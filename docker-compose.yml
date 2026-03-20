@@ -1,0 +1,12 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: apps-spa-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./studio-editor-bi:/usr/share/nginx/html/studio-editor-bi:ro
+      - ./chibaleteplus:/usr/share/nginx/html/chibaleteplus:ro
+

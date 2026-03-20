@@ -1,0 +1,63 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Studio Editor BI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;0,700;0,900;1,300;1,400&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              'chibalete-sage': '#9BC1BC',   // Sidebar BG
+              'chibalete-terra': '#ED6A5A',  // Accent / Red
+              'chibalete-cream': '#F4F1BB',  // Highlight / Yellow
+              'chibalete-mist': '#E6EBE0',   // Body BG
+            },
+            fontFamily: {
+              serif: ['Merriweather', 'serif'],
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      body {
+        background-color: #E6EBE0; /* chibalete-mist */
+        color: #0f172a;
+      }
+      .font-serif {
+        font-family: 'Merriweather', serif;
+      }
+      /* Custom Scrollbar for the sage theme */
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-track {
+        background: rgba(0,0,0,0.05);
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: #ED6A5A; /* terra */
+        border-radius: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: #d15646;
+      }
+    </style>
+
+
+  <script type="module" crossorigin src="/assets/index-CqLdlylq.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/vendor-MX9wq8i1.js">
+  <link rel="modulepreload" crossorigin href="/assets/ui-CkfYrhjD.js">
+  <link rel="modulepreload" crossorigin href="/assets/utils-DrgRuPKf.js">
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

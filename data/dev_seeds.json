@@ -1,0 +1,51 @@
+[
+  {
+    "email": "test@chibalete.com",
+    "nombre_completo": "Test User",
+    "roles": [
+      "lector"
+    ],
+    "password": "password123",
+    "colegio": "Colegio Test"
+  },
+  {
+    "id": "user-1765556451152",
+    "email": "test_persist_1765556451152@example.com",
+    "nombre_completo": "Test Persistence User",
+    "password": "password123",
+    "roles": [
+      "admin"
+    ]
+  },
+  {
+    "email": "test_auto_flow@example.com",
+    "nombre_completo": "Automated Test User",
+    "password": "password123",
+    "roles": [
+      "lector"
+    ],
+    "colegio": "Test School"
+  },
+  {
+    "id": "user-1765979897432",
+    "nombre_usuario": "audit",
+    "nombre_completo": "AuditUser Edited",
+    "email": "audit@test.com",
+    "password": "chibalete123",
+    "colegio": "Colegio Chibalete",
+    "avatar_url": "https://ui-avatars.com/api/?name=AuditUser&background=random",
+    "bio_corta": "Usuario nuevo",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Novato",
+    "roles": [
+      "lector"
+    ],
+    "social_connections": {
+      "facebook": false,
+      "instagram": false,
+      "linkedin": false
+    }
+  }
+]

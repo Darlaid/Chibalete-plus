@@ -1,0 +1,7 @@
+{
+  "name": "Chibalete+ V-4.0 y Demo",
+  "description": "An educational ecosystem for reading, audio, and video designed for children and young adults. This initial phase includes a functional PDF reader, mock data, and the basic structure for future AI integrations with Gemini.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

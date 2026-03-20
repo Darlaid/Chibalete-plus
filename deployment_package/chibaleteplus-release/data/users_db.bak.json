@@ -1,0 +1,224 @@
+[
+  {
+    "email": "test@chibalete.com",
+    "nombre_completo": "Test User",
+    "roles": [
+      "lector"
+    ],
+    "password": "password123",
+    "colegio": "Colegio Test"
+  },
+  {
+    "id": "user-1765556451152",
+    "email": "test_persist_1765556451152@example.com",
+    "nombre_completo": "Test Persistence User",
+    "password": "password123",
+    "roles": [
+      "admin"
+    ]
+  },
+  {
+    "email": "test_auto_flow@example.com",
+    "nombre_completo": "Automated Test User",
+    "password": "password123",
+    "roles": [
+      "lector"
+    ],
+    "colegio": "Test School"
+  },
+  {
+    "id": "admin-super-1",
+    "email": "admin@chibaleteeditores.com",
+    "password": "(Derpheluno2)",
+    "nombre_completo": "Admin Chibalete",
+    "nombre_usuario": "admin_chibalete",
+    "roles": [
+      "administrador"
+    ],
+    "avatar_url": "/assets/avatars/default_admin.png",
+    "bio_corta": "Super Administrador",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Feroz"
+  },
+  {
+    "id": "admin-super-2",
+    "email": "monicauribe22@gmail.com",
+    "password": "(HizoSol123*$)",
+    "nombre_completo": "Mónica Uribe",
+    "nombre_usuario": "monica_uribe",
+    "roles": [
+      "administrador"
+    ],
+    "avatar_url": "/assets/avatars/default_admin.png",
+    "bio_corta": "Super Administrador",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Feroz"
+  },
+  {
+    "id": "user-tono",
+    "email": "tono@chibalete.com",
+    "password": "password123",
+    "nombre_completo": "Toño",
+    "roles": [
+      "lector"
+    ],
+    "colegio": "Colegio Chibalete",
+    "groupIds": [
+      "group-chiba1"
+    ]
+  },
+  {
+    "id": "user-rosi",
+    "email": "rosi@chibalete.com",
+    "password": "password123",
+    "nombre_completo": "Rosi",
+    "roles": [
+      "lector"
+    ],
+    "colegio": "Colegio Chibalete",
+    "groupIds": [
+      "group-chiba1"
+    ]
+  },
+  {
+    "id": "user-louie",
+    "email": "louie@chibalete.com",
+    "password": "password123",
+    "nombre_completo": "Louie",
+    "roles": [
+      "lector"
+    ],
+    "colegio": "Colegio Chibalete",
+    "groupIds": [
+      "group-chiba1"
+    ]
+  },
+  {
+    "id": "user-1765640096515",
+    "nombre_usuario": "mariaortiz",
+    "nombre_completo": "Mari Cronopio",
+    "email": "mariaortiz@chibalete.com",
+    "password": "M4r140rt1z",
+    "colegio": "Colegio Chibalete",
+    "avatar_url": "https://ui-avatars.com/api/?name=Mari%20Cronopio&background=random",
+    "bio_corta": "Usuario nuevo",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Novato",
+    "roles": [
+      "profesor"
+    ],
+    "social_connections": {
+      "facebook": false,
+      "instagram": false,
+      "linkedin": false
+    }
+  },
+  {
+    "id": "user-1765642768931",
+    "nombre_usuario": "mediador",
+    "nombre_completo": "Mediador",
+    "email": "mediador@chibaleteeditores.com",
+    "password": "Mediador101",
+    "colegio": "Colegio Chibalete",
+    "avatar_url": "https://ui-avatars.com/api/?name=Mediador&background=random",
+    "bio_corta": "Usuario nuevo",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Novato",
+    "roles": [
+      "profesor"
+    ],
+    "social_connections": {
+      "facebook": false,
+      "instagram": false,
+      "linkedin": false
+    },
+    "groupIds": [
+      "group-chiba1",
+      "group-chiba2",
+      "group-chiba3"
+    ]
+  },
+  {
+    "id": "user-1765979897432",
+    "nombre_usuario": "audit",
+    "nombre_completo": "AuditUser Edited",
+    "email": "audit@test.com",
+    "password": "chibalete123",
+    "colegio": "Colegio Chibalete",
+    "avatar_url": "https://ui-avatars.com/api/?name=AuditUser&background=random",
+    "bio_corta": "Usuario nuevo",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Novato",
+    "roles": [
+      "lector"
+    ],
+    "social_connections": {
+      "facebook": false,
+      "instagram": false,
+      "linkedin": false
+    }
+  },
+  {
+    "email": "admin@demo.com",
+    "password": "admin123",
+    "nombre_completo": "Administrador Demo",
+    "roles": [
+      "administrador"
+    ]
+  },
+  {
+    "id": "user-1772816301825",
+    "nombre_usuario": "ana",
+    "nombre_completo": "Ana Afán",
+    "email": "ana@demo.com",
+    "password": "demo123",
+    "colegio": "Colegio Chibalete",
+    "avatar_url": "https://ui-avatars.com/api/?name=Ana%20Af%C3%A1n&background=random",
+    "bio_corta": "Usuario nuevo",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Novato",
+    "roles": [
+      "lector"
+    ],
+    "social_connections": {
+      "facebook": false,
+      "instagram": false,
+      "linkedin": false
+    }
+  },
+  {
+    "id": "user-1773088698506",
+    "nombre_usuario": "pacho",
+    "nombre_completo": "Pachito",
+    "email": "pacho@demo.com",
+    "password": "chibalete123",
+    "colegio": "Cole Paulo VI",
+    "curso": "3 A",
+    "avatar_url": "https://ui-avatars.com/api/?name=Pachito&background=random",
+    "bio_corta": "Usuario nuevo",
+    "libros_leidos": 0,
+    "seguidores": 0,
+    "seguidos": 0,
+    "nivel_lectura": "Novato",
+    "roles": [
+      "lector"
+    ],
+    "social_connections": {
+      "facebook": false,
+      "instagram": false,
+      "linkedin": false
+    }
+  }
+]
