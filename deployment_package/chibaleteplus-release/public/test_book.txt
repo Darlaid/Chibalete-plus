@@ -1,6 +1,0 @@
-This is a test book for TTS generation.
-It should have enough text to generate at least a few audio segments.
-Sentence one is here.
-Sentence two is shorter.
-Sentence three is a bit longer to ensure we have variety in the audio generation process.
-Final sentence.

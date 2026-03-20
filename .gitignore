@@ -38,3 +38,40 @@ Thumbs.db
 # Optional uploads or generated assets
 public/uploads/
 uploads/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+.env.bak*
+*.bak_test
+
+# Build artifacts
+dist/
+dist-ssr/
+chibaleteplus/
+studio-editor-bi/
+
+# Deployment bundles
+deployment_package/
+*.zip
+*.tar.gz
+
+# Runtime uploads
+public/uploads/
+uploads/
+
+# Runtime state
+data/progress_db.json
+data/leo_memory_db.json
+
+# DB backups / corrupt / legacy
+data/*.bak*
+data/*.backup*
+data/*.pre_*
+data/*.corrupt*
+data/content_db.json
+
+# Temp / scratch
+dev_output.txt
+dummy_text.txt
