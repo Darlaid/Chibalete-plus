@@ -53,7 +53,6 @@ const QuickClubModal: React.FC<QuickClubModalProps> = ({ isOpen, onClose }) => {
                 school: user.colegio,
                 type: 'club',
                 mediatorIds: [user.id],
-                teacherId: user.id,
                 accessEndsAt: endsAt.toISOString(),
                 grade: 'Club'
             };

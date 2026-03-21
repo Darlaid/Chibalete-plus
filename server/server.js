@@ -14,6 +14,7 @@ import { fileTypeFromFile } from 'file-type';
 
 import { processLeoRequest } from './leoEngine.js';
 import { ingestPedagogicalFile } from './leoIngester.js';
+import { createAccessService } from './accessService.js';
 
 // Configure dotenv to load from parent directory .env
 // Fix for __dirname in ESM
@@ -25,6 +26,7 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_PROD = process.env.NODE_ENV?.trim() === 'production';
+const ACCESS_FALLBACK_MODE = process.env.ACCESS_FALLBACK_MODE || 'open'; // 'open' | 'restricted'
 
 // Configurar trust proxy para express-rate-limit detrás de Nginx Docker -> Host
 app.set('trust proxy', 1);
@@ -115,6 +117,7 @@ const SCHOOL_CONFIGS_DB = path.resolve(__dirname, '../data/school_configs.json')
 const SCHOOLS_DB = path.resolve(__dirname, '../data/schools_db.json');
 const ACCESS_DB = path.resolve(__dirname, '../data/access_db.json'); // FASE E6: Motor de Accesos por Scopes
 const LEO_MEMORY_DB = path.resolve(__dirname, '../data/leo_memory_db.json'); // LEO SESSION PERSISTENCE
+const BUNDLES_DB = path.resolve(__dirname, '../data/bundles_db.json');       // Fase 7: Bundles comerciales
 
 log(`Users DB: ${USERS_DB}`);
 log(`Groups DB: ${GROUPS_DB}`);
@@ -189,114 +192,10 @@ function resolveCollectionContentIds(collectionIds) {
         .map(c => c.id);
 }
 
-// --- E6: ACCESS ENGINE (SHADOW MODE) ---
-
-/**
- * Resuelve el acceso consolidado de un usuario basado en reglas de Scope.
- * Consolida reglas para user.id, grupos a los que pertenece, y su colegio.
- */
-function resolveUserContentAccess(userId) {
-    const users = readJSON(USERS_DB);
-    const rawUser = users.find(u => u.id === userId);
-    if (!rawUser) {
-        return { titleIds: [], collectionIds: [], appliedRules: [], hasBroadAccess: false };
-    }
-    const user = normalizeUser(rawUser);
-
-    // Identificar a qué grupos pertenece realmente para buscar reglas de scope=group
-    const groups = readJSON(GROUPS_DB).map(normalizeGroup);
-    
-    // Grupos donde es mediador o miembro (Fase 2 + Extendido)
-    const userGroups = groups.filter(g => 
-        (g.mediatorIds && g.mediatorIds.includes(userId)) || 
-        (g.memberIds && g.memberIds.includes(userId)) ||
-        (user.groupIds && user.groupIds.includes(g.id))
-    );
-    const resolvedGroupIds = [...new Set(userGroups.map(g => g.id))];
-
-    // Colegios u organizaciones
-    const organizationId = user.organizationId || user.colegio;
-
-    // Leer reglas
-    const accessRules = readJSON(ACCESS_DB);
-    const now = Date.now();
-
-    const appliedRules = [];
-    const effectiveTitleIds = new Set();
-    const effectiveCollectionIds = new Set();
-    let hasBroadAccess = false; 
-
-    accessRules.forEach(rule => {
-        // Ignorar expiradas
-        if (typeof rule.expiresAt === 'number' && Number.isFinite(rule.expiresAt) && now > rule.expiresAt) {
-            log(`Rule expired and ignored: ${rule.id} (scope=${rule.scope})`, 'ACCESS_ENGINE');
-            return;
-        }
-
-        let applies = false;
-        if (rule.scope === 'user' && rule.scopeId === userId) applies = true;
-        if (rule.scope === 'group' && resolvedGroupIds.includes(rule.scopeId)) applies = true;
-        if (rule.scope === 'organization' && rule.scopeId === organizationId) applies = true;
-
-        if (applies) {
-            appliedRules.push(rule.id);
-            if (rule.titleIds) rule.titleIds.forEach(id => effectiveTitleIds.add(id));
-            if (rule.collectionIds) rule.collectionIds.forEach(id => effectiveCollectionIds.add(id));
-        }
-    });
-
-    log(`Access Engine resolved for ${userId}: ${appliedRules.length} rules, ${effectiveTitleIds.size} titles, ${effectiveCollectionIds.size} collections`, 'ACCESS_ENGINE');
-
-    return {
-        titleIds: Array.from(effectiveTitleIds),
-        collectionIds: Array.from(effectiveCollectionIds),
-        appliedRules,
-        hasBroadAccess: false
-    };
-}
-
-/**
- * Valida si un usuario tiene acceso a un contenido estrictamente a través del Motor de Scopes (Fase E7).
- * Retorna decision con bandera legacyFallback si no existen reglas aplicables.
- */
-function canUserAccessContent(userId, contentId, content) {
-    const scopeData = resolveUserContentAccess(userId);
-
-    // 1. Si no hay reglas activas aplicables, activamos fallback legacy
-    if (scopeData.appliedRules.length === 0) {
-        return { 
-            allowed: true, 
-             legacyFallback: true, 
-            reason: 'Sin reglas estrictas aplicables. Evaluando fallback legacy...' 
-        };
-    }
-
-    // 2. Si sí hay reglas, validamos arrays efectivos
-    // Por Title ID directo
-    if (scopeData.titleIds.includes(contentId)) {
-        return { 
-            allowed: true, 
-            legacyFallback: false,
-            reason: 'Aprobado por Título explícito (Scope Engine)' 
-        };
-    }
-
-    // Por Collection ID (se vincula mediante content.parentId)
-    if (content.parentId && scopeData.collectionIds.includes(content.parentId)) {
-        return { 
-            allowed: true, 
-            legacyFallback: false,
-            reason: 'Aprobado por Colección autorizada (Scope Engine)' 
-        };
-    }
-
-    // 3. Fallo de cumplimiento estricto
-    return { 
-        allowed: false, 
-        legacyFallback: false,
-        reason: 'Acceso denegado. Posee política restrictiva que no autoriza este contenido.' 
-    };
-}
+// --- E6/E7: ACCESS ENGINE ---
+// resolveUserContentAccess, canUserAccessContent, getAccessibleContentIds
+// se inicializan en accessService (ver más abajo, tras normalizeUser/normalizeGroup).
+// Solo se llaman en tiempo de petición, por lo que la inicialización diferida es segura.
 
 app.post('/api/access', requireAuth, (req, res) => {
     const payload = req.body;
@@ -440,6 +339,60 @@ app.get('/api/server-time', (_req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
+// --- BUNDLE ROUTES (Fase 7) ---
+// Nombre interno: "bundles". Nombre visible en UI: "Experiencias".
+app.get('/api/bundles', (req, res) => {
+    try {
+        res.json(readJSON(BUNDLES_DB));
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to read bundles' });
+    }
+});
+
+app.post('/api/bundles', requireAuth, (req, res) => {
+    const payload = req.body;
+    if (!payload.name || !payload.name.trim()) {
+        return res.status(400).json({ error: 'El nombre de la experiencia es obligatorio' });
+    }
+    const bundles = readJSON(BUNDLES_DB);
+    const newBundle = {
+        id: `bundle-${Date.now()}`,
+        name: payload.name.trim(),
+        shortDescription: payload.shortDescription || '',
+        description: payload.shortDescription || payload.description || '',
+        summary: payload.summary || '',
+        includes: Array.isArray(payload.includes) ? payload.includes : [],
+        contentIds: Array.isArray(payload.contentIds) ? payload.contentIds : [],
+        tags: Array.isArray(payload.tags) ? payload.tags : []
+    };
+    bundles.push(newBundle);
+    writeJSON(BUNDLES_DB, bundles);
+    log(`[BUNDLE] Created: ${newBundle.id} "${newBundle.name}"`);
+    res.status(201).json(newBundle);
+});
+
+app.put('/api/bundles/:id', requireAuth, (req, res) => {
+    const { id } = req.params;
+    const payload = req.body;
+    const bundles = readJSON(BUNDLES_DB);
+    const idx = bundles.findIndex(b => b.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'Experiencia no encontrada' });
+    bundles[idx] = { ...bundles[idx], ...payload, id }; // id inmutable
+    writeJSON(BUNDLES_DB, bundles);
+    log(`[BUNDLE] Updated: ${id}`);
+    res.json(bundles[idx]);
+});
+
+app.delete('/api/bundles/:id', requireAuth, (req, res) => {
+    const { id } = req.params;
+    const bundles = readJSON(BUNDLES_DB);
+    const filtered = bundles.filter(b => b.id !== id);
+    if (filtered.length === bundles.length) return res.status(404).json({ error: 'Experiencia no encontrada' });
+    writeJSON(BUNDLES_DB, filtered);
+    log(`[BUNDLE] Deleted: ${id}`);
+    res.json({ ok: true });
+});
+
 // --- CONTENT ROUTES ---
 app.get('/api/content', (req, res) => {
     try {
@@ -479,10 +432,20 @@ app.get('/api/content/:id/access', (req, res) => {
             return res.status(403).json({ allowed: false, reason: 'Usuario no encontrado.' });
         }
 
-        // 3. Admin y Profesor: acceso operativo completo irrestricto
+        // Jerarquía de acceso (orden de evaluación):
+        // 1. ADMIN_ROLE          → total, sin restricciones
+        // 2. MEDIATOR_ORG        → catálogo activo de la organización del mediador
+        // 3. GROUP_ASSIGNMENT    → asignación pedagógica activa en cualquier grupo
+        // 4. SCOPE_ENGINE        → reglas en access_db.json (scope: user > group > org)
+        // 5. LEGACY_GROUP        → group.availableContentIds + vigencia
+        // 6. LEGACY_ORG          → schoolConfig.availableContentIds + vigencia
+        // 7. FALLBACK            → según ACCESS_FALLBACK_MODE (open | restricted)
+
+        // 3. Admin: acceso total irrestricto
         const roles = user.roles || (user.role ? [user.role] : (user.rol ? [user.rol] : ['lector']));
-        if (roles.includes('administrador') || roles.includes('profesor')) {
-            return res.json({ allowed: true, reason: 'Acceso operativo completo.' });
+        if (roles.includes('administrador')) {
+            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ADMIN_ROLE`, 'ACCESS');
+            return res.json({ allowed: true, reason: 'Acceso administrativo total.' });
         }
 
         // 4. Verificar que el contenido existe
@@ -495,11 +458,45 @@ app.get('/api/content/:id/access', (req, res) => {
         // 5. Helper de vigencia temporal server-side (árbitro real de tiempo)
         const now = Date.now();
         const isEntityActive = (startStr, endStr) => {
-            if (!startStr && !endStr) return true; // sin restricción temporal
-            if (startStr && now < new Date(startStr).getTime()) return false; // aún no comienza
-            if (endStr && now > new Date(endStr).getTime()) return false;     // ya expiró
+            if (!startStr && !endStr) return true;
+            if (startStr && now < new Date(startStr).getTime()) return false;
+            if (endStr   && now > new Date(endStr).getTime())   return false;
             return true;
         };
+
+        // 6. Mediador/Profesor: acceso ampliado dentro de su organización
+        if (roles.includes('profesor') || roles.includes('mediador')) {
+            const mediatorSchool = user.colegio || user.school || '';
+            if (mediatorSchool) {
+                try {
+                    const schoolConfigs = readJSON(SCHOOL_CONFIGS_DB);
+                    const schoolConfig = Array.isArray(schoolConfigs)
+                        ? schoolConfigs.find(s => s.schoolName === mediatorSchool)
+                        : schoolConfigs[mediatorSchool];
+                    if (schoolConfig && isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
+                        const hasExplicitRestriction =
+                            Array.isArray(schoolConfig.availableContentIds) ||
+                            (Array.isArray(schoolConfig.collectionIds) && schoolConfig.collectionIds.length > 0);
+                        if (hasExplicitRestriction) {
+                            const orgTitles  = Array.isArray(schoolConfig.availableContentIds) ? schoolConfig.availableContentIds : [];
+                            const orgExtra   = resolveCollectionContentIds(schoolConfig.collectionIds || []);
+                            const orgCatalog = [...new Set([...orgTitles, ...orgExtra])];
+                            if (orgCatalog.includes(contentId)) {
+                                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
+                                return res.json({ allowed: true, reason: 'Acceso de mediador por catálogo institucional.' });
+                            }
+                            log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
+                            return res.status(403).json({ allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' });
+                        }
+                    }
+                } catch (e) {
+                    log(`[access-check] Error reading school_configs for mediator: ${e.message}`, 'WARN');
+                }
+            }
+            // Sin restricción institucional activa → acceso total (legado para mediadores sin configuración)
+            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
+            return res.json({ allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' });
+        }
 
         // 6. Verificar excepción por asignación pedagógica (Aula Viva)
         // Los datos de assignments viven en progress_db.json como progreso,
@@ -526,6 +523,7 @@ app.get('/api/content/:id/access', (req, res) => {
         );
 
         if (hasAssignment) {
+            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ASSIGNMENT`, 'ACCESS');
             return res.json({ allowed: true, reason: 'Acceso por asignación pedagógica.' });
         }
 
@@ -560,6 +558,7 @@ app.get('/api/content/:id/access', (req, res) => {
 
             if (available === 'all') {
                 // Shortcut: acceso total explícito desde cualquier grupo activo
+                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ALL (${g.id})`, 'ACCESS');
                 return res.json({ allowed: true, reason: 'Acceso total por grupo activo.' });
             }
 
@@ -597,6 +596,7 @@ app.get('/api/content/:id/access', (req, res) => {
                     const orgAccess = schoolConfig.availableContentIds;
                     if (isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
                         if (orgAccess === 'all') {
+                            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ORG_ALL (${schoolName})`, 'ACCESS');
                             return res.json({ allowed: true, reason: 'Acceso total por organización.' });
                         }
                         if (Array.isArray(orgAccess) && orgAccess.length > 0) {
@@ -619,19 +619,26 @@ app.get('/api/content/:id/access', (req, res) => {
 
         // 9. Veredicto final
         if (!hasAnyActiveGroupRule) {
-            // No hay reglas comerciales activas en ningún grupo → fallback legacy abierto
+            if (ACCESS_FALLBACK_MODE === 'restricted') {
+                log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via LEGACY_NO_RULES (restricted mode)`, 'ACCESS');
+                return res.status(403).json({ allowed: false, reason: 'Acceso restringido: sin catálogo activo para este usuario.' });
+            }
+            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via LEGACY_OPEN (no active rules)`, 'ACCESS');
             return res.json({ allowed: true, reason: 'Sin restricciones comerciales activas (modo legacy).' });
         }
 
         if (unionAccess !== null && Array.isArray(unionAccess)) {
             if (unionAccess.includes(contentId)) {
+                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_CATALOG`, 'ACCESS');
                 return res.json({ allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' });
             } else {
+                log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via CATALOG_RESTRICTION`, 'ACCESS');
                 return res.status(403).json({ allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' });
             }
         }
 
         // Todos los grupos activos tenían bloqueo total ([]) → acceso denegado
+        log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via GROUP_BLOCK`, 'ACCESS');
         return res.status(403).json({ allowed: false, reason: 'Acceso bloqueado por reglas del grupo.' });
 
     } catch (err) {
@@ -1021,7 +1028,7 @@ const normalizeRoles = (roles) => {
         return ['lector'];
     }
     const mappedRoles = roles.map(r => r === 'admin' ? 'administrador' : r);
-    const validRoles = ['administrador', 'profesor', 'lector'];
+    const validRoles = ['administrador', 'profesor', 'mediador', 'lector'];
     const filteredRoles = mappedRoles.filter(r => validRoles.includes(r));
     return filteredRoles.length > 0 ? filteredRoles : ['lector'];
 };
@@ -1231,21 +1238,62 @@ app.post('/api/progress/:userId/:contentId/complete', (req, res) => {
     }
 });
 // ------------------------------------
+// --- SUBFASE 2.1: Cache de escuelas para resolución de organizationId ---
+// Se carga bajo demanda y se invalida al crear una escuela nueva.
+// Permite que normalizeUser y normalizeGroup pueblen organizationId
+// sin cambiar call sites ni endpoints existentes.
+let _schoolsCache = null;
+
+const getSchoolsForNormalization = () => {
+    if (_schoolsCache === null) {
+        try {
+            _schoolsCache = readJSON(SCHOOLS_DB);
+            if (!Array.isArray(_schoolsCache)) _schoolsCache = [];
+        } catch (e) {
+            _schoolsCache = [];
+        }
+    }
+    return _schoolsCache;
+};
+
+const invalidateSchoolsCache = () => { _schoolsCache = null; };
+
 /**
  * normalizeUser — Compatibilidad legacy + modelo extendido
- * Asegura que los campos array sean verdaderamente arrays para evitar crashes en el frontend
+ * Asegura que los campos array sean verdaderamente arrays para evitar crashes en el frontend.
+ * SUBFASE 2.1: Puebla organizationId desde user.colegio si aún no está definido.
  */
 const normalizeUser = (user) => {
     if (!user) return user;
     const normalized = { ...user };
-    
+
     if (normalized.capabilities !== undefined && !Array.isArray(normalized.capabilities)) {
         normalized.capabilities = [];
     }
     if (normalized.groupIds !== undefined && !Array.isArray(normalized.groupIds)) {
         normalized.groupIds = [];
     }
-    
+
+    // SUBFASE 2.1: Resolver organizationId desde user.colegio (string legacy)
+    // Solo actúa si organizationId está ausente y colegio tiene valor.
+    // No elimina ni reemplaza user.colegio.
+    if (!normalized.organizationId && normalized.colegio) {
+        const schools = getSchoolsForNormalization();
+        const match = schools.find(s => s.name === normalized.colegio);
+        if (match) normalized.organizationId = match.id;
+    }
+
+    // SUBFASE 3.2: Normalizar mediatorKind para usuarios con rol profesor/mediador
+    // Si tienen rol de mediador/profesor pero sin mediatorKind válido, se asigna 'teacher' por defecto.
+    // No sobreescribe valores válidos ya almacenados.
+    const VALID_MEDIATOR_KINDS = ['teacher', 'librarian', 'coordinator', 'parent'];
+    const isMediatorRole = Array.isArray(normalized.roles) && (
+        normalized.roles.includes('profesor') || normalized.roles.includes('mediador')
+    );
+    if (isMediatorRole && !VALID_MEDIATOR_KINDS.includes(normalized.mediatorKind)) {
+        normalized.mediatorKind = 'teacher';
+    }
+
     return normalized;
 };
 
@@ -1418,8 +1466,9 @@ app.post('/api/schools', requireAuth, (req, res) => {
 
     schools.push(newSchool);
     writeJSON(SCHOOLS_DB, schools);
+    invalidateSchoolsCache(); // SUBFASE 2.1: forzar recarga del cache tras nueva escuela
     log(`School created: ${newSchool.name}`, 'ACCESS');
-    
+
     res.status(201).json(newSchool);
 });
 
@@ -1459,12 +1508,53 @@ function normalizeGroup(group) {
     const legacyStudents = Array.isArray(normalized.studentIds) ? normalized.studentIds : [];
     const existingMembers = Array.isArray(normalized.memberIds) ? normalized.memberIds : [];
     normalized.memberIds = [...new Set([...legacyStudents, ...existingMembers])];
-    
+
     // Output legacy: reflejar fielmente en studentIds para clientes viejos
     normalized.studentIds = [...normalized.memberIds];
 
+    // SUBFASE 2.1: Resolver organizationId desde group.school (string legacy)
+    // Solo actúa si organizationId está ausente y school tiene valor.
+    // No elimina ni reemplaza group.school.
+    if (!normalized.organizationId && normalized.school) {
+        const schools = getSchoolsForNormalization();
+        const match = schools.find(s => s.name === normalized.school);
+        if (match) normalized.organizationId = match.id;
+    }
+
+    // SUBFASE 4.1: Derivar gradeLevel y section desde grade (string legacy)
+    // Solo actúa en cursos (type !== 'club'), solo si los campos no están ya definidos.
+    // Patrones soportados: "6" → gradeLevel:6 | "6A" o "6 A" → gradeLevel:6, section:"A"
+    // Strings no numéricos ("Club", "Primero", etc.) son ignorados sin error.
+    if (normalized.type !== 'club' && normalized.grade) {
+        const gradeStr = String(normalized.grade).trim();
+        const withSection = gradeStr.match(/^(\d+)\s*([A-Za-z])$/);
+        if (withSection) {
+            if (!normalized.gradeLevel) normalized.gradeLevel = parseInt(withSection[1], 10);
+            if (!normalized.section)    normalized.section    = withSection[2].toUpperCase();
+        } else {
+            const pureNumeric = gradeStr.match(/^(\d+)$/);
+            if (pureNumeric && !normalized.gradeLevel) {
+                normalized.gradeLevel = parseInt(pureNumeric[1], 10);
+            }
+        }
+    }
+
     return normalized;
 }
+
+// --- E6/E7: INICIALIZAR ACCESS SERVICE ---
+// Debe ir después de normalizeUser y normalizeGroup (dependencias del servicio).
+// Las variables son const en scope de módulo; las rutas las leen en tiempo de petición.
+const { resolveUserContentAccess, canUserAccessContent, getAccessibleContentIds } = createAccessService({
+    readJSON,
+    log,
+    normalizeUser,
+    normalizeGroup,
+    USERS_DB,
+    GROUPS_DB,
+    ACCESS_DB,
+    fallbackMode: ACCESS_FALLBACK_MODE,
+});
 
 app.get('/api/groups', requireAuth, (req, res) => {
     try {

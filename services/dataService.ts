@@ -20,7 +20,8 @@ import type {
     SchoolConfig,
     OralityAttempt,
     ImportRowError,
-    School
+    School,
+    Bundle
 } from '../types';
 import { persistenceService } from './persistenceService';
 
@@ -42,6 +43,8 @@ class DataService {
     private oralityAttempts: OralityAttempt[] = [];
     // Leo Pedagogical Layer: Cumulative Reader Profiles
     private leoReaderProfiles: LeoReaderProfile[] = [];
+    // Fase 7: Bundles comerciales
+    private bundles: Bundle[] = [];
 
     // Phase 3.4 Sync Engine
     private pendingSyncs: Map<string, ProgresoLectura> = new Map();
@@ -222,6 +225,17 @@ class DataService {
             }
         } catch (error) {
             console.warn('Could not load content from API (using local/mock):', error);
+        }
+
+        // Fase 7: Cargar bundles comerciales
+        try {
+            const res = await fetch(`${this.apiUrl}/bundles`);
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data)) this.bundles = data;
+            }
+        } catch (e) {
+            console.warn('Could not load bundles from API:', e);
         }
     }
 
@@ -531,14 +545,20 @@ class DataService {
         // Procesar de a uno con await para evitar escrituras concurrentes en users_db.json
         for (const u of newUsers) {
             try {
-                // Mapear rol 'mediador' → 'profesor' (único valor aceptado por el backend)
-                let roles: ('lector' | 'profesor' | 'administrador')[] = ['lector'];
+                let roles: ('lector' | 'profesor' | 'mediador' | 'administrador')[] = ['lector'];
                 if (u.roles && Array.isArray(u.roles)) {
                     roles = u.roles;
                 } else if (typeof u.role === 'string') {
                     const r = u.role.toLowerCase().trim();
-                    roles = r === 'mediador' || r === 'profesor' ? ['profesor'] : ['lector'];
+                    roles = r === 'mediador' ? ['mediador'] : (r === 'profesor' ? ['profesor'] : ['lector']);
                 }
+
+                // SUBFASE 3.2: Pasar mediatorKind si viene del CSV y es válido
+                const VALID_MK = ['teacher', 'librarian', 'coordinator', 'parent'] as const;
+                const mkRaw = typeof u.mediatorKind === 'string' ? u.mediatorKind.trim() : undefined;
+                const mediatorKind = mkRaw && (VALID_MK as readonly string[]).includes(mkRaw)
+                    ? mkRaw as 'teacher' | 'librarian' | 'coordinator' | 'parent'
+                    : undefined;
 
                 const newUserObj = await this.createUser({
                     nombre_completo: u.nombre_completo || u.nombre || '',
@@ -547,6 +567,7 @@ class DataService {
                     colegio: u.colegio || '',
                     curso: u.curso || '',
                     roles,
+                    ...(mediatorKind ? { mediatorKind } : {}),
                 });
 
                 // HOTFIX: Relación automática con Clases/Grupos para Aula Viva
@@ -576,7 +597,7 @@ class DataService {
 
                     // 3. Emparejamiento bidireccional
                     if (targetGroup) {
-                        const isTeacher = newUserObj.roles.includes('profesor') || newUserObj.roles.includes('administrador');
+                        const isTeacher = newUserObj.roles.includes('profesor') || newUserObj.roles.includes('mediador') || newUserObj.roles.includes('administrador');
                         let groupNeedsUpdate = false;
 
                         if (isTeacher) {
@@ -803,6 +824,20 @@ class DataService {
     getGroupMemberIds(group: Group): string[] {
         // Backend es fuente de verdad; solo garantizar que devolvemos un array
         return Array.isArray(group.memberIds) ? group.memberIds : [];
+    }
+
+    getUserGroups(userId: string): Group[] {
+        // Fuente canónica: group.memberIds — el grupo declara quién pertenece
+        const fromMembers = this.groups.filter(g =>
+            Array.isArray(g.memberIds) && g.memberIds.includes(userId)
+        );
+        const canonicalIds = new Set(fromMembers.map(g => g.id));
+        // Fallback compat: user.groupIds puede tener grupos no reflejados aún en memberIds
+        const user = this.getUsuarioById(userId);
+        const extra = (user?.groupIds ?? [])
+            .map(gid => this.groups.find(g => g.id === gid))
+            .filter((g): g is Group => !!g && !canonicalIds.has(g.id));
+        return [...fromMembers, ...extra];
     }
 
     getAllGroups(): Group[] {
@@ -1032,7 +1067,77 @@ class DataService {
         }
     }
 
+    async addContentToClub(groupId: string, contentId: string) {
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) return;
+        const current = Array.isArray(group.availableContentIds) ? group.availableContentIds as string[] : [];
+        if (current.includes(contentId)) return;
+        console.log(`[CLUB_CONTENT] group ${groupId} → content ${contentId} → added`);
+        await this.updateGroup(groupId, { availableContentIds: [...current, contentId] });
+    }
 
+    async removeContentFromClub(groupId: string, contentId: string) {
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) return;
+        const current = Array.isArray(group.availableContentIds) ? group.availableContentIds as string[] : [];
+        const updated = current.filter(id => id !== contentId);
+        console.log(`[CLUB_CONTENT] group ${groupId} → content ${contentId} → removed`);
+        await this.updateGroup(groupId, { availableContentIds: updated });
+    }
+
+    // --- Fase 7: Bundles comerciales ---
+
+    getBundles(): Bundle[] {
+        return this.bundles;
+    }
+
+    async applyBundleToGroup(groupId: string, bundleId: string) {
+        const bundle = this.bundles.find(b => b.id === bundleId);
+        if (!bundle) throw new Error(`Bundle ${bundleId} not found`);
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) throw new Error(`Group ${groupId} not found`);
+        // Fase 8: reemplaza contenido anterior (no suma) — mantiene coherencia con activeExperienceId
+        console.log(`[BUNDLE] group ${groupId} ← bundle ${bundleId} (replace, ${bundle.contentIds.length} items)`);
+        await this.updateGroup(groupId, { availableContentIds: [...bundle.contentIds], activeExperienceId: bundleId });
+    }
+
+    async clearGroupExperience(groupId: string) {
+        console.log(`[BUNDLE] group ${groupId} → experience cleared`);
+        await this.updateGroup(groupId, { activeExperienceId: null });
+    }
+
+    async createBundle(data: Omit<Bundle, 'id'>): Promise<Bundle> {
+        const response = await fetch(`${this.apiUrl}/bundles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error('Failed to create bundle');
+        const saved: Bundle = await response.json();
+        this.bundles.push(saved);
+        return saved;
+    }
+
+    async updateBundle(id: string, updates: Partial<Bundle>): Promise<void> {
+        const response = await fetch(`${this.apiUrl}/bundles/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            body: JSON.stringify(updates)
+        });
+        if (!response.ok) throw new Error('Failed to update bundle');
+        const saved: Bundle = await response.json();
+        const idx = this.bundles.findIndex(b => b.id === id);
+        if (idx > -1) this.bundles[idx] = saved;
+    }
+
+    async deleteBundle(id: string): Promise<void> {
+        const response = await fetch(`${this.apiUrl}/bundles/${id}`, {
+            method: 'DELETE',
+            headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
+        });
+        if (!response.ok) throw new Error('Failed to delete bundle');
+        this.bundles = this.bundles.filter(b => b.id !== id);
+    }
 
     updateSocialConnection(userId: string, platform: 'facebook' | 'instagram' | 'linkedin', isConnected: boolean) {
         const user = this.getUsuarioById(userId);
@@ -1084,7 +1189,7 @@ class DataService {
         let baseContent = isAdmin ? this.content : this.content.filter(c => c.tipo !== 'contexto_pedagogico');
 
         // FASE 5: Filtro de catálogo por usuario
-        if (checkAccessForUserId && !isAdmin && !roles.includes('profesor')) {
+        if (checkAccessForUserId && !isAdmin && !roles.includes('profesor') && !roles.includes('mediador')) {
             const allowed = this.getEffectiveAccessibleContentIdsForUser(checkAccessForUserId);
             if (allowed !== 'all') {
                 baseContent = baseContent.filter(c => this.isContentAccessibleForUser(checkAccessForUserId, c.id, allowed));
@@ -1235,8 +1340,8 @@ class DataService {
 
     getEffectiveAccessibleContentIdsForUser(userId: string): string[] | 'all' {
         const user = this.getUsuarioById(userId);
-        if (!user || user.roles.includes('administrador') || user.roles.includes('profesor')) {
-            return 'all'; // Profesores y admins ven todo por defecto
+        if (!user || user.roles.includes('administrador') || user.roles.includes('profesor') || user.roles.includes('mediador')) {
+            return 'all'; // Profesores, mediadores y admins ven todo por defecto
         }
 
         // 1. Resolver acceso por Organización (Colegio) de manera síncrona
@@ -1360,7 +1465,7 @@ class DataService {
     isContentAccessibleForUser(userId: string, contentId: string, precalculatedAllowed?: string[] | 'all'): boolean {
         // --- ADMIN BYPASS ---
         const user = this.getUsuarioById(userId);
-        if (user && (user.roles?.includes('administrador') || user.roles?.includes('profesor'))) {
+        if (user && (user.roles?.includes('administrador') || user.roles?.includes('profesor') || user.roles?.includes('mediador'))) {
             return true;
         }
 
@@ -1521,7 +1626,7 @@ class DataService {
         return userProgress.map(p => {
             const content = this.content.find(c => c.id === p.contenido_id);
             if (!content) return null;
-            if (roles.includes('administrador') || roles.includes('profesor') || this.isContentAccessibleForUser(userId, content.id)) {
+            if (roles.includes('administrador') || roles.includes('profesor') || roles.includes('mediador') || this.isContentAccessibleForUser(userId, content.id)) {
                  return { content, progress: p };
             }
             return null;

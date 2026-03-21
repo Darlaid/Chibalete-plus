@@ -46,6 +46,29 @@ const chunkText = (text, minChunkSize = 800, maxChunkSize = 1500) => {
     return chunks.filter(c => c.length > 0);
 };
 
+/**
+ * MANIFEST v2: Segmentador determinista de oraciones para metadatos del manifest.
+ * Separa el texto de un chunk en oraciones reales para granularidad fina de display.
+ *
+ * FROZEN: No modificar esta función sin re-generar todos los manifests existentes.
+ * Cualquier cambio en el algoritmo invalidaría los sentenceStart almacenados en manifests activos.
+ *
+ * @param {string} chunkText - Texto del chunk de audio
+ * @returns {string[]} Array de oraciones limpias
+ */
+const splitSentencesFromChunk = (chunkText) => {
+    if (!chunkText || typeof chunkText !== 'string') return [];
+    // Proteger abreviaciones comunes en español y números decimales para evitar falsos cortes
+    const PLACEHOLDER = '\u00B6'; // Pilcrow — no aparece en texto editorial normal
+    const protected_ = chunkText
+        .replace(/\b(Dr|Sr|Sra|Srta|Prof|Lic|No|art|cap|núm|vs|etc|pág|vol|fig)\./gi, `$1${PLACEHOLDER}`)
+        .replace(/(\d)\.(\d)/g, `$1${PLACEHOLDER}$2`);
+    const raw = protected_.match(/[^.!?]+[.!?]+[\s]*/g) || [protected_];
+    return raw
+        .map(s => s.replace(/\u00B6/g, '.').trim())
+        .filter(s => s.length > 5);
+};
+
 // --- CORE FUNCTION ---
 
 export const generateAudioForContent = async (contentId, textFilePath, uploadDir, onProgress = null) => {
@@ -102,6 +125,16 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
             }
         };
 
+        // MANIFEST v2: Inicializar _meta. Se sobreescribe en cada job para mantener
+        // totalChunks actualizado. totalSentences se calcula al finalizar el loop.
+        manifest._meta = {
+            version: 2,
+            splitVersion: 1,
+            totalChunks: chunks.length,
+            totalSentences: 0,
+        };
+
+        let globalSentenceIndex = 0; // Contador acumulado para sentenceStart por chunk
         let createdCount = 0;
         let errorCount = 0;
         let skippedCount = 0;
@@ -109,6 +142,12 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
 
         for (let i = 0; i < chunks.length; i++) {
             const chunkTextContent = chunks[i];
+
+            // MANIFEST v2: Calcular oraciones del chunk antes de la decisión skip/new
+            // Se computa siempre para mantener globalSentenceIndex consistente en ambos paths.
+            const chunkSentences = splitSentencesFromChunk(chunkTextContent);
+            const chunkSentenceStart = globalSentenceIndex;
+            globalSentenceIndex += chunkSentences.length;
             
             // WE NO LONGER HASH PRE-FLIGHT TO AVOID INACCURATE FALLBACK MISMATCH
             // Check cache by index first to see if we already have it safely mapped
@@ -137,7 +176,12 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
                         
                         // Phase 5.2: Self-heal old manifests to ensure they contain the FULL text, not the old substring
                         manifest[i].text = chunkTextContent;
-                        
+                        // MANIFEST v2: Self-heal — añadir metadata de oraciones si no existe en esta entrada
+                        if (!manifest[i].sentences) {
+                            manifest[i].sentences = chunkSentences;
+                            manifest[i].sentenceStart = chunkSentenceStart;
+                        }
+
                         skippedCount++;
                         skipCurrentChunk = true;
                         
@@ -180,12 +224,14 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
 
                 // Append safely to Manifest
                 manifest[i] = {
-                    text: chunkTextContent, // Phase 5.2: Save full text for audio-sync
+                    text: chunkTextContent,
                     file: `audio/${contentId}/${finalFileName}`,
                     index: i,
                     hash: exactHash,
                     provider: result.provider,
-                    model: result.model
+                    model: result.model,
+                    sentences: chunkSentences,
+                    sentenceStart: chunkSentenceStart,
                 };
 
             } catch (e) {
@@ -232,6 +278,9 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
                 }
             }
         } // end loop
+
+        // MANIFEST v2: Totalizar oraciones ahora que el loop está completo
+        manifest._meta.totalSentences = globalSentenceIndex;
 
         // Always ensure a final save at the very exit to guarantee consistency
         saveManifest();

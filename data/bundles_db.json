@@ -1,0 +1,32 @@
+[
+  {
+    "id": "bundle-primeros-lectores",
+    "name": "Primeros Lectores",
+    "shortDescription": "Cuentos ideales para quienes empiezan a leer.",
+    "description": "Selección de cuentos ideales para iniciarse en la lectura. Recomendado para primaria.",
+    "summary": "Una colección cuidadosamente seleccionada para lectores en formación. Incluye clásicos accesibles que desarrollan comprensión literal y amor por la lectura desde los primeros años.",
+    "includes": ["2 libros", "guías de comprensión"],
+    "contentIds": ["content-1772817449967", "content-1773089901847"],
+    "tags": ["primaria", "cuento", "iniciación"]
+  },
+  {
+    "id": "bundle-club-clasicos",
+    "name": "Club Literario — Clásicos",
+    "shortDescription": "Obras clásicas para un club de lectura activo.",
+    "description": "Obras clásicas adaptadas para un club de lectura activo. Ideal para secundaria.",
+    "summary": "Ideal para grupos de lectura que quieren explorar la literatura universal. Fomenta el análisis crítico, el debate y la reflexión colectiva sobre textos de valor permanente.",
+    "includes": ["2 libros clásicos", "colección Lectores en Red"],
+    "contentIds": ["content-1773089901847", "content-1765893250573"],
+    "tags": ["club", "clásicos", "secundaria"]
+  },
+  {
+    "id": "bundle-coleccion-completa",
+    "name": "Colección Completa",
+    "shortDescription": "Todos los libros disponibles en la plataforma.",
+    "description": "Todos los libros disponibles en la plataforma, incluyendo la colección Lectores en Red.",
+    "summary": "Acceso completo al catálogo de libros de Chibalete+. Perfecta para grupos con lectura libre o instituciones que quieren ofrecer máxima variedad a sus estudiantes.",
+    "includes": ["3 libros", "colección Lectores en Red", "guías de acompañamiento"],
+    "contentIds": ["content-1772817449967", "content-1773089901847", "content-1765893250573"],
+    "tags": ["completo", "todos"]
+  }
+]

@@ -36,6 +36,7 @@ const GaleriaIlustraciones = React.lazy(() => import('./components/GaleriaIlustr
 const Bitacora = React.lazy(() => import('./pages/Bitacora'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
 const AdminRecompensas = React.lazy(() => import('./pages/AdminRecompensas'));
+const AdminExperiencias = React.lazy(() => import('./pages/AdminExperiencias'));
 
 
 
@@ -223,7 +224,7 @@ const AppContent: React.FC = () => {
                 } />
 
                 <Route path="/subir-contenido" element={
-                    <ProtectedRoute roles={['administrador', 'profesor']}><Layout><SubirContenido /></Layout></ProtectedRoute>
+                    <ProtectedRoute roles={['administrador', 'profesor', 'mediador']}><Layout><SubirContenido /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/usuarios" element={
                     <ProtectedRoute roles={['administrador']}><Layout><AdminUsuarios /></Layout></ProtectedRoute>
@@ -233,6 +234,9 @@ const AppContent: React.FC = () => {
                 } />
                 <Route path="/admin/recompensas" element={
                     <ProtectedRoute roles={['administrador']}><Layout><AdminRecompensas /></Layout></ProtectedRoute>
+                } />
+                <Route path="/admin/experiencias" element={
+                    <ProtectedRoute roles={['administrador']}><Layout><AdminExperiencias /></Layout></ProtectedRoute>
                 } />
 
                 {/* Fallback route */}

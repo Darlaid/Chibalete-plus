@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
-import { Home, Library, Search, User, LifeBuoy, Crown, Upload, LogOut, Users, PlayCircle, ShoppingBag, Gamepad2, GraduationCap, BarChart2, Clock, Menu, X, NotebookPen, Package, Gift } from 'lucide-react';
+import { Home, Library, Search, User, LifeBuoy, Crown, Upload, LogOut, Users, PlayCircle, ShoppingBag, Gamepad2, GraduationCap, BarChart2, Clock, Menu, X, NotebookPen, Package, Gift, Sparkles } from 'lucide-react';
 
 // Helper component for standard nav items with accessibility improvements
 const NavItem: React.FC<{ to: string; icon: React.ReactNode; label: string; mobileOnly?: boolean }> = ({ to, icon, label, mobileOnly }) => {
@@ -96,7 +96,7 @@ const Navbar: React.FC = () => {
         { to: '/soporte', icon: <LifeBuoy size={20} />, label: 'Soporte' },
     ]
 
-    if (user?.roles.includes('administrador') || user?.roles.includes('profesor')) {
+    if (user?.roles.includes('administrador') || user?.roles.includes('profesor') || user?.roles.includes('mediador')) {
         navItemsDesktop.splice(3, 0, { to: '/aula-viva', icon: <GraduationCap size={22} strokeWidth={2} />, label: 'Aula Viva' });
     }
 
@@ -106,6 +106,7 @@ const Navbar: React.FC = () => {
         secondaryItemsDesktop.push({ to: '/admin/productos', icon: <Package size={20} />, label: 'Productos' });
         secondaryItemsDesktop.push({ to: '/admin/recompensas', icon: <Gift size={20} />, label: 'Recompensas' });
         secondaryItemsDesktop.push({ to: '/admin/usuarios', icon: <Users size={20} />, label: 'Usuarios' });
+        secondaryItemsDesktop.push({ to: '/admin/experiencias', icon: <Sparkles size={20} />, label: 'Experiencias' });
     }
 
     // --- MOBILE NAVIGATION ---
@@ -123,14 +124,15 @@ const Navbar: React.FC = () => {
         { to: '/trivia', icon: <Gamepad2 size={28} />, label: 'Trívia' },
         { to: '/tienda', icon: <ShoppingBag size={28} />, label: 'Tienda' },
         { to: '/bitacora', icon: <NotebookPen size={28} />, label: 'Bitácora' }, // Added here
-        ...((user?.roles.includes('profesor') || user?.roles.includes('administrador'))
+        ...((user?.roles.includes('profesor') || user?.roles.includes('mediador') || user?.roles.includes('administrador'))
             ? [{ to: '/aula-viva', icon: <GraduationCap size={28} />, label: 'Aula Viva' }]
             : []),
         { to: '/soporte', icon: <LifeBuoy size={28} />, label: 'Soporte' },
         ...((user?.roles.includes('administrador')) ? [
             { to: '/admin-dashboard', icon: <BarChart2 size={28} />, label: 'Panel Admin' },
             { to: '/subir-contenido', icon: <Upload size={28} />, label: 'Subir' },
-            { to: '/admin/usuarios', icon: <Users size={28} />, label: 'Usuarios' }
+            { to: '/admin/usuarios', icon: <Users size={28} />, label: 'Usuarios' },
+            { to: '/admin/experiencias', icon: <Sparkles size={28} />, label: 'Experiencias' }
         ] : [])
     ];
 

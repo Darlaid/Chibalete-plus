@@ -238,14 +238,15 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         let targetGroupId: string | null = null;
         let isAssigned = false;
 
-        if (user.groupIds && user.groupIds.length > 0) {
-            const allAssignments = user.groupIds.flatMap(gid => dataService.getAssignmentsByGroup(gid));
+        const userGroups = dataService.getUserGroups(user.id);
+        if (userGroups.length > 0) {
+            const allAssignments = userGroups.flatMap(g => dataService.getAssignmentsByGroup(g.id));
             const activeAssig = allAssignments.find(a => a.contentId === content.id);
             if (activeAssig) {
                 targetGroupId = activeAssig.groupId;
                 isAssigned = true;
-            } else if (user.groupIds.length === 1) {
-                targetGroupId = user.groupIds[0];
+            } else if (userGroups.length === 1) {
+                targetGroupId = userGroups[0].id;
             }
         }
 
@@ -256,7 +257,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 let medKind: any = undefined;
                 if (medIds.length > 0) {
                     const mainMed = dataService.getUsuarioById(medIds[0]);
-                    if (mainMed) medKind = mainMed.mediatorKind || (mainMed.roles?.includes('profesor') ? 'teacher' : undefined);
+                    if (mainMed) medKind = mainMed.mediatorKind || ((mainMed.roles?.includes('profesor') || mainMed.roles?.includes('mediador')) ? 'teacher' : undefined);
                 }
                 return {
                     isAssignedContext: isAssigned,
@@ -292,6 +293,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const inFlightRequests = useRef<Map<number, Promise<string | null>>>(new Map());
     const abortControllers = useRef<Map<number, AbortController>>(new Map()); // NEW: Abort controllers for flight requests
     const manifest = useRef<Record<string, { file: string, index: number }> | null>(null);
+    const sentenceToChunk = useRef<number[]>([]); // MANIFEST v2: sentenceIndex → chunkIndex (vacío en v1/fallback)
     const unmounted = useRef(false); // NEW: Unmount guard
     const heightCache = useRef<Map<number, number>>(new Map()); // NEW: Height Cache to prevent scroll geometric drift
     const lastMeasuredHeight = useRef<number>(150); // NEW: Stable fallback heuristic
@@ -300,9 +302,16 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
+    // MANIFEST v2: Resuelve sentenceIndex → cacheKey (chunkIndex en v2, identidad en v1/fallback).
+    // sentenceToChunk vacío significa v1 o fallback: toAudioKey retorna el mismo índice.
+    const toAudioKey = useCallback((si: number): number => {
+        return sentenceToChunk.current.length > 0 ? (sentenceToChunk.current[si] ?? si) : si;
+    }, []); // Lee de ref — stable, sin dependencias reactivas
+
     // --- INITIALIZATION ---
     useEffect(() => {
         const init = async () => {
+            sentenceToChunk.current = []; // Reset al inicio de cada init (cambio de contenido o remount)
             setIsLoading(true);
             try {
                 // 1. Fetch Manifest FIRST (Phase 5.2: Manifest as Source of Truth)
@@ -317,15 +326,38 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
 
                 let splits: string[] = [];
 
-                // Check if manifest provides canonical text for every chunk
                 if (loadedManifest) {
-                    const values: any[] = Object.values(loadedManifest).sort((a: any, b: any) => a.index - b.index);
-                    const manifestTexts = values.map(v => v.text).filter(t => t && typeof t === 'string');
-                    
-                    // Validate: We have text for all chunks, and it doesn't look like an old truncated Phase 4 manifest
-                    if (manifestTexts.length === values.length && manifestTexts.length > 0 && !manifestTexts[0].endsWith("...")) {
-                        splits = manifestTexts;
-                        console.log(`[VisorInmersivo] Using canonical text from manifest (${splits.length} chunks)`);
+                    if (loadedManifest._meta?.version >= 2) {
+                        // === MANIFEST v2: Expander sentences desde metadata de chunks ===
+                        // Filtramos _meta explícitamente antes de ordenar para evitar NaN en sort.
+                        const chunkEntries: any[] = Object.entries(loadedManifest)
+                            .filter(([key]) => key !== '_meta')
+                            .map(([, v]) => v)
+                            .sort((a: any, b: any) => a.index - b.index);
+
+                        const map: number[] = [];
+                        for (const chunk of chunkEntries) {
+                            // Si sentences[] está vacío o ausente, usamos el chunk.text completo como unidad
+                            const chunkSentences: string[] =
+                                Array.isArray(chunk.sentences) && chunk.sentences.length > 0
+                                    ? chunk.sentences
+                                    : (chunk.text ? [chunk.text] : []);
+                            for (const s of chunkSentences) {
+                                splits.push(s);
+                                map.push(chunk.index); // sentenceIndex → chunkIndex
+                            }
+                        }
+                        sentenceToChunk.current = map;
+                        console.log(`[VisorInmersivo] v2 manifest: ${splits.length} sentences from ${chunkEntries.length} chunks`);
+                    } else {
+                        // === MANIFEST v1: chunk text como unidades de display (comportamiento actual) ===
+                        const values: any[] = Object.values(loadedManifest).sort((a: any, b: any) => a.index - b.index);
+                        const manifestTexts = values.map(v => v.text).filter(t => t && typeof t === 'string');
+
+                        if (manifestTexts.length === values.length && manifestTexts.length > 0 && !manifestTexts[0].endsWith("...")) {
+                            splits = manifestTexts;
+                            console.log(`[VisorInmersivo] Using canonical text from manifest (${splits.length} chunks)`);
+                        }
                     }
                 }
 
@@ -433,35 +465,40 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     // 1. Fetcher (Blob | Gen)
     const getAudioUrl = useCallback(async (index: number): Promise<string | null> => {
         if (index >= audioSentences.length) return null;
-        if (audioCache.current.has(index)) return audioCache.current.get(index)!;
-        if (inFlightRequests.current.has(index)) return inFlightRequests.current.get(index)!;
+
+        // MANIFEST v2: resolver sentenceIndex → chunkIndex para cache, in-flight y manifest lookup.
+        // En v1/fallback (sentenceToChunk vacío), cacheKey === index (identidad, sin cambio de comportamiento).
+        const cacheKey = toAudioKey(index);
+
+        if (audioCache.current.has(cacheKey)) return audioCache.current.get(cacheKey)!;
+        if (inFlightRequests.current.has(cacheKey)) return inFlightRequests.current.get(cacheKey)!;
 
         const abortCtrl = new AbortController();
-        abortControllers.current.set(index, abortCtrl);
+        abortControllers.current.set(cacheKey, abortCtrl);
 
         const task = async () => {
             try {
-                // A. Manifest
-                if (manifest.current && manifest.current[index]) {
-                    const url = `/uploads/${manifest.current[index].file}`;
-                    const res = await fetch(url, { signal: abortCtrl.signal }); // PASSED ABORT SIGNAL
+                // A. Manifest: lookup por cacheKey (chunkIndex en v2, sentenceIndex en v1)
+                if (manifest.current && manifest.current[cacheKey]) {
+                    const url = `/uploads/${manifest.current[cacheKey].file}`;
+                    const res = await fetch(url, { signal: abortCtrl.signal });
                     if (res.ok) {
                         const blob = await res.blob();
-                        if (abortCtrl.signal.aborted) return null; // DOUBLE CHECK
+                        if (abortCtrl.signal.aborted) return null;
                         const blobUrl = URL.createObjectURL(blob);
-                        audioCache.current.set(index, blobUrl);
+                        audioCache.current.set(cacheKey, blobUrl);
                         return blobUrl;
                     }
                 }
 
-                // B. Generate
+                // B. Generate: usa el texto de la oración original (index, no cacheKey)
                 const txt = audioSentences[index];
                 if (!txt) return null;
-                
-                // NOTA: generarAudioTTS no soporta actualmente 'signal'. 
+
+                // NOTA: generarAudioTTS no soporta actualmente 'signal'.
                 // Se neutraliza el efecto de la promesa Zombi frenando cualquier asignación o cambio de estado posterior si abortó.
                 const b64 = await generarAudioTTS(txt); // Returns base64 mp3/wav
-                
+
                 if (unmounted.current || abortCtrl.signal.aborted) return null; // EARLY EXIT NEUTRALIZATION
 
                 if (b64) {
@@ -469,22 +506,22 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                     const wav = pcmToWav(bytes);
                     const blob = new Blob([wav], { type: 'audio/wav' });
                     const blobUrl = URL.createObjectURL(blob);
-                    audioCache.current.set(index, blobUrl);
+                    audioCache.current.set(cacheKey, blobUrl);
                     return blobUrl;
                 }
             } catch (e: any) {
                 if (e.name !== 'AbortError') console.error("Audio fetch/gen error", e);
             } finally {
-                inFlightRequests.current.delete(index);
-                abortControllers.current.delete(index);
+                inFlightRequests.current.delete(cacheKey);
+                abortControllers.current.delete(cacheKey);
             }
             return null;
         };
 
         const p = task();
-        inFlightRequests.current.set(index, p);
+        inFlightRequests.current.set(cacheKey, p);
         return p;
-    }, [audioSentences]);
+    }, [audioSentences, toAudioKey]);
 
     // 2. Prefetcher
     const prefetch = useCallback((start: number) => {
@@ -512,8 +549,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         if (!player || !otherPlayer) return;
 
         // ABORT FLIGHTS TOO FAR AWAY FROM NEW JUMP (Cancel zombie requests instantly)
-        Array.from(abortControllers.current.entries()).forEach(([reqIndex, ctrl]) => {
-            if (reqIndex < index - 5 || reqIndex > index + PREFETCH_WINDOW + 2) {
+        // MANIFEST v2: los límites se convierten a cacheKey (chunkIndex) para que el abort
+        // opere en el mismo espacio que abortControllers (keyed by cacheKey, no sentenceIndex).
+        const abortLower = toAudioKey(Math.max(0, index - 5));
+        const abortUpper = toAudioKey(Math.min(sentences.length - 1, index + PREFETCH_WINDOW + 2));
+        Array.from(abortControllers.current.entries()).forEach(([reqKey, ctrl]) => {
+            if (reqKey < abortLower || reqKey > abortUpper) {
                 ctrl.abort("Jumped away");
             }
         });
@@ -547,7 +588,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         // Trigger Prefetch
         prefetch(index + 2);
 
-    }, [sentences.length, getAudioUrl, playbackSpeed, prefetch]);
+    }, [sentences.length, getAudioUrl, playbackSpeed, prefetch, toAudioKey]);
 
 
     // Initial Load - MOUNT ONLY
@@ -719,8 +760,9 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         if (audioCache.current.size === 0) return;
         
         // Define safe window bounds: Keep [current-20] to [current+20] (Conservative GC)
-        const lowerBound = currentIndex - 20;
-        const upperBound = currentIndex + 20;
+        // Translate to cacheKey space (chunkIndex in v2, identity in v1/fallback)
+        const lowerBound = toAudioKey(Math.max(0, currentIndex - 20));
+        const upperBound = toAudioKey(Math.min(sentences.length - 1, currentIndex + 20));
         
         const keysToDelete: number[] = [];
         audioCache.current.forEach((blobUrl, index) => {
@@ -735,7 +777,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         if (keysToDelete.length > 0) {
             console.log(`[Memory GC] Freed ${keysToDelete.length} stale blobs. Active cached Blobs: ${audioCache.current.size}`);
         }
-    }, [currentIndex]);
+    }, [currentIndex, sentences.length, toAudioKey]);
 
 
     // --- TIMER & PROGRESS ---

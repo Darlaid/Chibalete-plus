@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { dataService } from '../services/dataService';
-import type { StoreOrder } from '../types';
-import { BarChart2, ShoppingCart, Users, BookOpen, Package, CheckCircle, Clock, Search, MapPin, Loader2, Brain, TrendingUp, Award, Download } from 'lucide-react';
+import type { StoreOrder, Group, Bundle } from '../types';
+import { BarChart2, ShoppingCart, Users, BookOpen, Package, CheckCircle, Clock, Search, MapPin, Loader2, Brain, TrendingUp, Award, Download, Sparkles, GraduationCap } from 'lucide-react';
 
 const AdminDashboard: React.FC = () => {
-    const [activeTab, setActiveTab] = useState<'reports' | 'sales'>('reports');
+    const [activeTab, setActiveTab] = useState<'reports' | 'sales' | 'grupos'>('reports');
     const [orders, setOrders] = useState<StoreOrder[]>([]);
 
     // Pagination
@@ -18,6 +18,11 @@ const AdminDashboard: React.FC = () => {
     const [contentInsights, setContentInsights] = useState<any>(null);
     const [isLoading, setIsLoading] = useState(true);
 
+    // Grupos State
+    const [allGroups, setAllGroups] = useState<Group[]>([]);
+    const [allBundles, setAllBundles] = useState<Bundle[]>([]);
+    const [groupFilter, setGroupFilter] = useState<'all' | 'with' | 'without'>('all');
+
     useEffect(() => {
         const loadData = async () => {
             setIsLoading(true);
@@ -25,6 +30,8 @@ const AdminDashboard: React.FC = () => {
             setOrders(dataService.getStoreOrders());
             setSchools(dataService.getColegios());
             setContentInsights(dataService.getContentInsights());
+            setAllGroups(dataService.getAllGroups());
+            setAllBundles(dataService.getBundles());
             setIsLoading(false);
         };
         loadData();
@@ -63,6 +70,21 @@ const AdminDashboard: React.FC = () => {
     const totalSales = useMemo(() => orders.reduce((acc, o) => acc + o.total, 0), [orders]);
     const pendingOrders = useMemo(() => orders.filter(o => o.status === 'pendiente').length, [orders]);
 
+    const bundleMap = useMemo(() => {
+        const m: Record<string, Bundle> = {};
+        allBundles.forEach(b => { m[b.id] = b; });
+        return m;
+    }, [allBundles]);
+
+    const groupsWithExp = useMemo(() => allGroups.filter(g => !!g.activeExperienceId).length, [allGroups]);
+    const groupsWithout = useMemo(() => allGroups.filter(g => !g.activeExperienceId).length, [allGroups]);
+
+    const filteredGroups = useMemo(() => {
+        if (groupFilter === 'with') return allGroups.filter(g => !!g.activeExperienceId);
+        if (groupFilter === 'without') return allGroups.filter(g => !g.activeExperienceId);
+        return allGroups;
+    }, [allGroups, groupFilter]);
+
     if (isLoading) {
         return (
             <div className="flex items-center justify-center min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -95,6 +117,12 @@ const AdminDashboard: React.FC = () => {
                     className={`pb-4 px-2 font-bold flex items-center border-b-2 transition-colors ${activeTab === 'sales' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
                 >
                     <ShoppingCart className="mr-2" /> Gestión de Ventas
+                </button>
+                <button
+                    onClick={() => setActiveTab('grupos')}
+                    className={`pb-4 px-2 font-bold flex items-center border-b-2 transition-colors ${activeTab === 'grupos' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                >
+                    <GraduationCap className="mr-2" /> Estado de Grupos
                 </button>
             </div>
 
@@ -364,6 +392,108 @@ const AdminDashboard: React.FC = () => {
                                 </div>
                             )}
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {activeTab === 'grupos' && (
+                <div className="animate-in fade-in space-y-6">
+
+                    {/* Summary row */}
+                    <div className="grid grid-cols-3 gap-4">
+                        <div className="bg-white dark:bg-gray-800 rounded-xl p-5 border border-gray-100 dark:border-gray-700 text-center">
+                            <p className="text-3xl font-bold text-gray-800 dark:text-white">{allGroups.length}</p>
+                            <p className="text-xs font-bold uppercase text-gray-400 mt-1">Grupos totales</p>
+                        </div>
+                        <div className="bg-indigo-50 dark:bg-indigo-900/20 rounded-xl p-5 border border-indigo-100 dark:border-indigo-800 text-center">
+                            <p className="text-3xl font-bold text-indigo-700 dark:text-indigo-300">{groupsWithExp}</p>
+                            <p className="text-xs font-bold uppercase text-indigo-500 mt-1 flex items-center justify-center gap-1">
+                                <Sparkles size={11} /> Con experiencia activa
+                            </p>
+                        </div>
+                        <div className="bg-white dark:bg-gray-800 rounded-xl p-5 border border-gray-100 dark:border-gray-700 text-center">
+                            <p className="text-3xl font-bold text-gray-400">{groupsWithout}</p>
+                            <p className="text-xs font-bold uppercase text-gray-400 mt-1">Sin experiencia</p>
+                        </div>
+                    </div>
+
+                    {/* Filter pills */}
+                    <div className="flex gap-2">
+                        {([
+                            { value: 'all', label: 'Todos' },
+                            { value: 'with', label: 'Con experiencia' },
+                            { value: 'without', label: 'Sin experiencia' },
+                        ] as const).map(f => (
+                            <button
+                                key={f.value}
+                                onClick={() => setGroupFilter(f.value)}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-colors ${groupFilter === f.value
+                                    ? 'bg-indigo-600 text-white'
+                                    : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                            >
+                                {f.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Groups list */}
+                    <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 overflow-hidden">
+                        {filteredGroups.length === 0 ? (
+                            <div className="p-10 text-center text-gray-400">
+                                <GraduationCap size={36} className="mx-auto mb-2 opacity-30" />
+                                <p className="text-sm">No hay grupos que coincidan con el filtro.</p>
+                            </div>
+                        ) : (
+                            <table className="w-full text-left text-sm">
+                                <thead className="bg-gray-50 dark:bg-gray-700/50 text-xs uppercase text-gray-500 border-b border-gray-100 dark:border-gray-700">
+                                    <tr>
+                                        <th className="px-5 py-3">Tipo</th>
+                                        <th className="px-5 py-3">Nombre</th>
+                                        <th className="px-5 py-3">Colegio</th>
+                                        <th className="px-5 py-3 text-center">Miembros</th>
+                                        <th className="px-5 py-3">Experiencia activa</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {filteredGroups.map(g => {
+                                        const memberCount = Array.isArray(g.memberIds) ? g.memberIds.length
+                                            : Array.isArray(g.studentIds) ? g.studentIds.length : 0;
+                                        const exp = g.activeExperienceId ? bundleMap[g.activeExperienceId] : null;
+                                        return (
+                                            <tr key={g.id} className="border-b border-gray-50 dark:border-gray-700/50 hover:bg-gray-50/50 dark:hover:bg-gray-700/20 transition-colors">
+                                                <td className="px-5 py-3 text-lg">
+                                                    {g.type === 'club' ? '🎪' : '🏫'}
+                                                </td>
+                                                <td className="px-5 py-3">
+                                                    <p className="font-bold text-gray-800 dark:text-gray-200">{g.name}</p>
+                                                    {g.grade && <p className="text-xs text-gray-400">{g.grade}</p>}
+                                                </td>
+                                                <td className="px-5 py-3 text-gray-500 dark:text-gray-400 text-xs">
+                                                    {g.school || g.organizationId || '—'}
+                                                </td>
+                                                <td className="px-5 py-3 text-center font-bold text-gray-700 dark:text-gray-300">
+                                                    {memberCount}
+                                                </td>
+                                                <td className="px-5 py-3">
+                                                    {exp ? (
+                                                        <div>
+                                                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                                                                <Sparkles size={10} /> {exp.name}
+                                                            </span>
+                                                            {exp.shortDescription && (
+                                                                <p className="text-xs text-gray-400 mt-0.5">{exp.shortDescription}</p>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="text-xs text-gray-400 italic">Sin experiencia</span>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        )}
                     </div>
                 </div>
             )}

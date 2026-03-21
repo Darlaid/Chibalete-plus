@@ -14,7 +14,7 @@ export interface User {
   seguidores: number;
   seguidos: number;
   nivel_lectura: "Novato" | "Intermedio" | "Feroz";
-  roles: ('lector' | 'profesor' | 'administrador')[];
+  roles: ('lector' | 'profesor' | 'mediador' | 'administrador')[];
   mediatorKind?: 'teacher' | 'librarian' | 'coordinator' | 'parent'; // NUEVO: Especialización
   // --- Extensión modelo (compatible con legacy) ---
   capabilities?: string[];     // Permisos granulares opcionales por usuario
@@ -329,6 +329,8 @@ export interface Group {
   studentIds?: string[];       // Legacy: lista de alumnos. Alias de memberIds.
   school?: string;             // Nombre del colegio (string legacy)
   grade?: string;              // Grado/nivel (string legacy)
+  gradeLevel?: number;         // Nivel escolar estructurado (derivado de grade en normalizeGroup)
+  section?: string;            // Sección letra (ej. 'A', 'B') — derivado de grade o explícito
   // --- Campos extendidos ---
   mediatorIds: string[];       // Múltiples mediadores. Normalizado desde teacherId si es necesario.
   memberIds: string[];         // Membresía flexible (alumnos + otros miembros)
@@ -337,6 +339,7 @@ export interface Group {
   collectionIds?: string[];               // Fase 6A: Acceso por paquete
   accessStartsAt?: string;                // Fase 6A: Ventana temporal inicio (ISO)
   accessEndsAt?: string;                  // Fase 6A: Ventana temporal fin (ISO)
+  activeExperienceId?: string | null;     // Fase 8: Bundle/experiencia activo en este grupo (null = sin experiencia)
   accessRules?: {                         // Reglas de acceso estructuradas (opcional)
     type: 'full' | 'restricted';
     titleIds?: string[];        // IDs de títulos específicos autorizados
@@ -360,6 +363,29 @@ export interface ResolvedAccessState {
   collectionIds: string[];
   appliedRules: string[];
   hasBroadAccess: boolean;
+}
+
+/**
+ * Bundle — Infraestructura interna de "Experiencias" (Fase 7).
+ *
+ * Nombre visible al usuario: "Experiencia" (nunca "bundle" en UI).
+ * Estos registros viven en bundles_db.json y se servirán vía GET /api/bundles.
+ *
+ * Preparado para futura edición desde panel Admin:
+ *   - POST   /api/bundles        → crear experiencia
+ *   - PUT    /api/bundles/:id    → editar experiencia
+ *   - DELETE /api/bundles/:id    → eliminar experiencia
+ * (No implementado aún — solo GET por ahora)
+ */
+export interface Bundle {
+  id: string;
+  name: string;                   // Nombre visible de la experiencia
+  description?: string;           // Descripción legacy (compat)
+  shortDescription?: string;      // Tagline corta para tarjetas UI
+  summary?: string;               // Descripción extendida (futuro detalle admin)
+  includes?: string[];            // Lista legible de qué incluye ("3 libros", "2 guías")
+  contentIds: string[];           // IDs de contenido habilitados al activar
+  tags?: string[];                // Etiquetas para filtrado (grado, tema, etc.)
 }
 
 export interface AssignmentSubmission {

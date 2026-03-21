@@ -83,7 +83,7 @@ const Home: React.FC = () => {
             setNuevos(dataService.getNuevosTitulos(user.roles).map(content => ({ content })));
             setRecomendados(dataService.getRecomendadosComunidad(user.roles).map(content => ({ content })));
 
-            if (user.roles.includes('profesor') || user.roles.includes('administrador')) {
+            if (user.roles.includes('profesor') || user.roles.includes('mediador') || user.roles.includes('administrador')) {
                 setArticulosPedagogicos(dataService.getArticulosPedagogicos().map(content => ({ content })));
             }
 
@@ -199,7 +199,7 @@ const Home: React.FC = () => {
         if (user.roles.includes('administrador')) {
             return `Hola, ${firstName} Administrador`;
         }
-        if (user.roles.includes('profesor')) {
+        if (user.roles.includes('profesor') || user.roles.includes('mediador')) {
             return `Bienvenido, Profesor ${firstName}`;
         }
         return `Hola, ${firstName}`;
@@ -269,7 +269,7 @@ const Home: React.FC = () => {
                     {getGreeting()}
                 </h1>
                 <div className="mt-2 flex items-center gap-2 flex-wrap min-h-[24px]">
-                    {(user.roles.includes('administrador') || user.roles.includes('profesor')) && (
+                    {(user.roles.includes('administrador') || user.roles.includes('profesor') || user.roles.includes('mediador')) && (
                         <div className="flex flex-wrap items-center gap-3">
                             <p className="text-md text-gray-500 dark:text-gray-400">Tus roles:</p>
                             {user.roles.map(role => (
@@ -498,9 +498,17 @@ const Home: React.FC = () => {
                             const mySubmission = assign.studentSubmissions?.find(s => s.studentId === user.id);
                             const hasSubmitted = !!mySubmission;
                             const isGraded = mySubmission?.status === 'graded';
+                            const groupCtx = dataService.getAllGroups().find(g => g.id === assign.groupId);
 
                             return (
-                                <div key={assign.id} className={`bg-white dark:bg-gray-800 p-5 rounded-xl shadow-md border min-w-[280px] md:min-w-[320px] flex flex-col ${hasSubmitted ? 'border-green-200 dark:border-green-900' : 'border-gray-200 dark:border-gray-700'}`}>
+                                <div key={assign.id} className={`bg-white dark:bg-gray-800 p-5 rounded-xl shadow-md border min-w-[280px] md:min-w-[320px] flex flex-col ${hasSubmitted ? 'border-green-200 dark:border-green-900' : groupCtx?.type === 'club' ? 'border-pink-200 dark:border-pink-900' : 'border-gray-200 dark:border-gray-700'}`}>
+                                    {groupCtx && (
+                                        <div className="mb-2">
+                                            <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded border ${groupCtx.type === 'club' ? 'bg-pink-50 text-pink-600 border-pink-200 dark:bg-pink-900/30 dark:text-pink-400 dark:border-pink-800' : 'bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800'}`}>
+                                                {groupCtx.type === 'club' ? '🎪 Club' : '🏫 Curso'} · {groupCtx.name}
+                                            </span>
+                                        </div>
+                                    )}
                                     <div className="flex justify-between items-start mb-2">
                                         <span className="text-xs font-bold text-indigo-600 uppercase tracking-wide bg-indigo-50 dark:bg-indigo-900/30 px-2 py-1 rounded">
                                             {assign.submissionType === 'text' ? 'Texto' : assign.submissionType === 'photo' ? 'Foto' : assign.submissionType === 'video' ? 'Video' : 'Audio'}
@@ -545,7 +553,7 @@ const Home: React.FC = () => {
             </section>
 
             {/* Ideas y Reflexiones (Profesores/Admin Only) */}
-            {(user.roles.includes('profesor') || user.roles.includes('administrador')) && articulosPedagogicos.length > 0 && (
+            {(user.roles.includes('profesor') || user.roles.includes('mediador') || user.roles.includes('administrador')) && articulosPedagogicos.length > 0 && (
                 <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-gray-800 dark:to-gray-900 py-2 my-6">
                     <div className="px-4 md:px-8 mb-2 flex items-center gap-2">
                         <Lightbulb className="text-yellow-500" />

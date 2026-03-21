@@ -2,8 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import { analizarProgresoPedagogico } from '../services/geminiService';
-import type { Group, User, PedagogicalStats, Assignment, Content, AssignmentSubmission } from '../types';
-import { Users, BookOpen, BrainCircuit, Clock, ChevronRight, BarChart2, Zap, Repeat, Timer, TrendingUp, ClipboardList, Plus, Calendar, Trash, FileText, X, Video, Image, Eye, EyeOff, Send, PenTool, MessageCircle, CheckCircle } from 'lucide-react';
+import type { Group, User, PedagogicalStats, Assignment, Content, AssignmentSubmission, Bundle } from '../types';
+import { Users, BookOpen, BrainCircuit, Clock, ChevronRight, BarChart2, Zap, Repeat, Timer, TrendingUp, ClipboardList, Plus, Calendar, Trash, FileText, X, Video, Image, Eye, EyeOff, Send, PenTool, MessageCircle, CheckCircle, Package, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 // Import extracted components
@@ -183,11 +183,27 @@ const AulaViva: React.FC = () => {
     // --- Student State ---
     const [studentAssignments, setStudentAssignments] = useState<Assignment[]>([]);
 
+    // --- Club Member Management ---
+    const [showClubMemberModal, setShowClubMemberModal] = useState(false);
+    const [allSchoolUsers, setAllSchoolUsers] = useState<User[]>([]);
+    const [memberSearchQuery, setMemberSearchQuery] = useState('');
+
+    // --- Club Content Management ---
+    const [showClubContentModal, setShowClubContentModal] = useState(false);
+    const [contentSearchQuery, setContentSearchQuery] = useState('');
+
+    // --- Bundle Management (Fase 7) ---
+    const [showBundleModal, setShowBundleModal] = useState(false);
+    const [bundles, setBundles] = useState<Bundle[]>([]);
+    const [applyingBundleId, setApplyingBundleId] = useState<string | null>(null);
+    const [activatedBundle, setActivatedBundle] = useState<Bundle | null>(null);
+    const [replacedBundleName, setReplacedBundleName] = useState<string | null>(null);
+
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
     const itemsPerPage = 10;
 
-    const isTeacher = (user?.roles.includes('profesor') || user?.roles.includes('administrador')) && !isStudentViewMode;
+    const isTeacher = (user?.roles.includes('profesor') || user?.roles.includes('mediador') || user?.roles.includes('administrador')) && !isStudentViewMode;
     const isAdmin = user?.roles.includes('administrador');
 
     useEffect(() => {
@@ -243,12 +259,11 @@ const AulaViva: React.FC = () => {
             if (isAdmin && selectedGroup) {
                 // Admin viewing specific group as student
                 setStudentAssignments(dataService.getAssignmentsByGroup(selectedGroup));
-            } else if (user.groupIds && user.groupIds.length > 0) {
-                // Regular student or Admin falling back to their own groups (unlikely for Admin)
-                const allAssignments = user.groupIds.flatMap(gid => dataService.getAssignmentsByGroup(gid));
-                setStudentAssignments(allAssignments);
             } else {
-                setStudentAssignments([]);
+                // memberIds es fuente canónica; user.groupIds como fallback compat
+                const userGroups = dataService.getUserGroups(user.id);
+                const allAssignments = userGroups.flatMap(g => dataService.getAssignmentsByGroup(g.id));
+                setStudentAssignments(allAssignments);
             }
         }
     }, [user, isTeacher, isAdmin, selectedSchool, selectedGroup]); // Added selectedGroup dependency to refresh student view content
@@ -315,6 +330,96 @@ const AulaViva: React.FC = () => {
             alert('Calificación guardada');
         }
     }
+
+    // --- Club Member Management Handlers ---
+    const handleOpenMemberModal = () => {
+        const school = currentGroup?.school || currentGroup?.colegio || user?.colegio || '';
+        const schoolUsers = school ? dataService.getUsuariosByColegio(school) : [];
+        setAllSchoolUsers(schoolUsers);
+        setMemberSearchQuery('');
+        setShowClubMemberModal(true);
+    };
+
+    const handleAddClubMember = (studentId: string) => {
+        if (!selectedGroup) return;
+        dataService.addStudentsToGroup(selectedGroup, [studentId]);
+        setStudents(dataService.getGroupStudents(selectedGroup));
+    };
+
+    const handleRemoveClubMember = (studentId: string) => {
+        if (!selectedGroup) return;
+        dataService.removeStudentFromGroup(selectedGroup, studentId);
+        setStudents(dataService.getGroupStudents(selectedGroup));
+    };
+
+    // --- Club Content Management Handlers ---
+    const handleOpenContentModal = () => {
+        setContentSearchQuery('');
+        setShowClubContentModal(true);
+    };
+
+    const handleAddClubContent = async (contentId: string) => {
+        if (!selectedGroup) return;
+        await dataService.addContentToClub(selectedGroup, contentId);
+        if (isAdmin) {
+            setGroups(dataService.getGroupsByColegio(selectedSchool || user?.colegio || ''));
+        } else {
+            setGroups(dataService.getTeacherGroups(user!.id));
+        }
+    };
+
+    const handleRemoveClubContent = async (contentId: string) => {
+        if (!selectedGroup) return;
+        await dataService.removeContentFromClub(selectedGroup, contentId);
+        if (isAdmin) {
+            setGroups(dataService.getGroupsByColegio(selectedSchool || user?.colegio || ''));
+        } else {
+            setGroups(dataService.getTeacherGroups(user!.id));
+        }
+    };
+
+    // --- Bundle Handlers (Fase 7) ---
+    const handleOpenBundleModal = () => {
+        setBundles(dataService.getBundles());
+        setShowBundleModal(true);
+    };
+
+    const handleApplyBundle = async (bundleId: string) => {
+        if (!selectedGroup) return;
+        setApplyingBundleId(bundleId);
+        const prevName = currentGroup?.activeExperienceId
+            ? (bundles.find(b => b.id === currentGroup.activeExperienceId)?.name ?? null)
+            : null;
+        try {
+            await dataService.applyBundleToGroup(selectedGroup, bundleId);
+            const applied = bundles.find(b => b.id === bundleId) || null;
+            if (isAdmin) {
+                setGroups(dataService.getGroupsByColegio(selectedSchool || user?.colegio || ''));
+            } else {
+                setGroups(dataService.getTeacherGroups(user!.id));
+            }
+            setShowBundleModal(false);
+            setActivatedBundle(applied);
+            setReplacedBundleName(prevName && prevName !== applied?.name ? prevName : null);
+            setTimeout(() => { setActivatedBundle(null); setReplacedBundleName(null); }, 7000);
+        } finally {
+            setApplyingBundleId(null);
+        }
+    };
+
+    const handleDeactivateExperience = async () => {
+        if (!selectedGroup) return;
+        try {
+            await dataService.clearGroupExperience(selectedGroup);
+            if (isAdmin) {
+                setGroups(dataService.getGroupsByColegio(selectedSchool || user?.colegio || ''));
+            } else {
+                setGroups(dataService.getTeacherGroups(user!.id));
+            }
+        } catch {
+            // silent — no bloquear flujo por esto
+        }
+    };
 
     // --- Student Actions ---
     const handleSolveInBitacora = (assignment: Assignment) => {
@@ -400,6 +505,23 @@ const AulaViva: React.FC = () => {
         return names.join(', ');
     }, [currentGroup]);
 
+    const clubContentIds = useMemo(() => {
+        if (!currentGroup || currentGroup.type !== 'club') return [] as string[];
+        const ids = currentGroup.availableContentIds;
+        if (!ids || ids === 'all') return [] as string[];
+        return ids as string[];
+    }, [currentGroup]);
+
+    const clubContentItems = useMemo(() =>
+        catalog.filter(c => clubContentIds.includes(c.id)),
+        [catalog, clubContentIds]
+    );
+
+    const activeBundle = useMemo(() => {
+        if (!currentGroup?.activeExperienceId) return null;
+        return dataService.getBundles().find(b => b.id === currentGroup.activeExperienceId) || null;
+    }, [currentGroup]);
+
     if (!user) return null;
 
     // --- STUDENT VIEW RENDER ---
@@ -451,6 +573,58 @@ const AulaViva: React.FC = () => {
                         </div>
                     )}
                 </header>
+
+                {/* Mis Grupos — contexto de pertenencia para el estudiante */}
+                {(() => {
+                    const myGroups = dataService.getUserGroups(user.id);
+                    if (myGroups.length === 0) return null;
+                    const courses = myGroups.filter(g => g.type !== 'club');
+                    const clubs = myGroups.filter(g => g.type === 'club');
+                    return (
+                        <div className="mb-8 animate-in fade-in">
+                            <p className="text-xs font-bold uppercase text-gray-400 mb-3 tracking-wider">Mis grupos</p>
+                            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                {courses.map(g => {
+                                    const exp = g.activeExperienceId ? dataService.getBundles().find(b => b.id === g.activeExperienceId) : null;
+                                    return (
+                                        <div key={g.id} className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl px-4 py-3 flex items-center gap-3">
+                                            <span className="text-2xl">🏫</span>
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-bold uppercase text-blue-500 tracking-wider">Curso</p>
+                                                <p className="font-semibold text-sm text-blue-800 dark:text-blue-200 truncate">{g.name}</p>
+                                                {exp && (
+                                                    <p className="text-xs text-indigo-500 dark:text-indigo-400 mt-0.5 flex items-center gap-1">
+                                                        <Sparkles size={10} /> {exp.name}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                                {clubs.map(g => {
+                                    const clubContent = dataService.getClubContent(g);
+                                    const exp = g.activeExperienceId ? dataService.getBundles().find(b => b.id === g.activeExperienceId) : null;
+                                    return (
+                                        <div key={g.id} className="bg-pink-50 dark:bg-pink-900/20 border border-pink-100 dark:border-pink-800 rounded-xl px-4 py-3 flex items-center gap-3">
+                                            <span className="text-2xl">🎪</span>
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-bold uppercase text-pink-500 tracking-wider">Club de lectura</p>
+                                                <p className="font-semibold text-sm text-pink-800 dark:text-pink-200 truncate">{g.name}</p>
+                                                {exp ? (
+                                                    <p className="text-xs text-indigo-500 dark:text-indigo-400 mt-0.5 flex items-center gap-1">
+                                                        <Sparkles size={10} /> {exp.name}
+                                                    </p>
+                                                ) : clubContent.length > 0 ? (
+                                                    <p className="text-xs text-pink-400 mt-0.5">{clubContent.length} {clubContent.length === 1 ? 'libro disponible' : 'libros disponibles'}</p>
+                                                ) : null}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 <div className="animate-in fade-in">
                     <h2 className="text-2xl font-bold mb-6 flex items-center"><ClipboardList className="mr-2" /> Tareas Pendientes</h2>
@@ -579,6 +753,62 @@ const AulaViva: React.FC = () => {
                         </div>
                     );
                 })()}
+
+            {/* Experiencia recién activada — confirmación temporal (Fase 8) */}
+            {activatedBundle && (
+                <div className="mb-5 px-4 py-4 rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 animate-in slide-in-from-top-2">
+                    <div className="flex items-start gap-3">
+                        <Sparkles className="text-amber-500 flex-shrink-0 mt-0.5" size={18} />
+                        <div className="flex-1 min-w-0">
+                            <p className="font-bold text-amber-700 dark:text-amber-400 text-sm">
+                                ¡Experiencia activada! — {activatedBundle.name}
+                            </p>
+                            {replacedBundleName && (
+                                <p className="text-xs text-amber-500 dark:text-amber-500 mt-0.5">Reemplazó a: {replacedBundleName}</p>
+                            )}
+                            {activatedBundle.shortDescription && (
+                                <p className="text-xs text-amber-600 dark:text-amber-500 mt-0.5">{activatedBundle.shortDescription}</p>
+                            )}
+                            {activatedBundle.includes && activatedBundle.includes.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                    {activatedBundle.includes.map(inc => (
+                                        <span key={inc} className="px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-700 rounded dark:bg-amber-900/40 dark:text-amber-300">{inc}</span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                        <button onClick={() => setActivatedBundle(null)} className="text-amber-400 hover:text-amber-600 flex-shrink-0"><X size={16} /></button>
+                    </div>
+                </div>
+            )}
+
+            {/* Experiencia activa persistente (Fase 8) */}
+            {activeBundle && !activatedBundle && (
+                <div className="mb-5 px-4 py-3 rounded-xl border border-indigo-200 bg-indigo-50 dark:bg-indigo-900/20 dark:border-indigo-800 flex items-start gap-3">
+                    <Sparkles className="text-indigo-400 flex-shrink-0 mt-0.5" size={15} />
+                    <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-bold uppercase text-indigo-500 tracking-wider mb-0.5">Experiencia activa</p>
+                        <p className="font-bold text-indigo-700 dark:text-indigo-300 text-sm">{activeBundle.name}</p>
+                        {activeBundle.shortDescription && (
+                            <p className="text-xs text-indigo-500 dark:text-indigo-400 mt-0.5">{activeBundle.shortDescription}</p>
+                        )}
+                        {activeBundle.includes && activeBundle.includes.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1.5">
+                                {activeBundle.includes.map(inc => (
+                                    <span key={inc} className="px-1.5 py-0.5 text-[10px] bg-indigo-100 text-indigo-600 rounded dark:bg-indigo-900/40 dark:text-indigo-300">{inc}</span>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <button
+                        onClick={handleDeactivateExperience}
+                        title="Quitar experiencia activa"
+                        className="text-indigo-300 hover:text-indigo-600 dark:hover:text-indigo-300 flex-shrink-0 p-1 rounded hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors"
+                    >
+                        <X size={14} />
+                    </button>
+                </div>
+            )}
 
             {/* Tab Switcher */}
             <div className="flex space-x-4 border-b border-gray-200 dark:border-gray-700 mb-8">
@@ -721,8 +951,34 @@ const AulaViva: React.FC = () => {
                             {/* Student Table (Updated Columns) */}
                             <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden border border-gray-200 dark:border-gray-700">
                                 <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-                                    <h2 className="text-xl font-bold">Listado Detallado de Estudiantes</h2>
-                                    <span className="text-xs text-gray-400">Mostrando {paginatedStudents.length} de {students.length}</span>
+                                    <h2 className="text-xl font-bold">{currentGroup?.type === 'club' ? 'Miembros del Club' : 'Listado Detallado de Estudiantes'}</h2>
+                                    <div className="flex items-center gap-3">
+                                        {currentGroup?.type === 'club' && (
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    onClick={handleOpenMemberModal}
+                                                    className="flex items-center px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-bold transition-colors"
+                                                >
+                                                    <Plus size={16} className="mr-1" /> Gestionar Miembros
+                                                </button>
+                                                <button
+                                                    onClick={handleOpenContentModal}
+                                                    className="flex items-center px-3 py-1.5 bg-pink-600 text-white rounded-lg hover:bg-pink-700 text-sm font-bold transition-colors"
+                                                >
+                                                    <BookOpen size={16} className="mr-1" /> Gestionar Contenido
+                                                </button>
+                                            </div>
+                                        )}
+                                        {currentGroup && (
+                                            <button
+                                                onClick={handleOpenBundleModal}
+                                                className="flex items-center px-3 py-1.5 bg-amber-500 text-white rounded-lg hover:bg-amber-600 text-sm font-bold transition-colors"
+                                            >
+                                                <Package size={16} className="mr-1" /> Experiencias
+                                            </button>
+                                        )}
+                                        <span className="text-xs text-gray-400">Mostrando {paginatedStudents.length} de {students.length}</span>
+                                    </div>
                                 </div>
                                 <div className="overflow-x-auto">
                                     <table className="w-full text-left">
@@ -763,6 +1019,48 @@ const AulaViva: React.FC = () => {
                                     >Siguiente</button>
                                 </div>
                             </div>
+
+                            {/* Club Content Section */}
+                            {currentGroup?.type === 'club' && (
+                                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 mt-6">
+                                    <div className="p-5 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+                                        <h2 className="text-lg font-bold flex items-center">
+                                            <BookOpen className="mr-2 text-pink-500" size={18} /> Contenido del Club
+                                        </h2>
+                                        <button
+                                            onClick={handleOpenContentModal}
+                                            className="flex items-center px-3 py-1.5 bg-pink-600 text-white rounded-lg hover:bg-pink-700 text-sm font-bold transition-colors"
+                                        >
+                                            <Plus size={14} className="mr-1" /> Gestionar
+                                        </button>
+                                    </div>
+                                    <div className="p-4">
+                                        {clubContentItems.length === 0 ? (
+                                            <div className="text-center py-5 text-gray-400">
+                                                <BookOpen size={28} className="mx-auto mb-2 opacity-25" />
+                                                <p className="text-sm">No hay contenido habilitado para este club.</p>
+                                                <p className="text-xs text-pink-500 mt-1 cursor-pointer hover:underline" onClick={handleOpenContentModal}>Agregar contenido</p>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {clubContentItems.map(c => (
+                                                    <div key={c.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                                                        <div className="flex items-center gap-2 min-w-0">
+                                                            <BookOpen size={13} className="text-pink-400 flex-shrink-0" />
+                                                            <span className="text-sm font-medium truncate">{c.titulo}</span>
+                                                            {c.autor && <span className="text-xs text-gray-400 flex-shrink-0">— {c.autor}</span>}
+                                                        </div>
+                                                        <button
+                                                            onClick={() => handleRemoveClubContent(c.id)}
+                                                            className="text-xs text-red-400 hover:text-red-600 font-bold ml-3 flex-shrink-0"
+                                                        >×</button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         {/* Right Column: Student Detail / Analytics Panel */}
@@ -891,6 +1189,220 @@ const AulaViva: React.FC = () => {
                         </div>
                     </div>
                 </>
+            )}
+
+            {/* Club Member Management Modal */}
+            {showClubMemberModal && currentGroup?.type === 'club' && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-lg p-6 animate-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xl font-bold flex items-center">
+                                <Users className="mr-2 text-indigo-600" size={20} /> Miembros — 🎪 {currentGroup.name}
+                            </h3>
+                            <button onClick={() => setShowClubMemberModal(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full"><X size={20} /></button>
+                        </div>
+
+                        <input
+                            type="text"
+                            placeholder="Buscar por nombre..."
+                            value={memberSearchQuery}
+                            onChange={e => setMemberSearchQuery(e.target.value)}
+                            className="w-full mb-4 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+
+                        {/* Current members */}
+                        <div className="mb-5">
+                            <p className="text-xs font-bold uppercase text-gray-500 mb-2">Miembros actuales ({students.length})</p>
+                            {students.length === 0 && (
+                                <p className="text-sm text-gray-400 italic">Este club no tiene miembros aún.</p>
+                            )}
+                            <div className="space-y-1 max-h-48 overflow-y-auto">
+                                {students
+                                    .filter(s => !memberSearchQuery || s.nombre_completo.toLowerCase().includes(memberSearchQuery.toLowerCase()))
+                                    .map(s => (
+                                        <div key={s.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                            <div className="flex items-center gap-2">
+                                                {s.avatar_url && <img src={s.avatar_url} className="w-7 h-7 rounded-full" />}
+                                                <span className="text-sm font-medium">{s.nombre_completo}</span>
+                                            </div>
+                                            <button
+                                                onClick={() => handleRemoveClubMember(s.id)}
+                                                className="text-xs text-red-500 hover:text-red-700 font-bold px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                                            >
+                                                Quitar
+                                            </button>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+
+                        {/* Available users to add */}
+                        <div>
+                            <p className="text-xs font-bold uppercase text-gray-500 mb-2">Agregar estudiante</p>
+                            <div className="space-y-1 max-h-48 overflow-y-auto">
+                                {allSchoolUsers
+                                    .filter(u => !students.find(s => s.id === u.id))
+                                    .filter(u => !memberSearchQuery || u.nombre_completo.toLowerCase().includes(memberSearchQuery.toLowerCase()))
+                                    .map(u => (
+                                        <div key={u.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                            <div className="flex items-center gap-2">
+                                                {u.avatar_url && <img src={u.avatar_url} className="w-7 h-7 rounded-full" />}
+                                                <span className="text-sm font-medium">{u.nombre_completo}</span>
+                                            </div>
+                                            <button
+                                                onClick={() => handleAddClubMember(u.id)}
+                                                className="text-xs text-indigo-600 hover:text-indigo-800 font-bold px-2 py-1 rounded hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors"
+                                            >
+                                                + Agregar
+                                            </button>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Club Content Management Modal */}
+            {showClubContentModal && currentGroup?.type === 'club' && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-lg p-6 animate-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xl font-bold flex items-center">
+                                <BookOpen className="mr-2 text-pink-600" size={20} /> Contenido — 🎪 {currentGroup.name}
+                            </h3>
+                            <button onClick={() => setShowClubContentModal(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full"><X size={20} /></button>
+                        </div>
+
+                        <input
+                            type="text"
+                            placeholder="Buscar por título..."
+                            value={contentSearchQuery}
+                            onChange={e => setContentSearchQuery(e.target.value)}
+                            className="w-full mb-4 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 outline-none focus:ring-2 focus:ring-pink-500"
+                        />
+
+                        {/* Contenido habilitado */}
+                        <div className="mb-5">
+                            <p className="text-xs font-bold uppercase text-gray-500 mb-2">Contenido habilitado ({clubContentItems.length})</p>
+                            {clubContentItems.length === 0 && (
+                                <p className="text-sm text-gray-400 italic">Este club no tiene contenido habilitado aún.</p>
+                            )}
+                            <div className="space-y-1 max-h-48 overflow-y-auto">
+                                {clubContentItems
+                                    .filter(c => !contentSearchQuery || c.titulo.toLowerCase().includes(contentSearchQuery.toLowerCase()))
+                                    .map(c => (
+                                        <div key={c.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <BookOpen size={13} className="text-pink-400 flex-shrink-0" />
+                                                <span className="text-sm font-medium truncate">{c.titulo}</span>
+                                            </div>
+                                            <button
+                                                onClick={() => handleRemoveClubContent(c.id)}
+                                                className="text-xs text-red-500 hover:text-red-700 font-bold px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0"
+                                            >
+                                                Quitar
+                                            </button>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+
+                        {/* Agregar contenido */}
+                        <div>
+                            <p className="text-xs font-bold uppercase text-gray-500 mb-2">Agregar contenido</p>
+                            <div className="space-y-1 max-h-48 overflow-y-auto">
+                                {catalog
+                                    .filter(c => !clubContentIds.includes(c.id))
+                                    .filter(c => !contentSearchQuery || c.titulo.toLowerCase().includes(contentSearchQuery.toLowerCase()))
+                                    .map(c => (
+                                        <div key={c.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <BookOpen size={13} className="text-gray-400 flex-shrink-0" />
+                                                <span className="text-sm font-medium truncate">{c.titulo}</span>
+                                            </div>
+                                            <button
+                                                onClick={() => handleAddClubContent(c.id)}
+                                                className="text-xs text-pink-600 hover:text-pink-800 font-bold px-2 py-1 rounded hover:bg-pink-50 dark:hover:bg-pink-900/20 transition-colors flex-shrink-0"
+                                            >
+                                                + Agregar
+                                            </button>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Bundle Modal (Fase 7) */}
+            {showBundleModal && currentGroup && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-lg p-6 animate-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+                        <div className="flex justify-between items-center mb-2">
+                            <h3 className="text-xl font-bold flex items-center">
+                                <Package className="mr-2 text-amber-500" size={20} /> Experiencias sugeridas
+                            </h3>
+                            <button onClick={() => setShowBundleModal(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full"><X size={20} /></button>
+                        </div>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
+                            Activar en: <span className="font-bold">{currentGroup.type === 'club' ? '🎪' : '🏫'} {currentGroup.name}</span>
+                            <span className="ml-1 text-xs text-gray-400">— el contenido de la experiencia reemplazará el habilitado actualmente</span>
+                        </p>
+                        {activeBundle && (
+                            <div className="mb-4 px-3 py-2 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 text-xs text-orange-700 dark:text-orange-400">
+                                <span className="font-bold">Actualmente activa:</span> {activeBundle.name} — se reemplazará al activar otra
+                            </div>
+                        )}
+
+                        {bundles.length === 0 ? (
+                            <p className="text-sm text-gray-400 italic text-center py-8">No hay experiencias disponibles.</p>
+                        ) : (
+                            <div className="space-y-3">
+                                {bundles.map(b => {
+                                    const items = b.contentIds
+                                        .map(id => catalog.find(c => c.id === id))
+                                        .filter(Boolean) as typeof catalog;
+                                    return (
+                                        <div key={b.id} className="bg-gray-50 dark:bg-gray-800 rounded-xl p-4 border border-gray-200 dark:border-gray-700">
+                                            <div className="flex justify-between items-start gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="font-bold text-sm">{b.name}</p>
+                                                    <p className="text-xs text-gray-500 mt-0.5">{b.shortDescription || b.description}</p>
+                                                    {b.includes && b.includes.length > 0 && (
+                                                        <div className="flex flex-wrap gap-1 mt-2">
+                                                            {b.includes.map(inc => (
+                                                                <span key={inc} className="px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-700 rounded dark:bg-amber-900/30 dark:text-amber-300">{inc}</span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                    {b.tags && b.tags.length > 0 && (
+                                                        <div className="flex flex-wrap gap-1 mt-1">
+                                                            {b.tags.map(t => (
+                                                                <span key={t} className="px-1.5 py-0.5 text-[10px] bg-gray-200 text-gray-500 rounded dark:bg-gray-700 dark:text-gray-400">{t}</span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    onClick={() => handleApplyBundle(b.id)}
+                                                    disabled={applyingBundleId !== null}
+                                                    className="flex-shrink-0 px-3 py-1.5 bg-amber-500 text-white rounded-lg hover:bg-amber-600 text-sm font-bold transition-colors disabled:opacity-50"
+                                                >
+                                                    {applyingBundleId === b.id ? 'Activando…' : 'Activar'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </div>
             )}
 
             {/* Assignment Creation Modal */}

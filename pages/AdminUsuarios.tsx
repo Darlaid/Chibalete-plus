@@ -20,7 +20,7 @@ const AdminUsuarios: React.FC = () => {
     const [schools, setSchools] = useState<string[]>([]);
     const [schoolUsers, setSchoolUsers] = useState<User[]>([]);
     const [schoolGroups, setSchoolGroups] = useState<Group[]>([]);
-    const [roleFilter, setRoleFilter] = useState<'all' | 'lector' | 'profesor' | 'administrador'>('all');
+    const [roleFilter, setRoleFilter] = useState<'all' | 'lector' | 'profesor' | 'mediador' | 'administrador'>('all');
     const [groupTypeFilter, setGroupTypeFilter] = useState<'all' | 'course' | 'club'>('all');
     // --- MODAL STATES ---
     const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
@@ -73,7 +73,7 @@ const AdminUsuarios: React.FC = () => {
 
     // Derived State
     const filteredUsers = schoolUsers.filter(u => roleFilter === 'all' || u.roles.includes(roleFilter));
-    const teachers = schoolUsers.filter(u => u.roles.includes('profesor') || u.roles.includes('administrador'));
+    const teachers = schoolUsers.filter(u => u.roles.includes('profesor') || u.roles.includes('mediador') || u.roles.includes('administrador'));
     const filteredGroups = schoolGroups.filter(g => groupTypeFilter === 'all' || (g.type || 'course') === groupTypeFilter);
 
     // --- HANDLERS FOR CSV ---
@@ -133,6 +133,12 @@ const AdminUsuarios: React.FC = () => {
                 const colegio = parts[3] || '';
                 const curso = parts[4] || '';
                 const rolRaw = (parts[5] || 'lector').toLowerCase().trim();
+                // SUBFASE 3.2: Columna 6 opcional — mediatorKind
+                const VALID_MK_VALUES = ['teacher', 'librarian', 'coordinator', 'parent'];
+                const mkRaw = parts[6] ? parts[6].toLowerCase().trim() : undefined;
+                const mediatorKind = mkRaw && VALID_MK_VALUES.includes(mkRaw)
+                    ? mkRaw as 'teacher' | 'librarian' | 'coordinator' | 'parent'
+                    : undefined;
 
                 // Validaciones rigurosas
                 const rowErrs: string[] = [];
@@ -157,8 +163,10 @@ const AdminUsuarios: React.FC = () => {
                 emailsSeen.add(email);
 
                 // Mapear rol
-                let roles: ('lector' | 'profesor')[];
-                if (rolRaw === 'mediador' || rolRaw === 'profesor') {
+                let roles: ('lector' | 'profesor' | 'mediador')[];
+                if (rolRaw === 'mediador') {
+                    roles = ['mediador'];
+                } else if (rolRaw === 'profesor') {
                     roles = ['profesor'];
                 } else {
                     if (rolRaw !== 'lector') {
@@ -168,7 +176,7 @@ const AdminUsuarios: React.FC = () => {
                     roles = ['lector'];
                 }
 
-                parsed.push({ nombre_completo: nombre, email, password, colegio, curso, roles, _rowNum: rowNum });
+                parsed.push({ nombre_completo: nombre, email, password, colegio, curso, roles, mediatorKind, _rowNum: rowNum });
             }
 
             if (parsed.length === 0 && rowErrors.length === 0) {
@@ -300,7 +308,7 @@ const AdminUsuarios: React.FC = () => {
 
     // --- HANDLERS FOR GROUPS ---
     const handleCreateGroup = () => {
-        setEditingGroup({ name: '', grade: '', school: selectedSchool, teacherId: '', type: 'course', mediatorIds: [] });
+        setEditingGroup({ name: '', grade: '', school: selectedSchool, type: 'course', mediatorIds: [] });
         setIsGroupModalOpen(true);
     };
 
@@ -329,25 +337,16 @@ const AdminUsuarios: React.FC = () => {
         setGroupSaveMsg(null);
 
         try {
-            // Garantizar al menos un teacherId derivado del primer mediador seleccionado para compatibilidad legacy
-            const principalTeacherId = editingGroup.mediatorIds && editingGroup.mediatorIds.length > 0
-                ? editingGroup.mediatorIds[0]
-                : (editingGroup.teacherId || '');
-
             if (editingGroup.id) {
-                // Update
-                dataService.updateGroup(editingGroup.id, {
-                    ...editingGroup,
-                    teacherId: principalTeacherId
-                });
+                // Update — teacherId derivado por dataService.updateGroup desde mediatorIds
+                dataService.updateGroup(editingGroup.id, { ...editingGroup });
             } else {
-                // Create
+                // Create — teacherId derivado por backend normalizeGroup desde mediatorIds
                 dataService.createGroup({
                     name: editingGroup.name!,
                     grade: editingGroup.grade || 'General',
                     school: selectedSchool,
                     type: editingGroup.type || 'course',
-                    teacherId: principalTeacherId,
                     mediatorIds: editingGroup.mediatorIds || [],
                     availableContentIds: editingGroup.availableContentIds,
                     collectionIds: editingGroup.collectionIds,
@@ -395,7 +394,6 @@ const AdminUsuarios: React.FC = () => {
                 school: selectedSchool,
                 type: 'club',
                 mediatorIds: [quickClubForm.mediatorId],
-                teacherId: quickClubForm.mediatorId, // compat legacy
                 accessEndsAt: endsAtRequest.toISOString(),
                 grade: 'Club'
             };
@@ -546,7 +544,7 @@ const AdminUsuarios: React.FC = () => {
 
                                         <div className="flex gap-2">
                                             <div className="flex bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-                                                {(['all', 'lector', 'profesor'] as const).map(role => (
+                                                {(['all', 'lector', 'profesor', 'mediador'] as const).map(role => (
                                                     <button
                                                         key={role}
                                                         onClick={() => setRoleFilter(role)}
@@ -1020,7 +1018,7 @@ const AdminUsuarios: React.FC = () => {
                             <div>
                                 <label className="block text-sm font-medium mb-2">Rol del Usuario</label>
                                 <div className="flex flex-wrap gap-2">
-                                    {(['lector', 'profesor', 'administrador'] as const).map(role => (
+                                    {(['lector', 'profesor', 'mediador', 'administrador'] as const).map(role => (
                                         <button
                                             key={role}
                                             onClick={() => {
@@ -1036,7 +1034,7 @@ const AdminUsuarios: React.FC = () => {
                                                 : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
                                                 }`}
                                         >
-                                            {role === 'lector' ? 'Estudiante' : role === 'profesor' ? 'Docente / Mediador' : 'Admin'}
+                                            {role === 'lector' ? 'Estudiante' : role === 'profesor' ? 'Docente' : role === 'mediador' ? 'Mediador' : 'Admin'}
                                         </button>
                                     ))}
                                 </div>
@@ -1053,7 +1051,7 @@ const AdminUsuarios: React.FC = () => {
                             </div>
 
                             {/* GROUP SELECTOR FOR TEACHERS/MEDIATORS */}
-                            {(editingUser?.roles?.includes('profesor') || editingUser?.roles?.includes('administrador')) && (
+                            {(editingUser?.roles?.includes('profesor') || editingUser?.roles?.includes('mediador') || editingUser?.roles?.includes('administrador')) && (
                                 <div className="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg border border-gray-200 dark:border-gray-600">
                                     <label className="block text-sm font-bold mb-2 flex items-center">
                                         <Users size={16} className="mr-2 text-indigo-500" />
