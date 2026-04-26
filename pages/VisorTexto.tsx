@@ -6,7 +6,7 @@ import type { Content, Assignment } from '../types';
 import { getOfflineText, saveOfflineText } from '../utils/offlineTextCache';
 import { getResumeToast } from '../utils/canonicalProgress';
 import { ChevronLeft, Type, Volume2, VolumeX, Globe, Moon, Sun, Loader2, Ruler, Image as ImageIcon, X, Mic, RefreshCw, Settings, ChevronUp, ChevronDown, Minus, Plus } from 'lucide-react';
-import { generarAudioTTS, generarMicroResumenRecordatorio } from '../services/geminiService';
+import { generarMicroResumenRecordatorio } from '../services/geminiService';
 import type { LeoSessionMemory } from '../services/geminiService';
 import { dataService } from '../services/dataService';
 import { shouldTriggerLeo } from '../utils/leoTriggerEngine';
@@ -17,39 +17,8 @@ import { LeoCompanion } from '../components/LeoCompanion';
 import Chatbot from '../components/Chatbot';
 import * as analyticsService from '../services/analyticsService';
 
-// Helper: PCM to WAV
-const pcmToWav = (pcmData: Uint8Array, sampleRate: number = 24000, numChannels: number = 1) => {
-    const buffer = new ArrayBuffer(44 + pcmData.length);
-    const view = new DataView(buffer);
-    const writeString = (view: DataView, offset: number, string: string) => { for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i)); };
-    writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + pcmData.length, true); writeString(view, 8, 'WAVE'); writeString(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * numChannels * 2, true); view.setUint16(32, numChannels * 2, true); view.setUint16(34, 16, true); writeString(view, 36, 'data'); view.setUint32(40, pcmData.length, true);
-    const pcmView = new Uint8Array(buffer, 44); pcmView.set(pcmData); return buffer;
-};
-
-// C2: Session cache for legacy TTS audio — avoids redundant Gemini API calls on replay.
-// Module-level singleton: survives re-renders, resets only on full page reload.
-// Design: LRU Map, max 5 entries (~200 KB total at 300-char chunks per entry), session-only.
-// Why not localStorage: audio base64 is large (~40 KB each); storing it persistently would
-// blow through quota quickly and provide little benefit vs. the manifest (persistent audio).
-const legacyTtsCache = new Map<string, string>(); // key: contentId+lang+text, value: base64
-const LEGACY_TTS_CACHE_MAX = 5;
-
-function getLegacyCache(key: string): string | null {
-    const v = legacyTtsCache.get(key);
-    if (!v) return null;
-    // Refresh LRU position: delete and re-insert moves entry to end of iteration order.
-    legacyTtsCache.delete(key);
-    legacyTtsCache.set(key, v);
-    return v;
-}
-function setLegacyCache(key: string, value: string): void {
-    if (legacyTtsCache.size >= LEGACY_TTS_CACHE_MAX) {
-        // Evict oldest (first in insertion order).
-        const oldest = legacyTtsCache.keys().next().value;
-        if (oldest !== undefined) legacyTtsCache.delete(oldest);
-    }
-    legacyTtsCache.set(key, value);
-}
+// Cache de TTS legacy eliminada — /api/tts usa Cache-Control: 1h desde el servidor.
+// El navegador evita re-generar el mismo texto sin necesidad de cache en memoria.
 
 // B2: Local calculation of days remaining — no backend dependency.
 // Returns a label and urgency level for the task banner in VisorTexto.
@@ -765,12 +734,11 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             return;
         }
 
-        // OPTION B: LEGACY — genera audio en tiempo real para los primeros 300 caracteres.
-        // Limitación intencional: generación completa de textos largos no es viable en tiempo real.
-        // El manifest es el modo correcto para libros completos; legacy solo cubre una vista previa.
+        // OPTION B: On-demand TTS via backend /api/tts (centralizado, sin API key en frontend).
+        // Limitación intencional: solo los primeros 300 chars — modo preview.
+        // El manifest (OPTION A) es el camino correcto para textos completos.
         setAudioLoading(true);
         // C1: Capture generation ID before the async wait.
-        // If content/language changes while awaiting, genId won't match and we discard the result.
         const genId = legacyTtsGenRef.current;
         try {
             const textToRead = text.substring(0, 300);
@@ -779,30 +747,30 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 return;
             }
 
-            // C2: Check session cache before calling Gemini — same 300-char slice plays again.
-            const cacheKey = `${content.id}_${language}_${textToRead}`;
-            let audioBase64 = getLegacyCache(cacheKey);
+            // Llamar a /api/tts — backend centralizado (OpenAI primary → Gemini fallback).
+            // El servidor aplica Cache-Control: 1h; el navegador evita re-generar el mismo texto.
+            const ttsRes = await fetch('/api/tts', {
+                method:  'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-user-id':    user?.id ?? '',
+                },
+                body: JSON.stringify({ text: textToRead }),
+            });
 
-            if (!audioBase64) {
-                audioBase64 = await generarAudioTTS(textToRead);
-                // C2: Store in session cache on success (not on null — avoid caching failures).
-                if (audioBase64) setLegacyCache(cacheKey, audioBase64);
-            }
-
-            // C1: Stale check — content or language changed while we were awaiting Gemini.
-            // Discard the result silently; the new content's load effect cleared audioLoading already.
+            // C1: Stale check
             if (legacyTtsGenRef.current !== genId) return;
 
-            if (!audioBase64) {
+            if (!ttsRes.ok) {
                 setAudioError('No se pudo generar el audio. Verifica tu conexión e intenta de nuevo.');
                 return;
             }
-            const binaryString = atob(audioBase64);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-            const wavBuffer = pcmToWav(bytes, 24000, 1);
-            const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-            // Revoke previous BlobURL before creating a new one — prevents ObjectURL accumulation.
+
+            const mp3Buffer = await ttsRes.arrayBuffer();
+            if (legacyTtsGenRef.current !== genId) return;
+
+            const blob = new Blob([mp3Buffer], { type: 'audio/mpeg' });
+            // Revoke previous BlobURL antes de crear uno nuevo — previene acumulación.
             if (audioUrl) URL.revokeObjectURL(audioUrl);
             const url = URL.createObjectURL(blob);
             setAudioUrl(url);
