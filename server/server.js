@@ -10,11 +10,42 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { fileTypeFromFile } from 'file-type';
+import archiver from 'archiver';
 
-import { processLeoRequest } from './leoEngine.js';
 import { ingestPedagogicalFile } from './leoIngester.js';
+import { normalizeRequest, dispatchInteraction } from './leoOrchestrator.js';
+import { getMediatorStudentSummary, getMediatorContentHistory } from './leoMediatorViewService.js';
+import { getActivationOutputsForUser } from './leoActivationService.js';
 import { createAccessService } from './accessService.js';
+import {
+    init as initMetrics,
+    computeStudentMetrics,
+    computeCourseMetrics,
+    computeSchoolMetrics,
+} from './metricsService.js';
+import { UPLOADS_ROOT, USERS_DB } from './config.js';
+import {
+    getProgressItem,
+    getProgressByUser,
+    getAllProgressAsMap,
+    upsertProgress,
+    getProgressCount,
+    closeDb as closeProgressDb,
+} from './progressService.js';
+import {
+    buildStudentReadingTimeMap,
+    buildStudentSessionTimelines,
+    buildStudentLeoInteractionsMap,
+    computeTemporalImpact,
+    computePedagogicalProfile,
+    aggregateCoursePedagogicalProfile,
+    computeEffectivenessByType,
+    computeSuccessPatterns,
+    getRecommendedInterventionType,
+    buildStudentInterventionHistory,
+} from './interventionAnalyticsService.js';
 
 // Configure dotenv to load from parent directory .env
 // Fix for __dirname in ESM
@@ -26,13 +57,19 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_PROD = process.env.NODE_ENV?.trim() === 'production';
-const ACCESS_FALLBACK_MODE = process.env.ACCESS_FALLBACK_MODE || 'open'; // 'open' | 'restricted'
+const ACCESS_FALLBACK_MODE = process.env.ACCESS_FALLBACK_MODE || 'restricted'; // 'open' | 'restricted'
+if (!process.env.ACCESS_FALLBACK_MODE) {
+    // Warn loudly so this is visible in PM2 logs on every startup
+    console.warn('[WARN] ACCESS_FALLBACK_MODE not set in .env — defaulting to "restricted". Set ACCESS_FALLBACK_MODE=open explicitly if open access is intended.');
+}
 
 // Configurar trust proxy para express-rate-limit detrás de Nginx Docker -> Host
 app.set('trust proxy', 1);
 
 import { generateAudioForContent } from './ttsService.js';
 import * as ttsQueue from './ttsQueue.js';
+import { runHybridTask, getGemini } from './aiEngine.js';
+import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
 
 // --- LOGGING HELPER ---
 const log = (msg, type = 'INFO') => {
@@ -48,25 +85,192 @@ app.use(helmet({
     crossOriginEmbedderPolicy: false,
 }));
 
-app.use(cors());
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+    : ['http://localhost:5173', 'http://localhost:4173'];
+
+app.use(cors({
+    origin: (origin, callback) => {
+        // Allow non-browser requests (e.g. server-to-server, curl) and whitelisted origins
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        log(`CORS rejected origin: ${origin}`, 'WARN');
+        callback(new Error('CORS no permitido'));
+    },
+    credentials: true
+}));
 app.use(express.json());
 
+// Key by userId for authenticated requests — prevents shared school NAT IPs from
+// exhausting a single bucket for all students. Falls back to IP for anonymous traffic.
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 1000
+    max: 1500,
+    keyGenerator: (req) => req.headers['x-user-id'] || req.ip,
+    skip: (req) => req.path === '/api/health',
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 app.use('/api/', limiter);
 
+// --- AUTH HARDENING: Rate limiters específicos por endpoint sensible ---
+// En dev los límites son relajados para no bloquear pruebas manuales.
+// En prod se aplican límites estrictos contra fuerza bruta.
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: IS_PROD ? 10 : 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' },
+});
+
+const acceptInviteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: IS_PROD ? 10 : 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' },
+});
+
+const resetRequestLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: IS_PROD ? 5 : 50,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiadas solicitudes de restablecimiento. Intenta nuevamente en 1 hora.' },
+});
+
+const resetConfirmLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: IS_PROD ? 10 : 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' },
+});
+
+// --- TTS RATE LIMITER (per userId) ---
+// In-memory sliding window: Map<userId, number[]> of request timestamps.
+// Prevents a single user from spamming TTS, exhausting OpenAI quota or disk.
+// Limits: 40 req/min for /api/tts, 60 req/min for /api/album/tts (disk-cached, cheaper).
+// Window: 60 seconds. Resets per user independently.
+const _ttsWindows    = new Map(); // userId → timestamp[]
+const _albumWindows  = new Map(); // userId → timestamp[]
+
+function makeTtsRateLimiter(windowMap, maxPerMinute) {
+    return (req, res, next) => {
+        const userId = req.headers['x-user-id'];
+        if (!userId) return next(); // requireUserAuth will reject it
+        const now  = Date.now();
+        const hits = (windowMap.get(userId) ?? []).filter(t => now - t < 60_000);
+        if (hits.length >= maxPerMinute) {
+            recordTtsAbuse(userId);
+            log(`[TTS_RATE] userId=${userId} hit limit ${maxPerMinute}/min abuses=${(_ttsUsage.get(userId)?.abuses ?? 1)}`, 'WARN');
+            return res.status(429).json({ error: 'Límite de TTS alcanzado. Intenta en 1 minuto.' });
+        }
+        hits.push(now);
+        windowMap.set(userId, hits);
+        next();
+    };
+}
+
+const ttsUserLimiter      = makeTtsRateLimiter(_ttsWindows,   IS_PROD ? 40  : 200);
+const albumTtsUserLimiter = makeTtsRateLimiter(_albumWindows, IS_PROD ? 60  : 200);
+
+// --- TTS USAGE TRACKING (in-memory, resets on restart) ---
+// Estructura: Map<userId, { reqs: number, chars: number, lastAt: ISO, abuses: number }>
+// Propósito: visibilidad operativa de quién consume TTS y en qué volumen.
+// Separado del rate limiter — este persiste más allá de la ventana de 1 minuto.
+const _ttsUsage = new Map();
+
+function recordTtsUsage(userId, chars, endpoint = 'tts') {
+    const now  = new Date().toISOString();
+    const prev = _ttsUsage.get(userId) ?? { reqs: 0, chars: 0, lastAt: now, abuses: 0 };
+    _ttsUsage.set(userId, {
+        reqs:   prev.reqs + 1,
+        chars:  prev.chars + chars,
+        lastAt: now,
+        abuses: prev.abuses,
+        endpoint,
+    });
+}
+
+function recordTtsAbuse(userId) {
+    const prev = _ttsUsage.get(userId) ?? { reqs: 0, chars: 0, lastAt: new Date().toISOString(), abuses: 0 };
+    _ttsUsage.set(userId, { ...prev, abuses: prev.abuses + 1 });
+}
+
+// --- ALBUM CACHE STARTUP GC ---
+// Limpiar archivos viejos al arrancar (no bloquea — solo I/O de listado de directorios).
+setImmediate(async () => {
+    try {
+        const result = await cleanupAlbumCache(30);
+        if (result.removed > 0) {
+            log(`[STARTUP] Album cache GC: removed=${result.removed} files bytes=${result.bytes}`);
+        }
+    } catch (e) {
+        log(`[STARTUP] Album cache GC failed: ${e.message}`, 'WARN');
+    }
+});
+
+// GC periódico: cada 24 horas mientras el proceso está vivo.
+setInterval(async () => {
+    try {
+        const result = await cleanupAlbumCache(30);
+        if (result.removed > 0) {
+            log(`[GC] Album cache: removed=${result.removed} files bytes=${result.bytes}`);
+        }
+    } catch (e) {
+        log(`[GC] Album cache failed: ${e.message}`, 'WARN');
+    }
+}, 24 * 60 * 60 * 1000).unref(); // .unref() — no bloquea cierre del proceso
+
 // --- AUTH MIDDLEWARE ---
+
+/**
+ * requireAdminAccess — Acepta DOS formas de autenticación para operaciones de escritura:
+ * A) x-admin-secret (backward compat, para scripts o llamadas server-to-server)
+ * B) x-user-id con rol 'administrador' (frontend autenticado — forma recomendada)
+ * GETs pasan sin auth (datos no sensibles, ya filtrados por rol en UI).
+ */
+const requireAdminAccess = (req, res, next) => {
+    if (req.method === 'GET') return next();
+
+    const SECRET = process.env.ADMIN_SECRET;
+    if (!SECRET) {
+        log('ADMIN_SECRET no configurado — operación de escritura admin rechazada', 'ERROR');
+        return res.status(503).json({ error: 'Servidor mal configurado: ADMIN_SECRET ausente' });
+    }
+
+    // Opción A: admin secret (scripts, PM2, server-to-server)
+    if (req.headers['x-admin-secret'] === SECRET) return next();
+
+    // Opción B: usuario autenticado con rol administrador
+    const userId = req.headers['x-user-id'];
+    if (userId) {
+        const users = readJSON(USERS_DB);
+        const user = users.find(u => u.id === userId);
+        if (user && isUserActive(user)) {
+            const roles = Array.isArray(user.roles) ? user.roles : (user.rol ? [user.rol] : []);
+            if (roles.includes('administrador')) return next();
+        }
+    }
+
+    log(`requireAdminAccess denied: ip=${req.ip} userId=${req.headers['x-user-id'] || 'none'}`, 'WARN');
+    res.status(401).json({ error: 'Unauthorized: se requiere admin secret o sesión de administrador' });
+};
+
 const requireAuth = (req, res, next) => {
     if (req.method === 'GET') return next();
     const authHeader = req.headers['x-admin-secret'];
-    const SECRET = process.env.ADMIN_SECRET || 'chibalete-secure-upload-2025';
+    const SECRET = process.env.ADMIN_SECRET;
 
+    if (!SECRET) {
+        log('ADMIN_SECRET no configurado — operación rechazada', 'ERROR');
+        return res.status(503).json({ error: 'Servidor mal configurado: ADMIN_SECRET ausente' });
+    }
     if (authHeader === SECRET) {
         next();
     } else {
-        log(`Unauthorized access attempt from ${req.ip}. Received Secret length: ${authHeader?.length || 0}. Expected: ${SECRET.length}`, 'WARN');
+        log(`Unauthorized access attempt from ${req.ip}. Received Secret length: ${authHeader?.length || 0}.`, 'WARN');
         res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
     }
 };
@@ -82,7 +286,6 @@ const requireUserAuth = (req, res, next) => {
         return res.status(401).json({ error: 'Auth requerida: x-user-id missing' });
     }
 
-    // Use established readJSON helper
     const users = readJSON(USERS_DB);
     const user = users.find(u => u.id === userId);
 
@@ -91,16 +294,78 @@ const requireUserAuth = (req, res, next) => {
         return res.status(403).json({ error: 'Acceso denegado: Usuario no encontrado' });
     }
 
-    req.user = user; // Pass user details if engine needs it
+    // Auth Pro: sesión activa no es suficiente si la cuenta fue deshabilitada.
+    if (!isUserActive(user)) {
+        log(`Session rejected: userId=${userId} accountStatus=${user.accountStatus}`, 'ACCESS');
+        return res.status(403).json({ error: 'Acceso denegado: cuenta inactiva' });
+    }
+
+    req.user = user;
     next();
 };
 
-app.use('/api/upload', requireAuth);
-app.use('/api/content', requireAuth);
+/**
+ * Validates that the authenticated user (x-user-id header) matches the :userId URL param.
+ * Applied to progress write endpoints that are NOT sendBeacon-based.
+ */
+const requireProgressOwner = (req, res, next) => {
+    const userIdFromHeader = req.headers['x-user-id'];
+    const userIdFromParam = req.params.userId;
+    if (!userIdFromHeader || userIdFromHeader !== userIdFromParam) {
+        log(`Progress auth rejected: header=${userIdFromHeader} param=${userIdFromParam}`, 'WARN');
+        return res.status(401).json({ error: 'No autorizado: x-user-id requerido y debe coincidir con el usuario' });
+    }
+    const users = readJSON(USERS_DB);
+    if (!users.find(u => u.id === userIdFromHeader)) {
+        return res.status(401).json({ error: 'No autorizado: usuario no válido' });
+    }
+    next();
+};
+
+/**
+ * RBAC middleware for upload/content write endpoints.
+ * Requires x-user-id header and verifies the user has role 'administrador'.
+ * GET requests pass through (read-only ops don't require upload rights).
+ */
+const requireAdminRole = (req, res, next) => {
+    if (req.method === 'GET') return next();
+
+    const userId = req.headers['x-user-id'];
+    if (!userId) {
+        log(`[AUTH_MISSING] method=${req.method} path=${req.path} ip=${req.ip}`, 'WARN');
+        return res.status(401).json({ error: 'Auth requerida: x-user-id missing' });
+    }
+
+    const users = readJSON(USERS_DB);
+    const user = users.find(u => u.id === userId);
+
+    if (!user) {
+        log(`[AUTH_FORBIDDEN] userId=${userId} reason=user_not_found method=${req.method} path=${req.path}`, 'WARN');
+        return res.status(403).json({ error: 'Acceso denegado: usuario no encontrado' });
+    }
+
+    if (!isUserActive(user)) {
+        log(`[AUTH_FORBIDDEN] userId=${userId} reason=account_inactive method=${req.method} path=${req.path}`, 'ACCESS');
+        return res.status(403).json({ error: 'Acceso denegado: cuenta inactiva' });
+    }
+
+    const roles = Array.isArray(user.roles) ? user.roles : (user.rol ? [user.rol] : []);
+    if (!roles.includes('administrador')) {
+        log(`[AUTH_FORBIDDEN] userId=${userId} roles=${roles.join(',')} reason=not_admin method=${req.method} path=${req.path}`, 'ACCESS');
+        return res.status(403).json({ error: 'Acceso denegado: se requiere rol administrador' });
+    }
+
+    req.user = user;
+    next();
+};
+
+app.use('/api/upload', requireAdminRole);
+app.use('/api/content', requireAdminRole);
 
 // --- CONFIGURATION ---
-// Ensure we use absolute paths relative to execution or this file
-const UPLOAD_DIR = path.resolve(__dirname, '../public/uploads');
+// Canonical paths come from ./config.js (env-overridable).
+// UPLOAD_DIR is an alias for UPLOADS_ROOT — preserves all existing usages in this file.
+const UPLOAD_DIR = UPLOADS_ROOT;
 const TEMP_DIR = path.join(UPLOAD_DIR, 'temp');
 
 if (!fs.existsSync(TEMP_DIR)) {
@@ -108,7 +373,7 @@ if (!fs.existsSync(TEMP_DIR)) {
 }
 
 // --- DATABASE FILES ---
-const USERS_DB = path.resolve(__dirname, '../data/users_db.json');
+// USERS_DB imported from ./config.js — do not redefine here.
 const GROUPS_DB = path.resolve(__dirname, '../data/groups_db.json');
 const PROGRESS_DB = path.resolve(__dirname, '../data/progress_db.json');
 const DB_FILE = path.resolve(__dirname, '../data/content.json');
@@ -118,13 +383,85 @@ const SCHOOLS_DB = path.resolve(__dirname, '../data/schools_db.json');
 const ACCESS_DB = path.resolve(__dirname, '../data/access_db.json'); // FASE E6: Motor de Accesos por Scopes
 const LEO_MEMORY_DB = path.resolve(__dirname, '../data/leo_memory_db.json'); // LEO SESSION PERSISTENCE
 const BUNDLES_DB = path.resolve(__dirname, '../data/bundles_db.json');       // Fase 7: Bundles comerciales
+const SUBMISSIONS_DB = path.resolve(__dirname, '../data/submissions_db.json'); // Exportación académica
+const ANALYTICS_DB = path.resolve(__dirname, '../data/analytics_db.json');    // Reading event analytics
+const PLAYBACK_EVENTS_LOG = path.resolve(__dirname, '../data/playback_events.log'); // Ritmo narrativo — append-only JSONL
+const LEO_INTERACTIONS_DB = path.resolve(__dirname, '../data/leo_interactions_db.json'); // Leo interaction log (metadata only)
+const INTERVENTIONS_DB = path.resolve(__dirname, '../data/interventions_db.json'); // Mediator interventions
+const USER_AUDIT_DB = path.resolve(__dirname, '../data/user_audit_log.json'); // Auditoría de mutaciones de usuarios
 
-log(`Users DB: ${USERS_DB}`);
+// In-memory idempotency locks for content save operations.
+// Key: `${actorId}:${contentId}`, TTL: 2 s. Prevents duplicate saves from network retries.
+// Scope: single-process. On multi-instance deployments replace with Redis SETNX.
+// TTL is intentionally short: covers browser double-submit and slow-network retry bursts.
+// A slow backend (>2 s) could let a second request through — acceptable for this single-VPS setup.
+const saveContentLocks = new Map();
+
+// ── Hash index — deduplicación O(1) en uploads ───────────────────────────────
+// Alternativa a escanear el directorio en cada upload (que sería O(n) y CPU-intensivo
+// con archivos grandes). El índice se construye al arrancar leyendo uploads existentes
+// con streams (nunca carga el archivo completo en RAM), y se mantiene actualizado con
+// cada upload/purge/delete durante la sesión.
+//
+// Límites conocidos:
+//   - In-process: si hay múltiples instancias, el índice no se sincroniza entre ellas.
+//     Para el setup de VPS única actual esto es correcto.
+//   - El índice no persiste entre reinicios del proceso, pero se reconstruye en <1 s
+//     para catálogos típicos (<500 archivos).
+
+/** Calcula el MD5 de un archivo leyéndolo como stream — nunca bloquea el event loop. */
+const computeFileHashStream = (filePath) => new Promise((resolve, reject) => {
+    const hash = crypto.createHash('md5');
+    fs.createReadStream(filePath)
+        .on('data', chunk => hash.update(chunk))
+        .on('end',  () => resolve(hash.digest('hex')))
+        .on('error', reject);
+});
+
+/** hash → URL relativa (/uploads/...) */
+const uploadHashIndex = new Map();
+
+/** Escanea recursivamente UPLOAD_DIR y construye el índice. Fire-and-forget en startup. */
+async function buildHashIndex(dir, baseDir) {
+    if (!fs.existsSync(dir)) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_e) { return; }
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            await buildHashIndex(fullPath, baseDir);
+        } else if (entry.isFile()) {
+            try {
+                const hash = await computeFileHashStream(fullPath);
+                const rel  = path.relative(baseDir, fullPath);
+                uploadHashIndex.set(hash, `/uploads/${rel.split(path.sep).join('/')}`);
+            } catch (_e) { /* skip unreadable files */ }
+        }
+    }
+}
+
+log(`[CONFIG] UPLOADS_ROOT : ${UPLOADS_ROOT}`);
+log(`[CONFIG] USERS_DB     : ${USERS_DB}`);
 log(`Groups DB: ${GROUPS_DB}`);
 log(`Progress DB: ${PROGRESS_DB}`);
 
-// Ensure DB files exist
-[USERS_DB, GROUPS_DB, DB_FILE, SCHOOLS_DB, ACCESS_DB].forEach(file => {
+// HARDENING — USERS_DB must exist. Never create it silently in another path.
+// If the file is missing, the server cannot operate safely. Fail fast with a clear message.
+if (!fs.existsSync(USERS_DB)) {
+    log(`FATAL: Users DB no encontrado en: ${USERS_DB}`, 'ERROR');
+    log(`FATAL: Verifique que USERS_DB env var apunta al archivo correcto o que el archivo existe.`, 'ERROR');
+    process.exit(1);
+}
+
+// HARDENING — UPLOADS_ROOT must exist.
+if (!fs.existsSync(UPLOADS_ROOT)) {
+    log(`FATAL: Directorio de uploads no encontrado: ${UPLOADS_ROOT}`, 'ERROR');
+    log(`FATAL: Verifique que UPLOADS_ROOT env var apunta al directorio correcto o créelo.`, 'ERROR');
+    process.exit(1);
+}
+
+// Ensure secondary DB files exist (auto-create is safe for these — not user-critical data)
+[GROUPS_DB, DB_FILE, SCHOOLS_DB, ACCESS_DB].forEach(file => {
     if (!fs.existsSync(path.dirname(file))) {
         fs.mkdirSync(path.dirname(file), { recursive: true });
     }
@@ -133,12 +470,11 @@ log(`Progress DB: ${PROGRESS_DB}`);
     }
 });
 
-// Initialize Progress DB with Object Map Structure (Phase 3)
+// Progress DB — now SQLite via progressService.js.
+// SQLite file initializes lazily on first access (getDb() inside progressService).
+// Ensure the data directory exists so SQLite can create its file there.
 if (!fs.existsSync(path.dirname(PROGRESS_DB))) {
     fs.mkdirSync(path.dirname(PROGRESS_DB), { recursive: true });
-}
-if (!fs.existsSync(PROGRESS_DB)) {
-    fs.writeFileSync(PROGRESS_DB, JSON.stringify({ progressMap: {} }, null, 2));
 }
 
 // Initialize Leo Memory DB
@@ -146,8 +482,58 @@ if (!fs.existsSync(LEO_MEMORY_DB)) {
     fs.writeFileSync(LEO_MEMORY_DB, JSON.stringify({ memoryMap: {} }, null, 2));
 }
 
+// Initialize Submissions DB (exportación académica)
+if (!fs.existsSync(SUBMISSIONS_DB)) {
+    fs.writeFileSync(SUBMISSIONS_DB, JSON.stringify([], null, 2));
+}
+
+// Initialize Analytics DB
+if (!fs.existsSync(ANALYTICS_DB)) {
+    fs.writeFileSync(ANALYTICS_DB, JSON.stringify([], null, 2));
+}
+
+// Initialize Playback Events Log (JSONL — append-only, una línea por evento)
+if (!fs.existsSync(PLAYBACK_EVENTS_LOG)) {
+    fs.writeFileSync(PLAYBACK_EVENTS_LOG, '');
+}
+
+// Initialize Leo Interactions DB
+if (!fs.existsSync(LEO_INTERACTIONS_DB)) {
+    fs.writeFileSync(LEO_INTERACTIONS_DB, JSON.stringify([], null, 2));
+}
+
+// Initialize User Audit Log
+if (!fs.existsSync(USER_AUDIT_DB)) {
+    fs.writeFileSync(USER_AUDIT_DB, JSON.stringify([], null, 2));
+}
+
 // --- HELPER WRAPPERS ---
+// ── In-memory TTL cache for hot read-only JSON files ─────────────────────────
+// USERS_DB and DB_FILE are read on every request but rarely change.
+// Caching them eliminates the dominant disk I/O bottleneck under load.
+// TTLs are conservative: stale data is a stale user record for ≤60s, acceptable.
+// writeJSON always invalidates so writes are immediately consistent.
+const _jsonCache = new Map(); // file → { data, expiresAt }
+const _JSON_TTL = {
+    [USERS_DB]: 60_000, // user records — 60s staleness acceptable
+};
+const _JSON_TTL_DEFAULT = 30_000; // content.json and others — 30s
+
+const _getCachedJSON = (file) => {
+    const entry = _jsonCache.get(file);
+    if (entry && Date.now() < entry.expiresAt) return entry.data;
+    return null;
+};
+
+const _setCachedJSON = (file, data) => {
+    const ttl = _JSON_TTL[file] ?? _JSON_TTL_DEFAULT;
+    _jsonCache.set(file, { data, expiresAt: Date.now() + ttl });
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 const readJSON = (file) => {
+    const cached = _getCachedJSON(file);
+    if (cached !== null) return cached;
     try {
         if (!fs.existsSync(file)) {
             return file === PROGRESS_DB ? { progressMap: {} } : [];
@@ -156,7 +542,9 @@ const readJSON = (file) => {
         if (!data.trim()) {
             return file === PROGRESS_DB ? { progressMap: {} } : [];
         }
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        _setCachedJSON(file, parsed);
+        return parsed;
     } catch (e) {
         log(`Error reading ${file}: ${e.message}`, 'ERROR');
         // Backup corrupted file
@@ -174,10 +562,18 @@ const writeJSON = (file, data) => {
         const tempFile = `${file}.tmp`;
         fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
         fs.renameSync(tempFile, file); // Atomic move
+        _jsonCache.delete(file); // invalidate cache immediately after write
     } catch (e) {
         log(`Error writing ${file}: ${e.message}`, 'ERROR');
         throw e; // Relanza error para permitir rollback transaccional
     }
+};
+
+const writeJSONAsync = async (file, data) => {
+    const tmp = `${file}.tmp`;
+    await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
+    await fs.promises.rename(tmp, file);
+    _jsonCache.delete(file);
 };
 
 /**
@@ -292,11 +688,12 @@ const matchesExpectedCategory = (category, fileTypeInfo) => {
 
 const rollbackMetadataFiles = (newContent) => {
     const urlFields = [
-        'portada_url', 
-        'url_recurso', 
-        'texto_plano_url', 
-        'texto_ingles_url', 
-        'ilustraciones_url'
+        'portada_url',
+        'url_recurso',
+        'texto_plano_url',
+        'texto_ingles_url',
+        'texto_portugues_url',
+        'ilustraciones_url',
     ];
     
     // Base absolutizada y segura del entorno físico
@@ -338,6 +735,65 @@ app.get('/api/server-time', (_req, res) => {
 // --- ROUTES ---
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+// --- SYSTEM METRICS (Phase 1 observability) ---
+app.get('/api/system/metrics', requireAdminAccess, (req, res) => {
+    const mem = process.memoryUsage();
+    const elu = performance.eventLoopUtilization();
+    res.json({
+        pid: process.pid,
+        uptime: Math.floor(process.uptime()),
+        memory: {
+            rss_mb: (mem.rss / 1048576).toFixed(1),
+            heap_used_mb: (mem.heapUsed / 1048576).toFixed(1),
+            heap_total_mb: (mem.heapTotal / 1048576).toFixed(1),
+        },
+        eventLoop: {
+            utilization: elu.utilization.toFixed(4),
+        },
+        tts: {
+            active: _ttsSemaphore.activeCount,
+            queued: _ttsSemaphore.queueDepth,
+        },
+        jsonCache: {
+            entries: _jsonCache.size,
+        },
+    });
+});
+
+// --- CHIBALETE LU — DISTRIBUCIÓN CONTROLADA ---
+// Endpoint público: la app LU lo consulta para saber si debe actualizar.
+// La configuración vive en data/lu_config.json — editar ahí para nuevas versiones.
+const LU_CONFIG_DB = path.resolve(__dirname, '../data/lu_config.json');
+const LU_CONFIG_DEFAULTS = {
+    version: '0.1.0',
+    apkUrl: 'https://chibaleteplus.chibaleteeditores.com/downloads/chibalete-lu.apk',
+    forceUpdate: false,
+    notes: 'Chibalete LU',
+    minSupportedVersion: '0.1.0'
+};
+app.get('/api/lu/version', (req, res) => {
+    try {
+        let config = {};
+        if (fs.existsSync(LU_CONFIG_DB)) {
+            const raw = fs.readFileSync(LU_CONFIG_DB, 'utf8');
+            config = JSON.parse(raw);
+        }
+        // Merge defensivo por campo: valida tipo antes de usar el valor del JSON.
+        // Evita que null, "yes", u otros tipos incorrectos lleguen a la app LU.
+        const payload = {
+            version:              typeof config.version === 'string'              ? config.version              : LU_CONFIG_DEFAULTS.version,
+            apkUrl:               typeof config.apkUrl === 'string'               ? config.apkUrl               : LU_CONFIG_DEFAULTS.apkUrl,
+            forceUpdate:          typeof config.forceUpdate === 'boolean'         ? config.forceUpdate          : LU_CONFIG_DEFAULTS.forceUpdate,
+            notes:                typeof config.notes === 'string'                ? config.notes                : LU_CONFIG_DEFAULTS.notes,
+            minSupportedVersion:  typeof config.minSupportedVersion === 'string'  ? config.minSupportedVersion  : LU_CONFIG_DEFAULTS.minSupportedVersion,
+        };
+        res.json(payload);
+    } catch (e) {
+        log(`[LU] Error leyendo lu_config.json: ${e.message}. Respondiendo con defaults.`, 'WARN');
+        res.json(LU_CONFIG_DEFAULTS);
+    }
+});
 
 // --- BUNDLE ROUTES (Fase 7) ---
 // Nombre interno: "bundles". Nombre visible en UI: "Experiencias".
@@ -464,8 +920,9 @@ app.get('/api/content/:id/access', (req, res) => {
             return true;
         };
 
-        // 6. Mediador/Profesor: acceso ampliado dentro de su organización
-        if (roles.includes('profesor') || roles.includes('mediador')) {
+        // 6. Mediador: acceso ampliado dentro de su organización
+        // DT-05: 'profesor' eliminado del modelo — solo 'mediador' es válido.
+        if (roles.includes('mediador')) {
             const mediatorSchool = user.colegio || user.school || '';
             if (mediatorSchool) {
                 try {
@@ -510,12 +967,8 @@ app.get('/api/content/:id/access', (req, res) => {
         });
 
         // Buscar si hay assignments en progress_db que asignen este contenido al usuario
-        const progressData = readJSON(PROGRESS_DB);
-        const assignmentsArr = Array.isArray(progressData.assignments)
-            ? progressData.assignments
-            : (progressData.assignmentsMap
-                ? Object.values(progressData.assignmentsMap).flat()
-                : []);
+        // SQLite solo almacena progressMap — assignments/assignmentsMap no existen en el schema actual.
+        const assignmentsArr = [];
 
         const hasAssignment = assignmentsArr.some(a =>
             a.contentId === contentId &&
@@ -650,9 +1103,11 @@ app.get('/api/content/:id/access', (req, res) => {
 
 
 // DELETE CONTENT — M1: with full physical file cleanup
-app.delete('/api/content/:id', requireAuth, (req, res) => {
+// requireAdminRole ya está aplicado via app.use('/api/content', requireAdminRole) arriba.
+app.delete('/api/content/:id', (req, res) => {
     const { id } = req.params;
-    log(`Request to delete content: ${id}`, 'INFO');
+    const actorId = req.headers['x-user-id'] ?? 'unknown';
+    log(`[DELETE_START] contentId=${id} actor=${actorId}`, 'INFO');
 
     // Guard: reject path traversal
     if (!id || /[\\/.]{2,}|[^a-zA-Z0-9_-]/.test(id)) {
@@ -725,15 +1180,30 @@ app.delete('/api/content/:id', requireAuth, (req, res) => {
             }
         }
 
-        // 6. Remove DB record — done last, after cleanup
+        // 6. Evict deleted URLs from uploadHashIndex to prevent stale dedup hits
+        const deletedUrls = new Set([
+            ...urlFields.map(f => item[f]).filter(u => u && typeof u === 'string'),
+            ...(Array.isArray(item.ilustraciones_url) ? item.ilustraciones_url.filter(Boolean) : [])
+        ]);
+        if (Array.isArray(item.pages)) {
+            item.pages.forEach(p => { if (p?.url) deletedUrls.add(p.url); if (p?.thumb) deletedUrls.add(p.thumb); });
+        }
+        if (Array.isArray(item.materials)) {
+            item.materials.forEach(m => { if (m?.url) deletedUrls.add(m.url); });
+        }
+        for (const [hash, indexedUrl] of uploadHashIndex) {
+            if (deletedUrls.has(indexedUrl)) uploadHashIndex.delete(hash);
+        }
+
+        // 7. Remove DB record — done last, after cleanup
         contentList.splice(itemIndex, 1);
         writeJSON(DB_FILE, contentList);
-        log(`Content removed from DB: ${id}`, 'SUCCESS');
+        log(`[DELETE_SUCCESS] contentId=${id} actor=${actorId}`, 'SUCCESS');
 
         res.json({ success: true, message: 'Content deleted successfully' });
 
     } catch (error) {
-        log(`CRITICAL DELETE ERROR: ${error.message}`, 'ERROR');
+        log(`[DELETE_FAIL] contentId=${id} actor=${actorId} error=${error.message}`, 'ERROR');
         res.status(500).json({ error: error.message });
     }
 });
@@ -776,13 +1246,16 @@ const upload = multer({
 
 // UPLOAD CON VALIDACIÓN BINARIA (Capa 2)
 app.post('/api/upload', (req, res) => {
-    log('Upload started...', 'INFO');
+    const actorId = req.headers['x-user-id'] ?? 'unknown';
+    const parentId = req.query.parentId ?? 'none';
+    log(`[UPLOAD_START] actor=${actorId} parentId=${parentId}`, 'INFO');
     upload.single('file')(req, res, async (err) => {
         if (err) {
-            log(`Upload Middleware Error: ${err.message}`, 'ERROR');
+            log(`[UPLOAD_FAIL] actor=${actorId} reason=middleware error=${err.message}`, 'ERROR');
             return res.status(400).json({ error: err.message });
         }
         if (!req.file) {
+            log(`[UPLOAD_FAIL] actor=${actorId} reason=no_file`, 'WARN');
             return res.status(400).json({ error: 'No file uploaded' });
         }
 
@@ -807,11 +1280,28 @@ app.post('/api/upload', (req, res) => {
             
             if (!isValid) {
                 safeUnlink(tempPath);
-                log(`Spoofing o binario malicioso detectado y purgado: ${req.file.originalname} (Expected: ${expectedCategory}, Real Mime: ${fileTypeInfo ? fileTypeInfo.mime : 'none'})`, 'SECURITY');
+                log(`[UPLOAD_FAIL] actor=${actorId} reason=spoofing file=${req.file.originalname} expected=${expectedCategory} actual=${fileTypeInfo?.mime ?? 'none'}`, 'SECURITY');
                 return res.status(415).json({ error: 'El contenido real del archivo no coincide con su extensión o contiene código binario no seguro.' });
             }
 
-            // Mover a destino definitivo si pasó las mallas
+            // Deduplicación O(1): hash del archivo actual con stream (no carga en RAM),
+            // consulta el índice en memoria construido al arrancar.
+            const fileHash = await computeFileHashStream(tempPath);
+            const dedupUrl = uploadHashIndex.get(fileHash);
+            if (dedupUrl) {
+                safeUnlink(tempPath);
+                log(`[UPLOAD_DEDUP] actor=${actorId} url=${dedupUrl}`, 'INFO');
+                return res.status(200).json({
+                    success: true,
+                    url: dedupUrl,
+                    filename: path.basename(dedupUrl),
+                    mimetype: fileTypeInfo ? fileTypeInfo.mime : (expectedCategory === 'text' ? 'text/plain' : req.file.mimetype),
+                    size: req.file.size,
+                    deduplicated: true,
+                });
+            }
+
+            // Mover a destino definitivo si pasó las mallas y no es duplicado
             let finalDestDir = UPLOAD_DIR;
             if (req.query.parentId) {
                 finalDestDir = path.join(UPLOAD_DIR, req.query.parentId);
@@ -824,7 +1314,10 @@ app.post('/api/upload', (req, res) => {
             const relativePath = path.relative(UPLOAD_DIR, finalPath);
             const fileUrl = `/uploads/${relativePath.split(path.sep).join('/')}`;
 
-            log(`File validated and stored: ${req.file.filename}`, 'SUCCESS');
+            // Actualizar índice con el nuevo archivo
+            uploadHashIndex.set(fileHash, fileUrl);
+
+            log(`[UPLOAD_SUCCESS] actor=${actorId} file=${req.file.filename} size=${req.file.size} parentId=${parentId}`, 'SUCCESS');
             res.status(200).json({
                 success: true,
                 url: fileUrl,
@@ -834,18 +1327,18 @@ app.post('/api/upload', (req, res) => {
             });
 
         } catch (validationErr) {
-            log(`Validation crash: ${validationErr.message}`, 'ERROR');
+            log(`[UPLOAD_FAIL] actor=${actorId} reason=validation_crash error=${validationErr.message}`, 'ERROR');
             safeUnlink(tempPath);
-            // W3: Distinguish unreadable/corrupt file (415) from real server errors (500)
             res.status(415).json({ error: 'El archivo no pudo ser leído. Puede estar corrupto o truncado.' });
         }
     });
 });
 
 // W1: ORPHAN PURGE ROUTE
-// Protected by app.use('/api/upload', requireAuth) already registered above.
+// Protected by app.use('/api/upload', requireAdminRole) already registered above.
 // Frontend calls this best-effort when a metadata save fails after files were uploaded.
 app.post('/api/upload/purge', (req, res) => {
+    const actorId = req.headers['x-user-id'] ?? 'unknown';
     const { url } = req.body;
     if (!url || typeof url !== 'string' || !url.startsWith('/uploads/')) {
         return res.status(400).json({ error: 'Invalid url — must start with /uploads/' });
@@ -854,30 +1347,235 @@ app.post('/api/upload/purge', (req, res) => {
     const resolved = path.resolve(UPLOAD_DIR, rawName);
     const rel = path.relative(path.resolve(UPLOAD_DIR), resolved);
     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
-        log(`Path traversal rejected in purge: ${url}`, 'SECURITY');
+        log(`[PURGE_FAIL] actor=${actorId} reason=path_traversal url=${url}`, 'SECURITY');
         return res.status(400).json({ error: 'Path traversal rejected' });
     }
+    log(`[PURGE_START] actor=${actorId} url=${url}`, 'INFO');
     safeUnlink(resolved);
-    log(`Orphan purged: ${resolved}`, 'CLEANUP');
+    // Remove from hash index so the URL is not returned as a dedup hit for future uploads
+    for (const [hash, indexedUrl] of uploadHashIndex) {
+        if (indexedUrl === url) { uploadHashIndex.delete(hash); break; }
+    }
+    // Remove parent dir if it's now empty (leaves no ghost folders from parentId uploads)
+    try {
+        const parentDir = path.dirname(resolved);
+        const parentRel = path.relative(path.resolve(UPLOAD_DIR), parentDir);
+        const isSubdir = parentRel && !parentRel.startsWith('..') && !path.isAbsolute(parentRel) && parentRel !== '.';
+        if (isSubdir && fs.existsSync(parentDir) && fs.readdirSync(parentDir).length === 0) {
+            fs.rmdirSync(parentDir);
+            log(`[PURGE_SUCCESS] actor=${actorId} url=${url} empty_dir_removed=${parentDir}`, 'CLEANUP');
+        } else {
+            log(`[PURGE_SUCCESS] actor=${actorId} url=${url}`, 'CLEANUP');
+        }
+    } catch (e) {
+        log(`[PURGE_SUCCESS] actor=${actorId} url=${url} dir_cleanup_warn=${e.message}`, 'CLEANUP');
+    }
     res.json({ success: true });
 });
+
+/**
+ * syncNewContentToOrgAccessRules
+ *
+ * Propaga un nuevo contentId a los titleIds de todas las reglas de acceso de
+ * scope 'organization' que estén vigentes en access_db.json.
+ *
+ * Política:
+ *   - Solo scope 'organization': representa catálogo institucional.
+ *   - No toca scope 'group' ni 'user': son asignaciones específicas del mediador/admin.
+ *   - No crea reglas nuevas. Solo actualiza las existentes.
+ *   - Salta reglas expiradas (expiresAt < Date.now()).
+ *   - Deduplica titleIds antes de escribir.
+ *   - Si no existen reglas org activas, emite warning y retorna sin cambios.
+ *
+ * @param {string} contentId - ID del contenido recién creado
+ */
+function syncNewContentToOrgAccessRules(contentId) {
+    const now = Date.now();
+
+    let rules;
+    try {
+        rules = readJSON(ACCESS_DB);
+    } catch (e) {
+        log(`[ACCESS_SYNC] ERROR leyendo access_db.json para sync de ${contentId}: ${e.message}`, 'ERROR');
+        return;
+    }
+
+    if (!Array.isArray(rules) || rules.length === 0) {
+        log(`[ACCESS_SYNC] WARN: access_db.json está vacío. El contenido ${contentId} no fue asignado a ninguna regla de acceso. Revisión administrativa requerida.`, 'WARN');
+        return;
+    }
+
+    const activeOrgRules = rules.filter(r =>
+        r.scope === 'organization' &&
+        !(typeof r.expiresAt === 'number' && Number.isFinite(r.expiresAt) && now > r.expiresAt)
+    );
+
+    if (activeOrgRules.length === 0) {
+        log(`[ACCESS_SYNC] WARN: No existen reglas activas de scope 'organization' en access_db.json. El contenido ${contentId} no fue asignado automáticamente. Revisión administrativa requerida.`, 'WARN');
+        return;
+    }
+
+    let syncedCount = 0;
+    const updatedRules = rules.map(rule => {
+        if (rule.scope !== 'organization') return rule;
+        if (typeof rule.expiresAt === 'number' && Number.isFinite(rule.expiresAt) && now > rule.expiresAt) return rule;
+
+        const current = Array.isArray(rule.titleIds) ? rule.titleIds : [];
+        if (current.includes(contentId)) return rule; // Ya presente, sin cambio
+
+        syncedCount++;
+        return { ...rule, titleIds: [...current, contentId] };
+    });
+
+    if (syncedCount === 0) return; // Nada cambió
+
+    try {
+        writeJSON(ACCESS_DB, updatedRules);
+        log(`[ACCESS_SYNC] Contenido ${contentId} agregado a ${syncedCount} regla(s) de organización en access_db.json.`, 'INFO');
+    } catch (e) {
+        log(`[ACCESS_SYNC] ERROR escribiendo access_db.json tras sync de ${contentId}: ${e.message}. El contenido quedó guardado pero puede no ser visible para lectores con reglas E7 activas.`, 'ERROR');
+    }
+}
+
+// ── Album data validation ─────────────────────────────────────────────────────
+
+/**
+ * validateAlbumData(albumData)
+ *
+ * Validates the album_data array before it is persisted to content.json.
+ * Returns null when the data is valid; returns an error string when invalid.
+ *
+ * Rules:
+ *   - Must be an array (may be empty — editor allows metadata-only updates)
+ *   - Each page must have a non-empty string imageUrl
+ *   - Each page's regions must be an array
+ *   - Each region's coordinates (x, y, width, height) must be numbers in [0, 100]
+ *   - type='audio'  → audioUrl required
+ *   - type='nav'    → navTargetPageId required
+ *
+ * Does NOT reject unknown fields (forward compat with future 2.0-B extensions).
+ */
+function validateAlbumData(albumData) {
+    if (!Array.isArray(albumData)) {
+        return 'album_data debe ser un array';
+    }
+
+    for (let pi = 0; pi < albumData.length; pi++) {
+        const page = albumData[pi];
+        const pageLabel = `Página ${pi + 1}`;
+
+        if (!page || typeof page !== 'object') {
+            return `${pageLabel}: entrada inválida (no es un objeto)`;
+        }
+        if (!page.imageUrl || typeof page.imageUrl !== 'string') {
+            return `${pageLabel}: falta imageUrl`;
+        }
+        if (!Array.isArray(page.regions)) {
+            return `${pageLabel}: regions debe ser un array`;
+        }
+
+        for (let ri = 0; ri < page.regions.length; ri++) {
+            const region = page.regions[ri];
+            const regionLabel = `${pageLabel} zona ${ri + 1}`;
+
+            if (!region || typeof region !== 'object') {
+                return `${regionLabel}: entrada inválida`;
+            }
+
+            // Coordinate bounds — all four are required and must be 0–100
+            for (const coord of ['x', 'y', 'width', 'height']) {
+                const val = region[coord];
+                if (typeof val !== 'number' || val < 0 || val > 100) {
+                    return `${regionLabel}: '${coord}' debe ser un número entre 0 y 100 (recibido: ${val})`;
+                }
+            }
+
+            // Dimensions must be positive (not just non-negative)
+            if (region.width <= 0 || region.height <= 0) {
+                return `${regionLabel}: width y height deben ser mayores a cero`;
+            }
+
+            // Region text is required only when the experience mode / action does NOT
+            // exempt it. Mirrors the frontend V4 rule in SubirContenido.tsx exactly.
+            //
+            // Exempt cases (text intentionally absent or carried by a different field):
+            //   • type='contemplative'        — silent observation zone; text cleared by editor
+            //   • action.type='audio'         — payload is audioUrl, not narrative text
+            //   • action.type='jump'/'return' — payload is targetPageId; no TTS needed
+            //   • action.type='text'          — overlay text lives in action.text, not region.text
+            //   • action.type='leo'           — Leo seed in action.leoPrompt; text optional
+            //   • action.type='none'          — pure zoom, no interaction
+            // Legacy compat: type='audio' and type='nav' (pre-2.0-C) are also exempt
+            // because their payloads live in region.audioUrl / region.navTargetPageId.
+            const ACTION_EXEMPTS_TEXT = ['audio', 'jump', 'text', 'leo', 'none', 'return'];
+            const actionExemptsText =
+                ACTION_EXEMPTS_TEXT.includes(region.action?.type) ||
+                region.type === 'audio' ||   // legacy 2.0-B
+                region.type === 'nav';       // legacy 2.0-B
+            const needsText = region.type !== 'contemplative' && !actionExemptsText;
+            if (needsText && (typeof region.text !== 'string' || !region.text.trim())) {
+                return `${regionLabel}: falta o está vacío el campo 'text'`;
+            }
+
+            // type-conditional requirements (legacy 2.0-B fields — still validated for
+            // content saved before the 2.0-C unified action model)
+            if (region.type === 'challenge' && (!region.interactiveHint || !region.interactiveHint.trim())) {
+                return `${regionLabel}: type='challenge' requiere 'interactiveHint' con texto (es el texto del desafío visible al estudiante)`;
+            }
+            if (region.type === 'audio' && !region.audioUrl) {
+                return `${regionLabel}: type='audio' requiere audioUrl`;
+            }
+            if (region.type === 'nav' && !region.navTargetPageId) {
+                return `${regionLabel}: type='nav' requiere navTargetPageId`;
+            }
+        }
+    }
+
+    return null; // valid
+}
 
 // SAVE CONTENT METADATA
 app.post('/api/content', (req, res) => {
     try {
         const newContent = req.body;
-        
+
         // 1. Validar metadata base para evitar registros basura
         if (!newContent.id || !newContent.titulo) {
              return res.status(400).json({ error: 'Faltan campos obligatorios de Metadata (id, titulo)' });
         }
 
-        log(`Saving content metadata: ${newContent.id}`, 'INFO');
+        // 2. Validar album_data si está presente
+        if (newContent.tipo === 'libro_album' && Array.isArray(newContent.album_data) && newContent.album_data.length > 0) {
+            const albumError = validateAlbumData(newContent.album_data);
+            if (albumError) {
+                return res.status(400).json({ error: `album_data inválido: ${albumError}` });
+            }
+        }
+
+        const saveActorId = req.headers['x-user-id'] ?? 'unknown';
+
+        // Idempotency guard: si llegan dos requests idénticos en ráfaga (retry de red),
+        // el segundo sobreescribe al primero con los mismos datos — benigno en create/update.
+        // El verdadero riesgo es títulos/IDs duplicados por race condition. Guard mínimo:
+        // rechazar si el body no tiene ID válido (ya cubierto arriba) o si el ID existe
+        // y el request parece un create accidental (título exactamente igual + mismo actor + <2s).
+        // Implementamos un lock simple en memoria para la ventana de 2s.
+        const lockKey = `${saveActorId}:${newContent.id}`;
+        if (saveContentLocks.has(lockKey)) {
+            log(`[CONTENT_SAVE_SKIP] contentId=${newContent.id} actor=${saveActorId} reason=idempotency_lock`, 'WARN');
+            // Devolvemos 200 con el contenido actual — el cliente no nota la diferencia
+            const currentList = readJSON(DB_FILE);
+            const existing = currentList.find(c => c.id === newContent.id);
+            return res.json({ success: true, content: existing || newContent, deduplicated: true });
+        }
+        saveContentLocks.set(lockKey, true);
+        setTimeout(() => saveContentLocks.delete(lockKey), 2000);
 
         const contentList = readJSON(DB_FILE);
 
         // Check for text changes to trigger TTS
         const index = contentList.findIndex((c) => c.id === newContent.id);
+        log(`[CONTENT_SAVE_START] contentId=${newContent.id} actor=${saveActorId} isUpdate=${index >= 0}`, 'INFO');
         let shouldGenerateTTS = false;
 
         const oldContent = index >= 0 ? contentList[index] : null;
@@ -947,6 +1645,12 @@ app.post('/api/content', (req, res) => {
             throw new Error('Fallo al escribir en la base JSON de Content');
         }
 
+        // 3. Sync de acceso: propagar nuevo contenido a reglas org activas
+        if (index === -1) {
+            syncNewContentToOrgAccessRules(newContent.id);
+        }
+
+        log(`[CONTENT_SAVE_SUCCESS] contentId=${newContent.id} actor=${saveActorId}`, 'SUCCESS');
         res.json({ success: true, content: newContent });
 
         // --- ASYNC TTS TRIGGER ---
@@ -1009,9 +1713,44 @@ app.post('/api/content', (req, res) => {
     }
 });
 
+// --- AUDIT HELPERS ---
+
+/**
+ * writeAuditLog — Registra un evento de mutación de usuario en user_audit_log.json.
+ * Nunca lanza: un fallo de auditoría jamás debe bloquear la operación principal.
+ *
+ * Campos estándar:
+ *   action       — string: create_user | update_user | delete_user |
+ *                          reset_password_request | reset_password_confirm | role_change
+ *   targetUserId — string: ID del usuario afectado
+ *   actor        — string | null: ID del admin que ejecuta la acción (null si es auto-servicio)
+ *   details      — object: contexto mínimo relevante por evento
+ */
+const writeAuditLog = (entry) => {
+    try {
+        const existing = readJSON(USER_AUDIT_DB);
+        const entries = Array.isArray(existing) ? existing : [];
+        entries.push({ ...entry, timestamp: new Date().toISOString() });
+        writeJSON(USER_AUDIT_DB, entries);
+    } catch (e) {
+        log(`[AUDIT] Error escribiendo entrada de auditoría: ${e.message}`, 'WARN');
+    }
+};
+
 // --- USER HELPERS ---
+
+/**
+ * isUserActive — Auth Pro
+ * Retorna true si el usuario puede autenticarse.
+ * Usuarios sin accountStatus (legacy) se tratan como 'active'.
+ */
+const isUserActive = (user) => {
+    const status = user?.accountStatus;
+    return !status || status === 'active';
+};
+
 const sanitizeUserForClient = (user) => {
-    const { password, ...safeUser } = user;
+    const { password, inviteToken, inviteExpiresAt, resetToken, resetExpiresAt, ...safeUser } = user;
     return safeUser;
 };
 
@@ -1027,32 +1766,43 @@ const normalizeRoles = (roles) => {
     if (!roles || !Array.isArray(roles) || roles.length === 0) {
         return ['lector'];
     }
-    const mappedRoles = roles.map(r => r === 'admin' ? 'administrador' : r);
-    const validRoles = ['administrador', 'profesor', 'mediador', 'lector'];
+    // DT-05: 'profesor' eliminado del modelo. Safety net: mapear → 'mediador' si llega de datos legacy.
+    const mappedRoles = roles.map(r => r === 'admin' ? 'administrador' : r === 'profesor' ? 'mediador' : r);
+    const validRoles = ['administrador', 'mediador', 'lector'];
     const filteredRoles = mappedRoles.filter(r => validRoles.includes(r));
     return filteredRoles.length > 0 ? filteredRoles : ['lector'];
 };
 
-const hashPasswordIfNeeded = (password) => {
+const hashPasswordIfNeeded = async (password) => {
     if (!password) return undefined;
     if (password.startsWith('$2')) return password; // Already hashed by bcrypt
-    const salt = bcrypt.genSaltSync(10);
-    return bcrypt.hashSync(password, salt);
+    return await bcrypt.hash(password, 10);
 };
 
 // --- PROGRESS SYNC HELPERS (Fase 3.2) ---
 const makeProgressKey = (userId, contentId) => `${userId}__${contentId}`;
 
 const normalizeCanonicalProgress = (payload) => {
-    return {
+    const base = {
         sentenceIndex: Math.max(0, parseInt(payload?.sentenceIndex || 0, 10)),
         totalSentences: Math.max(0, parseInt(payload?.totalSentences || 0, 10)),
         globalPercentage: Math.max(0, Math.min(100, parseFloat(payload?.globalPercentage || 0.0))),
         contentAnchor: payload?.contentAnchor ? String(payload.contentAnchor).substring(0, 100) : null,
         contentFingerprint: payload?.contentFingerprint ? String(payload.contentFingerprint).substring(0, 50) : null,
-        lastInteractedMode: ['pdf', 'text', 'accessible', 'immersive'].includes(payload?.lastInteractedMode) 
+        lastInteractedMode: ['pdf', 'text', 'accessible', 'immersive'].includes(payload?.lastInteractedMode)
             ? payload.lastInteractedMode : 'text'
     };
+    // Fase E: pass through precision anchor if structurally valid.
+    const a = payload?.anchor;
+    if (a && ['text', 'sentence', 'page'].includes(a.type) && typeof a.value === 'number' && isFinite(a.value)) {
+        base.anchor = { type: a.type, value: a.value };
+    }
+    // Fase F: pass through viewportHint (float 0–100) if valid.
+    if (typeof payload?.viewportHint === 'number' && isFinite(payload.viewportHint) &&
+        payload.viewportHint >= 0 && payload.viewportHint <= 100) {
+        base.viewportHint = payload.viewportHint;
+    }
+    return base;
 };
 
 const shouldAcceptIncomingProgress = (incomingDateStr, existingDateStr) => {
@@ -1065,12 +1815,20 @@ const shouldAcceptIncomingProgress = (incomingDateStr, existingDateStr) => {
 const mergeHistoryWithLimit = (existingHistory, newSession) => {
     let history = Array.isArray(existingHistory) ? [...existingHistory] : [];
     if (newSession && newSession.sessionId) {
-        history.push({
-            sessionId: String(newSession.sessionId),
+        const sid = String(newSession.sessionId);
+        const existingIdx = history.findIndex(h => h.sessionId === sid);
+        const entry = {
+            sessionId: sid,
             startedAt: newSession.startedAt || new Date().toISOString(),
             mode: newSession.mode || 'text',
             durationSec: Math.max(0, parseInt(newSession.durationSec || 0, 10))
-        });
+        };
+        if (existingIdx >= 0) {
+            // Update in-place — heartbeat keeps updating durationSec for the same session
+            history[existingIdx] = entry;
+        } else {
+            history.push(entry);
+        }
     }
     // FIFO limit exact 20
     if (history.length > 20) {
@@ -1085,61 +1843,154 @@ const ensureProgressDbShape = (db) => {
     return db;
 };
 
+// ---------------------------------------------------------------------------
+// READING PROGRESS — canonical computed model
+// ---------------------------------------------------------------------------
+
+const ABANDONED_THRESHOLD_DAYS = 30;
+
+/**
+ * Derive a canonical ReadingProgress record from a raw progress_db entry.
+ * No fields are written back to the DB — this is a pure computation.
+ *
+ * Status rules:
+ *   completed  — pct >= 90 OR isCompleted flag (legacy safety net)
+ *   abandoned  — no activity for ABANDONED_THRESHOLD_DAYS AND pct < 50
+ *   in_progress — has history and pct between 1 and 89
+ *   not_started — no record (caller must handle) or no history and pct === 0
+ */
+function computeReadingProgress(raw) {
+    const pct     = raw.canonicalProgress?.globalPercentage ?? 0;
+    const history = Array.isArray(raw.history) ? raw.history : [];
+
+    const totalReadingTimeMs = history.reduce((sum, h) => sum + Math.max(0, (h.durationSec ?? 0)) * 1000, 0);
+    const totalSessions      = history.length;
+
+    const firstReadAt = history.length > 0
+        ? history.reduce((min, h) => (h.startedAt && h.startedAt < min ? h.startedAt : min), history[0].startedAt ?? raw.updatedAt)
+        : (raw.updatedAt ?? null);
+
+    const lastReadAt  = raw.updatedAt ?? null;
+    const lastPosition = raw.canonicalProgress?.sentenceIndex ?? null;
+
+    let status;
+    if (pct >= 90 || raw.isCompleted === true) {
+        status = 'completed';
+    } else if (pct <= 0 && totalSessions === 0) {
+        status = 'not_started';
+    } else {
+        const daysSince = lastReadAt
+            ? (Date.now() - new Date(lastReadAt).getTime()) / (1000 * 60 * 60 * 24)
+            : Infinity;
+        status = (daysSince > ABANDONED_THRESHOLD_DAYS && pct < 50) ? 'abandoned' : 'in_progress';
+    }
+
+    return {
+        userId:             raw.userId,
+        contentId:          raw.contentId,
+        progressPercentage: Math.round(pct),
+        totalReadingTimeMs,
+        totalSessions,
+        firstReadAt,
+        lastReadAt,
+        lastPosition,
+        status,
+    };
+}
+
+/** Returns a not_started shell for a userId/contentId pair with no progress record. */
+function notStartedProgress(userId, contentId) {
+    return {
+        userId, contentId,
+        progressPercentage: 0,
+        totalReadingTimeMs: 0,
+        totalSessions: 0,
+        firstReadAt: null,
+        lastReadAt: null,
+        lastPosition: null,
+        status: 'not_started',
+    };
+}
+
 const ensureLeoMemoryDbShape = (db) => {
+    // Guard the DB container shape
     if (!db || typeof db !== 'object' || Array.isArray(db)) return { memoryMap: {} };
-    if (!db.memoryMap) db.memoryMap = {};
+    if (!db.memoryMap || typeof db.memoryMap !== 'object') db.memoryMap = {};
+
+    // Normalize existing records for type safety and array caps.
+    // New optional fields are NOT injected into old records — they remain
+    // absent until the frontend writes them for the first time.
+    for (const key of Object.keys(db.memoryMap)) {
+        const r = db.memoryMap[key];
+        if (!r || typeof r !== 'object' || Array.isArray(r)) {
+            db.memoryMap[key] = {};
+            continue;
+        }
+
+        // lastSentenceIndex — coerce if recoverable, remove if corrupt
+        if ('lastSentenceIndex' in r && typeof r.lastSentenceIndex !== 'number') {
+            const n = Math.floor(Number(r.lastSentenceIndex));
+            if (Number.isFinite(n) && n >= 0) r.lastSentenceIndex = n;
+            else delete r.lastSentenceIndex;
+        }
+
+        // lastReadAt — must be a string; remove corrupt values
+        if ('lastReadAt' in r && typeof r.lastReadAt !== 'string') {
+            delete r.lastReadAt;
+        }
+
+        // behavior — must be an object with numeric pauses/replays
+        if ('behavior' in r) {
+            if (!r.behavior || typeof r.behavior !== 'object' || Array.isArray(r.behavior)) {
+                r.behavior = { pauses: 0, replays: 0 };
+            } else {
+                if (typeof r.behavior.pauses  !== 'number') r.behavior.pauses  = 0;
+                if (typeof r.behavior.replays !== 'number') r.behavior.replays = 0;
+            }
+        }
+
+        // interactionHistory — must be array, keep last 10
+        if ('interactionHistory' in r) {
+            if (!Array.isArray(r.interactionHistory)) r.interactionHistory = [];
+            else if (r.interactionHistory.length > 10) r.interactionHistory = r.interactionHistory.slice(-10);
+        }
+
+        // vocabularyAsked — must be array, keep last 10
+        if ('vocabularyAsked' in r) {
+            if (!Array.isArray(r.vocabularyAsked)) r.vocabularyAsked = [];
+            else if (r.vocabularyAsked.length > 10) r.vocabularyAsked = r.vocabularyAsked.slice(-10);
+        }
+    }
+
     return db;
 };
 
-// --- SAFE LEGACY MIGRATION ---
-const migrateProgressDBIfNeeded = () => {
-    try {
-        const rawData = fs.readFileSync(PROGRESS_DB, 'utf8');
-        if (!rawData.trim()) return;
-        const parsed = JSON.parse(rawData);
-        
-        // Si la raíz es un array (Legacy)
-        if (Array.isArray(parsed)) {
-            log('Migrando Progress DB heredado (Array -> Map)...', 'WARN');
-            fs.copyFileSync(PROGRESS_DB, `${PROGRESS_DB}.bak.pre_v3`);
-            
-            const newDb = { progressMap: {} };
-            parsed.forEach(p => {
-                if (!p.userId || !p.contentId) return; // Skip basura
-                const key = makeProgressKey(p.userId, p.contentId);
-                newDb.progressMap[key] = {
-                    id: key,
-                    userId: p.userId,
-                    contentId: p.contentId,
-                    isCompleted: p.status === 'completado' || p.isCompleted || false,
-                    canonicalProgress: normalizeCanonicalProgress({
-                        globalPercentage: typeof p.progress === 'number' ? p.progress : 0,
-                        lastInteractedMode: 'text' // Fallback ciego
-                    }),
-                    updatedAt: p.updatedAt || new Date().toISOString(),
-                    history: []
-                };
-            });
-            writeJSON(PROGRESS_DB, newDb);
-            log('Migración completa.', 'SUCCESS');
-        }
-    } catch (e) {
-         log(`Error evaluando migración ProgressDB: ${e.message}`, 'ERROR');
-    }
-};
-
-// Ejecutar migración síncrona en el arranque
-if (fs.existsSync(PROGRESS_DB)) migrateProgressDBIfNeeded();
+// Legacy JSON migration skipped — progress now uses SQLite (progressService.js).
+// progress_db.json remains as read-only backup after migration script ran.
 
 // --- PROGRESS SYNC ROUTES (Fase 3.2) ---
 // * Auth temporal: Se omite requireAuth en desarrollo frontend, pero debe blindarse en producción Fase 4
 
 // 1. GET ALL PROGRESS POR USUARIO (Útil para Admin/Dashboard)
+// Auth: owner (mismo userId) OR admin secret OR rol administrador/mediador
 app.get('/api/progress/user/:userId', (req, res) => {
     try {
         const { userId } = req.params;
-        const db = ensureProgressDbShape(readJSON(PROGRESS_DB));
-        const userProgressList = Object.values(db.progressMap).filter(p => p.userId === userId);
+        const users = readJSON(USERS_DB);
+
+        const requester = resolveRequester(req, users);
+        const isOwner = requester && requester.id === userId;
+        const isAdmin = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isMediator = requester && isMediatorRole(requester);
+        if (!isOwner && !isAdmin && !isMediator) {
+            log(`GET progress/user denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+
+        if (!users.find(u => u.id === userId)) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+        const userProgressList = getProgressByUser(userId);
         res.json({ success: true, progressList: userProgressList });
     } catch (e) {
         log(`GET User Progress Error: ${e.message}`, 'ERROR');
@@ -1148,13 +1999,23 @@ app.get('/api/progress/user/:userId', (req, res) => {
 });
 
 // 2. GET SINGLE PROGRESS (Resolviendo colisión de rutas previa)
+// Auth: owner OR admin secret OR rol administrador/mediador
 app.get('/api/progress/item/:userId/:contentId', (req, res) => {
     try {
         const { userId, contentId } = req.params;
-        const key = makeProgressKey(userId, contentId);
-        const db = ensureProgressDbShape(readJSON(PROGRESS_DB));
-        const progress = db.progressMap[key];
-        
+        const users = readJSON(USERS_DB);
+
+        const requester = resolveRequester(req, users);
+        const isOwner = requester && requester.id === userId;
+        const isAdmin = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isMediator = requester && isMediatorRole(requester);
+        if (!isOwner && !isAdmin && !isMediator) {
+            log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+
+        const progress = getProgressItem(userId, contentId);
+
         if (!progress) return res.json({ success: true, progress: null });
         res.json({ success: true, progress });
     } catch (e) {
@@ -1164,7 +2025,7 @@ app.get('/api/progress/item/:userId/:contentId', (req, res) => {
 });
 
 // 3. POST SYNC HEARTBEAT
-app.post('/api/progress/:userId/:contentId/sync', (req, res) => {
+app.post('/api/progress/:userId/:contentId/sync', requireProgressOwner, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const payload = req.body;
@@ -1174,8 +2035,7 @@ app.post('/api/progress/:userId/:contentId/sync', (req, res) => {
              return res.status(400).json({ error: 'Falta objeto canonicalProgress' });
         }
 
-        const db = ensureProgressDbShape(readJSON(PROGRESS_DB));
-        const existing = db.progressMap[key];
+        const existing = getProgressItem(userId, contentId);
         const incomingDate = payload.updatedAt || new Date().toISOString();
 
         if (existing && !shouldAcceptIncomingProgress(incomingDate, existing.updatedAt)) {
@@ -1193,8 +2053,7 @@ app.post('/api/progress/:userId/:contentId/sync', (req, res) => {
             history: mergeHistoryWithLimit(existing?.history || [], payload.session)
         };
 
-        db.progressMap[key] = newProgress;
-        writeJSON(PROGRESS_DB, db);
+        upsertProgress(newProgress);
 
         res.json({ success: true, progress: newProgress });
     } catch (e) {
@@ -1204,21 +2063,21 @@ app.post('/api/progress/:userId/:contentId/sync', (req, res) => {
 });
 
 // 4. POST COMPLETE CONTENT
-app.post('/api/progress/:userId/:contentId/complete', (req, res) => {
+app.post('/api/progress/:userId/:contentId/complete', requireProgressOwner, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
+
         const payload = req.body;
         const key = makeProgressKey(userId, contentId);
-        
-        const db = ensureProgressDbShape(readJSON(PROGRESS_DB));
-        const existing = db.progressMap[key] || {
+
+        const existing = getProgressItem(userId, contentId) || {
             id: key, userId, contentId, history: [],
             canonicalProgress: normalizeCanonicalProgress({})
         };
 
         existing.isCompleted = true;
         existing.canonicalProgress.globalPercentage = 100.0;
-        
+
         // Conservar/Sobrescribir sentenceIndex si viene nuevo
         if (payload.canonicalProgress?.sentenceIndex !== undefined) {
              existing.canonicalProgress.sentenceIndex = normalizeCanonicalProgress(payload.canonicalProgress).sentenceIndex;
@@ -1227,8 +2086,7 @@ app.post('/api/progress/:userId/:contentId/complete', (req, res) => {
         existing.updatedAt = payload.updatedAt || new Date().toISOString();
         existing.history = mergeHistoryWithLimit(existing.history, payload.session);
 
-        db.progressMap[key] = existing;
-        writeJSON(PROGRESS_DB, db);
+        upsertProgress(existing);
 
         log(`Contenido completado: ${key}`, 'SUCCESS');
         res.json({ success: true, progress: existing });
@@ -1283,15 +2141,20 @@ const normalizeUser = (user) => {
         if (match) normalized.organizationId = match.id;
     }
 
-    // SUBFASE 3.2: Normalizar mediatorKind para usuarios con rol profesor/mediador
-    // Si tienen rol de mediador/profesor pero sin mediatorKind válido, se asigna 'teacher' por defecto.
+    // SUBFASE 3.2: Normalizar mediatorKind para usuarios con rol mediador.
+    // Si tienen rol mediador pero sin mediatorKind válido, se asigna 'teacher' por defecto.
     // No sobreescribe valores válidos ya almacenados.
+    // DT-05: 'profesor' eliminado del modelo — solo 'mediador' es rol canónico.
     const VALID_MEDIATOR_KINDS = ['teacher', 'librarian', 'coordinator', 'parent'];
-    const isMediatorRole = Array.isArray(normalized.roles) && (
-        normalized.roles.includes('profesor') || normalized.roles.includes('mediador')
-    );
+    const isMediatorRole = Array.isArray(normalized.roles) && normalized.roles.includes('mediador');
     if (isMediatorRole && !VALID_MEDIATOR_KINDS.includes(normalized.mediatorKind)) {
         normalized.mediatorKind = 'teacher';
+    }
+
+    // Auth Pro: default 'active' para usuarios legacy sin accountStatus.
+    // Garantía de migración lazy — no requiere script ni write previo.
+    if (!normalized.accountStatus) {
+        normalized.accountStatus = 'active';
     }
 
     return normalized;
@@ -1312,10 +2175,10 @@ app.get('/api/users', requireAuth, (req, res) => {
 });
 
 // LOGIN
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { email, password } = req.body;
     const normalizedEmail = normalizeEmail(email);
-    
+
     const users = readJSON(USERS_DB);
     const userIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
 
@@ -1324,29 +2187,340 @@ app.post('/api/auth/login', (req, res) => {
         let isValid = false;
 
         if (user.password && user.password.startsWith('$2')) {
-            isValid = bcrypt.compareSync(password, user.password);
+            isValid = await bcrypt.compare(password, user.password);
         } else {
             // Legacy plain text comparison
             if (user.password === password) {
                 isValid = true;
                 // Auto-upgrade security: Hash it and save immediately
-                user.password = hashPasswordIfNeeded(password);
+                user.password = await hashPasswordIfNeeded(password);
                 users[userIndex] = user;
-                writeJSON(USERS_DB, users);
+                writeJSONAsync(USERS_DB, users).catch(e => log(`Auto-upgrade write error: ${e.message}`, 'ERROR'));
                 log(`Auto-upgraded password hash for legacy user: ${normalizedEmail}`, 'ACCESS');
             }
         }
 
         if (isValid) {
+            // Auth Pro: bloquear cuentas no activas DESPUÉS de validar credenciales.
+            // SIEMPRE responder con el mismo mensaje genérico para no revelar:
+            //   (a) que el email existe, (b) que la contraseña era correcta.
+            // El detalle real queda solo en logs internos.
+            if (!isUserActive(user)) {
+                log(`Login bloqueado para ${normalizedEmail}: accountStatus=${user.accountStatus}`, 'ACCESS');
+                return res.status(401).json({ error: 'Credenciales inválidas' });
+            }
+            log(`Login exitoso: ${normalizedEmail} ip=${req.ip}`, 'ACCESS');
             return res.json({ success: true, user: sanitizeUserForClient(user) });
         }
     }
-    
+
+    const safeEmail = normalizedEmail || 'unknown';
+    log(`Login fallido: ${safeEmail} ip=${req.ip}`, 'ACCESS');
     res.status(401).json({ error: 'Credenciales inválidas' });
 });
 
+// ---------------------------------------------------------------------------
+// AUTH PRO — INVITACIONES
+// ---------------------------------------------------------------------------
+
+// INVITE USER
+// POST /api/invite-user
+// Solo admin. Crea usuario en estado 'invited' con token de 48h.
+// No requiere contraseña inicial — el usuario la elige al aceptar.
+app.post('/api/invite-user', requireAuth, (req, res) => {
+    const { email, nombre_completo, roles, colegio, groupIds, mediatorKind } = req.body;
+
+    if (!email || !nombre_completo) {
+        return res.status(400).json({ error: 'email y nombre_completo son obligatorios' });
+    }
+
+    const normalizedEmail = normalizeEmail(email);
+    const users = readJSON(USERS_DB);
+
+    const existingIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+
+    // Re-invitación: si el email ya existe pero la cuenta está en 'invited',
+    // regenerar token en lugar de lanzar error. Cubre el caso de token expirado.
+    if (existingIndex !== -1) {
+        const existing = users[existingIndex];
+        if (existing.accountStatus !== 'invited') {
+            // Cuenta activa o deshabilitada → no se puede reinvitar
+            return res.status(409).json({ error: 'El email ya está registrado con una cuenta activa' });
+        }
+        // Reinvitar: regenerar token y expiración, preservar el resto del perfil
+        const inviteToken     = crypto.randomBytes(32).toString('hex');
+        const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;
+        users[existingIndex]  = { ...existing, inviteToken, inviteExpiresAt };
+        writeJSON(USERS_DB, users);
+        log(`Invite regenerated: ${existing.email} (${existing.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+        return res.status(200).json({
+            success:       true,
+            userId:        existing.id,
+            email:         existing.email,
+            inviteToken,
+            inviteExpiresAt,
+            activationUrl: `/#/activar?token=${inviteToken}`,
+            regenerated:   true,
+        });
+    }
+
+    const inviteToken   = crypto.randomBytes(32).toString('hex');  // 64 hex chars
+    const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;     // +48 horas
+
+    const newUser = normalizeUser({
+        id:               `user-${Date.now()}`,
+        email:            normalizedEmail,
+        nombre_completo,
+        nombre_usuario:   normalizedEmail.split('@')[0],
+        roles:            normalizeRoles(roles),
+        mediatorKind:     mediatorKind || undefined,
+        colegio:          colegio || '',
+        groupIds:         Array.isArray(groupIds) ? groupIds : [],
+        avatar_url:       '',
+        bio_corta:        '',
+        libros_leidos:    0,
+        seguidores:       0,
+        seguidos:         0,
+        nivel_lectura:    'Novato',
+        accountStatus:    'invited',
+        inviteToken,
+        inviteExpiresAt,
+        // Sin password intencionalmente — se fija en /api/accept-invite
+    });
+
+    users.push(newUser);
+    writeJSON(USERS_DB, users);
+    log(`Invite created: ${newUser.email} (${newUser.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+
+    res.status(201).json({
+        success:       true,
+        userId:        newUser.id,
+        email:         newUser.email,
+        inviteToken,
+        inviteExpiresAt,
+        activationUrl: `/#/activar?token=${inviteToken}`,
+        regenerated:   false,
+    });
+});
+
+// ACCEPT INVITE
+// POST /api/accept-invite
+// Público (sin requireAuth). Valida token, fija contraseña, activa cuenta.
+app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+        return res.status(400).json({ error: 'token y password son obligatorios' });
+    }
+
+    if (password.length < 8) {
+        return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+    }
+
+    const users = readJSON(USERS_DB);
+    const index = users.findIndex(u => u.inviteToken === token);
+
+    if (index === -1) {
+        // Respuesta genérica: no revelar si el token existió o no
+        return res.status(404).json({ error: 'Token inválido o ya utilizado' });
+    }
+
+    const user = users[index];
+
+    if (user.accountStatus !== 'invited') {
+        return res.status(409).json({ error: 'Esta cuenta ya fue activada' });
+    }
+
+    if (!user.inviteExpiresAt || Date.now() > user.inviteExpiresAt) {
+        log(`Accept-invite rechazado — token expirado: ${user.email}`, 'ACCESS');
+        return res.status(410).json({
+            error:  'El enlace de invitación expiró. Solicita uno nuevo a tu administrador.',
+            code:   'TOKEN_EXPIRED',
+        });
+    }
+
+    // Activar cuenta: setear password, cambiar status, eliminar token
+    const { inviteToken: _tok, inviteExpiresAt: _exp, ...rest } = user;
+    const activated = {
+        ...rest,
+        password:      await hashPasswordIfNeeded(password),
+        accountStatus: 'active',
+    };
+
+    users[index] = activated;
+    writeJSON(USERS_DB, users);
+    log(`Account activated: ${activated.email} (${activated.id})`, 'ACCESS');
+
+    return res.status(200).json({
+        success: true,
+        user:    sanitizeUserForClient(activated),
+    });
+});
+
+// RESEND INVITE
+// POST /api/resend-invite
+// Admin regenera token para usuario en estado 'invited'.
+// Acepta { email } o { userId } — al menos uno requerido.
+app.post('/api/resend-invite', requireAuth, (req, res) => {
+    const { email, userId } = req.body;
+
+    if (!email && !userId) {
+        return res.status(400).json({ error: 'Se requiere email o userId' });
+    }
+
+    const users = readJSON(USERS_DB);
+    const index = email
+        ? users.findIndex(u => normalizeEmail(u.email) === normalizeEmail(email))
+        : users.findIndex(u => u.id === userId);
+
+    if (index === -1) {
+        return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    const user = users[index];
+
+    if (user.accountStatus !== 'invited') {
+        return res.status(409).json({
+            error: `No se puede reenviar: la cuenta está en estado '${user.accountStatus}'`,
+        });
+    }
+
+    const inviteToken     = crypto.randomBytes(32).toString('hex');
+    const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;
+    users[index]          = { ...user, inviteToken, inviteExpiresAt };
+
+    writeJSON(USERS_DB, users);
+    log(`Invite resent: ${user.email} (${user.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+
+    return res.status(200).json({
+        success:       true,
+        userId:        user.id,
+        email:         user.email,
+        inviteToken,
+        inviteExpiresAt,
+        activationUrl: `/#/activar?token=${inviteToken}`,
+    });
+});
+
+// ---------------------------------------------------------------------------
+// AUTH PRO — RESET PASSWORD
+// ---------------------------------------------------------------------------
+
+// REQUEST PASSWORD RESET
+// POST /api/request-password-reset  (legacy path)
+// POST /api/auth/reset-request      (path canónico — usar en clientes nuevos como LU)
+// Público. Genera token temporal de 1h para usuarios activos.
+// Respuesta siempre 200 independientemente de si el email existe (anti-oracle).
+const handleResetRequest = (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).json({ error: 'email es obligatorio' });
+    }
+
+    const normalizedEmail = normalizeEmail(email);
+    const users = readJSON(USERS_DB);
+    const index = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+
+    // Solo generar token si la cuenta existe y está activa.
+    // Invited y disabled: no se genera token — respuesta genérica igual.
+    if (index !== -1 && isUserActive(users[index])) {
+        const resetToken     = crypto.randomBytes(32).toString('hex');
+        const resetExpiresAt = Date.now() + 3600000; // +1 hora
+        users[index]         = { ...users[index], resetToken, resetExpiresAt };
+        writeJSON(USERS_DB, users);
+        log(`Password reset requested: ${normalizedEmail} expires=${new Date(resetExpiresAt).toISOString()}`, 'ACCESS');
+        writeAuditLog({
+            action:       'reset_password_request',
+            targetUserId: users[index].id,
+            actor:        null, // auto-servicio
+            details:      { email: normalizedEmail, expiresAt: new Date(resetExpiresAt).toISOString() },
+        });
+
+        // En producción este token se enviaría por email, nunca en la respuesta.
+        // Para entorno actual sin servicio de email, se devuelve para pruebas.
+        return res.status(200).json({
+            success:  true,
+            message:  'Si el email está registrado, recibirás instrucciones.',
+            resetToken,
+            resetExpiresAt,
+            resetUrl: `/#/reset-password?token=${resetToken}`,
+        });
+    }
+
+    // Email no existe, invited o disabled — respuesta idéntica (anti-oracle).
+    return res.status(200).json({
+        success: true,
+        message: 'Si el email está registrado, recibirás instrucciones.',
+    });
+};
+app.post('/api/request-password-reset', resetRequestLimiter, handleResetRequest);
+app.post('/api/auth/reset-request',     resetRequestLimiter, handleResetRequest);
+
+// CONFIRM PASSWORD RESET
+// POST /api/confirm-password-reset  (legacy path)
+// POST /api/auth/reset-confirm      (path canónico — usar en clientes nuevos como LU)
+// Público. Valida token, fija nueva contraseña, invalida token.
+const handleResetConfirm = async (req, res) => {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+        return res.status(400).json({ error: 'token y password son obligatorios' });
+    }
+
+    if (password.length < 8) {
+        return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+    }
+
+    const users = readJSON(USERS_DB);
+    const index = users.findIndex(u => u.resetToken === token);
+
+    if (index === -1) {
+        return res.status(404).json({ error: 'Token inválido o ya utilizado' });
+    }
+
+    const user = users[index];
+
+    if (!isUserActive(user)) {
+        log(`Reset rechazado — cuenta no activa: ${user.email} status=${user.accountStatus}`, 'ACCESS');
+        return res.status(409).json({ error: 'No se puede restablecer esta cuenta' });
+    }
+
+    if (!user.resetExpiresAt || Date.now() > user.resetExpiresAt) {
+        log(`Reset rechazado — token expirado: ${user.email}`, 'ACCESS');
+        return res.status(410).json({
+            error: 'El enlace de restablecimiento expiró. Solicita uno nuevo.',
+            code:  'TOKEN_EXPIRED',
+        });
+    }
+
+    // Aplicar nueva contraseña y eliminar token de un solo paso (mismo patrón que accept-invite)
+    const { resetToken: _rt, resetExpiresAt: _re, ...rest } = user;
+    const updated = {
+        ...rest,
+        password: await hashPasswordIfNeeded(password),
+    };
+
+    users[index] = updated;
+    writeJSON(USERS_DB, users);
+    log(`Password reset completed: ${updated.email} (${updated.id})`, 'ACCESS');
+    writeAuditLog({
+        action:       'reset_password_confirm',
+        targetUserId: updated.id,
+        actor:        null, // auto-servicio via token
+        details:      { email: updated.email },
+    });
+
+    return res.status(200).json({
+        success: true,
+        user:    sanitizeUserForClient(updated),
+    });
+};
+app.post('/api/confirm-password-reset', resetConfirmLimiter, handleResetConfirm);
+app.post('/api/auth/reset-confirm',     resetConfirmLimiter, handleResetConfirm);
+
 // CREATE USER
-app.post('/api/users', requireAuth, (req, res) => {
+app.post('/api/users', requireAdminAccess, async (req, res) => {
     const newUser = req.body;
     if (!newUser.email || !newUser.nombre_completo || !newUser.password) {
         return res.status(400).json({ error: 'Faltan campos obligatorios' });
@@ -1367,22 +2541,35 @@ app.post('/api/users', requireAuth, (req, res) => {
         newUser.id = `user-${Date.now()}`;
     }
 
-    newUser.password = hashPasswordIfNeeded(newUser.password);
+    newUser.password = await hashPasswordIfNeeded(newUser.password);
     newUser.roles = normalizeRoles(newUser.roles);
     newUser.email = normalizedEmail;
 
-    // Normalizamos capacidades y groupIds antes de guardar
+    // Auth Pro: accountStatus explícito — nunca dejar null/vacío colarse como 'active'.
+    // Valores válidos: 'active' | 'invited' | 'disabled'.
+    // Si el admin no envía nada → 'active' (creación directa con password incluye activación implícita).
+    const VALID_ACCOUNT_STATUSES = ['active', 'invited', 'disabled'];
+    if (!VALID_ACCOUNT_STATUSES.includes(newUser.accountStatus)) {
+        newUser.accountStatus = 'active';
+    }
+
     const userToSave = normalizeUser(newUser);
 
     users.push(userToSave);
     writeJSON(USERS_DB, users);
     log(`User created: ${userToSave.email} (${userToSave.id})`, 'ACCESS');
-    
+    writeAuditLog({
+        action:       'create_user',
+        targetUserId: userToSave.id,
+        actor:        req.headers['x-user-id'] || null,
+        details:      { email: userToSave.email, roles: userToSave.roles, colegio: userToSave.colegio || null },
+    });
+
     res.json(sanitizeUserForClient(userToSave));
 });
 
 // UPDATE USER
-app.put('/api/users/:id', requireAuth, (req, res) => {
+app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     const users = readJSON(USERS_DB);
@@ -1407,20 +2594,41 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
         updates.email = newEmail;
     }
     
+    const oldRoles = [...(users[index].roles || [])];
     if (updates.roles) updates.roles = normalizeRoles(updates.roles);
-    if (updates.password) updates.password = hashPasswordIfNeeded(updates.password);
+    if (updates.password) updates.password = await hashPasswordIfNeeded(updates.password);
 
     // Merge y renormalizar
     const mergedUser = normalizeUser({ ...users[index], ...updates });
     users[index] = mergedUser;
     writeJSON(USERS_DB, users);
     log(`User updated: ${id}`, 'ACCESS');
-    
+
+    const actor = req.headers['x-user-id'] || null;
+    writeAuditLog({
+        action:       'update_user',
+        targetUserId: id,
+        actor,
+        details:      { fieldsUpdated: Object.keys(updates).filter(k => k !== 'password') },
+    });
+
+    // Evento adicional si los roles cambiaron
+    const newRoles = mergedUser.roles || [];
+    const rolesChanged = JSON.stringify([...oldRoles].sort()) !== JSON.stringify([...newRoles].sort());
+    if (rolesChanged) {
+        writeAuditLog({
+            action:       'role_change',
+            targetUserId: id,
+            actor,
+            details:      { oldRoles, newRoles },
+        });
+    }
+
     res.json(sanitizeUserForClient(mergedUser));
 });
 
 // DELETE USER
-app.delete('/api/users/:id', requireAuth, (req, res) => {
+app.delete('/api/users/:id', requireAdminAccess, (req, res) => {
     const { id } = req.params;
     const users = readJSON(USERS_DB);
     const index = users.findIndex(u => u.id === id);
@@ -1429,9 +2637,16 @@ app.delete('/api/users/:id', requireAuth, (req, res) => {
         return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
+    const deletedUser = users[index];
     users.splice(index, 1);
     writeJSON(USERS_DB, users);
     log(`User deleted: ${id}`, 'ACCESS');
+    writeAuditLog({
+        action:       'delete_user',
+        targetUserId: id,
+        actor:        req.headers['x-user-id'] || null,
+        details:      { email: deletedUser.email, roles: deletedUser.roles },
+    });
     res.json({ success: true });
 });
 
@@ -1445,7 +2660,7 @@ app.get('/api/schools', requireAuth, (req, res) => {
     }
 });
 
-app.post('/api/schools', requireAuth, (req, res) => {
+app.post('/api/schools', requireAdminAccess, (req, res) => {
     const newSchool = req.body;
     if (!newSchool.name) {
         return res.status(400).json({ error: 'Name is required' });
@@ -1566,7 +2781,7 @@ app.get('/api/groups', requireAuth, (req, res) => {
     }
 });
 
-app.post('/api/groups', requireAuth, (req, res) => {
+app.post('/api/groups', requireAdminAccess, (req, res) => {
     const payload = req.body;
     if (!payload.name) {
         return res.status(400).json({ error: 'El nombre del grupo es obligatorio' });
@@ -1595,6 +2810,13 @@ app.post('/api/groups', requireAuth, (req, res) => {
         accessStartsAt:       payload.accessStartsAt       || undefined,
         accessEndsAt:         payload.accessEndsAt         || undefined,
         accessRules:          payload.accessRules          || undefined,
+        // Clubes Externos
+        kind:                 payload.kind                 || undefined,
+        mediationMessage:     payload.mediationMessage     || undefined,
+        mediationQuestions:   Array.isArray(payload.mediationQuestions) ? payload.mediationQuestions : undefined,
+        readingNow:           payload.readingNow           || undefined,
+        weeklyFocus:          payload.weeklyFocus          || undefined,
+        nextMilestone:        payload.nextMilestone        || undefined,
     });
 
     groups.push(newGroup);
@@ -1603,7 +2825,7 @@ app.post('/api/groups', requireAuth, (req, res) => {
     res.json(newGroup);
 });
 
-app.put('/api/groups/:id', requireAuth, (req, res) => {
+app.put('/api/groups/:id', requireAdminAccess, (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     const groups = readJSON(GROUPS_DB);
@@ -1622,7 +2844,7 @@ app.put('/api/groups/:id', requireAuth, (req, res) => {
     res.json(merged);
 });
 
-app.delete('/api/groups/:id', requireAuth, (req, res) => {
+app.delete('/api/groups/:id', requireAdminAccess, (req, res) => {
     const { id } = req.params;
     const groups = readJSON(GROUPS_DB);
     const index = groups.findIndex(g => g.id === id);
@@ -1635,6 +2857,40 @@ app.delete('/api/groups/:id', requireAuth, (req, res) => {
     writeJSON(GROUPS_DB, groups);
     log(`Group deleted: ${id}`, 'ACCESS');
     res.json({ success: true });
+});
+
+// --- CLUBES EXTERNOS: JOIN ---
+app.post('/api/groups/:id/join', requireUserAuth, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    const groups = readJSON(GROUPS_DB);
+    const index = groups.findIndex(g => g.id === id);
+
+    if (index === -1) {
+        return res.status(404).json({ error: 'Grupo no encontrado' });
+    }
+
+    const group = groups[index];
+
+    if (group.type !== 'club' || group.kind !== 'open') {
+        return res.status(403).json({ error: 'Este grupo no admite uniones directas' });
+    }
+
+    const memberIds = Array.isArray(group.memberIds) ? group.memberIds : [];
+    if (memberIds.includes(userId)) {
+        return res.json(normalizeGroup(group)); // idempotente
+    }
+
+    groups[index] = normalizeGroup({
+        ...group,
+        memberIds: [...memberIds, userId],
+        studentIds: [...new Set([...(Array.isArray(group.studentIds) ? group.studentIds : []), userId])]
+    });
+
+    writeJSON(GROUPS_DB, groups);
+    log(`User ${userId} joined open club ${id}`, 'ACCESS');
+    res.json(groups[index]);
 });
 
 // --- SECTIONS ROUTES ---
@@ -1701,7 +2957,7 @@ app.get('/api/schools/:name/config', requireAuth, (req, res) => {
     }
 });
 
-app.post('/api/schools/:name/config', requireAuth, (req, res) => {
+app.post('/api/schools/:name/config', requireAdminAccess, (req, res) => {
     const { name } = req.params;
     const newConfig = req.body; // Expect { hiddenContentIds: [...] }
 
@@ -1724,9 +2980,12 @@ app.post('/api/schools/:name/config', requireAuth, (req, res) => {
 });
 
 // RETRY/REPAIR ROUTE (Must be before static catch-all)
-app.post('/api/content/:id/retry', requireAuth, (req, res) => {
+// requireAdminRole aplicado vía app.use('/api/content', requireAdminRole).
+// requireAuth (x-admin-secret) fue removido: el frontend envía x-user-id, no el secret.
+app.post('/api/content/:id/retry', (req, res) => {
     const { id } = req.params;
-    log(`Manual Retry requested for ${id}`, 'INFO');
+    const actorId = req.headers['x-user-id'] ?? 'unknown';
+    log(`[RETRY_START] contentId=${id} actor=${actorId}`, 'INFO');
 
     try {
         const contentList = readJSON(DB_FILE);
@@ -1736,6 +2995,13 @@ app.post('/api/content/:id/retry', requireAuth, (req, res) => {
 
         const content = contentList[index];
         if (!content.texto_plano_url) return res.status(400).json({ error: 'No text file linked' });
+
+        // Guard: evitar encolar un segundo job si ya hay uno en curso.
+        // ttsStatus='generando' significa que el queue ya tiene un job activo.
+        if (content.ttsStatus === 'generando') {
+            log(`[RETRY_FAIL] contentId=${id} reason=already_running actor=${actorId}`, 'WARN');
+            return res.status(409).json({ error: 'Ya hay un proceso de generación de audio en curso para este contenido. Espera a que termine.' });
+        }
 
         // Reset Status
         content.status = 'disponible'; // Always disponible to read
@@ -1768,57 +3034,365 @@ app.post('/api/content/:id/retry', requireAuth, (req, res) => {
             }
         }))
             .then(r => {
-                if (r.abortedByProvider) log(`Retry aborted by provider for ${id}`, 'WARN');
-                else log(`Retry result for ${id}: ${r.success}`, 'INFO');
+                if (r.abortedByProvider) log(`[RETRY_FAIL] contentId=${id} reason=provider_abort`, 'WARN');
+                else if (r.success) log(`[RETRY_SUCCESS] contentId=${id}`, 'INFO');
+                else log(`[RETRY_FAIL] contentId=${id} success=false`, 'WARN');
             })
-            .catch(e => log(`Retry crash for ${id}: ${e?.message || String(e)}`, 'ERROR'));
+            .catch(e => log(`[RETRY_FAIL] contentId=${id} error=${e?.message || String(e)}`, 'ERROR'));
 
-        res.json(content);
+        res.json({ success: true, content });
 
     } catch (e) {
-        log(`Retry error: ${e}`, 'ERROR');
+        log(`[RETRY_FAIL] contentId=${id} error=${e?.message}`, 'ERROR');
         res.status(500).json({ error: e.message });
     }
 });
 
-// --- LEO PEDAGOGICAL ENGINE (Fase 5) ---
+// --- TTS GLOBAL SEMAPHORE — max 12 concurrent AI calls ---
+const _ttsSemaphore = (() => {
+    let active = 0;
+    const MAX_CONCURRENT = 12;
+    const queue = [];
+    return {
+        acquire() {
+            return new Promise(resolve => {
+                if (active < MAX_CONCURRENT) { active++; resolve(); }
+                else queue.push(resolve);
+            });
+        },
+        release() {
+            const next = queue.shift();
+            if (next) { next(); } else { active--; }
+        },
+        get queueDepth() { return queue.length; },
+        get activeCount() { return active; },
+    };
+})();
+
+// --- TTS ON-DEMAND (Sprint 1 — Security) ---
+// Centraliza la generación de audio en el backend.
+// El frontend nunca llama a proveedores de IA directamente.
+app.post('/api/tts', requireUserAuth, ttsUserLimiter, async (req, res) => {
+    const { text } = req.body;
+
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+        return res.status(400).json({ error: 'text requerido y no puede estar vacío' });
+    }
+
+    // Respetar el límite de tokens del engine para TTS (2000 chars)
+    const trimmed = text.trim().substring(0, 2000);
+
+    const userId = req.headers['x-user-id'];
+
+    if (_ttsSemaphore.queueDepth >= 50) {
+        return res.status(503).json({ error: 'TTS temporalmente no disponible' });
+    }
+
+    await _ttsSemaphore.acquire();
+    try {
+        log(`[TTS] on-demand request userId=${userId} chars=${trimmed.length} active=${_ttsSemaphore.activeCount}`);
+        const result = await runHybridTask('tts', { text: trimmed, voice: 'alloy' });
+        recordTtsUsage(userId, trimmed.length, 'tts');
+
+        // result.data es un Buffer MP3 (OpenAI) o MP3 desde Gemini
+        res.set('Content-Type', 'audio/mpeg');
+        res.set('Cache-Control', 'public, max-age=3600'); // 1h — mismo texto = mismo audio
+        res.set('X-Audio-Provider', result.provider);    // 'openai' | 'gemini' — para normalización de volumen en frontend
+        res.send(result.data);
+    } catch (err) {
+        log(`[TTS] on-demand error userId=${userId}: ${err.message}`, 'ERROR');
+        // 503 — el cliente debe degradar a texto sin audio, no bloquear
+        res.status(503).json({ error: 'TTS temporalmente no disponible' });
+    } finally {
+        _ttsSemaphore.release();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/album/tts
+// TTS con cache persistente en disco para libro álbum.
+//
+// Input:  { text: string, contentId?: string }
+// Output: { url: string | null, provider: string }
+//   provider: 'openai' | 'gemini' — usado por frontend para normalización de volumen.
+//   url es ruta estática — el frontend la asigna directamente a audio.src.
+// ---------------------------------------------------------------------------
+app.post('/api/album/tts', requireUserAuth, albumTtsUserLimiter, async (req, res) => {
+    const { text, contentId } = req.body ?? {};
+
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+        return res.status(400).json({ error: 'text requerido' });
+    }
+
+    const trimmed = text.trim().substring(0, 500);
+    const userId  = req.headers['x-user-id'];
+
+    try {
+        const { url, provider, cached } = await getOrGenerateAlbumRegionAudio(contentId ?? 'global', trimmed);
+        if (!cached) recordTtsUsage(userId, trimmed.length, 'album_tts'); // solo contabilizar generaciones reales
+        res.json({ url, provider });
+    } catch (err) {
+        log(`[ALBUM_TTS] userId=${userId} error: ${err.message}`, 'ERROR');
+        res.json({ url: null, provider: 'openai' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/gemini/analizar-ilustracion
+// Proxy seguro para análisis de ilustraciones de libro álbum con Gemini multimodal.
+// Reemplaza la llamada directa desde SubirContenido.tsx — VITE_GEMINI_API_KEY
+// ya no necesita estar en el bundle del frontend para esta feature.
+//
+// Input:  { base64: string, mimeType: string }  (imagen como base64, max ~10MB)
+// Output: { regions: AlbumRegion[] }
+// Auth:   requireAdminAccess — solo administradores pueden analizar ilustraciones.
+// ---------------------------------------------------------------------------
+app.post('/api/gemini/analizar-ilustracion', requireAdminAccess, async (req, res) => {
+    const { base64, mimeType } = req.body ?? {};
+
+    if (!base64 || typeof base64 !== 'string') {
+        return res.status(400).json({ error: 'base64 de imagen requerido' });
+    }
+    if (base64.length > 14_000_000) { // ~10MB decoded
+        return res.status(413).json({ error: 'Imagen demasiado grande (máx ~10MB)' });
+    }
+    const safeMime = typeof mimeType === 'string' && mimeType.startsWith('image/')
+        ? mimeType
+        : 'image/jpeg';
+
+    const gemini = getGemini();
+    if (!gemini) {
+        return res.status(503).json({ error: 'Gemini no disponible (GEMINI_API_KEY ausente en servidor)' });
+    }
+
+    const prompt = `Eres un asistente pedagógico que analiza ilustraciones de libros álbum infantiles para una plataforma de lectura mediada.
+
+TAREA: Identifica entre 3 y 6 regiones visualmente distintas y narrativamente significativas en esta imagen.
+
+REGLAS DE SALIDA:
+- Devuelve ÚNICAMENTE JSON válido. Sin markdown, sin explicaciones.
+- Entre 3 y 6 regiones. Nunca más de 6.
+- Cada región debe corresponder a un elemento claramente visible.
+- NO inventes elementos ausentes.
+
+COORDENADAS: x, y = extremo superior izquierdo en % (0–100). width, height en %. Mínimo 10×10. Máximo 60×60.
+
+PRIORIDAD: 1. Personaje(s) principal(es). 2. Acción central. 3. Objetos con carga emocional. 4. Elementos de fondo narrativos.
+
+CAMPOS por región:
+- text: descripción narrativa breve en español (máx 2 oraciones)
+- type: "focus" (estándar) | "challenge" (elemento ambiguo u oculto)
+- pedagogicalObjective: "literal" | "inferential" | "reflective" | "writing"
+- leoHint: oración interna para IA (opcional, nunca visible al estudiante)
+- x, y, width, height: números
+
+Devuelve: {"regions": [...]}`;
+
+    try {
+        const response = await gemini.models.generateContent({
+            model: 'gemini-1.5-flash',
+            contents: [{
+                role: 'user',
+                parts: [
+                    { inlineData: { mimeType: safeMime, data: base64 } },
+                    { text: prompt },
+                ],
+            }],
+            config: { responseMimeType: 'application/json' },
+        });
+
+        let parsed;
+        try { parsed = JSON.parse(response.text ?? '{}'); } catch { parsed = {}; }
+
+        const raw = Array.isArray(parsed?.regions) ? parsed.regions : [];
+        const VALID_TYPES = new Set(['focus', 'challenge', 'contemplative', 'audio', 'nav']);
+        const VALID_OBJ   = new Set(['literal', 'inferential', 'reflective', 'writing']);
+
+        const regions = raw
+            .filter(r => r && typeof r.text === 'string' &&
+                         typeof r.x === 'number' && typeof r.y === 'number' &&
+                         typeof r.width === 'number' && typeof r.height === 'number')
+            .slice(0, 6)
+            .map(r => ({
+                text:                 r.text.substring(0, 300),
+                type:                 VALID_TYPES.has(r.type) ? r.type : 'focus',
+                x:                    Math.max(0, Math.min(100, r.x)),
+                y:                    Math.max(0, Math.min(100, r.y)),
+                width:                Math.max(1, Math.min(100, r.width)),
+                height:               Math.max(1, Math.min(100, r.height)),
+                pedagogicalObjective: VALID_OBJ.has(r.pedagogicalObjective) ? r.pedagogicalObjective : 'literal',
+                ...(r.leoHint ? { leoHint: String(r.leoHint).substring(0, 200) } : {}),
+            }));
+
+        log(`[GEMINI_PROXY] analizar-ilustracion → ${regions.length} regiones`);
+        res.json({ regions });
+    } catch (err) {
+        log(`[GEMINI_PROXY] analizar-ilustracion error: ${err.message}`, 'ERROR');
+        res.status(502).json({ error: 'El modelo no pudo analizar la imagen.' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/gemini/sugerir-etiquetas
+// Proxy seguro para sugerencia de etiquetas THEMA con Gemini.
+// Reemplaza la llamada directa desde SubirContenido.tsx.
+//
+// Input:  { titulo: string, descripcion: string }
+// Output: { tags: string[] }
+// Auth:   requireAdminAccess
+// ---------------------------------------------------------------------------
+app.post('/api/gemini/sugerir-etiquetas', requireAdminAccess, async (req, res) => {
+    const { titulo, descripcion } = req.body ?? {};
+
+    if (!titulo || typeof titulo !== 'string') {
+        return res.status(400).json({ error: 'titulo requerido' });
+    }
+
+    const gemini = getGemini();
+    if (!gemini) {
+        return res.status(503).json({ error: 'Gemini no disponible (GEMINI_API_KEY ausente en servidor)' });
+    }
+
+    const safeTitle = String(titulo).substring(0, 200);
+    const safeDesc  = String(descripcion ?? '').substring(0, 500);
+
+    try {
+        const response = await gemini.models.generateContent({
+            model: 'gemini-1.5-flash',
+            contents: `Analiza el siguiente libro y sugiere exactamente 4 etiquetas de clasificación (estilo THEMA simplificado para escuela).
+
+Título: ${safeTitle}
+Descripción: ${safeDesc}
+
+Las etiquetas deben cubrir:
+1. Tema Principal (ej. "Aventura", "Ciencia")
+2. Género/Formato (ej. "Novela Gráfica", "Documental")
+3. Público/Edad (ej. "Infantil", "Juvenil")
+4. Un valor o tema transversal (ej. "Amistad", "Ecología")
+
+Devuelve SOLO las 4 palabras o frases cortas separadas por comas.`,
+        });
+
+        const text = response.text ?? '';
+        const tags = text.split(',').map(t => t.trim()).filter(Boolean).slice(0, 6);
+        res.json({ tags });
+    } catch (err) {
+        log(`[GEMINI_PROXY] sugerir-etiquetas error: ${err.message}`, 'ERROR');
+        res.status(502).json({ error: 'No se pudieron generar etiquetas.' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// ADMIN — TTS OBSERVABILITY & CACHE MANAGEMENT
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/admin/tts/stats
+ * Devuelve métricas de consumo de TTS por usuario desde el último reinicio.
+ * Útil para detectar abuso, planificar capacidad y revisar costos.
+ *
+ * Output: { updatedAt, totalUsers, totalReqs, totalChars, users: [...] }
+ * Auth: requireAdminAccess
+ */
+app.get('/api/admin/tts/stats', requireAdminAccess, (req, res) => {
+    const users = [];
+    let totalReqs  = 0;
+    let totalChars = 0;
+
+    _ttsUsage.forEach((data, userId) => {
+        totalReqs  += data.reqs;
+        totalChars += data.chars;
+        users.push({ userId, ...data });
+    });
+
+    // Ordenar por mayor consumo primero
+    users.sort((a, b) => b.chars - a.chars);
+
+    res.json({
+        updatedAt:  new Date().toISOString(),
+        note:       'Datos desde el último reinicio del servidor. No persisten entre reinicios.',
+        totalUsers: _ttsUsage.size,
+        totalReqs,
+        totalChars,
+        users,
+    });
+});
+
+/**
+ * DELETE /api/admin/album-cache/:contentId
+ * Elimina todo el cache de audio TTS de un contenido específico.
+ * Usar cuando el texto de un álbum cambió editorialmente y el cache está desactualizado.
+ *
+ * Output: { removed, bytes, contentId }
+ * Auth: requireAdminAccess
+ */
+app.delete('/api/admin/album-cache/:contentId', requireAdminAccess, async (req, res) => {
+    const { contentId } = req.params;
+    if (!contentId) return res.status(400).json({ error: 'contentId requerido' });
+
+    try {
+        const result = await purgeAlbumCacheForContent(contentId);
+        log(`[ADMIN] Album cache purged contentId=${contentId} removed=${result.removed} bytes=${result.bytes}`);
+        res.json({ ...result, contentId });
+    } catch (err) {
+        log(`[ADMIN] Album cache purge error: ${err.message}`, 'ERROR');
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/album-cache/gc
+ * Dispara GC manual del cache de audio de álbum (elimina archivos > maxAgeDays).
+ * Útil cuando el disco está cerca del límite sin esperar el ciclo de 24h.
+ *
+ * Body: { maxAgeDays?: number }  — default: 30
+ * Output: { removed, bytes, maxAgeDays }
+ * Auth: requireAdminAccess
+ */
+app.post('/api/admin/album-cache/gc', requireAdminAccess, async (req, res) => {
+    const maxAgeDays = Math.max(1, parseInt(req.body?.maxAgeDays ?? 30, 10) || 30);
+    try {
+        const result = await cleanupAlbumCache(maxAgeDays);
+        log(`[ADMIN] Manual GC: removed=${result.removed} bytes=${result.bytes} maxAgeDays=${maxAgeDays}`);
+        res.json({ ...result, maxAgeDays });
+    } catch (err) {
+        log(`[ADMIN] Manual GC error: ${err.message}`, 'ERROR');
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- LEO PEDAGOGICAL ENGINE (Fase 5 / D1) ---
 app.post('/api/leo/ask', requireUserAuth, async (req, res) => {
     try {
-        const {
-            contentId, chunkIndex, interactionType, payload, exactSentence,
-            // Advanced context fields (optional — graceful defaults applied in engine)
-            sessionMemory, difficultyLevel,
-            // Phase 5.5: pedagogical layer
-            pedagogicalStage, readerProfile,
-            // Phase 4: transitional context
-            leoContext
-        } = req.body;
-        log(`Leo request: ${contentId} chunk: ${chunkIndex} type: ${interactionType} difficulty: ${difficultyLevel ?? 'default'} stage: ${pedagogicalStage ?? 'default'}`, 'INFO');
-        
-        const result = await processLeoRequest(
-            contentId, chunkIndex, interactionType, payload, exactSentence,
-            sessionMemory ?? null, difficultyLevel ?? null,
-            pedagogicalStage ?? null, readerProfile ?? null,
-            leoContext ?? null
-        );
-        
+        const leoReq = normalizeRequest(req.body, 'companion', req.headers['x-user-id']);
+        const result = await dispatchInteraction(leoReq);
         res.status(200).json({ success: true, answer: result.answer });
-    } catch (error) {
-        log(`LeoEngine Guard/Policy Error: ${error.message}`, 'WARN');
-        const errStr = error.message.toLowerCase();
-        
-        let statusCode = 500;
-        if (errStr.includes("faltan parámetros") || errStr.includes("longitud permitida")) {
-            statusCode = 400;
-        } else if (errStr.includes("dominio autorizado") || errStr.includes("tipo de interacción")) {
-            statusCode = 403;
-        }
 
-        res.status(statusCode).json({ 
-            success: false, 
-            answer: errStr.includes('dominio autorizado') 
+        // Persist Leo interaction metadata (fire-and-forget, never blocks response)
+        try {
+            const userId = req.headers['x-user-id'];
+            const contentId = req.body?.contentId ?? null;
+            const interactionType = req.body?.interactionType ?? 'chat';
+            const surface = req.body?.surface ?? 'reader';
+            const entry = { userId, contentId, timestamp: Date.now(), interactionType, surface };
+            const existing = readJSON(LEO_INTERACTIONS_DB) || [];
+            const updated = [...existing, entry];
+            const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
+            writeJSON(LEO_INTERACTIONS_DB, capped);
+        } catch (persistErr) {
+            log(`Leo interactions persist error: ${persistErr.message}`, 'WARN');
+        }
+    } catch (error) {
+        log(`Leo ask error: ${error.message}`, 'WARN');
+        const errStr = error.message.toLowerCase();
+        let statusCode = error.statusCode ?? 500;
+        if (errStr.includes("faltan parámetros") || errStr.includes("longitud permitida")) statusCode = 400;
+        else if (errStr.includes("dominio autorizado") || errStr.includes("tipo de interacción")) statusCode = 403;
+        res.status(statusCode).json({
+            success: false,
+            answer: errStr.includes('dominio autorizado')
                 ? "¡Buena pregunta! Pero como estamos de exploración lectora, hablemos mejor sobre nuestra historia actual."
-                : "¡Ups! Leo se distrajo. ¿Puedes intentarlo de nuevo?" 
+                : "¡Ups! Leo se distrajo. ¿Puedes intentarlo de nuevo?",
         });
     }
 });
@@ -1928,6 +3502,399 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
     }
 });
 
+// --- LEO CHAT (Fase 6 / D1) ---
+app.post('/api/leo/chat', requireUserAuth, async (req, res) => {
+    try {
+        const leoReq = normalizeRequest(req.body, 'chatbot', req.headers['x-user-id']);
+        const result = await dispatchInteraction(leoReq);
+        res.status(200).json({ success: true, answer: result.answer });
+    } catch (error) {
+        log(`Leo chat error: ${error.message}`, 'WARN');
+        const statusCode = error.statusCode ?? 500;
+        res.status(statusCode).json({
+            success: false,
+            answer: statusCode === 400
+                ? error.message
+                : '¡Hola! Soy Leo 🦀. Mi conexión con la biblioteca central está fallando un poco. ¿Me repites eso?',
+        });
+    }
+});
+
+// --- LEO RECAP (Fase 6 / D1) ---
+app.post('/api/leo/recap', requireUserAuth, async (req, res) => {
+    try {
+        const leoReq = normalizeRequest(req.body, 'recap', req.headers['x-user-id']);
+        const result = await dispatchInteraction(leoReq);
+        res.status(200).json({ success: true, answer: result.answer });
+    } catch (error) {
+        log(`Leo recap error: ${error.message}`, 'WARN');
+        const statusCode = error.statusCode ?? 500;
+        res.status(statusCode).json({
+            success: false,
+            answer: statusCode === 400
+                ? error.message
+                : '¡Hola! 🦀 Te extrañé. ¡Sigamos leyendo!',
+        });
+    }
+});
+
+// --- LEO MEDIATOR VIEW (D6) ---
+// Note: requireAuth lets GET through without the admin secret (existing pattern).
+// D7 should introduce a requireMediatorAuth middleware scoped to mediador/administrador roles.
+
+app.get('/api/leo/mediator/student/:userId', requireAuth, (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
+        const summary = getMediatorStudentSummary(userId);
+        res.json({ success: true, summary });
+    } catch (e) {
+        log(`Leo mediator summary error: ${e.message}`, 'ERROR');
+        res.status(500).json({ success: false, error: 'Error al construir resumen de mediador' });
+    }
+});
+
+app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, (req, res) => {
+    try {
+        const { userId, contentId } = req.params;
+        if (!userId || !contentId) {
+            return res.status(400).json({ success: false, error: 'userId y contentId requeridos' });
+        }
+        const history = getMediatorContentHistory(userId, contentId);
+        res.json({ success: true, history });
+    } catch (e) {
+        log(`Leo mediator content history error: ${e.message}`, 'ERROR');
+        res.status(500).json({ success: false, error: 'Error al construir historial por contenido' });
+    }
+});
+
+// ── D7: ACTIVATION LAYER ──────────────────────────────────────────────────
+
+/**
+ * GET /api/leo/activation/:userId
+ *
+ * Returns activation outputs for a user: family summary, continuity nudge,
+ * content recommendation, and/or production prompt.
+ * Each output includes a `suppressUntil` advisory TTL for the caller.
+ *
+ * Auth: requireAuth (admin/mediator) or requireProgressOwner pattern.
+ * Here we use requireAuth so mediators can query any student under their org.
+ * Students calling for themselves must send x-user-id matching :userId.
+ */
+app.get('/api/leo/activation/:userId', requireAuth, (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
+        const outputs = getActivationOutputsForUser(userId);
+        res.json({ success: true, outputs });
+    } catch (e) {
+        log(`Leo activation error userId=${req.params.userId}: ${e.message}`, 'ERROR');
+        res.status(500).json({ success: false, error: 'Error al generar outputs de activación' });
+    }
+});
+
+// ── EXPORTACIÓN ACADÉMICA ──────────────────────────────────────────────────
+
+/**
+ * Sanitiza un string para usarlo como nombre de carpeta/archivo en el ZIP.
+ * Preserva caracteres latinos (acentos, ñ), números, guiones y espacios (convertidos a _).
+ */
+function sanitizeFileName(str) {
+    return (str || 'sin_nombre')
+        .replace(/[^\w\s\-\u00C0-\u017E]/g, '')
+        .trim()
+        .replace(/\s+/g, '_')
+        .slice(0, 80);
+}
+
+/**
+ * Escapa un valor para celda CSV (RFC 4180 simplificado).
+ */
+function csvCell(value) {
+    const str = String(value ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+}
+
+/**
+ * Genera el contenido del resumen.csv con una fila por entrega.
+ */
+function buildCSV(enriched) {
+    const header = 'studentId,studentName,email,submittedAt,wordCount';
+    const rows = enriched.map(({ sub, student }) => [
+        csvCell(sub.studentId),
+        csvCell(student?.nombre_completo || ''),
+        csvCell(student?.email || ''),
+        csvCell(sub.submittedAt || ''),
+        csvCell(sub.wordCount ?? 0),
+    ].join(','));
+    return [header, ...rows].join('\r\n');
+}
+
+/**
+ * Genera el contenido de respuesta.txt para un estudiante.
+ */
+function buildRespuesta(sub, student) {
+    const name  = student?.nombre_completo || `Estudiante ${sub.studentId}`;
+    const email = student?.email || '—';
+    const fecha = sub.submittedAt
+        ? new Date(sub.submittedAt).toLocaleDateString('es-ES', { timeZone: 'UTC' })
+        : '—';
+    return `Nombre: ${name}\nEmail: ${email}\nFecha: ${fecha}\n\n---\n\n${sub.responseText}`;
+}
+
+/**
+ * Genera el objeto metadatos.json para un estudiante.
+ */
+function buildMetadatos(sub, student) {
+    return {
+        submissionId: sub.id,
+        taskId:       sub.taskId,
+        studentId:    sub.studentId,
+        studentName:  student?.nombre_completo || '—',
+        submittedAt:  sub.submittedAt || null,
+        wordCount:    sub.wordCount ?? 0,
+    };
+}
+
+// POST /api/submissions — el estudiante persiste su entrega en el servidor
+// Complementa el guardado en localStorage; no reemplaza el flujo existente.
+app.post('/api/submissions', requireUserAuth, (req, res) => {
+    try {
+        const { taskId, studentId, groupId, responseText, contentId, source, taskTitle } = req.body;
+
+        if (!taskId || !studentId || !groupId || typeof responseText !== 'string' || !responseText.trim()) {
+            return res.status(400).json({ error: 'Campos obligatorios: taskId, studentId, groupId, responseText' });
+        }
+
+        // El usuario autenticado sólo puede enviar sus propias entregas
+        if (req.user.id !== studentId) {
+            return res.status(403).json({ error: 'No autorizado: solo puedes enviar entregas propias' });
+        }
+
+        const submissions = readJSON(SUBMISSIONS_DB);
+
+        // Reemplazar entrega previa del mismo estudiante para la misma tarea
+        const base = submissions.filter(s => !(s.taskId === taskId && s.studentId === studentId));
+
+        const wordCount = responseText.trim().split(/\s+/).filter(Boolean).length;
+
+        const newSub = {
+            id:           `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            taskId,
+            studentId,
+            groupId,
+            responseText,
+            status:       'submitted',
+            submittedAt:  new Date().toISOString(),
+            wordCount,
+            ...(contentId  && { contentId }),
+            ...(source     && { source }),
+            ...(taskTitle  && { taskTitle }),
+        };
+
+        base.push(newSub);
+        writeJSON(SUBMISSIONS_DB, base);
+
+        log(`Submission saved: task=${taskId} student=${studentId} words=${wordCount}`);
+        res.status(201).json({ success: true, submission: newSub });
+
+    } catch (e) {
+        log(`POST /api/submissions error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al guardar la entrega' });
+    }
+});
+
+// GET /api/tasks/:taskId/export-submissions — genera y descarga el ZIP de entregas
+// Requiere autenticación de usuario válido (profesores/coordinadores).
+app.get('/api/tasks/:taskId/export-submissions', requireUserAuth, (req, res) => {
+    try {
+        const { taskId } = req.params;
+
+        const users       = readJSON(USERS_DB);
+        const submissions = readJSON(SUBMISSIONS_DB);
+
+        const taskSubs = submissions.filter(s => s.taskId === taskId && s.status === 'submitted');
+
+        // Enriquecer con perfil de estudiante y ordenar alfabéticamente por nombre
+        const enriched = taskSubs
+            .map(sub => ({ sub, student: users.find(u => u.id === sub.studentId) || null }))
+            .sort((a, b) => {
+                const na = a.student?.nombre_completo || a.sub.studentId;
+                const nb = b.student?.nombre_completo || b.sub.studentId;
+                return na.localeCompare(nb, 'es');
+            });
+
+        const dateStr    = new Date().toISOString().slice(0, 10);
+        const taskLabel  = enriched[0]?.sub.taskTitle || taskId;
+        const safeLabel  = sanitizeFileName(taskLabel);
+        const folderName = `Tarea_${safeLabel}`;
+        const zipName    = `Tarea_${safeLabel}_${dateStr}.zip`;
+
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        archive.on('error', (err) => {
+            log(`Archiver error for task ${taskId}: ${err.message}`, 'ERROR');
+            res.destroy(err);
+        });
+
+        archive.pipe(res);
+
+        if (enriched.length === 0) {
+            archive.append(
+                `No hay entregas enviadas para la tarea: ${taskId}\n`,
+                { name: `${folderName}/sin_entregas.txt` }
+            );
+        } else {
+            // resumen.csv en raíz del folder
+            archive.append(buildCSV(enriched), { name: `${folderName}/resumen.csv` });
+
+            // Una carpeta por estudiante
+            for (const { sub, student } of enriched) {
+                const nameRaw    = student?.nombre_completo || `Estudiante_${sub.studentId}`;
+                const safeName   = sanitizeFileName(nameRaw);
+                const dir        = `${folderName}/${safeName}_${sub.studentId}`;
+
+                archive.append(
+                    buildRespuesta(sub, student),
+                    { name: `${dir}/respuesta.txt` }
+                );
+                archive.append(
+                    JSON.stringify(buildMetadatos(sub, student), null, 2),
+                    { name: `${dir}/metadatos.json` }
+                );
+            }
+        }
+
+        archive.finalize();
+        log(`ZIP export: task=${taskId} submissions=${enriched.length} file=${zipName}`);
+
+    } catch (e) {
+        log(`GET /api/tasks/:taskId/export-submissions error: ${e.message}`, 'ERROR');
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Error al generar la exportación' });
+        }
+    }
+});
+
+// ── HELPERS PARA EXPORTACIÓN POR ESTUDIANTE ─────────────────────────────────
+
+/**
+ * CSV de resumen con una fila por tarea entregada por el estudiante.
+ * Columnas: taskId, taskTitle, submittedAt, wordCount
+ */
+function buildStudentCSV(subs) {
+    const header = 'taskId,taskTitle,submittedAt,wordCount';
+    const rows = subs.map(sub => [
+        csvCell(sub.taskId),
+        csvCell(sub.taskTitle || ''),
+        csvCell(sub.submittedAt || ''),
+        csvCell(sub.wordCount ?? 0),
+    ].join(','));
+    return [header, ...rows].join('\r\n');
+}
+
+/**
+ * Contenido de respuesta.txt para una tarea dentro del portfolio del estudiante.
+ */
+function buildStudentRespuesta(sub) {
+    const taskLabel = sub.taskTitle || sub.taskId;
+    const fecha = sub.submittedAt
+        ? new Date(sub.submittedAt).toLocaleDateString('es-ES', { timeZone: 'UTC' })
+        : '—';
+    return `Tarea: ${taskLabel}\nFecha: ${fecha}\n\n---\n\n${sub.responseText}`;
+}
+
+/**
+ * Objeto metadatos.json para una tarea dentro del portfolio del estudiante.
+ */
+function buildStudentMetadatos(sub, student) {
+    return {
+        submissionId: sub.id,
+        taskId:       sub.taskId,
+        taskTitle:    sub.taskTitle || '—',
+        studentId:    sub.studentId,
+        studentName:  student?.nombre_completo || '—',
+        submittedAt:  sub.submittedAt || null,
+        wordCount:    sub.wordCount ?? 0,
+    };
+}
+
+// GET /api/students/:studentId/export-submissions — portfolio de tareas de un estudiante
+// Ordenadas ascendente por fecha de entrega (cronología del estudiante).
+app.get('/api/students/:studentId/export-submissions', requireUserAuth, (req, res) => {
+    try {
+        const { studentId } = req.params;
+
+        const users       = readJSON(USERS_DB);
+        const submissions = readJSON(SUBMISSIONS_DB);
+
+        const student = users.find(u => u.id === studentId) || null;
+
+        const studentSubs = submissions
+            .filter(s => s.studentId === studentId && s.status === 'submitted')
+            .sort((a, b) => new Date(a.submittedAt || 0) - new Date(b.submittedAt || 0)); // ascendente
+
+        const dateStr     = new Date().toISOString().slice(0, 10);
+        const studentName = student?.nombre_completo || `Estudiante_${studentId}`;
+        const safeName    = sanitizeFileName(studentName);
+        const zipName     = `${safeName}_${dateStr}.zip`;
+
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        archive.on('error', (err) => {
+            log(`Archiver error for student ${studentId}: ${err.message}`, 'ERROR');
+            res.destroy(err);
+        });
+
+        archive.pipe(res);
+
+        if (studentSubs.length === 0) {
+            archive.append(
+                `No hay entregas enviadas para: ${studentName}\n`,
+                { name: `${safeName}/sin_entregas.txt` }
+            );
+        } else {
+            archive.append(
+                buildStudentCSV(studentSubs),
+                { name: `${safeName}/resumen.csv` }
+            );
+
+            for (const sub of studentSubs) {
+                const taskLabel    = sub.taskTitle || sub.taskId;
+                const safeTaskLabel = sanitizeFileName(taskLabel);
+                const dir          = `${safeName}/${safeTaskLabel}_${sub.taskId}`;
+
+                archive.append(
+                    buildStudentRespuesta(sub),
+                    { name: `${dir}/respuesta.txt` }
+                );
+                archive.append(
+                    JSON.stringify(buildStudentMetadatos(sub, student), null, 2),
+                    { name: `${dir}/metadatos.json` }
+                );
+            }
+        }
+
+        archive.finalize();
+        log(`ZIP export: student=${studentId} submissions=${studentSubs.length} file=${zipName}`);
+
+    } catch (e) {
+        log(`GET /api/students/:studentId/export-submissions error: ${e.message}`, 'ERROR');
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Error al generar la exportación' });
+        }
+    }
+});
+
 // --- STATIC FILES ---
 app.use('/uploads', express.static(UPLOAD_DIR));
 
@@ -2028,8 +3995,1169 @@ const checkMissingTTS = async () => {
 
 
 
+// ---------------------------------------------------------------------------
+// ANALYTICS
+// ---------------------------------------------------------------------------
+
+// POST /api/analytics/events
+// Accepts a JSON array of ReadingEvent objects from the frontend.
+// Requires x-user-id header — events with a mismatching userId are discarded.
+// Rate-limited by the global /api/ limiter. Capped at 50k events rolling.
+app.post('/api/analytics/events', (req, res) => {
+    try {
+        const events = req.body;
+        if (!Array.isArray(events) || events.length === 0) {
+            return res.status(400).json({ error: 'Expected non-empty array of events' });
+        }
+
+        // Validate minimal shape to prevent junk writes
+        const valid = events.every(e =>
+            typeof e.event === 'string' &&
+            typeof e.userId === 'string' &&
+            typeof e.contentId === 'string' &&
+            typeof e.timestamp === 'number'
+        );
+        if (!valid) {
+            return res.status(400).json({ error: 'Malformed event objects' });
+        }
+
+        // Security: x-user-id header is required. Reject requests without it.
+        // Events claiming a different userId than the header are discarded and logged.
+        const headerUserId = req.headers['x-user-id'];
+        if (!headerUserId) {
+            return res.status(401).json({ error: 'x-user-id required' });
+        }
+        const securityFiltered = events.filter(e => {
+            if (e.userId === headerUserId) return true;
+            log(`Analytics: evento descartado — userId mismatch header=${headerUserId} event=${e.userId}`, 'WARN');
+            return false;
+        });
+
+        if (securityFiltered.length === 0) {
+            return res.status(200).json({ ok: true, received: 0, discarded: events.length });
+        }
+
+        // Validate userIds — discard events from unknown users to prevent DB contamination.
+        const knownUsers = readJSON(USERS_DB);
+        const validIds   = new Set(knownUsers.map(u => u.id));
+        const validEvents = securityFiltered.filter(e => {
+            if (validIds.has(e.userId)) return true;
+            log(`Analytics: evento descartado — userId desconocido: ${e.userId}`, 'WARN');
+            return false;
+        });
+
+        if (validEvents.length === 0) {
+            return res.status(200).json({ ok: true, received: 0, discarded: events.length });
+        }
+
+        const existing = readJSON(ANALYTICS_DB) || [];
+
+        // Idempotency: deduplicate by eventId — prevents double-write on LU retry
+        const existingEventIds = new Set(existing.map(e => e.eventId).filter(Boolean));
+        const deduped = validEvents.filter(e => {
+            if (!e.eventId) return true;              // legacy events without eventId always pass
+            if (existingEventIds.has(e.eventId)) {
+                log(`Analytics: evento duplicado descartado eventId=${e.eventId}`, 'DEBUG');
+                return false;
+            }
+            return true;
+        });
+
+        const updated = [...existing, ...deduped];
+        // Rolling cap: keep only the most recent 50k events
+        const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
+        writeJSON(ANALYTICS_DB, capped);
+
+        res.json({ ok: true, received: deduped.length, deduplicated: validEvents.length - deduped.length });
+    } catch (e) {
+        log(`Analytics write error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Failed to write analytics' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// METRICS API
+// ---------------------------------------------------------------------------
+
+/**
+ * Load all required flat-file databases and initialize the metrics engine.
+ * Called fresh on each request — data is always current without a server restart.
+ * Returns the raw loaded data so callers can use it for auth checks too.
+ */
+function loadAndInitMetrics() {
+    const groups = readJSON(GROUPS_DB) || [];
+    const users  = readJSON(USERS_DB)  || [];
+    initMetrics({
+        events:          readJSON(ANALYTICS_DB)       || [],
+        leoMemory:       readJSON(LEO_MEMORY_DB)      || { memoryMap: {} },
+        leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
+        progress:        getAllProgressAsMap(),
+        groups,
+        users,
+    });
+    return { groups, users };
+}
+
+// ---------------------------------------------------------------------------
+// METRICS AUTH HELPERS
+// ---------------------------------------------------------------------------
+
+/** True if the request carries a valid admin secret. */
+function isAdminRequest(req) {
+    const secret = process.env.ADMIN_SECRET;
+    return secret ? req.headers['x-admin-secret'] === secret : false;
+}
+
+/**
+ * Resolve the requesting user from x-user-id header.
+ * Returns null if header is missing or user not found.
+ */
+function resolveRequester(req, users) {
+    const id = req.headers['x-user-id'];
+    if (!id) return null;
+    return users.find(u => u.id === id) ?? null;
+}
+
+/**
+ * True if user has the mediador role.
+ * DT-05: 'profesor' eliminado del modelo. Safety net: también acepta 'profesor'
+ * para datos legacy que no hayan pasado por la migración DT-04.
+ */
+function isMediatorRole(user) {
+    return (user.roles ?? []).some(r => r === 'mediador' || r === 'profesor');
+}
+
+/**
+ * True if `user` is assigned as mediator of `courseId`.
+ * Checks: group.teacherId, group.mediatorIds, and user.groupIds (reverse lookup).
+ */
+function isMediatorOfCourse(user, courseId, groups) {
+    const group = groups.find(g => g.id === courseId);
+    if (!group) return false;
+    return (
+        group.teacherId === user.id ||
+        (group.mediatorIds ?? []).includes(user.id) ||
+        (user.groupIds    ?? []).includes(courseId)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SCHOOL IDENTIFIER HELPERS
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive a stable URL-safe slug from a school name.
+ * "Colegio Chibalete" → "colegio-chibalete"
+ * Accent-stripped, lowercased, non-alphanumeric runs replaced with "-".
+ */
+function schoolNameToSlug(name) {
+    return name
+        .toLowerCase()
+        .trim()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')   // strip combining accents
+        .replace(/[^a-z0-9]+/g, '-')       // non-alphanumeric → hyphen
+        .replace(/^-|-$/g, '');            // trim leading/trailing hyphens
+}
+
+/**
+ * Resolve a school by slug OR by raw name (case-insensitive, backward-compatible).
+ * Returns { schoolId: string (slug), schoolName: string (canonical) } or null.
+ *
+ * Accepts:
+ *   - "colegio-chibalete"   (new stable slug form)
+ *   - "Colegio Chibalete"   (legacy name form — still supported)
+ */
+function resolveSchoolRecord(input, groups) {
+    const normalizedInput = input.toLowerCase().trim();
+    const match = groups.find(g => {
+        if (!g.school) return false;
+        const name = g.school.trim();
+        return (
+            name.toLowerCase() === normalizedInput ||   // exact name match (case-insensitive)
+            schoolNameToSlug(name) === normalizedInput  // slug match
+        );
+    });
+    if (!match) return null;
+    const schoolName = match.school.trim();
+    return { schoolId: schoolNameToSlug(schoolName), schoolName };
+}
+
+// ---------------------------------------------------------------------------
+// ALERT GENERATION
+// ---------------------------------------------------------------------------
+
+const ALERT_SEVERITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+/**
+ * Generate structured alerts from behavioral metrics and reading level scores.
+ *
+ * @param {object} behavioral   - BehavioralMetrics object
+ * @param {object} readingLevels - ReadingLevelScores object
+ * @param {'student'|'course'|'school'} context
+ * @param {object} extras       - Optional: { studentCount, activeStudentCount }
+ *                                for engagement alert at group level
+ *
+ * Alerts are deduplicated by type and sorted high → medium → low.
+ */
+function generateAlerts(behavioral, readingLevels, context = 'student', extras = {}) {
+    const seen   = new Set();
+    const alerts = [];
+
+    const add = (type, severity, message) => {
+        if (seen.has(type)) return; // deduplicate by type
+        seen.add(type);
+        alerts.push({ type, severity, message });
+    };
+
+    // low_sessions: sparse data — metrics may not be representative
+    const sessionThreshold = context === 'student' ? 3 : 0;
+    if (behavioral.totalSessions <= sessionThreshold) {
+        add('low_sessions', 'low',
+            context === 'student'
+                ? 'El estudiante tiene pocas sesiones registradas. Las métricas pueden no ser representativas.'
+                : 'El grupo tiene poca actividad registrada. Se necesitan más datos para métricas confiables.');
+    }
+
+    // low_trance: reader rarely enters sustained focus flow (streak >= 3)
+    const tranceThreshold = context === 'school' ? 0.15 : 0.20;
+    if (behavioral.totalSessions > 0 && behavioral.tranceEntryRate < tranceThreshold) {
+        add('low_trance', context === 'school' ? 'high' : 'medium',
+            'Baja tasa de flujo de concentración. Los lectores interrumpen la lectura con frecuencia antes de alcanzar ritmo sostenido.');
+    }
+
+    // low_continuity: high streak-break rate indicates fragmented reading
+    const breakThreshold = context === 'student' ? 0.50 : 0.60;
+    if (behavioral.totalSessions > 0 && behavioral.streakBreakRate > breakThreshold) {
+        add('low_continuity', 'medium',
+            'Alta tasa de interrupciones de racha. Indica lectura fragmentada o dificultad sostenida de atención.');
+    }
+
+    // low_inference: reader struggles beyond the literal level
+    const inferThreshold = context === 'student' ? 30 : 25;
+    if (readingLevels.inferential < inferThreshold) {
+        add('low_inference', 'high',
+            'Nivel inferencial bajo. El lector puede tener dificultad para derivar significado más allá del contenido explícito.');
+    }
+
+    // low_engagement: group-level only — fewer active students than expected
+    const { studentCount, activeStudentCount, totalLeoInteractions, totalLeoOfflineAttempts } = extras;
+    if (studentCount != null && activeStudentCount != null && studentCount > 0) {
+        const engThreshold = context === 'school' ? 0.40 : 0.50;
+        const engSeverity  = context === 'school' ? 'high' : 'medium';
+        if (activeStudentCount / studentCount < engThreshold) {
+            add('low_engagement', engSeverity,
+                `Solo ${activeStudentCount} de ${studentCount} estudiantes tienen sesiones registradas.`);
+        }
+    }
+
+    // leo_offline_barrier: significant offline Leo attempts detected
+    if (totalLeoOfflineAttempts != null && totalLeoOfflineAttempts > 0) {
+        const totalAttempts = (totalLeoInteractions ?? 0) + totalLeoOfflineAttempts;
+        const offlineRatio  = totalAttempts > 0 ? totalLeoOfflineAttempts / totalAttempts : 1;
+        if (offlineRatio > 0.40 || totalLeoOfflineAttempts >= 5) {
+            add('leo_offline_barrier', 'medium',
+                `${totalLeoOfflineAttempts} intento${totalLeoOfflineAttempts > 1 ? 's' : ''} de Leo sin conexión registrado${totalLeoOfflineAttempts > 1 ? 's' : ''}. Puede indicar una barrera de conectividad.`);
+        }
+    }
+
+    // Sort: high → medium → low
+    return alerts.sort((a, b) => ALERT_SEVERITY_ORDER[a.severity] - ALERT_SEVERITY_ORDER[b.severity]);
+}
+
+// ---------------------------------------------------------------------------
+// RESPONSE FORMATTERS
+// ---------------------------------------------------------------------------
+
+/** Map a composite score (0–100) to a human-readable level label in Spanish. */
+function compositeToLabel(score) {
+    if (score >= 75) return 'Avanzado';
+    if (score >= 55) return 'En desarrollo';
+    if (score >= 30) return 'Básico';
+    return 'Inicial';
+}
+
+/** Round a number to 1 decimal place. */
+function r1(n) { return Math.round(n * 10) / 10; }
+
+/** Return a reading-levels object with all scores rounded to 1 decimal. */
+function roundReadingLevels(rl) {
+    return {
+        literal:     r1(rl.literal),
+        inferential: r1(rl.inferential),
+        critical:    r1(rl.critical),
+        reflective:  r1(rl.reflective),
+        composite:   r1(rl.composite),
+    };
+}
+
+/**
+ * Format raw StudentMetrics into the structured API response shape.
+ */
+function formatStudentResponse(raw) {
+    const alerts = generateAlerts(raw.behavioral, raw.readingLevels, 'student');
+    return {
+        userId:     raw.userId,
+        dataWindow: raw.dataWindow,
+        computedAt: raw.computedAt,
+        summary: {
+            totalSessions:        raw.behavioral.totalSessions,
+            totalReadingTimeMs:   raw.behavioral.totalReadingTimeMs,
+            distinctContentsRead: raw.behavioral.distinctContentsRead,
+            composite:            r1(raw.readingLevels.composite),
+            level:                compositeToLabel(raw.readingLevels.composite),
+        },
+        productMetrics: raw.behavioral,
+        readingLevels:  roundReadingLevels(raw.readingLevels),
+        icdli:          raw.icdli,
+        alerts,
+    };
+}
+
+/**
+ * Build a Map<contentId, { title, type }> from content.json.
+ * Returns empty map on read failure — callers fall back to contentId display.
+ */
+function buildContentMap() {
+    try {
+        const items = readJSON(DB_FILE) || [];
+        return new Map(
+            (Array.isArray(items) ? items : []).map(c => [
+                c.id,
+                { title: c.titulo ?? c.id, type: c.tipo ?? null }
+            ])
+        );
+    } catch { return new Map(); }
+}
+
+/** Resolve a human-readable title from contentId, falling back gracefully. */
+function resolveContentTitle(contentId, contentMap) {
+    return contentMap.get(contentId)?.title ?? `Contenido ${contentId.slice(-8)}`;
+}
+
+/**
+ * Build a ReadingDetails object from student.contentStats, enriched with titles.
+ * Caps at 2 in-progress, 3 completed, 2 abandoned — sorted by recency.
+ */
+function buildReadingDetails(contentStats, contentMap) {
+    const contents = contentStats?.contents ?? [];
+    const byRecency = (a, b) => (b.lastReadAt ?? '').localeCompare(a.lastReadAt ?? '');
+
+    const inProgress = contents
+        .filter(c => c.status === 'in_progress')
+        .sort(byRecency)
+        .slice(0, 2)
+        .map(c => ({
+            contentId:          c.contentId,
+            title:              resolveContentTitle(c.contentId, contentMap),
+            type:               contentMap.get(c.contentId)?.type ?? null,
+            progressPercentage: c.progressPercentage,
+            totalReadingTimeMs: c.totalReadingTimeMs,
+        }));
+
+    const completed = contents
+        .filter(c => c.status === 'completed')
+        .sort(byRecency)
+        .slice(0, 3)
+        .map(c => ({
+            contentId: c.contentId,
+            title:     resolveContentTitle(c.contentId, contentMap),
+            type:      contentMap.get(c.contentId)?.type ?? null,
+            lastReadAt: c.lastReadAt,
+        }));
+
+    const abandoned = contents
+        .filter(c => c.status === 'abandoned')
+        .sort(byRecency)
+        .slice(0, 2)
+        .map(c => ({
+            contentId:          c.contentId,
+            title:              resolveContentTitle(c.contentId, contentMap),
+            type:               contentMap.get(c.contentId)?.type ?? null,
+            progressPercentage: c.progressPercentage,
+        }));
+
+    return { inProgress, completed, abandoned };
+}
+
+/**
+ * Build a single student row for the course breakdown table.
+ * Adds needsAttention flag and hasData boolean for direct UI consumption.
+ */
+function buildStudentBreakdownRow(student, users, contentMap) {
+    const user       = users.find(u => u.id === student.userId);
+    const hasData    = student.behavioral.totalSessions > 0;
+    // needsAttention: no activity OR composite score at the lowest ICDLI tier
+    const needsAttention = !hasData || student.readingLevels.composite < 30;
+    return {
+        userId:                  student.userId,
+        name:                    user?.nombre_completo ?? student.userId,
+        hasData,
+        needsAttention,
+        totalSessions:           student.behavioral.totalSessions,
+        composite:               r1(student.readingLevels.composite),
+        literal:                 r1(student.readingLevels.literal),
+        inferential:             r1(student.readingLevels.inferential),
+        critical:                r1(student.readingLevels.critical),
+        reflective:              r1(student.readingLevels.reflective),
+        level:                   compositeToLabel(student.readingLevels.composite),
+        totalLeoInteractions:    student.leoMetrics?.totalLeoInteractions ?? 0,
+        totalLeoOfflineAttempts: student.leoMetrics?.totalLeoOfflineAttempts ?? 0,
+        dominantLeoType:         student.leoMetrics?.dominantType ?? null,
+        lastAccessAt:            student.lastAccessAt ?? null,
+        totalReadingTimeMs:      student.behavioral.totalReadingTimeMs,
+        contentsInProgress:      student.contentStats?.inProgress ?? 0,
+        contentsCompleted:       student.contentStats?.completed  ?? 0,
+        contentsAbandoned:       student.contentStats?.abandoned  ?? 0,
+        readingDetails:          buildReadingDetails(student.contentStats, contentMap ?? new Map()),
+    };
+}
+
+/**
+ * Format raw CourseMetrics into the structured API response shape.
+ */
+function formatCourseResponse(raw, users) {
+    const contentMap = buildContentMap();
+
+    const totalLeoInteractions = raw.studentBreakdown.reduce(
+        (sum, s) => sum + (s.leoMetrics?.totalLeoInteractions ?? 0), 0
+    );
+    const totalLeoOfflineAttempts = raw.studentBreakdown.reduce(
+        (sum, s) => sum + (s.leoMetrics?.totalLeoOfflineAttempts ?? 0), 0
+    );
+
+    const alerts = generateAlerts(
+        raw.averages.behavioral,
+        raw.averages.readingLevels,
+        'course',
+        { studentCount: raw.studentCount, activeStudentCount: raw.activeStudentCount, totalLeoInteractions, totalLeoOfflineAttempts }
+    );
+
+    const engagementRate = raw.studentCount > 0
+        ? Math.round((raw.activeStudentCount / raw.studentCount) * 100) / 100
+        : 0;
+
+    const topNames    = raw.topPerformers.map(id => {
+        const u = users.find(u => u.id === id);
+        return { userId: id, name: u?.nombre_completo ?? id };
+    });
+    const bottomNames = raw.needsAttention.map(id => {
+        const u = users.find(u => u.id === id);
+        return { userId: id, name: u?.nombre_completo ?? id };
+    });
+
+    return {
+        courseId:   raw.courseId,
+        courseName: raw.courseName,
+        computedAt: raw.computedAt,
+        summary: {
+            studentCount:           raw.studentCount,
+            activeStudentCount:     raw.activeStudentCount,
+            engagementRate,
+            avgComposite:           r1(raw.averages.readingLevels.composite),
+            level:                  compositeToLabel(raw.averages.readingLevels.composite),
+            totalLeoInteractions,
+            totalLeoOfflineAttempts,
+        },
+        productMetrics:   raw.averages.behavioral,
+        readingLevels:    roundReadingLevels(raw.averages.readingLevels),
+        icdli:            raw.averages.icdli,
+        distributions:    raw.distributions,
+        studentBreakdown: raw.studentBreakdown.map(s => buildStudentBreakdownRow(s, users, contentMap)),
+        topPerformers:    topNames,
+        needsAttention:   bottomNames,
+        alerts,
+    };
+}
+
+/**
+ * Format raw SchoolMetrics into the structured API response shape.
+ * schoolRecord: { schoolId: slug, schoolName: canonical }
+ */
+function formatSchoolResponse(raw, schoolRecord) {
+    const alerts = generateAlerts(
+        raw.averages.behavioral,
+        raw.averages.readingLevels,
+        'school',
+        { studentCount: raw.studentCount, activeStudentCount: raw.activeStudentCount }
+    );
+
+    const engagementRate = raw.studentCount > 0
+        ? Math.round((raw.activeStudentCount / raw.studentCount) * 100) / 100
+        : 0;
+
+    return {
+        schoolId:   schoolRecord.schoolId,
+        schoolName: schoolRecord.schoolName,
+        computedAt: raw.computedAt,
+        summary: {
+            courseCount:        raw.courseCount,
+            studentCount:       raw.studentCount,
+            activeStudentCount: raw.activeStudentCount,
+            engagementRate,
+            avgComposite:       r1(raw.averages.readingLevels.composite),
+            level:              compositeToLabel(raw.averages.readingLevels.composite),
+        },
+        productMetrics:  raw.averages.behavioral,
+        readingLevels:   roundReadingLevels(raw.averages.readingLevels),
+        icdli:           raw.averages.icdli,
+        distributions:   raw.distributions,
+        courseBreakdown: raw.courseBreakdown,
+        alerts,
+    };
+}
+
+/**
+ * Compute the dataWindow for a course report from the raw student breakdown.
+ * Uses the engine's StudentMetrics[] (which carry dataWindow) before formatting.
+ * Returns null if no student has any recorded events.
+ */
+function computeCourseDataWindow(studentBreakdown) {
+    const windows = studentBreakdown.filter(s => s.dataWindow != null).map(s => s.dataWindow);
+    if (windows.length === 0) return null;
+    return {
+        from: windows.reduce((min, w) => Math.min(min, w.from), Infinity),
+        to:   windows.reduce((max, w) => Math.max(max, w.to),   -Infinity),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// METRICS ENDPOINTS
+// ---------------------------------------------------------------------------
+
+// GET /api/metrics/schools
+// Lists all schools with both stable schoolId (slug) and display schoolName.
+// Mediators see only schools of their assigned groups.
+// Requires: admin OR authenticated mediator/user.
+app.get('/api/metrics/schools', (req, res) => {
+    const { groups, users } = loadAndInitMetrics();
+    const requester = resolveRequester(req, users);
+
+    if (!isAdminRequest(req) && !requester) {
+        return res.status(401).json({ error: 'Auth requerida' });
+    }
+
+    let relevantGroups = groups;
+    if (!isAdminRequest(req) && requester && isMediatorRole(requester)) {
+        relevantGroups = groups.filter(g => isMediatorOfCourse(requester, g.id, groups));
+    }
+
+    // Deduplicate by canonical name, return { schoolId (slug), schoolName } pairs
+    const seen    = new Map(); // schoolName → slug
+    for (const g of relevantGroups) {
+        if (!g.school) continue;
+        const name = g.school.trim();
+        if (!seen.has(name)) seen.set(name, schoolNameToSlug(name));
+    }
+
+    const schools = [...seen.entries()]
+        .map(([schoolName, schoolId]) => ({ schoolId, schoolName }))
+        .sort((a, b) => a.schoolName.localeCompare(b.schoolName));
+
+    res.json({ schools });
+});
+
+// GET /api/metrics/student/:userId
+// Returns full structured metrics for a single student.
+// Requires: admin secret OR the student's own x-user-id.
+app.get('/api/metrics/student/:userId', (req, res) => {
+    const { userId }        = req.params;
+    const { users }         = loadAndInitMetrics();
+    const requester         = resolveRequester(req, users);
+    const selfAccess        = requester?.id === userId;
+
+    if (!isAdminRequest(req) && !selfAccess) {
+        return res.status(403).json({ error: 'Acceso denegado' });
+    }
+
+    try {
+        const raw = computeStudentMetrics(userId);
+        res.json(formatStudentResponse(raw));
+    } catch (e) {
+        log(`Metrics student error (${userId}): ${e.message}`, 'ERROR');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /api/metrics/course/:courseId
+// Returns aggregated structured metrics for a course.
+// Requires: admin secret OR mediator assigned to that course (x-user-id).
+app.get('/api/metrics/course/:courseId', (req, res) => {
+    const { courseId }      = req.params;
+    const { groups, users } = loadAndInitMetrics();
+    const requester         = resolveRequester(req, users);
+    const adminAccess       = isAdminRequest(req);
+    const mediatorAccess    = requester && isMediatorRole(requester) &&
+                              isMediatorOfCourse(requester, courseId, groups);
+
+    if (!adminAccess && !mediatorAccess) {
+        return res.status(403).json({ error: 'Acceso denegado' });
+    }
+
+    try {
+        const raw      = computeCourseMetrics(courseId);
+        const response = formatCourseResponse(raw, users);
+
+        // Augment each student with their pedagogical profile (computed from session timelines)
+        const pDb       = getAllProgressAsMap();
+        const leoRaw    = readJSON(LEO_INTERACTIONS_DB) || [];
+        const timelines = buildStudentSessionTimelines(pDb);
+        const leoByUser = buildStudentLeoInteractionsMap(leoRaw);
+
+        response.studentBreakdown = response.studentBreakdown.map(student => ({
+            ...student,
+            pedagogicalProfile: computePedagogicalProfile(
+                timelines[student.userId] ?? [],
+                leoByUser[student.userId] ?? []
+            ),
+        }));
+
+        res.json(response);
+    } catch (e) {
+        log(`Metrics course error (${courseId}): ${e.message}`, 'ERROR');
+        const status = e.message.includes('not found') ? 404 : 500;
+        res.status(status).json({ error: e.message });
+    }
+});
+
+// GET /api/metrics/school/:schoolId
+// Accepts schoolId as either a slug ("colegio-chibalete") or original name.
+// Returns aggregated structured metrics for a school.
+// Requires: admin secret only.
+app.get('/api/metrics/school/:schoolId', (req, res) => {
+    if (!isAdminRequest(req)) {
+        return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
+    }
+    const { groups }     = loadAndInitMetrics();
+    const input          = decodeURIComponent(req.params.schoolId);
+    const schoolRecord   = resolveSchoolRecord(input, groups);
+
+    if (!schoolRecord) {
+        return res.status(404).json({ error: `No se encontraron grupos para: ${input}` });
+    }
+
+    try {
+        const raw = computeSchoolMetrics(schoolRecord.schoolName);
+        res.json(formatSchoolResponse(raw, schoolRecord));
+    } catch (e) {
+        log(`Metrics school error (${schoolRecord.schoolName}): ${e.message}`, 'ERROR');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// REPORT ENDPOINTS
+// ---------------------------------------------------------------------------
+
+// GET /api/reports/course/:courseId
+// Report-ready version of course metrics. Adds reportMeta for direct rendering.
+// Requires: admin OR mediator assigned to that course.
+app.get('/api/reports/course/:courseId', (req, res) => {
+    const { courseId }      = req.params;
+    const { groups, users } = loadAndInitMetrics();
+    const requester         = resolveRequester(req, users);
+    const adminAccess       = isAdminRequest(req);
+    const mediatorAccess    = requester && isMediatorRole(requester) &&
+                              isMediatorOfCourse(requester, courseId, groups);
+
+    if (!adminAccess && !mediatorAccess) {
+        return res.status(403).json({ error: 'Acceso denegado' });
+    }
+
+    try {
+        const raw      = computeCourseMetrics(courseId);
+        const group    = groups.find(g => g.id === courseId);
+        const response = formatCourseResponse(raw, users);
+
+        // Compute dataWindow from engine's StudentMetrics[] (before formatting strips it)
+        const dataWindow = computeCourseDataWindow(raw.studentBreakdown);
+
+        response.reportMeta = {
+            generatedAt: new Date().toISOString(),
+            entityType:  'course',
+            entityId:    raw.courseId,
+            entityName:  raw.courseName,
+            school:      group?.school          ?? null,
+            schoolId:    group?.school ? schoolNameToSlug(group.school) : null,
+            grade:       group?.grade           ?? null,
+            groupType:   group?.type            ?? 'course',
+            dataWindow,
+        };
+
+        res.json(response);
+    } catch (e) {
+        log(`Report course error (${courseId}): ${e.message}`, 'ERROR');
+        const status = e.message.includes('not found') ? 404 : 500;
+        res.status(status).json({ error: e.message });
+    }
+});
+
+// GET /api/reports/school/:schoolId
+// Report-ready version of school metrics. Accepts slug or name.
+// Requires: admin secret only.
+app.get('/api/reports/school/:schoolId', (req, res) => {
+    if (!isAdminRequest(req)) {
+        return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
+    }
+    const { groups }   = loadAndInitMetrics();
+    const input        = decodeURIComponent(req.params.schoolId);
+    const schoolRecord = resolveSchoolRecord(input, groups);
+
+    if (!schoolRecord) {
+        return res.status(404).json({ error: `No se encontraron grupos para: ${input}` });
+    }
+
+    try {
+        const raw      = computeSchoolMetrics(schoolRecord.schoolName);
+        const response = formatSchoolResponse(raw, schoolRecord);
+
+        response.reportMeta = {
+            generatedAt: new Date().toISOString(),
+            entityType:  'school',
+            entityId:    schoolRecord.schoolId,
+            entityName:  schoolRecord.schoolName,
+            courseCount: raw.courseCount,
+            dataWindow:  null, // school-level window not computed (too expensive for sparse data)
+        };
+
+        res.json(response);
+    } catch (e) {
+        log(`Report school error (${schoolRecord.schoolName}): ${e.message}`, 'ERROR');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// CHIBALETE LU — CONTRATOS CANÓNICOS
+// Endpoints estables para Chibalete LU como cliente liviano del mismo backend.
+// Auth: requireUserAuth (x-user-id con cuenta activa).
+// ---------------------------------------------------------------------------
+
+// GET /api/auth/me
+// Devuelve identidad, roles y colegio del usuario autenticado.
+// LU lo usa al arranque para saber qué experiencia mostrar.
+app.get('/api/auth/me', requireUserAuth, (req, res) => {
+    const u = req.user;
+    const roles = Array.isArray(u.roles) ? u.roles : (u.rol ? [u.rol] : []);
+    res.json({
+        id: u.id,
+        nombre: u.nombre_completo ?? u.nombre ?? null,
+        email: u.email,
+        roles,
+        colegio: u.colegio ?? null,
+        accountStatus: u.accountStatus ?? 'active',
+    });
+});
+
+// GET /api/content/my-catalog
+// Devuelve solo el contenido accesible para el usuario autenticado.
+// LU no reimplementa lógica de permisos: consulta este endpoint.
+app.get('/api/content/my-catalog', requireUserAuth, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { titleIds, collectionIds } = getAccessibleContentIds(userId);
+        const allContent = readJSON(DB_FILE);
+
+        const catalog = allContent.filter(item =>
+            titleIds.includes(item.id) ||
+            (item.collectionId && collectionIds.includes(item.collectionId))
+        );
+
+        res.json({
+            success: true,
+            catalog: catalog.map(item => ({
+                id: item.id,
+                title: item.title ?? item.titulo ?? null,
+                type: item.type ?? item.tipo ?? null,
+                coverImage: item.coverImage ?? item.portada ?? null,
+                collectionId: item.collectionId ?? null,
+            })),
+        });
+    } catch (e) {
+        log(`GET my-catalog error (userId=${req.user.id}): ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al obtener catálogo' });
+    }
+});
+
+// GET /api/progress/my/:contentId
+// Devuelve el progreso del usuario autenticado para un contenido.
+// LU usa x-user-id en header; no expone userId en la URL.
+app.get('/api/progress/my/:contentId', requireUserAuth, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { contentId } = req.params;
+        const progress = getProgressItem(userId, contentId) ?? null;
+        res.json({ success: true, progress });
+    } catch (e) {
+        log(`GET progress/my error (userId=${req.user?.id}): ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al obtener progreso' });
+    }
+});
+
+// POST /api/progress/my/:contentId
+// Sincroniza el progreso del usuario autenticado para un contenido.
+// Misma lógica que /api/progress/:userId/:contentId/sync pero con userId desde sesión.
+app.post('/api/progress/my/:contentId', requireUserAuth, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { contentId } = req.params;
+        const payload = req.body;
+
+        if (!payload.canonicalProgress) {
+            return res.status(400).json({ error: 'Falta objeto canonicalProgress' });
+        }
+
+        const key = makeProgressKey(userId, contentId);
+        const existing = getProgressItem(userId, contentId);
+        const incomingDate = payload.updatedAt || new Date().toISOString();
+
+        if (existing && !shouldAcceptIncomingProgress(incomingDate, existing.updatedAt)) {
+            log(`LU concurrencia: progreso ignorado por ser más viejo (${key})`, 'DEBUG');
+            return res.json({ success: true, ignored: true, progress: existing });
+        }
+
+        const newProgress = {
+            id: key,
+            userId,
+            contentId,
+            isCompleted: payload.isCompleted || (existing?.isCompleted || false),
+            canonicalProgress: normalizeCanonicalProgress(payload.canonicalProgress),
+            updatedAt: incomingDate,
+            history: mergeHistoryWithLimit(existing?.history || [], payload.session),
+        };
+
+        upsertProgress(newProgress);
+
+        res.json({ success: true, progress: newProgress });
+    } catch (e) {
+        log(`POST progress/my error (userId=${req.user?.id}): ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al sincronizar progreso' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// INTERVENTIONS — mediator intervention log
+// ---------------------------------------------------------------------------
+
+function readInterventionsDb() {
+    try {
+        const data = readJSON(INTERVENTIONS_DB);
+        return Array.isArray(data?.interventions) ? data : { interventions: [] };
+    } catch { return { interventions: [] }; }
+}
+
+function writeInterventionsDb(data) {
+    writeJSON(INTERVENTIONS_DB, data);
+}
+
+/**
+ * POST /api/interventions
+ * Create a new pedagogical intervention record.
+ * Body: { studentId, courseId, type, note, contentId?, patternsAtIntervention[], readingTimeMsAtIntervention }
+ * Auth: mediador or administrador
+ */
+app.post('/api/interventions', requireUserAuth, (req, res) => {
+    try {
+        const requester = req.user;
+        if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
+            return res.status(403).json({ error: 'Solo mediadores pueden registrar intervenciones' });
+        }
+        const { studentId, courseId, type, note, contentId, patternsAtIntervention, readingTimeMsAtIntervention } = req.body;
+        if (!studentId || !courseId || !type) {
+            return res.status(400).json({ error: 'Faltan campos: studentId, courseId, type' });
+        }
+        const db = readInterventionsDb();
+        const intervention = {
+            id:                          require('crypto').randomUUID(),
+            mediatorId:                  requester.id,
+            studentId,
+            courseId,
+            type:                        String(type).slice(0, 60),
+            note:                        note ? String(note).slice(0, 500) : '',
+            contentId:                   contentId ?? null,
+            patternsAtIntervention:      Array.isArray(patternsAtIntervention) ? patternsAtIntervention : [],
+            readingTimeMsAtIntervention: Number(readingTimeMsAtIntervention) || 0,
+            createdAt:                   new Date().toISOString(),
+        };
+        db.interventions.push(intervention);
+        writeInterventionsDb(db);
+        log(`Intervention created: mediator=${requester.id} student=${studentId} type=${type}`, 'INFO');
+        res.status(201).json({ success: true, intervention });
+    } catch (e) {
+        log(`POST /api/interventions error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al guardar intervención' });
+    }
+});
+
+/**
+ * GET /api/interventions/course/:courseId
+ * Get all interventions for students in a course.
+ * Auth: mediador or administrador
+ */
+app.get('/api/interventions/course/:courseId', requireUserAuth, (req, res) => {
+    try {
+        const requester = req.user;
+        if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        const { courseId } = req.params;
+        const db = readInterventionsDb();
+        const interventions = db.interventions
+            .filter(i => i.courseId === courseId)
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt)); // most recent first
+        res.json({ success: true, courseId, interventions });
+    } catch (e) {
+        log(`GET /api/interventions/course error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al obtener intervenciones' });
+    }
+});
+
+/**
+ * GET /api/interventions/student/:studentId
+ * Full intervention history for one student with computed impact.
+ * Auth: mediador or administrador
+ */
+app.get('/api/interventions/student/:studentId', requireUserAuth, (req, res) => {
+    try {
+        const requester = req.user;
+        if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        const { studentId } = req.params;
+        const iDb      = readInterventionsDb();
+        const pDb      = getAllProgressAsMap();
+        const timeMap  = buildStudentReadingTimeMap(pDb);
+        const timelines = buildStudentSessionTimelines(pDb);
+        const history  = buildStudentInterventionHistory(iDb.interventions, studentId, timeMap, timelines);
+        res.json({ success: true, studentId, history });
+    } catch (e) {
+        log(`GET /api/interventions/student error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al obtener historial' });
+    }
+});
+
+/**
+ * GET /api/interventions/effectiveness
+ * Aggregated effectiveness analytics.
+ * Query params: courseId (optional, scopes to one course)
+ * Auth: mediador or administrador
+ */
+app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
+    try {
+        const requester = req.user;
+        if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        const { courseId } = req.query;
+        const iDb = readInterventionsDb();
+        const pDb = getAllProgressAsMap();
+
+        let interventions = iDb.interventions;
+        if (courseId) {
+            interventions = interventions.filter(iv => iv.courseId === courseId);
+        }
+
+        const timeMap      = buildStudentReadingTimeMap(pDb);
+        const timelines    = buildStudentSessionTimelines(pDb);
+        const leoRaw       = readJSON(LEO_INTERACTIONS_DB) || [];
+        const leoByUser    = buildStudentLeoInteractionsMap(leoRaw);
+
+        // Pass timelines to get temporal + dimension breakdowns in per-type stats
+        const effectivenessByType = computeEffectivenessByType(interventions, timeMap, timelines);
+        const successPatterns     = computeSuccessPatterns(interventions, timeMap);
+
+        const totalInterventions     = interventions.length;
+        const totalImproved          = effectivenessByType.reduce((s, e) => s + e.improved, 0);
+        const overallImprovementRate = totalInterventions > 0 ? totalImproved / totalInterventions : 0;
+
+        // Temporal aggregate rates — exclude interventions < 3 days old (too early)
+        const NOW           = Date.now();
+        const MS_3_DAYS     = 3 * 86_400_000;
+        const assessable    = interventions.filter(iv => NOW - new Date(iv.createdAt).getTime() >= MS_3_DAYS);
+        const totalAssessed = assessable.length;
+
+        let overallImmediateRate = 0;
+        let overallSustainedRate = 0;
+
+        if (totalAssessed > 0) {
+            let immediate = 0;
+            let sustained = 0;
+            for (const iv of assessable) {
+                const sessions = timelines[iv.studentId] ?? [];
+                const { temporalImpact } = computeTemporalImpact(iv, sessions);
+                if (temporalImpact === 'immediate_improvement') immediate++;
+                else if (temporalImpact === 'sustained_improvement') sustained++;
+            }
+            overallImmediateRate = immediate / totalAssessed;
+            overallSustainedRate = sustained / totalAssessed;
+        }
+
+        // Pedagogical profiles — compute for all students who have interventions in scope
+        const studentIds = [...new Set(interventions.map(iv => iv.studentId))];
+        const studentPedagogicalProfiles = {};
+        for (const uid of studentIds) {
+            studentPedagogicalProfiles[uid] = computePedagogicalProfile(
+                timelines[uid] ?? [],
+                leoByUser[uid] ?? []
+            );
+        }
+        const coursePedagogicalProfile = aggregateCoursePedagogicalProfile(studentPedagogicalProfiles);
+
+        // Top 2 most effective types (need >=2 samples to include)
+        const topTypes = effectivenessByType
+            .filter(e => e.total >= 2)
+            .slice(0, 2);
+
+        res.json({
+            success: true,
+            courseId:                    courseId ?? null,
+            totalInterventions,
+            totalImproved,
+            overallImprovementRate,
+            overallImmediateRate,
+            overallSustainedRate,
+            totalAssessed,
+            effectivenessByType,
+            topTypes,
+            successPatterns:             successPatterns.slice(0, 15),
+            coursePedagogicalProfile,
+            computedAt:                  Date.now(),
+        });
+    } catch (e) {
+        log(`GET /api/interventions/effectiveness error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al calcular efectividad' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// READING PROGRESS — new canonical endpoints
+// ---------------------------------------------------------------------------
+
+// GET /api/reading-progress/:userId
+// Returns computed ReadingProgress for every content this user has touched.
+// Auth: owner OR admin OR mediador
+app.get('/api/reading-progress/:userId', (req, res) => {
+    try {
+        const { userId } = req.params;
+        const users = readJSON(USERS_DB);
+        const requester  = resolveRequester(req, users);
+        const isOwner    = requester?.id === userId;
+        const isAdmin    = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isMediator = requester && isMediatorRole(requester);
+        if (!isOwner && !isAdmin && !isMediator) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        if (!users.find(u => u.id === userId)) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+        const db  = getAllProgressAsMap();
+        const cMap = buildContentMap();
+        const entries = Object.values(db.progressMap).filter(p => p.userId === userId);
+        const readingProgress = entries.map(raw => {
+            const rp = computeReadingProgress(raw);
+            rp.title = resolveContentTitle(rp.contentId, cMap);
+            rp.type  = cMap.get(rp.contentId)?.type ?? null;
+            return rp;
+        });
+        const summary = {
+            total:      readingProgress.length,
+            inProgress: readingProgress.filter(p => p.status === 'in_progress').length,
+            completed:  readingProgress.filter(p => p.status === 'completed').length,
+            abandoned:  readingProgress.filter(p => p.status === 'abandoned').length,
+        };
+        res.json({ success: true, userId, summary, readingProgress });
+    } catch (e) {
+        log(`GET reading-progress/${req.params.userId} error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al obtener progreso de lectura' });
+    }
+});
+
+// GET /api/reading-progress/:userId/:contentId
+// Returns computed ReadingProgress for a single content.
+app.get('/api/reading-progress/:userId/:contentId', (req, res) => {
+    try {
+        const { userId, contentId } = req.params;
+        const users = readJSON(USERS_DB);
+        const requester  = resolveRequester(req, users);
+        const isOwner    = requester?.id === userId;
+        const isAdmin    = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isMediator = requester && isMediatorRole(requester);
+        if (!isOwner && !isAdmin && !isMediator) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        const key = makeProgressKey(userId, contentId);
+        const db  = getAllProgressAsMap();
+        const raw = db.progressMap[key];
+        const readingProgress = raw ? computeReadingProgress(raw) : notStartedProgress(userId, contentId);
+        res.json({ success: true, readingProgress });
+    } catch (e) {
+        log(`GET reading-progress/${req.params.userId}/${req.params.contentId} error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al obtener progreso de lectura' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/playback-events
+// Recibe batch de eventos de ritmo narrativo y los persiste en JSONL.
+// Formato por línea: { event, ts, serverTs, userId, sessionId, contentId, ...campos }
+// Append-only — nunca lee, nunca modifica. Analizable offline con analyze_rhythm.js.
+// ---------------------------------------------------------------------------
+app.post('/api/playback-events', (req, res) => {
+    try {
+        const userId = req.headers['x-user-id'];
+        if (!userId) return res.status(401).end();
+
+        const events = req.body?.events;
+        if (!Array.isArray(events) || events.length === 0) {
+            return res.status(400).json({ error: 'events[] required' });
+        }
+        // Cap por request — previene abuso sin complejidad de rate-limit adicional
+        if (events.length > 50) return res.status(400).json({ error: 'max 50 events per request' });
+
+        const serverTs = Date.now();
+        const lines = events
+            .filter(e => typeof e?.event === 'string' && e.event.length > 0 && e.event.length < 64)
+            .map(e => JSON.stringify({ ...e, userId, serverTs }))
+            .join('\n');
+
+        if (!lines) return res.json({ ok: true, received: 0 });
+
+        // appendFile es async — la respuesta va antes de que el disco confirme.
+        // Aceptable: un evento perdido en un crash es preferible a bloquear el event loop.
+        fs.appendFile(PLAYBACK_EVENTS_LOG, lines + '\n', err => {
+            if (err) log(`[PLAYBACK_EVENTS] Write error: ${err.message}`, 'WARN');
+        });
+
+        res.json({ ok: true, received: events.length });
+    } catch (e) {
+        // Falla silenciosa intencionada: analytics nunca debe interrumpir la experiencia
+        log(`[PLAYBACK_EVENTS] Unexpected error: ${e.message}`, 'WARN');
+        res.json({ ok: true });
+    }
+});
+
+// POST /api/events
+// Recibe eventos de playback y los escribe al log del servidor.
+// Fire-and-forget desde el cliente — nunca bloquea el flujo de audio.
+// Requiere x-user-id para correlación — rechaza sin él (evita spam anónimo).
+app.post('/api/events', (req, res) => {
+    try {
+        const userId = req.headers['x-user-id'];
+        if (!userId) return res.status(400).end();
+        const { event, ts, ...rest } = req.body ?? {};
+        if (typeof event !== 'string') return res.status(400).json({ error: 'event required' });
+        log(`[EVENT] ${event} user=${userId} ts=${ts ?? Date.now()} ${JSON.stringify(rest)}`);
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ error: 'Error logging event' });
+    }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
     log(`Server running on port ${PORT}`);
-    // Run background check after distinct delay to allow server to settle
     setTimeout(checkMissingTTS, 2000);
+    // Build upload dedup index in background — never blocks startup
+    buildHashIndex(UPLOAD_DIR, UPLOAD_DIR)
+        .then(() => log(`[HASH_INDEX] Built: ${uploadHashIndex.size} entries`, 'INFO'))
+        .catch(e => log(`[HASH_INDEX] Build failed (dedup disabled): ${e.message}`, 'WARN'));
 });

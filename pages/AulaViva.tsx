@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
+import { isMediator, isAdmin as checkIsAdmin } from '../utils/permissions';
 import { analizarProgresoPedagogico } from '../services/geminiService';
-import type { Group, User, PedagogicalStats, Assignment, Content, AssignmentSubmission, Bundle } from '../types';
-import { Users, BookOpen, BrainCircuit, Clock, ChevronRight, BarChart2, Zap, Repeat, Timer, TrendingUp, ClipboardList, Plus, Calendar, Trash, FileText, X, Video, Image, Eye, EyeOff, Send, PenTool, MessageCircle, CheckCircle, Package, Sparkles } from 'lucide-react';
+import type { Group, User, PedagogicalStats, Assignment, Content, AssignmentSubmission, Bundle, StudentLearningSignals, StudentRecommendationBundle, LeoTeacherAdvisorSummary } from '../types';
+import { Users, BookOpen, BrainCircuit, Clock, ChevronRight, BarChart2, Zap, Repeat, Timer, TrendingUp, ClipboardList, Plus, Calendar, Trash, FileText, X, Video, Image, Eye, EyeOff, Send, PenTool, MessageCircle, CheckCircle, Package, Sparkles, Download, Loader2, ExternalLink, BookMarked } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 // Import extracted components
@@ -12,6 +13,7 @@ import { CompetencyBar } from '../components/aula-viva/CompetencyBar';
 import { DistributionChart } from '../components/aula-viva/DistributionChart';
 import { TrendChart } from '../components/aula-viva/TrendChart';
 import { StudentRow } from '../components/aula-viva/StudentRow';
+import ClubFormModal from '../components/ClubFormModal';
 
 // --- Components for Charts & Visuals ---
 // (Refactored to separate files in components/aula-viva)
@@ -192,6 +194,27 @@ const AulaViva: React.FC = () => {
     const [showClubContentModal, setShowClubContentModal] = useState(false);
     const [contentSearchQuery, setContentSearchQuery] = useState('');
 
+    // --- Exportación académica ---
+    const [downloadingTaskId, setDownloadingTaskId] = useState<string | null>(null);
+    const [downloadError, setDownloadError] = useState<string | null>(null);
+    const [downloadingStudentId, setDownloadingStudentId] = useState<string | null>(null);
+    const [studentDownloadError, setStudentDownloadError] = useState<string | null>(null);
+
+    // --- Club Creation ---
+    const [clubModalOpen, setClubModalOpen] = useState(false);
+    const [editingClub, setEditingClub] = useState<Group | null>(null);
+    const [clubCreatedFeedback, setClubCreatedFeedback] = useState<string | null>(null);
+
+    // --- C3 Mediation Actions ---
+    const [c3Modal, setC3Modal] = useState<'message' | 'focus' | 'suggest' | 'intervene' | null>(null);
+    const [c3Input, setC3Input] = useState('');
+    const [c3FocusField, setC3FocusField] = useState<'weeklyFocus' | 'readingNow'>('weeklyFocus');
+    const [c3IntervenStudent, setC3IntervenStudent] = useState<User | null>(null);
+    const [c3SuggestionText, setC3SuggestionText] = useState('');
+    const [c3Saving, setC3Saving] = useState(false);
+    const [c3SavedFeedback, setC3SavedFeedback] = useState<string | null>(null);
+    const [c3Filter, setC3Filter] = useState<'all' | 'rezago' | 'progreso' | 'avanzado'>('all');
+
     // --- Bundle Management (Fase 7) ---
     const [showBundleModal, setShowBundleModal] = useState(false);
     const [bundles, setBundles] = useState<Bundle[]>([]);
@@ -203,17 +226,20 @@ const AulaViva: React.FC = () => {
     const [currentPage, setCurrentPage] = useState(1);
     const itemsPerPage = 10;
 
-    const isTeacher = (user?.roles.includes('profesor') || user?.roles.includes('mediador') || user?.roles.includes('administrador')) && !isStudentViewMode;
-    const isAdmin = user?.roles.includes('administrador');
+    // canManageClassroom: true si el usuario tiene capacidades de gestión del aula
+    // (mediador, profesor legado, o administrador) y NO está en modo vista-estudiante.
+    // Reemplaza el naming heredado 'isTeacher' que reflejaba el rol 'profesor' (legacy).
+    const canManageClassroom = (isMediator(user) || checkIsAdmin(user)) && !isStudentViewMode;
+    const isAdmin = checkIsAdmin(user);
 
     useEffect(() => {
         if (!user) return;
 
-        // Logic for Teachers OR Admins in Student Mode (to allow context switching)
-        const shouldLoadAdminContext = isAdmin; 
-        const shouldLoadTeacherContext = isTeacher;
+        // Logic for Managers OR Admins in Student Mode (to allow context switching)
+        const shouldLoadAdminContext = isAdmin;
+        const shouldLoadManagementContext = canManageClassroom;
 
-        if (shouldLoadTeacherContext || shouldLoadAdminContext) {
+        if (shouldLoadManagementContext || shouldLoadAdminContext) {
             // LOAD CATALOG (Always needed for context)
             setCatalog(dataService.getContenidos(user.roles, user.id).filter(c => c.tipo === 'libro' || c.tipo === 'guia'));
 
@@ -244,7 +270,7 @@ const AulaViva: React.FC = () => {
                         }
                     }
                 }
-            } else if (isTeacher) {
+            } else if (canManageClassroom) {
                 // Regular Teacher
                 const teachersGroups = dataService.getTeacherGroups(user.id);
                 setGroups(teachersGroups);
@@ -255,7 +281,7 @@ const AulaViva: React.FC = () => {
         }
 
         // Student View Assignments Fetching
-        if (!isTeacher) { // This means we are in Student View (real student or Admin toggled)
+        if (!canManageClassroom) { // This means we are in Student View (real student or Admin toggled)
             if (isAdmin && selectedGroup) {
                 // Admin viewing specific group as student
                 setStudentAssignments(dataService.getAssignmentsByGroup(selectedGroup));
@@ -266,17 +292,17 @@ const AulaViva: React.FC = () => {
                 setStudentAssignments(allAssignments);
             }
         }
-    }, [user, isTeacher, isAdmin, selectedSchool, selectedGroup]); // Added selectedGroup dependency to refresh student view content
+    }, [user, canManageClassroom, isAdmin, selectedSchool, selectedGroup]); // Added selectedGroup dependency to refresh student view content
 
     useEffect(() => {
-        if (selectedGroup && isTeacher) {
+        if (selectedGroup && canManageClassroom) {
             const groupStudents = dataService.getGroupStudents(selectedGroup);
             setStudents(groupStudents);
             setGroupAssignments(dataService.getAssignmentsByGroup(selectedGroup));
             setSelectedStudent(null);
             setCurrentPage(1);
         }
-    }, [selectedGroup, isTeacher]);
+    }, [selectedGroup, canManageClassroom]);
 
     // --- Stats & Reports ---
     useEffect(() => {
@@ -286,6 +312,25 @@ const AulaViva: React.FC = () => {
             setAiReport('');
         }
     }, [selectedStudent]);
+
+    // Señales pedagógicas básicas derivadas de datos reales del estudiante seleccionado.
+    // Se recalculan cuando cambia el estudiante o las tareas del grupo.
+    const learningSignals: StudentLearningSignals | null = useMemo(() => {
+        if (!selectedStudent || groupAssignments.length === 0) return null;
+        return dataService.analyzeStudentLearningSignals(selectedStudent.id, groupAssignments);
+    }, [selectedStudent, groupAssignments]);
+
+    const recommendations: StudentRecommendationBundle | null = useMemo(() => {
+        if (!learningSignals || learningSignals.totalSubmitted === 0) return null;
+        return dataService.buildStudentPedagogicalRecommendations(learningSignals);
+    }, [learningSignals]);
+
+    // Síntesis de Leo para el docente — determinista, sin LLM, trazable.
+    // Se genera solo cuando hay señales Y recomendaciones disponibles.
+    const leoAdvisor: LeoTeacherAdvisorSummary | null = useMemo(() => {
+        if (!learningSignals || !recommendations) return null;
+        return dataService.buildLeoTeacherAdvisorSummary(learningSignals, recommendations);
+    }, [learningSignals, recommendations]);
 
     // --- Teacher Actions ---
     const generateReport = async () => {
@@ -311,6 +356,61 @@ const AulaViva: React.FC = () => {
         setSelectedAssignment(assignment);
         setShowReviewModal(true);
         setGradingSubmission(null);
+        setDownloadError(null);
+    };
+
+    const handleDownloadStudentSubmissions = async (studentId: string) => {
+        if (!user) return;
+        setDownloadingStudentId(studentId);
+        setStudentDownloadError(null);
+        try {
+            const res = await fetch(`/api/students/${studentId}/export-submissions`, {
+                headers: { 'x-user-id': user.id },
+            });
+            if (!res.ok) throw new Error(`Error del servidor (${res.status})`);
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const disposition = res.headers.get('Content-Disposition');
+            const match = disposition?.match(/filename="([^"]+)"/);
+            a.download = match?.[1] ?? `tareas_${studentId}.zip`;
+            a.href = url;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (err: any) {
+            setStudentDownloadError('No se pudo descargar. Intenta de nuevo.');
+        } finally {
+            setDownloadingStudentId(null);
+        }
+    };
+
+    const handleDownloadSubmissions = async (taskId: string) => {
+        if (!user) return;
+        setDownloadingTaskId(taskId);
+        setDownloadError(null);
+        try {
+            const res = await fetch(`/api/tasks/${taskId}/export-submissions`, {
+                headers: { 'x-user-id': user.id },
+            });
+            if (!res.ok) throw new Error(`Error del servidor (${res.status})`);
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const disposition = res.headers.get('Content-Disposition');
+            const match = disposition?.match(/filename="([^"]+)"/);
+            a.download = match?.[1] ?? `tareas_${taskId}.zip`;
+            a.href = url;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (err: any) {
+            setDownloadError('No se pudo descargar. Intenta de nuevo.');
+        } finally {
+            setDownloadingTaskId(null);
+        }
     };
 
     const handleSelectSubmission = (sub: AssignmentSubmission) => {
@@ -421,6 +521,79 @@ const AulaViva: React.FC = () => {
         }
     };
 
+    // --- C3 Mediation Action Handlers ---
+    const refreshGroups = () => {
+        const newGroups = isAdmin
+            ? dataService.getGroupsByColegio(selectedSchool || user?.colegio || '')
+            : dataService.getTeacherGroups(user!.id);
+        setGroups(newGroups);
+    };
+
+    const showC3Feedback = (msg: string) => {
+        setC3SavedFeedback(msg);
+        setTimeout(() => setC3SavedFeedback(null), 3000);
+    };
+
+    const handleC3SaveMessage = async () => {
+        if (!selectedGroup || !c3Input.trim()) return;
+        setC3Saving(true);
+        await dataService.updateGroup(selectedGroup, { mediationMessage: c3Input.trim() } as any);
+        refreshGroups();
+        setC3Modal(null);
+        setC3Input('');
+        setC3Saving(false);
+        showC3Feedback('Mensaje guardado');
+    };
+
+    const handleC3SaveFocus = async () => {
+        if (!selectedGroup || !c3Input.trim()) return;
+        setC3Saving(true);
+        await dataService.updateGroup(selectedGroup, { [c3FocusField]: c3Input.trim() } as any);
+        refreshGroups();
+        setC3Modal(null);
+        setC3Input('');
+        setC3Saving(false);
+        showC3Feedback(c3FocusField === 'weeklyFocus' ? 'Foco semanal actualizado' : 'Lectura activa actualizada');
+    };
+
+    const handleC3OpenSuggest = () => {
+        if (!currentGroup) return;
+        const cg = currentGroup as typeof currentGroup & { mediationMessage?: string; weeklyFocus?: string; readingNow?: string };
+        const allProgress = students.map(s => {
+            const progs = clubContentItems.map(item => dataService.getProgresoUsuarioLibro(s.id, item.id)?.porcentaje ?? 0);
+            const avg = progs.length > 0 ? Math.round(progs.reduce((a, b) => a + b, 0) / progs.length) : 0;
+            return { student: s, avg };
+        });
+        const groupAvg = students.length > 0
+            ? Math.round(allProgress.reduce((sum, p) => sum + p.avg, 0) / students.length)
+            : 0;
+        const behindStudents = allProgress.filter(p => p.avg < 20).map(p => p.student.nombre_completo);
+        const aheadStudents  = allProgress.filter(p => p.avg >= 80).map(p => p.student.nombre_completo);
+
+        let suggestion = `Progreso promedio del club: ${groupAvg}%.\n\n`;
+        if (behindStudents.length > 0) {
+            suggestion += `⚠️ ${behindStudents.length} miembro${behindStudents.length > 1 ? 's' : ''} con avance menor al 20%: ${behindStudents.join(', ')}.\n→ Recomendación: sesión de acompañamiento individualizado o lectura compartida en voz alta.\n\n`;
+        }
+        if (aheadStudents.length > 0) {
+            suggestion += `✅ ${aheadStudents.length} miembro${aheadStudents.length > 1 ? 's han' : ' ha'} completado más del 80%: ${aheadStudents.join(', ')}.\n→ Considera asignarles el rol de comentaristas o proponerles una reflexión escrita.\n\n`;
+        }
+        if (groupAvg >= 70) {
+            suggestion += `El grupo está en recta final. Momento ideal para una sesión de cierre: debate, reseña o presentación oral.`;
+        } else if (groupAvg >= 40) {
+            suggestion += `El grupo está a mitad de camino. Refuerza comprensión con preguntas inferenciales sobre${cg.readingNow ? ` "${cg.readingNow}"` : ' la lectura activa'}.`;
+        } else {
+            suggestion += `El grupo está en etapa inicial. Prioriza motivación: comparte el contexto del autor${cg.weeklyFocus ? ` y recuerda el foco: "${cg.weeklyFocus}"` : ''}.`;
+        }
+        setC3SuggestionText(suggestion.trim());
+        setC3Modal('suggest');
+    };
+
+    const handleC3OpenIntervene = (student: User) => {
+        setC3IntervenStudent(student);
+        setC3Input('');
+        setC3Modal('intervene');
+    };
+
     // --- Student Actions ---
     const handleSolveInBitacora = (assignment: Assignment) => {
         if (!user) return;
@@ -435,6 +608,17 @@ const AulaViva: React.FC = () => {
             detailPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
     }, [selectedStudent]);
+
+    // --- ESC closes C3 modal ---
+    useEffect(() => {
+        if (!c3Modal) return;
+        const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') { setC3Modal(null); setC3Input(''); setC3IntervenStudent(null); } };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [c3Modal]);
+
+    // --- Reset grid filter when group changes ---
+    useEffect(() => { setC3Filter('all'); }, [selectedGroup]);
 
     // --- Visuals ---
 
@@ -525,7 +709,7 @@ const AulaViva: React.FC = () => {
     if (!user) return null;
 
     // --- STUDENT VIEW RENDER ---
-    if (!isTeacher) {
+    if (!canManageClassroom) {
         return (
             <div className="p-4 md:p-8 min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200">
                 <header className="flex flex-col md:flex-row justify-between items-center mb-8">
@@ -669,7 +853,7 @@ const AulaViva: React.FC = () => {
                         )}
                     </div>
                     <div className="mt-4 md:mt-0 flex flex-col md:flex-row gap-4 items-end md:items-center">
-                        {user?.roles.includes('administrador') && (
+                        {isAdmin && (
                             <button
                                 onClick={() => setIsStudentViewMode(!isStudentViewMode)}
                                 className={`flex items-center px-3 py-2 rounded-lg text-sm font-bold border transition-colors ${isStudentViewMode 
@@ -706,8 +890,24 @@ const AulaViva: React.FC = () => {
                             {groups.length === 0 && <option value="">Sin grupos asignados</option>}
                             {groups.map(g => <option key={g.id} value={g.id}>{g.type === 'club' ? '🎪 ' : '🏫 '}{g.name}</option>)}
                         </select>
+
+                        <button
+                            onClick={() => { setEditingClub(null); setClubModalOpen(true); }}
+                            className="flex items-center gap-2 px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-sm transition-colors shadow-sm whitespace-nowrap"
+                        >
+                            <Plus size={16} />
+                            Nuevo club
+                        </button>
                     </div>
                 </header>
+
+                {/* Club creation success feedback */}
+                {clubCreatedFeedback && (
+                    <div className="mb-4 flex items-center gap-3 px-4 py-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl text-sm text-green-700 dark:text-green-400 animate-in fade-in slide-in-from-top-2">
+                        <CheckCircle size={16} className="flex-shrink-0" />
+                        <span>Club <strong>{clubCreatedFeedback}</strong> creado. Ya está disponible en el selector.</span>
+                    </div>
+                )}
 
                 {/* --- Fase 6D: Banner de Vigencia Temporal del Grupo Activo --- */}
                 {currentGroup?.type === 'club' && (currentGroup.accessStartsAt || currentGroup.accessEndsAt) && (() => {
@@ -807,6 +1007,385 @@ const AulaViva: React.FC = () => {
                     >
                         <X size={14} />
                     </button>
+                </div>
+            )}
+
+            {/* C3 — Club Session Panel (only when a club is selected) */}
+            {currentGroup?.type === 'club' && (() => {
+                const cg = currentGroup as typeof currentGroup & {
+                    mediationMessage?: string;
+                    mediationQuestions?: string[];
+                    weeklyFocus?: string;
+                    readingNow?: string;
+                    nextMilestone?: string;
+                };
+                const hasSessionData = cg.mediationMessage || cg.weeklyFocus || cg.readingNow || cg.nextMilestone || (cg.mediationQuestions && cg.mediationQuestions.length > 0);
+
+                // Per-student average across all club content (for detection + grouping)
+                const studentAvgs = students.map(s => {
+                    const progs = clubContentItems.map(item => dataService.getProgresoUsuarioLibro(s.id, item.id)?.porcentaje ?? 0);
+                    const avg = progs.length > 0 ? Math.round(progs.reduce((a, b) => a + b, 0) / progs.length) : 0;
+                    return { student: s, avg };
+                });
+                const rezagoCount    = studentAvgs.filter(p => p.avg < 20).length;
+                const sinProgresoCount = studentAvgs.filter(p => p.avg === 0).length;
+                const progresoCount  = studentAvgs.filter(p => p.avg >= 20 && p.avg < 80).length;
+                const avanzadoCount  = studentAvgs.filter(p => p.avg >= 80).length;
+
+                // Filtered students for the progress grid
+                const filteredStudents = c3Filter === 'rezago'   ? students.filter((_, i) => studentAvgs[i].avg < 20)
+                                       : c3Filter === 'progreso'  ? students.filter((_, i) => studentAvgs[i].avg >= 20 && studentAvgs[i].avg < 80)
+                                       : c3Filter === 'avanzado'  ? students.filter((_, i) => studentAvgs[i].avg >= 80)
+                                       : students;
+
+                // Column highlight for readingNow
+                const readingNowLower = cg.readingNow?.toLowerCase() ?? '';
+                const isReadingNowCol = (item: Content) =>
+                    readingNowLower.length > 0 && item.titulo.toLowerCase().includes(readingNowLower.split('—')[0].trim());
+
+                return (
+                    <div className="mb-8 space-y-4 animate-in fade-in">
+
+                        {/* Part 1 — Save feedback toast */}
+                        {c3SavedFeedback && (
+                            <div className="flex items-center gap-2 px-4 py-2.5 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-xl text-sm font-bold text-green-700 dark:text-green-400 animate-in fade-in slide-in-from-top-1">
+                                <CheckCircle size={14} /> {c3SavedFeedback}
+                            </div>
+                        )}
+
+                        {/* Part 3 — Detection banner */}
+                        {students.length > 0 && (rezagoCount > 0 || sinProgresoCount > 0) && (
+                            <div className="flex items-center justify-between gap-3 px-4 py-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-xl">
+                                <div className="flex items-center gap-2 text-sm text-red-700 dark:text-red-400">
+                                    <span className="text-base">⚠️</span>
+                                    <span>
+                                        {rezagoCount > 0 && <><strong>{rezagoCount}</strong> con rezago (&lt;20%){sinProgresoCount > 0 ? ' · ' : ''}</>}
+                                        {sinProgresoCount > 0 && <><strong>{sinProgresoCount}</strong> sin progreso</>}
+                                    </span>
+                                </div>
+                                <button
+                                    onClick={handleC3OpenSuggest}
+                                    className="shrink-0 px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                                >
+                                    Intervenir ahora
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Section header + DashboardMediador link */}
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-bold uppercase tracking-wider text-pink-600 dark:text-pink-400 flex items-center gap-2">
+                                <BookMarked size={15} /> Sesión del Club
+                            </h3>
+                            <button
+                                onClick={() => navigate(`/dashboard/curso/${currentGroup.id}`)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 hover:bg-indigo-100 dark:hover:bg-indigo-800/50 border border-indigo-200 dark:border-indigo-700 rounded-lg transition-colors"
+                            >
+                                <BarChart2 size={13} /> Ver analítica completa <ExternalLink size={11} />
+                            </button>
+                        </div>
+
+                        {/* Group-level action buttons */}
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                onClick={handleC3OpenSuggest}
+                                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-800/40 rounded-lg transition-colors"
+                            >
+                                <BrainCircuit size={13} /> Sugerir intervención
+                            </button>
+                            <button
+                                onClick={() => { setC3Input(cg.mediationMessage ?? ''); setC3Modal('message'); }}
+                                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold bg-pink-50 dark:bg-pink-900/20 border border-pink-200 dark:border-pink-700 text-pink-700 dark:text-pink-400 hover:bg-pink-100 dark:hover:bg-pink-800/40 rounded-lg transition-colors"
+                            >
+                                <MessageCircle size={13} /> Mensaje al grupo
+                            </button>
+                            <button
+                                onClick={() => { setC3Input(cg.weeklyFocus ?? ''); setC3FocusField('weeklyFocus'); setC3Modal('focus'); }}
+                                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-800/40 rounded-lg transition-colors"
+                            >
+                                <PenTool size={13} /> Definir foco
+                            </button>
+                        </div>
+
+                        {/* Session context tiles */}
+                        {hasSessionData && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {cg.mediationMessage && (
+                                    <div className="md:col-span-2 px-4 py-3 bg-pink-50 dark:bg-pink-900/20 border border-pink-200 dark:border-pink-800 rounded-xl">
+                                        <p className="text-[10px] font-bold uppercase text-pink-500 tracking-wider mb-1">Mensaje del mediador</p>
+                                        <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed">{cg.mediationMessage}</p>
+                                    </div>
+                                )}
+                                {(cg.weeklyFocus || cg.readingNow || cg.nextMilestone) && (
+                                    <div className="flex flex-col gap-2">
+                                        {cg.weeklyFocus && (
+                                            <div className="px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+                                                <p className="text-[10px] font-bold uppercase text-gray-400 tracking-wider">Foco de la semana</p>
+                                                <p className="text-sm font-semibold text-gray-700 dark:text-gray-200 mt-0.5">{cg.weeklyFocus}</p>
+                                            </div>
+                                        )}
+                                        {cg.readingNow && (
+                                            <div className="px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+                                                <p className="text-[10px] font-bold uppercase text-gray-400 tracking-wider">Leyendo ahora</p>
+                                                <p className="text-sm font-semibold text-gray-700 dark:text-gray-200 mt-0.5">{cg.readingNow}</p>
+                                            </div>
+                                        )}
+                                        {cg.nextMilestone && (
+                                            <div className="px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+                                                <p className="text-[10px] font-bold uppercase text-gray-400 tracking-wider">Próximo hito</p>
+                                                <p className="text-sm font-semibold text-gray-700 dark:text-gray-200 mt-0.5">{cg.nextMilestone}</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {cg.mediationQuestions && cg.mediationQuestions.length > 0 && (
+                                    <div className="px-3 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl">
+                                        <p className="text-[10px] font-bold uppercase text-gray-400 tracking-wider mb-2">Preguntas de reflexión</p>
+                                        <ol className="space-y-1.5">
+                                            {cg.mediationQuestions.map((q, i) => (
+                                                <li key={i} className="flex gap-2 text-sm text-gray-700 dark:text-gray-300">
+                                                    <span className="font-bold text-pink-500 shrink-0">{i + 1}.</span>
+                                                    <span>{q}</span>
+                                                </li>
+                                            ))}
+                                        </ol>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Per-content progress grid */}
+                        {clubContentItems.length > 0 && students.length > 0 && (
+                            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
+                                {/* Part 5 — Grouping summary + filter chips */}
+                                <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-2">
+                                    <p className="text-xs font-bold uppercase text-gray-500 tracking-wider mr-1">Progreso por lectura</p>
+                                    {[
+                                        { key: 'all',      label: `Todos (${students.length})`,   cls: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-600' },
+                                        { key: 'rezago',   label: `Rezago (${rezagoCount})`,       cls: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-700' },
+                                        { key: 'progreso', label: `En progreso (${progresoCount})`, cls: 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-700' },
+                                        { key: 'avanzado', label: `Avanzados (${avanzadoCount})`,  cls: 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-green-200 dark:border-green-700' },
+                                    ].map(chip => (
+                                        <button
+                                            key={chip.key}
+                                            onClick={() => setC3Filter(chip.key as typeof c3Filter)}
+                                            className={`px-2.5 py-1 text-[11px] font-bold rounded-full border transition-colors ${chip.cls} ${c3Filter === chip.key ? 'ring-2 ring-offset-1 ring-current' : 'opacity-70 hover:opacity-100'}`}
+                                        >
+                                            {chip.label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="border-b border-gray-100 dark:border-gray-700">
+                                                <th className="text-left px-4 py-2 font-bold text-gray-500 uppercase tracking-wider min-w-[140px]">Miembro</th>
+                                                {/* Part 4 — readingNow column highlight */}
+                                                {clubContentItems.map(item => {
+                                                    const isActive = isReadingNowCol(item);
+                                                    return (
+                                                        <th key={item.id} className={`text-center px-3 py-2 font-bold uppercase tracking-wider max-w-[120px] ${isActive ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400' : 'text-gray-500'}`}>
+                                                            <span className="block truncate" title={item.titulo}>{item.titulo}</span>
+                                                            {isActive && <span className="block text-[9px] text-indigo-400 font-bold normal-case tracking-normal mt-0.5">leyendo ahora</span>}
+                                                        </th>
+                                                    );
+                                                })}
+                                                <th className="text-center px-3 py-2 font-bold text-gray-500 uppercase tracking-wider w-24"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filteredStudents.map(student => {
+                                                const sAvg = studentAvgs.find(p => p.student.id === student.id)?.avg ?? 0;
+                                                const isLow = sAvg < 20;
+                                                return (
+                                                    <tr key={student.id} className={`border-b border-gray-50 dark:border-gray-700/50 transition-colors ${isLow ? 'bg-red-50/40 dark:bg-red-900/10 hover:bg-red-50 dark:hover:bg-red-900/20' : 'hover:bg-gray-50 dark:hover:bg-gray-700/30'}`}>
+                                                        <td className="px-4 py-2 font-medium truncate max-w-[140px]">
+                                                            <span className={isLow ? 'text-red-700 dark:text-red-400' : 'text-gray-700 dark:text-gray-300'}>
+                                                                {student.nombre_completo}
+                                                            </span>
+                                                            {isLow && <span className="ml-1 text-[9px] font-bold text-red-500 uppercase">rezago</span>}
+                                                        </td>
+                                                        {clubContentItems.map(item => {
+                                                            const isActive = isReadingNowCol(item);
+                                                            const prog = dataService.getProgresoUsuarioLibro(student.id, item.id);
+                                                            const pct = prog?.porcentaje ?? 0;
+                                                            const color = pct >= 80 ? 'bg-green-500' : pct >= 30 ? 'bg-indigo-500' : 'bg-gray-300 dark:bg-gray-600';
+                                                            return (
+                                                                <td key={item.id} className={`px-3 py-2 text-center ${isActive ? 'bg-indigo-50/50 dark:bg-indigo-900/10' : ''}`}>
+                                                                    <div className="flex flex-col items-center gap-1">
+                                                                        <span className={`font-bold ${pct >= 80 ? 'text-green-600 dark:text-green-400' : pct >= 30 ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-400'}`}>{pct}%</span>
+                                                                        <div className="w-12 h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
+                                                                            <div className={`h-full rounded-full ${color} transition-all`} style={{ width: `${pct}%` }} />
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+                                                            );
+                                                        })}
+                                                        {/* Part 1 — Intervenir button highlights red for low-progress students */}
+                                                        <td className="px-3 py-2 text-center">
+                                                            <button
+                                                                onClick={() => handleC3OpenIntervene(student)}
+                                                                className={`px-2.5 py-1 text-[11px] font-bold border rounded-md transition-colors whitespace-nowrap ${isLow
+                                                                    ? 'bg-red-100 dark:bg-red-900/30 border-red-300 dark:border-red-700 text-red-700 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-800/40'
+                                                                    : 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-800/40'}`}
+                                                            >
+                                                                Intervenir
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                            {filteredStudents.length === 0 && (
+                                                <tr><td colSpan={clubContentItems.length + 2} className="px-4 py-4 text-center text-xs text-gray-400">Sin miembros en esta categoría.</td></tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {!hasSessionData && clubContentItems.length === 0 && (
+                            <div className="px-4 py-5 bg-gray-50 dark:bg-gray-800/50 border border-dashed border-gray-200 dark:border-gray-700 rounded-xl text-center">
+                                <p className="text-sm text-gray-400">No hay datos de sesión configurados para este club.</p>
+                                <p className="text-xs text-gray-400 mt-1">Edita el club para agregar mensaje del mediador, foco semanal y lectura activa.</p>
+                            </div>
+                        )}
+                    </div>
+                );
+            })()}
+
+            {/* C3 Mediation Modal */}
+            {c3Modal !== null && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={() => { setC3Modal(null); setC3Input(''); }}>
+                    <div className="bg-white dark:bg-gray-900 w-full max-w-sm rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 p-6" onClick={e => e.stopPropagation()}>
+
+                        {/* Mensaje al grupo */}
+                        {c3Modal === 'message' && (
+                            <>
+                                <h4 className="font-bold text-gray-800 dark:text-gray-100 mb-1">Mensaje al grupo</h4>
+                                <p className="text-xs text-gray-500 mb-4">Se mostrará a todos los miembros como mensaje del mediador.</p>
+                                <textarea
+                                    autoFocus
+                                    rows={4}
+                                    value={c3Input}
+                                    onChange={e => setC3Input(e.target.value)}
+                                    placeholder="Escribe tu mensaje..."
+                                    className="w-full px-3 py-2 text-sm bg-gray-100 dark:bg-gray-800 border-transparent rounded-xl focus:ring-2 focus:ring-pink-500 focus:bg-white dark:focus:bg-gray-700 transition-all resize-none"
+                                />
+                                <div className="flex gap-2 mt-4">
+                                    <button onClick={() => { setC3Modal(null); setC3Input(''); }} className="flex-1 py-2 text-sm font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 rounded-xl transition-colors">Cancelar</button>
+                                    <button onClick={handleC3SaveMessage} disabled={!c3Input.trim() || c3Saving} className="flex-1 py-2 text-sm font-bold text-white bg-pink-600 hover:bg-pink-700 disabled:opacity-50 rounded-xl transition-colors flex items-center justify-center gap-1">
+                                        {c3Saving ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Guardar
+                                    </button>
+                                </div>
+                            </>
+                        )}
+
+                        {/* Definir foco */}
+                        {c3Modal === 'focus' && (
+                            <>
+                                <h4 className="font-bold text-gray-800 dark:text-gray-100 mb-1">Definir foco</h4>
+                                <p className="text-xs text-gray-500 mb-3">Actualiza el foco de la semana o la lectura activa del club.</p>
+                                <div className="flex gap-2 mb-3">
+                                    <button
+                                        onClick={() => { setC3FocusField('weeklyFocus'); setC3Input((currentGroup as any).weeklyFocus ?? ''); }}
+                                        className={`flex-1 py-1.5 text-xs font-bold rounded-lg border transition-colors ${c3FocusField === 'weeklyFocus' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 border-gray-200 dark:border-gray-700 hover:bg-gray-200'}`}
+                                    >Foco semanal</button>
+                                    <button
+                                        onClick={() => { setC3FocusField('readingNow'); setC3Input((currentGroup as any).readingNow ?? ''); }}
+                                        className={`flex-1 py-1.5 text-xs font-bold rounded-lg border transition-colors ${c3FocusField === 'readingNow' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 border-gray-200 dark:border-gray-700 hover:bg-gray-200'}`}
+                                    >Leyendo ahora</button>
+                                </div>
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={c3Input}
+                                    onChange={e => setC3Input(e.target.value)}
+                                    onKeyDown={e => e.key === 'Enter' && handleC3SaveFocus()}
+                                    placeholder={c3FocusField === 'weeklyFocus' ? 'Ej: Comprensión inferencial del capítulo 3' : 'Ej: El Principito — capítulos 1-5'}
+                                    className="w-full px-3 py-2 text-sm bg-gray-100 dark:bg-gray-800 border-transparent rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white dark:focus:bg-gray-700 transition-all"
+                                />
+                                <div className="flex gap-2 mt-4">
+                                    <button onClick={() => { setC3Modal(null); setC3Input(''); }} className="flex-1 py-2 text-sm font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 rounded-xl transition-colors">Cancelar</button>
+                                    <button onClick={handleC3SaveFocus} disabled={!c3Input.trim() || c3Saving} className="flex-1 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-xl transition-colors flex items-center justify-center gap-1">
+                                        {c3Saving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />} Guardar
+                                    </button>
+                                </div>
+                            </>
+                        )}
+
+                        {/* Sugerir intervención */}
+                        {c3Modal === 'suggest' && (
+                            <>
+                                <h4 className="font-bold text-gray-800 dark:text-gray-100 mb-3 flex items-center gap-2"><BrainCircuit size={16} className="text-amber-500" /> Sugerencia de intervención</h4>
+                                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl p-4 text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-line mb-4">
+                                    {c3SuggestionText}
+                                </div>
+                                {/* Part 2 — action bridge buttons */}
+                                <p className="text-[10px] font-bold uppercase text-gray-400 tracking-wider mb-2">Usar sugerencia como</p>
+                                <div className="flex gap-2 mb-3">
+                                    <button
+                                        onClick={() => { setC3Input(c3SuggestionText); setC3Modal('message'); }}
+                                        className="flex-1 py-2 text-xs font-bold bg-pink-50 dark:bg-pink-900/20 border border-pink-200 dark:border-pink-700 text-pink-700 dark:text-pink-400 hover:bg-pink-100 rounded-lg transition-colors flex items-center justify-center gap-1"
+                                    >
+                                        <MessageCircle size={12} /> Mensaje al grupo
+                                    </button>
+                                    <button
+                                        onClick={() => { setC3Input(c3SuggestionText.split('\n')[0]); setC3FocusField('weeklyFocus'); setC3Modal('focus'); }}
+                                        className="flex-1 py-2 text-xs font-bold bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-400 hover:bg-indigo-100 rounded-lg transition-colors flex items-center justify-center gap-1"
+                                    >
+                                        <PenTool size={12} /> Foco semanal
+                                    </button>
+                                </div>
+                                <button onClick={() => setC3Modal(null)} className="w-full py-2 text-sm font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 rounded-xl transition-colors">Cerrar</button>
+                            </>
+                        )}
+
+                        {/* Intervenir — per student */}
+                        {c3Modal === 'intervene' && c3IntervenStudent && (
+                            <>
+                                <h4 className="font-bold text-gray-800 dark:text-gray-100 mb-0.5">Intervención — {c3IntervenStudent.nombre_completo}</h4>
+                                <p className="text-xs text-gray-500 mb-4">Escribe una nota de acompañamiento o sugerencia para este miembro.</p>
+                                <textarea
+                                    autoFocus
+                                    rows={4}
+                                    value={c3Input}
+                                    onChange={e => setC3Input(e.target.value)}
+                                    placeholder="Ej: Compartir vocabulario del capítulo 2. Preguntar por la escena del barco."
+                                    className="w-full px-3 py-2 text-sm bg-gray-100 dark:bg-gray-800 border-transparent rounded-xl focus:ring-2 focus:ring-amber-500 focus:bg-white dark:focus:bg-gray-700 transition-all resize-none"
+                                />
+                                <div className="flex gap-2 mt-4">
+                                    <button onClick={() => { setC3Modal(null); setC3Input(''); setC3IntervenStudent(null); }} className="flex-1 py-2 text-sm font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 rounded-xl transition-colors">Cancelar</button>
+                                    <button
+                                        onClick={() => {
+                                            if (!c3Input.trim() || !selectedGroup || !c3IntervenStudent) return;
+                                            // Part 6 — semantic tag via description prefix (future Leo integration)
+                                            dataService.createAssignment({
+                                                groupId: selectedGroup,
+                                                contentId: '',
+                                                contentTitle: `Nota: ${c3IntervenStudent.nombre_completo}`,
+                                                assignedDate: new Date().toISOString(),
+                                                dueDate: '',
+                                                description: c3Input.trim(),
+                                                submissionType: undefined,
+                                                ...(({ _tag: 'mediator_intervention', _targetStudentId: c3IntervenStudent.id }) as any),
+                                            } as any);
+                                            setC3Modal(null);
+                                            setC3Input('');
+                                            setC3IntervenStudent(null);
+                                            if (selectedGroup) setGroupAssignments(dataService.getAssignmentsByGroup(selectedGroup));
+                                            showC3Feedback('Nota de intervención guardada');
+                                        }}
+                                        disabled={!c3Input.trim()}
+                                        className="flex-1 py-2 text-sm font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-xl transition-colors flex items-center justify-center gap-1"
+                                    >
+                                        <Send size={14} /> Guardar nota
+                                    </button>
+                                </div>
+                            </>
+                        )}
+
+                    </div>
                 </div>
             )}
 
@@ -1067,11 +1646,31 @@ const AulaViva: React.FC = () => {
                         <div className="lg:col-span-1" ref={detailPanelRef}>
                             {selectedStudent && studentStats ? (
                                 <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700 sticky top-24 animate-in slide-in-from-right-4">
-                                    <div className="flex items-center mb-6">
-                                        <img src={selectedStudent.avatar_url} className="w-16 h-16 rounded-full mr-4 shadow-md border-2 border-indigo-500" />
-                                        <div>
-                                            <h2 className="text-xl font-bold">{selectedStudent.nombre_completo}</h2>
-                                            <p className="text-sm text-gray-500">{selectedStudent.email}</p>
+                                    <div className="flex items-center justify-between mb-6">
+                                        <div className="flex items-center">
+                                            <img src={selectedStudent.avatar_url} className="w-16 h-16 rounded-full mr-4 shadow-md border-2 border-indigo-500" />
+                                            <div>
+                                                <h2 className="text-xl font-bold">{selectedStudent.nombre_completo}</h2>
+                                                <p className="text-sm text-gray-500">{selectedStudent.email}</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex flex-col items-end gap-1 flex-shrink-0 ml-2">
+                                            <button
+                                                onClick={() => handleDownloadStudentSubmissions(selectedStudent.id)}
+                                                disabled={downloadingStudentId === selectedStudent.id}
+                                                title="Exportar tareas del estudiante"
+                                                className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-colors shadow-sm whitespace-nowrap"
+                                            >
+                                                {downloadingStudentId === selectedStudent.id
+                                                    ? <><Loader2 size={12} className="animate-spin" /> Descargando...</>
+                                                    : <><Download size={12} /> Exportar tareas</>
+                                                }
+                                            </button>
+                                            {studentDownloadError && (
+                                                <span className="text-[11px] text-red-500 text-right leading-tight max-w-[120px]">
+                                                    {studentDownloadError}
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
 
@@ -1153,6 +1752,243 @@ const AulaViva: React.FC = () => {
                                             <ProgressBar value={studentStats.reflexion_critica} color="bg-purple-500" label="Crítica (Reflexionar)" />
                                         </div>
                                     )}
+
+                                    {/* ── Análisis pedagógico (señales básicas) ── */}
+                                    <div className="mb-6">
+                                        <h3 className="font-bold text-gray-500 uppercase text-xs mb-3 tracking-wider border-b pb-1 flex items-center gap-1.5">
+                                            <ClipboardList size={13} />
+                                            Análisis pedagógico
+                                        </h3>
+
+                                        {!learningSignals || learningSignals.totalAssigned === 0 ? (
+                                            <p className="text-xs text-gray-400 italic">
+                                                No hay tareas asignadas en este grupo aún.
+                                            </p>
+                                        ) : learningSignals.totalSubmitted === 0 ? (
+                                            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded-xl p-4">
+                                                <p className="text-xs font-bold text-amber-700 dark:text-amber-400 mb-1">Sin entregas registradas</p>
+                                                <p className="text-xs text-amber-600 dark:text-amber-500">
+                                                    {learningSignals.totalAssigned} tarea{learningSignals.totalAssigned !== 1 ? 's' : ''} asignada{learningSignals.totalAssigned !== 1 ? 's' : ''} · 0 enviadas
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                {/* Bloque A — Resumen rápido */}
+                                                <div className="grid grid-cols-3 gap-2 mb-3">
+                                                    <div className="bg-gray-50 dark:bg-gray-700/40 rounded-lg p-2.5 text-center">
+                                                        <p className="text-lg font-black text-indigo-600 dark:text-indigo-400">
+                                                            {learningSignals.completionRate}%
+                                                        </p>
+                                                        <p className="text-[10px] text-gray-400 uppercase tracking-wide">Cumplimiento</p>
+                                                    </div>
+                                                    <div className="bg-gray-50 dark:bg-gray-700/40 rounded-lg p-2.5 text-center">
+                                                        <p className="text-lg font-black text-indigo-600 dark:text-indigo-400">
+                                                            {learningSignals.averageWordCount}
+                                                        </p>
+                                                        <p className="text-[10px] text-gray-400 uppercase tracking-wide">Prom. palabras</p>
+                                                    </div>
+                                                    <div className="bg-gray-50 dark:bg-gray-700/40 rounded-lg p-2.5 text-center">
+                                                        <p className="text-lg font-black text-indigo-600 dark:text-indigo-400">
+                                                            {learningSignals.totalSubmitted}/{learningSignals.totalAssigned}
+                                                        </p>
+                                                        <p className="text-[10px] text-gray-400 uppercase tracking-wide">Entregas</p>
+                                                    </div>
+                                                </div>
+
+                                                {/* Bloque B — Chips de indicadores */}
+                                                {(() => {
+                                                    const consistencyColor =
+                                                        learningSignals.consistencyLevel === 'high'   ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                                                        learningSignals.consistencyLevel === 'medium' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                                                                                                        'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+                                                    const developColor =
+                                                        learningSignals.writingDevelopmentLevel === 'solid'     ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                                                        learningSignals.writingDevelopmentLevel === 'developing' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                                                                                                                    'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400';
+                                                    const trendColor =
+                                                        learningSignals.trend === 'improving'       ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                                                        learningSignals.trend === 'stable'          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                                                        learningSignals.trend === 'irregular'       ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                                                                                                      'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+                                                    const consistencyLabel =
+                                                        learningSignals.consistencyLevel === 'high'   ? 'Consistencia alta' :
+                                                        learningSignals.consistencyLevel === 'medium' ? 'Consistencia media' : 'Consistencia baja';
+                                                    const developLabel =
+                                                        learningSignals.writingDevelopmentLevel === 'solid'     ? 'Elaboración sólida' :
+                                                        learningSignals.writingDevelopmentLevel === 'developing' ? 'Elaboración en desarrollo' : 'Elaboración inicial';
+                                                    const trendLabel =
+                                                        learningSignals.trend === 'improving'      ? 'Tendencia: mejorando' :
+                                                        learningSignals.trend === 'stable'         ? 'Tendencia: estable' :
+                                                        learningSignals.trend === 'irregular'      ? 'Tendencia: irregular' :
+                                                                                                     'Requiere atención';
+                                                    return (
+                                                        <div className="flex flex-wrap gap-1.5 mb-3">
+                                                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${consistencyColor}`}>{consistencyLabel}</span>
+                                                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${developColor}`}>{developLabel}</span>
+                                                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${trendColor}`}>{trendLabel}</span>
+                                                        </div>
+                                                    );
+                                                })()}
+
+                                                {/* Bloque C — Resumen docente */}
+                                                <p className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed mb-3 italic">
+                                                    {learningSignals.summary}
+                                                </p>
+
+                                                {/* Bloque D — Evidencia */}
+                                                <div className="text-[10px] text-gray-400 space-y-0.5 border-t border-gray-100 dark:border-gray-700 pt-2">
+                                                    <p>Tareas asignadas: <span className="font-bold text-gray-500">{learningSignals.evidence.basedOnAssignments}</span></p>
+                                                    <p>Tareas enviadas: <span className="font-bold text-gray-500">{learningSignals.evidence.basedOnSubmissions}</span></p>
+                                                    <p>Total de palabras: <span className="font-bold text-gray-500">{learningSignals.totalWordCount.toLocaleString('es-ES')}</span></p>
+                                                    {learningSignals.evidence.lastSubmissionAt && (
+                                                        <p>Última entrega: <span className="font-bold text-gray-500">{new Date(learningSignals.evidence.lastSubmissionAt).toLocaleDateString('es-ES')}</span></p>
+                                                    )}
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+
+                                    {/* ── Recomendaciones pedagógicas ── */}
+                                    {recommendations && (
+                                        <div className="mb-6">
+                                            <h3 className="font-bold text-gray-500 uppercase text-xs mb-3 tracking-wider border-b pb-1 flex items-center gap-1.5">
+                                                <Sparkles size={13} />
+                                                Recomendaciones para la mediación
+                                            </h3>
+
+                                            {/* Titular */}
+                                            <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-3 leading-snug">
+                                                {recommendations.headline}
+                                            </p>
+
+                                            {/* Fortalezas */}
+                                            {recommendations.strengths.length > 0 && (
+                                                <div className="mb-3">
+                                                    <p className="text-[10px] uppercase font-bold text-green-600 dark:text-green-400 tracking-wider mb-1.5">Fortalezas</p>
+                                                    <div className="space-y-2">
+                                                        {recommendations.strengths.map((rec, i) => (
+                                                            <div key={i} className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/40 rounded-lg p-2.5">
+                                                                <p className="text-xs font-bold text-green-800 dark:text-green-300 mb-0.5">{rec.title}</p>
+                                                                <p className="text-xs text-green-700 dark:text-green-400 leading-relaxed">{rec.description}</p>
+                                                                <p className="text-[10px] text-green-500 dark:text-green-600 mt-1 italic">{rec.rationale}</p>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Alertas */}
+                                            {recommendations.alerts.length > 0 && (
+                                                <div className="mb-3">
+                                                    <p className="text-[10px] uppercase font-bold text-amber-600 dark:text-amber-400 tracking-wider mb-1.5">Alertas</p>
+                                                    <div className="space-y-2">
+                                                        {recommendations.alerts.map((rec, i) => (
+                                                            <div key={i} className={`rounded-lg p-2.5 border ${
+                                                                rec.priority === 'high'
+                                                                    ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800/40'
+                                                                    : 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/40'
+                                                            }`}>
+                                                                <p className={`text-xs font-bold mb-0.5 ${rec.priority === 'high' ? 'text-red-800 dark:text-red-300' : 'text-amber-800 dark:text-amber-300'}`}>{rec.title}</p>
+                                                                <p className={`text-xs leading-relaxed ${rec.priority === 'high' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}>{rec.description}</p>
+                                                                <p className={`text-[10px] mt-1 italic ${rec.priority === 'high' ? 'text-red-500 dark:text-red-600' : 'text-amber-500 dark:text-amber-600'}`}>{rec.rationale}</p>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Acciones */}
+                                            {recommendations.actions.length > 0 && (
+                                                <div>
+                                                    <p className="text-[10px] uppercase font-bold text-indigo-600 dark:text-indigo-400 tracking-wider mb-1.5">Acciones sugeridas</p>
+                                                    <div className="space-y-2">
+                                                        {recommendations.actions.map((rec, i) => (
+                                                            <div key={i} className="bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800/40 rounded-lg p-2.5">
+                                                                <p className="text-xs font-bold text-indigo-800 dark:text-indigo-300 mb-0.5">{rec.title}</p>
+                                                                <p className="text-xs text-indigo-700 dark:text-indigo-400 leading-relaxed">{rec.description}</p>
+                                                                <p className="text-[10px] text-indigo-400 dark:text-indigo-600 mt-1 italic">{rec.rationale}</p>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* ── Leo sugiere ── */}
+                                    {leoAdvisor && (() => {
+                                        const goalLabels: Record<NonNullable<typeof leoAdvisor>['dominantGoal'], string> = {
+                                            emotional:     'Motivación y vínculo',
+                                            reading_habit: 'Hábito lector',
+                                            writing:       'Expresión escrita',
+                                            metacognitive: 'Auto-regulación',
+                                            critical:      'Pensamiento crítico',
+                                            inferential:   'Comprensión inferencial',
+                                            literal:       'Comprensión literal',
+                                            vocabulary:    'Vocabulario',
+                                            fluency:       'Fluidez lectora',
+                                        };
+                                        const goalColors: Record<NonNullable<typeof leoAdvisor>['dominantGoal'], string> = {
+                                            emotional:     'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400',
+                                            reading_habit: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+                                            writing:       'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
+                                            metacognitive: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+                                            critical:      'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
+                                            inferential:   'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400',
+                                            literal:       'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
+                                            vocabulary:    'bg-lime-100 text-lime-700 dark:bg-lime-900/30 dark:text-lime-400',
+                                            fluency:       'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400',
+                                        };
+                                        const confidenceLabels = { low: 'confianza baja', medium: 'confianza media', high: 'confianza alta' };
+                                        const confidenceColors = {
+                                            low:    'text-gray-400 dark:text-gray-500',
+                                            medium: 'text-yellow-500 dark:text-yellow-400',
+                                            high:   'text-green-500 dark:text-green-400',
+                                        };
+                                        return (
+                                            <div className="mb-6">
+                                                {/* Header */}
+                                                <h3 className="font-bold text-gray-500 uppercase text-xs mb-3 tracking-wider border-b pb-1 flex items-center gap-1.5">
+                                                    <BrainCircuit size={13} />
+                                                    Leo sugiere
+                                                </h3>
+
+                                                <div className="bg-gradient-to-br from-violet-50 to-indigo-50 dark:from-violet-900/20 dark:to-indigo-900/20 border border-violet-200 dark:border-violet-800/50 rounded-xl p-4 space-y-3">
+
+                                                    {/* A. Headline */}
+                                                    <p className="text-sm font-semibold text-violet-900 dark:text-violet-200 leading-snug">
+                                                        {leoAdvisor.headline}
+                                                    </p>
+
+                                                    {/* B. Teacher guidance */}
+                                                    <p className="text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
+                                                        {leoAdvisor.teacherGuidance}
+                                                    </p>
+
+                                                    {/* C. Acción concreta */}
+                                                    <div className="bg-white/70 dark:bg-white/5 rounded-lg p-2.5 border border-violet-100 dark:border-violet-800/30">
+                                                        <p className="text-[10px] uppercase font-bold text-violet-500 dark:text-violet-400 tracking-wider mb-1">Acción inmediata</p>
+                                                        <p className="text-xs text-gray-800 dark:text-gray-200 leading-relaxed">{leoAdvisor.shortTermAction}</p>
+                                                    </div>
+
+                                                    {/* D. Objetivo dominante + confianza */}
+                                                    <div className="flex items-center justify-between flex-wrap gap-2">
+                                                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${goalColors[leoAdvisor.dominantGoal]}`}>
+                                                            {goalLabels[leoAdvisor.dominantGoal]}
+                                                        </span>
+                                                        <span className={`text-[10px] font-medium ${confidenceColors[leoAdvisor.confidence]}`}>
+                                                            {confidenceLabels[leoAdvisor.confidence]}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* E. Justificación (rationale) */}
+                                                    <p className="text-[10px] text-gray-400 dark:text-gray-500 italic leading-relaxed border-t border-violet-100 dark:border-violet-800/30 pt-2">
+                                                        {leoAdvisor.rationale}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
 
                                     {/* AI Analysis */}
                                     <div className="bg-indigo-50 dark:bg-indigo-900/30 p-4 rounded-xl border border-indigo-100 dark:border-indigo-800">
@@ -1542,7 +2378,25 @@ const AulaViva: React.FC = () => {
                                 <h3 className="text-xl font-bold text-indigo-700 dark:text-indigo-300 h-8 overflow-hidden">{selectedAssignment.contentTitle}</h3>
                                 <p className="text-sm text-gray-500">Revisando entregas</p>
                             </div>
-                            <button onClick={() => setShowReviewModal(false)} className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full"><X size={24} /></button>
+                            <div className="flex items-center gap-2">
+                                {downloadError && (
+                                    <span className="text-xs text-red-500 font-medium max-w-[160px] text-right leading-tight">
+                                        {downloadError}
+                                    </span>
+                                )}
+                                <button
+                                    onClick={() => handleDownloadSubmissions(selectedAssignment.id)}
+                                    disabled={downloadingTaskId === selectedAssignment.id}
+                                    title="Descargar tareas finalizadas"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold rounded-lg transition-colors shadow-sm"
+                                >
+                                    {downloadingTaskId === selectedAssignment.id
+                                        ? <><Loader2 size={14} className="animate-spin" /> Descargando...</>
+                                        : <><Download size={14} /> Descargar tareas finalizadas</>
+                                    }
+                                </button>
+                                <button onClick={() => setShowReviewModal(false)} className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full"><X size={24} /></button>
+                            </div>
                         </div>
 
                         <div className="flex flex-1 overflow-hidden">
@@ -1618,6 +2472,31 @@ const AulaViva: React.FC = () => {
                     </div>
                 </div>
             )}
+
+            <ClubFormModal
+                isOpen={clubModalOpen}
+                onClose={() => { setClubModalOpen(false); setEditingClub(null); }}
+                club={editingClub}
+                onSaved={() => {
+                    const prevIds = new Set(groups.map(g => g.id));
+                    const newGroups = isAdmin
+                        ? dataService.getGroupsByColegio(selectedSchool || user?.colegio || '')
+                        : dataService.getTeacherGroups(user!.id);
+                    setGroups(newGroups);
+                    setClubModalOpen(false);
+                    setEditingClub(null);
+                    const newGroup = newGroups.find(g => !prevIds.has(g.id));
+                    if (newGroup) {
+                        if ((newGroup as any).kind === 'open') {
+                            navigate(`/clubs/${newGroup.id}`);
+                        } else {
+                            setSelectedGroup(newGroup.id);
+                            setClubCreatedFeedback(newGroup.name);
+                            setTimeout(() => setClubCreatedFeedback(null), 4000);
+                        }
+                    }
+                }}
+            />
         </div>
     );
 };

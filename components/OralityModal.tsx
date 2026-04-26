@@ -56,6 +56,18 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
     const recognitionRef = useRef<any>(null);
     const chunksRef = useRef<Blob[]>([]);
 
+    // A4: Guard against state updates on an unmounted component.
+    // This can happen if the modal is closed while recognition is still processing audio.
+    const isMountedRef = useRef(true);
+    // T4: Store the 500ms finalizeScore timeout so it can be cancelled on unmount.
+    const finalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        return () => {
+            isMountedRef.current = false;
+            if (finalizeTimeoutRef.current) clearTimeout(finalizeTimeoutRef.current);
+        };
+    }, []);
+
     // Load history for this user+content on mount
     useEffect(() => {
         if (userId && contentId) {
@@ -72,11 +84,12 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
         }
 
         const recognition = new SpeechRecognition();
-        recognition.lang = 'es-ES'; // Default or parameterize
+        recognition.lang = 'es-ES';
         recognition.continuous = true;
         recognition.interimResults = true;
 
         recognition.onresult = (event: any) => {
+            if (!isMountedRef.current) return; // A4: skip if already unmounted
             let currentTranscript = '';
             for (let i = event.resultIndex; i < event.results.length; i++) {
                 currentTranscript += event.results[i][0].transcript;
@@ -85,15 +98,21 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
         };
 
         recognition.onerror = (event: any) => {
-            console.error("Speech recognition error", event.error);
+            console.error('Speech recognition error', event.error);
+            if (!isMountedRef.current) return; // A4: skip if already unmounted
             if (event.error !== 'aborted') {
-                setError(`Error de reconocimiento: ${event.error}`);
+                // 'network' error is common in Chrome Android without internet
+                const msg = event.error === 'network'
+                    ? 'El reconocimiento de voz requiere conexión a internet en este navegador.'
+                    : `Error de reconocimiento: ${event.error}`;
+                setError(msg);
             }
         };
 
         recognitionRef.current = recognition;
 
         return () => {
+            // A4: Ensure media resources are released when component unmounts
             cleanupMedia();
         };
     }, []);
@@ -112,16 +131,29 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
     };
 
     const startRecording = async () => {
+        if (!isMountedRef.current) return;
         setError(null);
         setTranscript('');
         setScore(null);
-        recordingStartMs.current = Date.now(); // Phase 8: start timer
+        recordingStartMs.current = Date.now();
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            if (!isMountedRef.current) {
+                // Component unmounted while waiting for mic permission — release stream immediately
+                stream.getTracks().forEach(t => t.stop());
+                return;
+            }
             streamRef.current = stream;
 
-            const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }).catch ? new MediaRecorder(stream) : new MediaRecorder(stream);
+            // A4: Correct try/catch for MediaRecorder constructor.
+            // The old `.catch` check was wrong — MediaRecorder throws synchronously, not a Promise.
+            let recorder: MediaRecorder;
+            try {
+                recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+            } catch {
+                recorder = new MediaRecorder(stream); // fallback: browser picks mimeType
+            }
             recorderRef.current = recorder;
             chunksRef.current = [];
 
@@ -129,10 +161,9 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
                 if (e.data.size > 0) chunksRef.current.push(e.data);
             };
 
+            // Audio blob is captured for potential future upload — not sent anywhere yet (Beta)
             recorder.onstop = () => {
-                // We have the blob if we want to upload it later
-                const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
-                // console.log("Audio Blob generated", audioBlob);
+                // const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
             };
 
             recorder.start();
@@ -140,24 +171,29 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
                 try {
                     recognitionRef.current.start();
                 } catch (e) {
-                    console.error("Recognition already started or error", e);
+                    console.warn('[OralityModal] Recognition start error (may already be running):', e);
                 }
             }
-            
-            setRecording(true);
+
+            if (isMountedRef.current) setRecording(true);
         } catch (err: any) {
-            console.error(err);
-            setError('No pudimos acceder al micrófono.');
+            console.error('[OralityModal] getUserMedia error:', err);
+            if (isMountedRef.current) {
+                setError(err.name === 'NotAllowedError'
+                    ? 'Permiso de micrófono denegado. Habilítalo en la configuración del navegador.'
+                    : 'No se pudo acceder al micrófono.');
+            }
         }
     };
 
     const stopRecording = () => {
-        setRecording(false);
+        if (isMountedRef.current) setRecording(false);
         cleanupMedia();
 
         const durationMs = Date.now() - recordingStartMs.current;
 
         const finalizeScore = (resolvedTranscript: string) => {
+            if (!isMountedRef.current) return; // A4: skip if unmounted during async wait
             const s = calculateScore(expectedText, resolvedTranscript);
             setScore(s);
 
@@ -176,7 +212,9 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
                     },
                 };
                 dataService.saveOralityAttempt(attempt);
-                setHistory(dataService.getOralityHistory(userId, contentId));
+                if (isMountedRef.current) {
+                    setHistory(dataService.getOralityHistory(userId, contentId));
+                }
                 onResult?.(attempt);
             }
         };
@@ -184,7 +222,10 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
         if (transcript) {
             finalizeScore(transcript);
         } else if (!error) {
-            setTimeout(() => {
+            // T4: Store timeout ref so it can be cancelled if the modal is closed
+            // before the 500ms grace period elapses (isMountedRef guard inside finalizeScore
+            // still protects state updates, but cancelling avoids the call entirely).
+            finalizeTimeoutRef.current = setTimeout(() => {
                 finalizeScore(transcript);
             }, 500);
         }
@@ -199,10 +240,20 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in zoom-in-95">
             <div className="bg-white dark:bg-gray-900 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden border border-gray-200 dark:border-gray-700">
                 <div className="bg-indigo-600 p-4 flex justify-between items-center text-white">
-                    <h2 className="text-xl font-bold flex items-center gap-2">
-                        <Mic size={24} /> Laboratorio de oralidad
-                    </h2>
-                    <button onClick={handleClose} className="p-1 hover:bg-white/20 rounded-full transition-colors">
+                    <div>
+                        <h2 className="text-xl font-bold flex items-center gap-2">
+                            <Mic size={24} /> Laboratorio de oralidad
+                            {/* A4: Beta badge — honest about the experimental status */}
+                            <span className="bg-amber-400 text-amber-900 text-[10px] font-black px-2 py-0.5 rounded-full leading-tight">
+                                BETA
+                            </span>
+                        </h2>
+                        {/* A4: Connectivity notice — SpeechRecognition requires internet in Chrome Android */}
+                        <p className="text-indigo-200 text-xs mt-0.5">
+                            Función experimental · Requiere micrófono e internet
+                        </p>
+                    </div>
+                    <button onClick={handleClose} className="p-1 hover:bg-white/20 rounded-full transition-colors" aria-label="Cerrar">
                         <X size={24} />
                     </button>
                 </div>

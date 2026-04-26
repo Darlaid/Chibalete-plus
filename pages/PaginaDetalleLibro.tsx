@@ -3,7 +3,9 @@ import { useNavigate, Link } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
-import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye } from 'lucide-react';
+import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2 } from 'lucide-react';
+import { getOfflineTextEntry, saveOfflineText } from '../utils/offlineTextCache';
+import type { OfflineTextEntry } from '../utils/offlineTextCache';
 import StarRating from '../components/StarRating';
 import ContentCard from '../components/ContentCard';
 
@@ -16,6 +18,11 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
     const [showBioModal, setShowBioModal] = useState(false);
     const [progress, setProgress] = useState<any>(null);
 
+    // B5: Offline download state for accessible mode (texto_plano_url only).
+    type OfflineStatus = 'none' | 'this' | 'other' | 'downloading' | 'error' | 'quota';
+    const [offlineStatus, setOfflineStatus] = useState<OfflineStatus>('none');
+    const [offlineCachedEntry, setOfflineCachedEntry] = useState<OfflineTextEntry | null>(null);
+
     useEffect(() => {
         Promise.resolve(dataService.getContenidosHijos(content.id, user?.roles || [])).then(children => {
             const filtered = children.filter(c => c.tipo !== 'contexto_pedagogico');
@@ -24,8 +31,15 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
         if(user) {
             const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
             setProgress(prog);
-            // Also add to history
             dataService.addToHistory(user.id, content.id);
+        }
+        // B5: Check offline status on mount — derive from localStorage cache.
+        if (content.texto_plano_url) {
+            const entry = getOfflineTextEntry();
+            setOfflineCachedEntry(entry);
+            if (!entry) setOfflineStatus('none');
+            else if (entry.contentId === content.id) setOfflineStatus('this');
+            else setOfflineStatus('other');
         }
     }, [content.id, user]);
 
@@ -46,6 +60,35 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
         });
         setReviewSubmitted(true);
         setReviewText('');
+    };
+
+    // B5: Download the accessible text for offline reading.
+    // Only runs if content.texto_plano_url is set. Replaces any previous offline book.
+    const handleDownloadOffline = async () => {
+        if (!content.texto_plano_url) return;
+        setOfflineStatus('downloading');
+        try {
+            const res = await fetch(content.texto_plano_url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const texto = await res.text();
+            const result = saveOfflineText({
+                contentId: content.id,
+                title: content.titulo,
+                autor: content.autor,
+                portada_url: content.portada_url,
+                texto,
+                language: 'es',
+                cachedAt: new Date().toISOString(),
+            });
+            if (result === 'quota') { setOfflineStatus('quota'); return; }
+            if (result === 'error') { setOfflineStatus('error'); return; }
+            const saved = getOfflineTextEntry();
+            setOfflineCachedEntry(saved);
+            setOfflineStatus('this');
+        } catch (e) {
+            console.error('[PaginaDetalleLibro] offline download failed:', e);
+            setOfflineStatus('error');
+        }
     };
 
     const ActionButton: React.FC<{ icon: React.ReactNode, label: string, subLabel?: string, onClick: () => void, primary?: boolean, accent?: string }> = ({ icon, label, subLabel, onClick, primary, accent }) => (
@@ -128,6 +171,46 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                             <div className="w-px h-4 bg-white/20"></div>
                             <div>{content.metricas.veces_leido} lecturas</div>
                         </div>
+
+                        {/* B5: Offline download button — only for books with accessible text */}
+                        {content.texto_plano_url && (
+                            <div className="mt-4">
+                                {offlineStatus === 'this' ? (
+                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-green-500/20 border border-green-400/30 text-green-300 text-xs font-semibold">
+                                        <CheckCircle size={14} />
+                                        Disponible sin conexión
+                                    </div>
+                                ) : offlineStatus === 'downloading' ? (
+                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white/10 border border-white/20 text-white/70 text-xs">
+                                        <Loader2 size={14} className="animate-spin" />
+                                        Descargando...
+                                    </div>
+                                ) : offlineStatus === 'quota' ? (
+                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-500/20 border border-red-400/30 text-red-300 text-xs">
+                                        <WifiOff size={14} />
+                                        Sin espacio disponible
+                                    </div>
+                                ) : offlineStatus === 'error' ? (
+                                    <button onClick={handleDownloadOffline} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-500/20 border border-red-400/30 text-red-300 text-xs hover:bg-red-500/30 transition-colors">
+                                        <WifiOff size={14} />
+                                        Error — reintentar
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={handleDownloadOffline}
+                                        className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white/80 hover:text-white text-xs font-semibold transition-all"
+                                        title={offlineStatus === 'other' && offlineCachedEntry
+                                            ? `Reemplazará "${offlineCachedEntry.title}"`
+                                            : 'Guardar para leer sin internet'}
+                                    >
+                                        <Download size={14} />
+                                        {offlineStatus === 'other'
+                                            ? 'Reemplazar libro offline'
+                                            : 'Guardar para leer offline'}
+                                    </button>
+                                )}
+                            </div>
+                        )}
                     </div>
 
                     {/* Info & Actions */}

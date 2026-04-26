@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { UPLOADS_ROOT } from './config.js';
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
 const __filename = fileURLToPath(import.meta.url);
@@ -26,8 +27,7 @@ export const ingestPedagogicalFile = async (tempFilePath, originalName, contentI
         throw new Error(`Formato '${ext}' no soportado. Solo .txt o .pdf permitidos.`);
     }
 
-    const rootDir = path.resolve(__dirname, '..');
-    const bookDir = path.join(rootDir, 'uploads', 'leo_context', contentId);
+    const bookDir = path.join(UPLOADS_ROOT, 'leo_context', contentId);
     const sourcesDir = path.join(bookDir, 'sources');
 
     if (!fs.existsSync(bookDir)) fs.mkdirSync(bookDir, { recursive: true });

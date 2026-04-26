@@ -75,3 +75,35 @@ data/content_db.json
 # Temp / scratch
 dev_output.txt
 dummy_text.txt
+
+# === Repo-order sprint 2026-04-26 — additions ===
+
+# PII — gold users + duplicates
+/usuarios_colegios_oro.json
+/Users/
+/data/users_db*.json
+/data/user_audit_log.json
+/data/users_db.pre-*.json
+
+# Operational/runtime DB files (regenerated from API or seeded locally)
+/data/*_db.json
+/data/test_import_*.csv
+/data/playback_events.log
+/data/sections.json.corrupt.*
+/data/dev_seeds.json
+/data/school_configs.json
+/data/sections.json
+/data/content.json
+
+# Lockfile-history snapshots
+/package-lock.json.pre-*.json
+
+# IDE / agent / prompt scratch
+/.claude/
+/Prompts/
+
+# Snapshot working dir (used by Phase 5 reconcile)
+/_prod_snapshot_/
+
+# Ad-hoc scripts (whole directory ignored per sprint scope; legitimate scripts must be re-tracked explicitly)
+/scripts/

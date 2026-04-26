@@ -40,7 +40,7 @@ const Bienvenida: React.FC = () => {
                 <RoleButton onClick={() => handleNavigateToAuth('lector')} icon={<BookUser />}>
                     Soy Lector
                 </RoleButton>
-                <RoleButton onClick={() => handleNavigateToAuth('profesor')} icon={<User />}>
+                <RoleButton onClick={() => handleNavigateToAuth('mediador')} icon={<User />}>
                     Soy Mediador
                 </RoleButton>
                 <RoleButton onClick={() => handleNavigateToAuth('administrador')} icon={<ShieldCheck />}>

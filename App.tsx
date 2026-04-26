@@ -9,11 +9,58 @@ import ProtectedRoute from './components/ProtectedRoute';
 import ContentRouter from './components/ContentRouter';
 import { dataService } from './services/dataService';
 import { useAccessCheck } from './hooks/useAccessCheck';
+import { getRoutePermission, rolesForLevel } from './config/routePermissions';
+import type { RouteAccess } from './utils/permissions';
 
 // Eager loading for critical initial pages
 import Bienvenida from './pages/Bienvenida';
 import Auth from './pages/Auth';
 import Home from './pages/Home';
+
+/**
+ * Convierte el path de una ruta al descriptor explícito de acceso RouteAccess.
+ *
+ * Consulta routePermissions.ts (fuente única de verdad) y mapea el AccessLevel
+ * semántico al tipo discriminado RouteAccess que consume ProtectedRoute.
+ *
+ * Retornos posibles:
+ *   { type: 'public' }         → ruta pública (sin sesión requerida)
+ *   { type: 'authenticated' }  → cualquier usuario con sesión activa
+ *   { type: 'roles', roles }   → usuario debe tener al menos uno de estos roles
+ *   { type: 'deny' }           → ruta no registrada → acceso denegado (Fase 1F.2)
+ *
+ * Política de seguridad:
+ *   Una ruta no registrada en routePermissions.ts NUNCA queda silenciosamente
+ *   abierta. Siempre produce { type: 'deny' } + warning en DEV.
+ */
+function getRouteAccess(path: string): RouteAccess {
+  const permission = getRoutePermission(path);
+
+  if (!permission) {
+    if (import.meta.env.DEV) {
+      console.warn(
+        `[routePermissions] Ruta no registrada: "${path}". ` +
+        `Acceso denegado por defecto. Agrégala a config/routePermissions.ts.`
+      );
+    }
+    return { type: 'deny' };
+  }
+
+  switch (permission.access) {
+    case 'public':        return { type: 'public' };
+    case 'authenticated': return { type: 'authenticated' };
+    case 'mediator':      return { type: 'roles', roles: rolesForLevel('mediator') };
+    case 'admin':         return { type: 'roles', roles: rolesForLevel('admin') };
+    default: {
+      // Protege contra futuros AccessLevel añadidos al enum sin actualizar este switch.
+      const exhaustive: never = permission.access;
+      if (import.meta.env.DEV) {
+        console.warn(`[getRouteAccess] AccessLevel no reconocido: "${exhaustive}". Acceso denegado.`);
+      }
+      return { type: 'deny' };
+    }
+  }
+}
 
 // Lazy loading for heavy or role-specific components
 const Biblioteca = React.lazy(() => import('./pages/Biblioteca'));
@@ -37,6 +84,14 @@ const Bitacora = React.lazy(() => import('./pages/Bitacora'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
 const AdminRecompensas = React.lazy(() => import('./pages/AdminRecompensas'));
 const AdminExperiencias = React.lazy(() => import('./pages/AdminExperiencias'));
+const Clubs = React.lazy(() => import('./pages/Clubs'));
+const ClubExterno = React.lazy(() => import('./pages/ClubExterno'));
+const DashboardMediador = React.lazy(() => import('./pages/DashboardMediador'));
+const DashboardAdminLectura = React.lazy(() => import('./pages/DashboardAdminLectura'));
+const InformeVisor = React.lazy(() => import('./pages/InformeVisor'));
+const ActivarCuenta = React.lazy(() => import('./pages/ActivarCuenta'));
+const ResetPassword = React.lazy(() => import('./pages/ResetPassword'));
+const ChibaleteLU = React.lazy(() => import('./pages/ChibaleteLU'));
 
 
 
@@ -133,9 +188,15 @@ const TextWrapper = () => (
     <AccessWrapper>{(content) => <VisorTexto content={content} />}</AccessWrapper>
 );
 
-const ImmersiveWrapper = () => (
-    <AccessWrapper>{(content) => <VisorInmersivo content={content} />}</AccessWrapper>
-);
+// ImmersiveWrapper bypasses the blocking AccessWrapper intentionally.
+// VisorInmersivo renders Phase 0 (shell + placeholder) immediately, then runs
+// the access check in the background and shows a soft denial overlay if needed.
+const ImmersiveWrapper = () => {
+    const { id } = useParams();
+    const content = dataService.getContenidoById(id || '');
+    if (!content) return <Navigate to="/" replace />;
+    return <VisorInmersivo content={content} />;
+};
 
 const AlbumWrapper = () => (
     <AccessWrapper>{(content) => <VisorAlbum content={content} />}</AccessWrapper>
@@ -158,85 +219,114 @@ const AppContent: React.FC = () => {
             <Routes>
                 <Route path="/bienvenida" element={<Bienvenida />} />
                 <Route path="/auth" element={<Auth />} />
+                <Route path="/activar" element={<ActivarCuenta />} />
+                <Route path="/reset-password" element={<ResetPassword />} />
 
-
-
-                {/* Protected Routes */}
+                {/* Protected Routes — todos los accesos pasan por getRouteAccess() → routePermissions.ts */}
                 <Route path="/" element={
-                    <ProtectedRoute><Layout><Home /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/')}><Layout><Home /></Layout></ProtectedRoute>
                 } />
                 <Route path="/biblioteca" element={
-                    <ProtectedRoute><Layout><Biblioteca /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/biblioteca')}><Layout><Biblioteca /></Layout></ProtectedRoute>
                 } />
                 <Route path="/multimedia" element={
-                    <ProtectedRoute><Layout><Multimedia /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/multimedia')}><Layout><Multimedia /></Layout></ProtectedRoute>
                 } />
                 <Route path="/trivia" element={
-                    <ProtectedRoute><Layout><Trivia /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/trivia')}><Layout><Trivia /></Layout></ProtectedRoute>
                 } />
                 <Route path="/tienda" element={
-                    <ProtectedRoute><Layout><Tienda /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/tienda')}><Layout><Tienda /></Layout></ProtectedRoute>
                 } />
                 <Route path="/bitacora" element={
-                    <ProtectedRoute><Layout><Bitacora /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/bitacora')}><Layout><Bitacora /></Layout></ProtectedRoute>
                 } />
                 <Route path="/buscar" element={
-                    <ProtectedRoute><Layout><Busqueda /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/buscar')}><Layout><Busqueda /></Layout></ProtectedRoute>
                 } />
                 <Route path="/perfil/:id" element={
-                    <ProtectedRoute><Layout><Perfil /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/perfil/:id')}><Layout><Perfil /></Layout></ProtectedRoute>
                 } />
 
                 <Route path="/soporte" element={
-                    <ProtectedRoute><Layout><Soporte /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/soporte')}><Layout><Soporte /></Layout></ProtectedRoute>
+                } />
+                <Route path="/chibalete-lu" element={
+                    <ProtectedRoute access={getRouteAccess('/chibalete-lu')}><Layout><ChibaleteLU /></Layout></ProtectedRoute>
                 } />
 
-                {/* Aula Viva for Teachers/Admins AND Students */}
+                {/* Clubes Externos */}
+                <Route path="/clubs" element={
+                    <ProtectedRoute access={getRouteAccess('/clubs')}><Layout><Clubs /></Layout></ProtectedRoute>
+                } />
+                <Route path="/clubs/:id" element={
+                    <ProtectedRoute access={getRouteAccess('/clubs/:id')}><Layout><ClubExterno /></Layout></ProtectedRoute>
+                } />
+
+                {/* Aula Viva — cualquier usuario autenticado (lector, mediador, admin) */}
                 <Route path="/aula-viva" element={
-                    <ProtectedRoute roles={['profesor', 'administrador', 'lector']}><Layout><AulaViva /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/aula-viva')}><Layout><AulaViva /></Layout></ProtectedRoute>
+                } />
+
+                {/* Mediator Course Dashboard */}
+                <Route path="/dashboard/curso/:courseId" element={
+                    <ProtectedRoute access={getRouteAccess('/dashboard/curso/:courseId')}><Layout><DashboardMediador /></Layout></ProtectedRoute>
                 } />
 
                 {/* Admin Dashboard */}
                 <Route path="/admin-dashboard" element={
-                    <ProtectedRoute roles={['administrador']}><Layout><AdminDashboard /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/admin-dashboard')}><Layout><AdminDashboard /></Layout></ProtectedRoute>
+                } />
+
+                {/* Admin Reading Metrics Dashboard */}
+                <Route path="/admin/metricas" element={
+                    <ProtectedRoute access={getRouteAccess('/admin/metricas')}><Layout><DashboardAdminLectura /></Layout></ProtectedRoute>
+                } />
+
+                {/* Report Views */}
+                <Route path="/reportes/curso/:id" element={
+                    <ProtectedRoute access={getRouteAccess('/reportes/curso/:id')}><Layout><InformeVisor type="course" /></Layout></ProtectedRoute>
+                } />
+                <Route path="/reportes/colegio/:id" element={
+                    <ProtectedRoute access={getRouteAccess('/reportes/colegio/:id')}><Layout><InformeVisor type="school" /></Layout></ProtectedRoute>
                 } />
 
                 {/* Content Detail Hub */}
                 <Route path="/contenido/:id" element={
-                    <ProtectedRoute><ContentRouter /></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/contenido/:id')}><ContentRouter /></ProtectedRoute>
                 } />
 
                 {/* Specific Reading Modes */}
                 <Route path="/leer/pdf/:id" element={
-                    <ProtectedRoute><PDFWrapper /></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/leer/pdf/:id')}><PDFWrapper /></ProtectedRoute>
                 } />
                 <Route path="/leer/texto/:id" element={
-                    <ProtectedRoute><TextWrapper /></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/leer/texto/:id')}><TextWrapper /></ProtectedRoute>
                 } />
                 <Route path="/leer/inmersivo/:id" element={
-                    <ProtectedRoute><ImmersiveWrapper /></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/leer/inmersivo/:id')}><ImmersiveWrapper /></ProtectedRoute>
                 } />
                 <Route path="/ver/album/:id" element={
-                    <ProtectedRoute><AlbumWrapper /></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/ver/album/:id')}><AlbumWrapper /></ProtectedRoute>
                 } />
                 <Route path="/galeria/:id" element={
-                    <ProtectedRoute><GalleryWrapper /></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/galeria/:id')}><GalleryWrapper /></ProtectedRoute>
                 } />
 
                 <Route path="/subir-contenido" element={
-                    <ProtectedRoute roles={['administrador', 'profesor', 'mediador']}><Layout><SubirContenido /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/subir-contenido')}><Layout><SubirContenido /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/usuarios" element={
-                    <ProtectedRoute roles={['administrador']}><Layout><AdminUsuarios /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/admin/usuarios')}><Layout><AdminUsuarios /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/productos" element={
-                    <ProtectedRoute roles={['administrador']}><Layout><AdminProductos /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/admin/productos')}><Layout><AdminProductos /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/recompensas" element={
-                    <ProtectedRoute roles={['administrador']}><Layout><AdminRecompensas /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/admin/recompensas')}><Layout><AdminRecompensas /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/experiencias" element={
-                    <ProtectedRoute roles={['administrador']}><Layout><AdminExperiencias /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/admin/experiencias')}><Layout><AdminExperiencias /></Layout></ProtectedRoute>
                 } />
 
                 {/* Fallback route */}

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, Link, useLocation } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import { AtSign, Lock, User as UserIcon, Eye, EyeOff, ChevronLeft } from 'lucide-react';
@@ -11,7 +11,6 @@ const Auth: React.FC = () => {
   const [formData, setFormData] = useState({ email: '', password: '', nombre: '' });
   const [error, setError] = useState('');
   const navigate = useNavigate();
-  const location = useLocation();
   const { login } = useAuth();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -25,16 +24,7 @@ const Auth: React.FC = () => {
       const user = await dataService.validarCredenciales(formData.email, formData.password);
 
       if (!user) {
-        setError('Credenciales incorrectas. Verifica tu email y contraseña.');
-        return;
-      }
-
-      const targetRole = location.state?.targetRole;
-      const userRoles = user.roles || [];
-
-      if (targetRole && !userRoles.includes(targetRole)) {
-        setError('Tu cuenta no tiene permisos para ingresar con ese rol.');
-        return;
+        throw new Error('Credenciales inválidas');
       }
 
       // --- Club Activation: escribir bienvenida de club para Home ---
@@ -66,15 +56,9 @@ const Auth: React.FC = () => {
       // ---
 
       login(user, rememberMe);
-
-      if (targetRole === 'administrador') {
-        navigate('/admin-dashboard');
-        return;
-      }
-
       navigate('/');
     } catch (e: any) {
-      setError('Error al iniciar sesión. Intenta nuevamente.');
+      setError(e?.message || 'Error al iniciar sesión. Intenta nuevamente.');
       console.error(e);
     }
   };

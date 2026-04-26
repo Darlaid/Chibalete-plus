@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Users, School, Upload, FileText, Check, Plus, Edit2, Trash2, UserPlus, GraduationCap, UserCog, X, Download, Shield, BookOpen, EyeOff, MinusCircle, PenTool, UploadCloud, AlertCircle, CheckCircle, Save, Zap, Clock } from 'lucide-react';
 import { dataService } from '../services/dataService';
+import { isMediator, isAdmin } from '../utils/permissions';
 import type { User, Group, SchoolConfig, Content } from '../types';
 
 const AdminUsuarios: React.FC = () => {
@@ -20,7 +21,7 @@ const AdminUsuarios: React.FC = () => {
     const [schools, setSchools] = useState<string[]>([]);
     const [schoolUsers, setSchoolUsers] = useState<User[]>([]);
     const [schoolGroups, setSchoolGroups] = useState<Group[]>([]);
-    const [roleFilter, setRoleFilter] = useState<'all' | 'lector' | 'profesor' | 'mediador' | 'administrador'>('all');
+    const [roleFilter, setRoleFilter] = useState<'all' | 'lector' | 'mediador' | 'administrador'>('all');
     const [groupTypeFilter, setGroupTypeFilter] = useState<'all' | 'course' | 'club'>('all');
     // --- MODAL STATES ---
     const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
@@ -73,7 +74,8 @@ const AdminUsuarios: React.FC = () => {
 
     // Derived State
     const filteredUsers = schoolUsers.filter(u => roleFilter === 'all' || u.roles.includes(roleFilter));
-    const teachers = schoolUsers.filter(u => u.roles.includes('profesor') || u.roles.includes('mediador') || u.roles.includes('administrador'));
+    // managers: usuarios con rol mediador o administrador. Usados para asignar mediadores a grupos.
+    const managers = schoolUsers.filter(u => isMediator(u) || isAdmin(u));
     const filteredGroups = schoolGroups.filter(g => groupTypeFilter === 'all' || (g.type || 'course') === groupTypeFilter);
 
     // --- HANDLERS FOR CSV ---
@@ -162,12 +164,10 @@ const AdminUsuarios: React.FC = () => {
 
                 emailsSeen.add(email);
 
-                // Mapear rol
-                let roles: ('lector' | 'profesor' | 'mediador')[];
-                if (rolRaw === 'mediador') {
+                // Mapear rol — DT-05: 'profesor' eliminado del modelo; se normaliza → 'mediador'.
+                let roles: ('lector' | 'mediador')[];
+                if (rolRaw === 'mediador' || rolRaw === 'profesor') {
                     roles = ['mediador'];
-                } else if (rolRaw === 'profesor') {
-                    roles = ['profesor'];
                 } else {
                     if (rolRaw !== 'lector') {
                         rowErrors.push({ row: rowNum, email, reason: `Rol "${rolRaw}" desconocido. Se forzó 'lector'` });
@@ -291,19 +291,23 @@ const AdminUsuarios: React.FC = () => {
         }
     };
 
-    const handleSaveUser = () => {
+    const handleSaveUser = async () => {
         if (!editingUser || !editingUser.nombre_completo || !editingUser.email) return;
 
         const userData = { ...editingUser, colegio: selectedSchool }; // Force school context
 
-        if (editingUser.id) {
-            dataService.updateUser(editingUser.id, userData);
-        } else {
-            dataService.createUser(userData);
+        try {
+            if (editingUser.id) {
+                await dataService.updateUser(editingUser.id, userData);
+            } else {
+                await dataService.createUser(userData);
+            }
+            setIsUserModalOpen(false);
+            if (selectedSchool) setSchoolUsers(dataService.getUsuariosByColegio(selectedSchool));
+            refreshData(); // In case a new school was involved
+        } catch (err: any) {
+            alert(`Error al guardar usuario: ${err?.message || 'Intenta de nuevo.'}`);
         }
-        setIsUserModalOpen(false);
-        if (selectedSchool) setSchoolUsers(dataService.getUsuariosByColegio(selectedSchool));
-        refreshData(); // In case a new school was involved
     };
 
     // --- HANDLERS FOR GROUPS ---
@@ -544,7 +548,7 @@ const AdminUsuarios: React.FC = () => {
 
                                         <div className="flex gap-2">
                                             <div className="flex bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-                                                {(['all', 'lector', 'profesor', 'mediador'] as const).map(role => (
+                                                {(['all', 'lector', 'mediador'] as const).map(role => (
                                                     <button
                                                         key={role}
                                                         onClick={() => setRoleFilter(role)}
@@ -591,7 +595,7 @@ const AdminUsuarios: React.FC = () => {
                                                         <td className="p-3">
                                                             {user.roles.map(r => (
                                                                 <span key={r} className={`mr-1 px-2 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider ${r === 'administrador' ? 'bg-red-100 text-red-700' :
-                                                                    r === 'profesor' ? 'bg-purple-100 text-purple-700' :
+                                                                    r === 'mediador' ? 'bg-purple-100 text-purple-700' :
                                                                         'bg-green-100 text-green-700'
                                                                     }`}>
                                                                     {r}
@@ -653,7 +657,7 @@ const AdminUsuarios: React.FC = () => {
                                                 onClick={() => {
                                                     setQuickClubForm({
                                                         name: '',
-                                                        mediatorId: teachers.length > 0 ? teachers[0].id : '',
+                                                        mediatorId: managers.length > 0 ? managers[0].id : '',
                                                         contentType: 'all',
                                                         selectedContentId: '',
                                                         durationMonths: '1'
@@ -672,7 +676,7 @@ const AdminUsuarios: React.FC = () => {
                                         {filteredGroups.map(group => {
                                             const mediatorIds = dataService.getGroupMediatorIds(group);
                                             const mediatorNames = mediatorIds.length > 0 
-                                                ? mediatorIds.map(mId => teachers.find(t => t.id === mId)?.nombre_completo).filter(Boolean).join(', ')
+                                                ? mediatorIds.map(mId => managers.find(t => t.id === mId)?.nombre_completo).filter(Boolean).join(', ')
                                                 : 'Sin asignar';
                                             const isClub = group.type === 'club';
 
@@ -1018,7 +1022,7 @@ const AdminUsuarios: React.FC = () => {
                             <div>
                                 <label className="block text-sm font-medium mb-2">Rol del Usuario</label>
                                 <div className="flex flex-wrap gap-2">
-                                    {(['lector', 'profesor', 'mediador', 'administrador'] as const).map(role => (
+                                    {(['lector', 'mediador', 'administrador'] as const).map(role => (
                                         <button
                                             key={role}
                                             onClick={() => {
@@ -1034,7 +1038,7 @@ const AdminUsuarios: React.FC = () => {
                                                 : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
                                                 }`}
                                         >
-                                            {role === 'lector' ? 'Estudiante' : role === 'profesor' ? 'Docente' : role === 'mediador' ? 'Mediador' : 'Admin'}
+                                            {role === 'lector' ? 'Estudiante' : role === 'mediador' ? 'Mediador' : 'Admin'}
                                         </button>
                                     ))}
                                 </div>
@@ -1051,7 +1055,7 @@ const AdminUsuarios: React.FC = () => {
                             </div>
 
                             {/* GROUP SELECTOR FOR TEACHERS/MEDIATORS */}
-                            {(editingUser?.roles?.includes('profesor') || editingUser?.roles?.includes('mediador') || editingUser?.roles?.includes('administrador')) && (
+                            {(isMediator(editingUser) || isAdmin(editingUser)) && (
                                 <div className="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg border border-gray-200 dark:border-gray-600">
                                     <label className="block text-sm font-bold mb-2 flex items-center">
                                         <Users size={16} className="mr-2 text-indigo-500" />
@@ -1165,8 +1169,8 @@ const AdminUsuarios: React.FC = () => {
                             <div>
                                 <label className="block text-sm font-medium mb-1">Mediadores Asignados</label>
                                 <div className="max-h-40 overflow-y-auto border border-gray-300 rounded-lg p-3 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/50 space-y-2">
-                                    {teachers.length === 0 && <p className="text-xs text-gray-400 italic">No hay docentes registrados en el colegio.</p>}
-                                    {teachers.map(t => {
+                                    {managers.length === 0 && <p className="text-xs text-gray-400 italic">No hay mediadores o administradores registrados en el colegio.</p>}
+                                    {managers.map(t => {
                                         const isSelected = editingGroup?.mediatorIds?.includes(t.id) || editingGroup?.teacherId === t.id;
                                         return (
                                             <div key={t.id} className="flex items-center hover:bg-white dark:hover:bg-gray-700 p-1 rounded transition-colors">
@@ -1483,7 +1487,7 @@ const AdminUsuarios: React.FC = () => {
                                         onChange={e => setQuickClubForm(prev => ({ ...prev, mediatorId: e.target.value }))}
                                         className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700"
                                     >
-                                        {teachers.map(t => (
+                                        {managers.map(t => (
                                             <option key={t.id} value={t.id}>{t.nombre_completo}</option>
                                         ))}
                                     </select>

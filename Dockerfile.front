@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────
+# Dockerfile.front — Chibalete+ Frontend (SPA)
+#
+# Stage 1: build the Vite/React app
+# Stage 2: serve with nginx
+# ─────────────────────────────────────────────────────────────
+
+# ── Stage 1: build ───────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Install deps first (layer cache)
+COPY package.json package-lock.json ./
+RUN npm ci --prefer-offline
+
+# Copy all frontend source
+COPY index.html index.tsx index.css App.tsx metadata.json vite.config.ts tsconfig.json ./
+COPY pages/       ./pages/
+COPY components/  ./components/
+COPY context/     ./context/
+COPY hooks/       ./hooks/
+COPY services/    ./services/
+COPY types/       ./types/
+COPY utils/       ./utils/
+COPY config/      ./config/
+COPY engines/     ./engines/
+COPY public/      ./public/
+
+# Build production bundle → /app/dist
+RUN npm run build
+
+# ── Stage 2: serve ───────────────────────────────────────────
+FROM nginx:1.27-alpine AS runner
+
+# Remove default nginx content
+RUN rm -rf /usr/share/nginx/html/*
+
+# Copy the built SPA
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Nginx config that handles SPA routing and proxies /api/ to the API container
+COPY nginx.prod.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

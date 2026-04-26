@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────
+# Chibalete+ — Production Docker Compose
+#
+# Services:
+#   front  → SPA served by nginx on port 80
+#   api    → Express backend on port 3000 (internal only)
+#
+# Data persistence:
+#   data-volume  → flat-file JSON databases (runtime state)
+#   uploads      → user-uploaded PDFs, images, audio
+#   users-db     → production users file (external, critical)
+#   downloads    → APK distribution folder
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Frontend ──────────────────────────────────────────────
+  front:
+    build:
+      context: .
+      dockerfile: Dockerfile.front
+    container_name: chibalete-front
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    # No volumes required — static assets are baked into the image.
+    # To serve the LU APK, add: - ./downloads:/usr/share/nginx/html/downloads:ro
+
+  # ── API ───────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: chibalete-api
+    restart: unless-stopped
+    # Port 3000 is NOT exposed to host — nginx proxies internally
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Required secrets — set via .env file or VPS environment
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ADMIN_SECRET: ${ADMIN_SECRET}
+      # Override DB paths to point at persistent volumes
+      USERS_DB: /data-critical/usuarios_colegios_oro.json
+      UPLOADS_ROOT: /app/public/uploads
+      ACCESS_FALLBACK_MODE: restricted
+    volumes:
+      # Persistent runtime data (flat-file DBs)
+      - data-volume:/app/data
+      # Uploads (PDFs, audio, images)
+      - uploads-volume:/app/public/uploads
+      # Production users DB (bind mount — managed outside container)
+      - /var/www/chibalete/data-critical:/data-critical:ro
+
+volumes:
+  data-volume:
+  uploads-volume:

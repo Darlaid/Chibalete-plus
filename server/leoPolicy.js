@@ -38,6 +38,10 @@ const formatMemory = (memoryContext) => {
     
     if (memoryContext.lastQuestionType === 'vocab')
         parts.push(`- Su última interacción fue de vocabulario. Mantén un tono didáctico enfocado en el léxico si la pregunta es ambigua.`);
+    else if (memoryContext.lastQuestionType === 'inferential')
+        parts.push(`- Su última interacción fue inferencial. Fomenta la exploración de causas, motivaciones y significados implícitos.`);
+    else if (memoryContext.lastQuestionType === 'reflection')
+        parts.push(`- Su última interacción fue reflexiva. Invita a conectar el texto con experiencias propias o valoraciones personales.`);
     else if (memoryContext.lastQuestionType === 'question')
         parts.push(`- Su última interacción fue una pregunta sobre el texto. Mantén el hilo de curiosidad y exploración analítica.`);
         

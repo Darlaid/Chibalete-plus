@@ -1,21 +1,51 @@
 
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import type { QuizQuestion, Content, ChatMessage, TriviaQuestion, AlbumRegion, VisualContext } from "../types";
+import type { QuizQuestion, Content, ChatMessage, TriviaQuestion, AlbumRegion, VisualContext, LeoReaderProfile, PedagogicalStage } from "../types";
 import { dataService } from "./dataService";
+import { derivePedagogicalStage } from "../utils/leoStage";
 
-// Initialize the Gemini API client safely
-// Support both process.env (via Vite define) and import.meta.env
+// ── AI Model Registry ─────────────────────────────────────────────────────
+// Single source of truth for all Gemini model IDs used in this service.
+// Update HERE when Google releases new stable versions — not scattered inline.
+//
+//   GEMINI_FLASH        → gemini-2.0-flash   GA stable, general-purpose fast tasks
+//   GEMINI_FLASH_LATEST → gemini-2.5-flash   GA newer, heavier prompts & multi-turn chat
+//   GEMINI_TTS          → gemini-2.5-flash-preview-tts  Preview; no GA TTS alternative yet
+//
+// DO NOT use 'gemini-3-pro-preview' — not a public GA model; causes HTTP 404.
+const GEMINI_FLASH        = 'gemini-2.0-flash';
+const GEMINI_FLASH_LATEST = 'gemini-2.5-flash';
+const GEMINI_TTS          = 'gemini-2.5-flash-preview-tts';
+
+// ── Shared error logger ────────────────────────────────────────────────────
+// Extracts the HTTP status from the SDK error object so DevTools show the
+// real cause: 400/403 = bad/wrong key, 404 = model not found, 429 = quota.
+const logAiError = (fnName: string, error: unknown): void => {
+    const err = error as any;
+    const status = err?.status ?? err?.httpStatus ?? err?.code ?? 'unknown';
+    const msg    = err?.message ?? String(error);
+    console.error(`[Gemini] ${fnName} failed — HTTP ${status}: ${msg}`);
+};
+
+// ── Client init ────────────────────────────────────────────────────────────
+// Required env var: VITE_GEMINI_API_KEY (from Google AI Studio)
+// IMPORTANT: this must be a Gemini/AI Studio key, NOT a Firebase API key.
+//            Both start with "AIzaSy" but are different credentials.
+//            Add VITE_GEMINI_API_KEY to .env.local — never commit real keys.
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 let ai: GoogleGenAI | null = null;
 
 try {
   if (apiKey) {
+    if (apiKey === import.meta.env.VITE_FIREBASE_API_KEY) {
+      console.debug("[Gemini] VITE_GEMINI_API_KEY matches VITE_FIREBASE_API_KEY (silenced; backend mediates AI).");
+    }
     ai = new GoogleGenAI({ apiKey });
   } else {
-    console.warn("Chibalete+: Gemini API Key missing. AI features will return mock data.");
+    console.debug("[Gemini] VITE_GEMINI_API_KEY not set; safe fallback (silenced; backend mediates AI).");
   }
 } catch (e) {
-  console.error("Error initializing Gemini client:", e);
+  logAiError('init', e);
 }
 
 // --- PERSISTENT CACHE SYSTEM ---
@@ -91,14 +121,14 @@ export const generarResumenInteligente = async (textoPagina: string, modelName?:
 
   try {
     const response = await ai.models.generateContent({
-      model: modelName || 'gemini-2.5-flash',
+      model: modelName || GEMINI_FLASH_LATEST,
       contents: `Eres un asistente de lectura experto y amigable. Resume el siguiente texto de manera concisa, utilizando viñetas para destacar los puntos clave y facilitar la lectura rápida. Texto: ${textoPagina}`,
     });
     const result = response.text || "No se pudo generar el resumen.";
     setCached(cacheKey, result);
     return result;
   } catch (error) {
-    console.error("Error en generarResumenInteligente:", error);
+    logAiError('generarResumenInteligente', error);
     return "Hubo un error al conectar con el asistente inteligente.";
   }
 };
@@ -115,53 +145,47 @@ export const adaptarNivelDificultad = async (textoPagina: string, nivelUsuario: 
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
+      model: GEMINI_FLASH_LATEST,
       contents: `Reescribe el siguiente texto para un lector de nivel "${nivelUsuario}".
       - Si el nivel es "Novato", usa oraciones cortas y vocabulario muy sencillo.
       - Si es "Intermedio", mantén un tono narrativo fluido pero claro.
       - Explica términos complejos entre paréntesis si es necesario.
       Texto original: ${textoPagina}`,
-      config: {
-        thinkingConfig: { thinkingBudget: 2048 },
-      },
     });
     const result = response.text || "No se pudo adaptar el texto.";
     setCached(cacheKey, result);
     return result;
   } catch (error) {
-    console.error("Error en adaptarNivelDificultad:", error);
+    logAiError('adaptarNivelDificultad', error);
     return "Hubo un error al adaptar el nivel de dificultad.";
   }
 };
 
 /**
  * Generates a micro-summary for re-engagement notifications via Chatbot.
+ * Routes through /api/leo/recap (backend) — no direct Gemini call from client.
  */
-export const generarMicroResumenRecordatorio = async (textoPagina: string, tituloLibro: string): Promise<string> => {
-  // No caching for reminders as context might change slightly or we want fresh greeting
-  try {
-    if (!ai) return "¡Hola! 🦀 Te extrañé. ¡Sigamos leyendo!";
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
-      contents: `Eres Leo 🦀, el asistente amigable de la biblioteca Chibalete.
-        El usuario ha dejado de leer el libro "${tituloLibro}" hace unos días. 
-        
-        Tu misión: Darle una cálida bienvenida en el chat y recordarle brevemente dónde quedó.
-        
-        Texto donde quedó: "${textoPagina.substring(0, 500)}..."
-        
-        Genera un mensaje de chat corto (máx 3 oraciones) que empiece con "¡Hola! 🦀 Hace días no te veía..." y luego resuma en una línea qué estaba pasando, invitando a seguir.
-        Sé entusiasta y motivador.`,
-      config: {
-        thinkingConfig: { thinkingBudget: 1024 },
-      }
-    });
-    return response.text || "¡Hola! 🦀 Hace días no te veía. ¿Listo para continuar donde lo dejamos?";
-  } catch (error) {
-    console.error("Error en generarMicroResumenRecordatorio:", error);
-    return "¡Hola! 🦀 Te extrañé. ¡Sigamos leyendo!";
-  }
+export const generarMicroResumenRecordatorio = async (
+    textoPagina: string,
+    tituloLibro: string,
+    userId?: string
+): Promise<string> => {
+    try {
+        const res = await fetch('/api/leo/recap', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(userId ? { 'x-user-id': userId } : {}),
+            },
+            body: JSON.stringify({ textoPagina, tituloLibro }),
+        });
+        if (!res.ok) return '¡Hola! 🦀 Te extrañé. ¡Sigamos leyendo!';
+        const data = await res.json();
+        return data.answer || '¡Hola! 🦀 Hace días no te veía. ¿Listo para continuar donde lo dejamos?';
+    } catch (error) {
+        logAiError('generarMicroResumenRecordatorio', error);
+        return '¡Hola! 🦀 Te extrañé. ¡Sigamos leyendo!';
+    }
 };
 
 /**
@@ -176,7 +200,7 @@ export const generarPreguntasQuiz = async (textoPagina: string, modelName?: stri
     if (!ai) return [];
 
     const response = await ai.models.generateContent({
-      model: modelName || 'gemini-2.5-flash',
+      model: modelName || GEMINI_FLASH_LATEST,
       contents: `Basado en el siguiente texto, crea 3 preguntas de opción múltiple para comprobar la comprensión lectora.
       Texto: ${textoPagina}`,
       config: {
@@ -204,7 +228,7 @@ export const generarPreguntasQuiz = async (textoPagina: string, modelName?: stri
     }
     return [];
   } catch (error) {
-    console.error("Error en generarPreguntasQuiz:", error);
+    logAiError('generarPreguntasQuiz', error);
     return [];
   }
 };
@@ -229,7 +253,7 @@ export const generarPreguntaTrivia = async (): Promise<TriviaQuestion | null> =>
     }
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_FLASH_LATEST,
       contents: `Genera una pregunta de trivia desafiante pero educativa sobre el siguiente contenido de la biblioteca:
             Título: ${randomContent.titulo}
             Autor: ${randomContent.autor}
@@ -260,7 +284,7 @@ export const generarPreguntaTrivia = async (): Promise<TriviaQuestion | null> =>
     }
     return null;
   } catch (error) {
-    console.error("Error generando trivia:", error);
+    logAiError('generarPreguntaTrivia', error);
     return null;
   }
 }
@@ -278,7 +302,7 @@ export const generarAudioTTS = async (texto: string): Promise<string | undefined
     if (!ai) return undefined;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-preview-tts',
+      model: GEMINI_TTS,
       contents: [{ parts: [{ text: texto }] }],
       config: {
         responseModalities: [Modality.AUDIO],
@@ -298,7 +322,7 @@ export const generarAudioTTS = async (texto: string): Promise<string | undefined
     }
     return data;
   } catch (error) {
-    console.error("Error en generarAudioTTS:", error);
+    logAiError('generarAudioTTS', error);
     return undefined;
   }
 }
@@ -310,9 +334,9 @@ export const analizarFluidezLectora = async (audioBase64: string, textoReferenci
   try {
     if (!ai) return { score: 5, feedback: "¡Excelente lectura! (Simulado - Sin AI)", emoji: "🎉" };
 
-    // Gemini 2.5 Flash is multimodal and fast, perfect for audio analysis
+    // Flash is multimodal — handles audio + text in a single request
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_FLASH_LATEST,
       contents: [
         {
           role: 'user',
@@ -361,7 +385,7 @@ export const analizarFluidezLectora = async (audioBase64: string, textoReferenci
     }
     return null;
   } catch (error) {
-    console.error("Error analizando fluidez:", error);
+    logAiError('analizarFluidezLectora', error);
     return null;
   }
 }
@@ -386,7 +410,7 @@ export const buscarContenidoSemantico = async (query: string): Promise<{ id: str
     }
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_FLASH_LATEST,
       contents: `Analiza la siguiente consulta de búsqueda de un usuario: "${query}".
         
         Catálogo disponible:
@@ -419,7 +443,7 @@ export const buscarContenidoSemantico = async (query: string): Promise<{ id: str
     return result;
 
   } catch (e) {
-    console.error("Error semantic search", e);
+    logAiError('buscarContenidoSemantico', e);
     return [];
   }
 };
@@ -443,24 +467,21 @@ export const generarPreguntaProactiva = async (textoContexto: string, tituloLibr
     if (!ai) return "¿Qué opinas de lo que acabas de leer?";
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
+      model: GEMINI_FLASH_LATEST,
       contents: `Actúa como un entrenador de lectura experto en pruebas PISA y Saber.
             El estudiante está leyendo "${tituloLibro}".
-            
+
             Texto actual: "${textoContexto.substring(0, 1000)}..."
-            
+
             TU OBJETIVO: Generar UNA sola pregunta corta pero desafiante que evalúe la competencia: ${objetivo}.
-            
+
             La pregunta debe invitar al estudiante a detenerse y pensar. No debe ser de Sí/No.
             Empieza la pregunta directamente.`,
-      config: {
-        thinkingConfig: { thinkingBudget: 2048 },
-      }
     });
 
     return response.text || "¿Qué opinas de lo que acabas de leer?";
   } catch (error) {
-    console.error("Error proactiva", error);
+    logAiError('generarPreguntaProactiva', error);
     return "¿Qué te parece la historia hasta ahora?";
   }
 };
@@ -477,7 +498,7 @@ export const analizarProgresoPedagogico = async (stats: any): Promise<string> =>
     if (!ai) return "El estudiante muestra progreso constante. Se recomienda continuar con lecturas de su interés. (Análisis AI no disponible).";
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_FLASH_LATEST,
       contents: `Analiza las siguientes estadísticas detalladas de un estudiante y genera un reporte pedagógico breve y estratégico para el docente (máx 150 palabras).
             
             DATOS DEL ESTUDIANTE:
@@ -498,177 +519,309 @@ export const analizarProgresoPedagogico = async (stats: any): Promise<string> =>
     setCached(cacheKey, result);
     return result;
   } catch (e) {
+    logAiError('analizarProgresoPedagogico', e);
     return "Error generando análisis.";
   }
 }
 
 /**
  * Generates standardized THEMA tags for content categorization.
+ * Returns null on error so callers can distinguish failure from empty results.
  */
-export const sugerirEtiquetasThema = async (titulo: string, descripcion: string): Promise<string[]> => {
+export const sugerirEtiquetasThema = async (titulo: string, descripcion: string): Promise<string[] | null> => {
   const cacheKey = `thema-${titulo}-${descripcion.substring(0, 50)}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  try {
-    if (!ai) return ["Generales", "Sin Clasificar", "Lectura", "Educación"];
+  if (!ai) {
+    console.debug("[Gemini] sugerirEtiquetasThema: AI client not initialized (silenced).");
+    return null;
+  }
 
+  try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_FLASH,
       contents: `Analiza el siguiente libro/contenido y sugiere exactamente 4 etiquetas de clasificación estandarizada (estilo THEMA o BISAC pero simplificado para escuela).
-            
+
             Título: ${titulo}
             Descripción: ${descripcion}
-            
+
             Las etiquetas deben cubrir:
             1. Tema Principal (ej. "Aventura", "Ciencia")
             2. Género/Formato (ej. "Novela Gráfica", "Documental")
             3. Público/Edad (ej. "Infantil", "Juvenil")
             4. Un valor o tema transversal (ej. "Amistad", "Ecología")
-            
+
             Devuelve SOLO las 4 palabras o frases cortas separadas por comas.`,
     });
 
     const text = response.text || "";
-    const tags = text.split(',').map(t => t.trim()).slice(0, 4);
+    const tags = text.split(',').map(t => t.trim()).filter(Boolean).slice(0, 4);
 
     if (tags.length > 0) {
       setCached(cacheKey, tags);
       return tags;
     }
-    return ["Generales", "Lectura"];
+    return null;
   } catch (error) {
-    console.error("Error generando etiquetas THEMA:", error);
-    return ["Error AI", "Intenta Manualmente"];
+    logAiError('sugerirEtiquetasThema', error);
+    return null;
   }
 };
 
+// --- LEO CHAT TYPES ---
+
+/**
+ * Minimal session memory consumed by chatConBibliotecario.
+ * Only fields that are actively used for context adaptation.
+ */
+export interface LeoSessionMemory {
+    sessionReadingProgress: number;        // 0–100; used to derive pedagogical stage
+    pedagogicalStage?: PedagogicalStage;  // pre-computed if available; overrides derivation
+    lastQuestionType?: 'vocab' | 'inferential' | 'reflection' | null;
+    // Visor-level operational fields (used by VisorTexto / VisorInmersivo)
+    recentAnchors?: number[];             // sentence indices visited in session
+    difficultyLevel?: string;             // 'inicial' | 'medio' | 'avanzado'
+    // Persistent reading position fields (Phase Leo-M3)
+    lastSentenceIndex?: number;           // last sentence/segment reached
+    lastReadAt?: string;                  // ISO timestamp of last meaningful reading activity
+    behavior?: { pauses: number; replays: number }; // user reading behavior counters
+}
+
+
+function buildAdaptiveSection(profile: LeoReaderProfile | undefined, stage: PedagogicalStage): string {
+    const stageHints: Record<PedagogicalStage, string> = {
+        comprehension:  'Prioriza comprensión literal (Obj.1) y vocabulario (Obj.6).',
+        interpretation: 'Prioriza inferencia (Obj.2) y conexión entre textos (Obj.4).',
+        reflection:     'Prioriza evaluación crítica (Obj.3) y conexión personal (Obj.5).',
+        creation:       'Prioriza expresión creativa (Obj.7) e invita al estudiante a producir.',
+    };
+    const supportHints: Record<NonNullable<LeoReaderProfile['preferredSupportType']>, string> = {
+        vocabulary:  'Este lector prefiere apoyo de vocabulario — explica palabras difíciles en contexto.',
+        inferential: 'Este lector responde bien a preguntas de inferencia — formula preguntas implícitas.',
+        reflection:  'Este lector reflexiona bien — invita a conectar el texto con experiencias propias.',
+    };
+    const lines = [`Etapa: ${stage}. ${stageHints[stage]}`];
+    if (profile?.preferredSupportType) lines.push(supportHints[profile.preferredSupportType]);
+    return `\n\n      ADAPTACIÓN PEDAGÓGICA:\n      ${lines.join('\n      ')}`;
+}
+
 /**
  * Chat with Leo (The Librarian).
+ * Routes through /api/leo/chat (backend) — no direct Gemini call from client.
+ * Signature is backward-compatible; userId added as optional last param for auth header.
  */
 export const chatConBibliotecario = async (
   mensajeUsuario: string,
   historialChat: ChatMessage[],
   contextoLibroActual?: Content,
   contenidoPaginaActual?: string,
-  visualContext?: VisualContext
+  visualContext?: VisualContext,
+  readerProfile?: LeoReaderProfile,
+  sessionMemory?: LeoSessionMemory,
+  userId?: string
 ): Promise<string> => {
-  try {
-    // Chat context changes too frequently to cache effectively in a simple key-value map without complexity
-    const catalogo = dataService.getContenidos(['lector']).map(c => `Título: ${c.titulo}, Autor: ${c.autor}, Temas: ${c.etiquetas.join(', ')}`).join('\n');
-
-    // Extract Critical Plot Points if they exist for the current book
-    const plotPoints = contextoLibroActual?.plotPoints || [];
-    let criticalContext = "";
-    if (plotPoints.length > 0) {
-      const relevantPoints = plotPoints.map(p => `- En capítulo/página ${p.pageOrChapter}: ${p.title}. Análisis: ${p.insight} (${p.type})`).join('\n');
-      criticalContext = `
-        HITOS CRÍTICOS Y CONTEXTUALES DE ESTE LIBRO (GUÍA DE LECTURA):
-        ${relevantPoints}
-        
-        INSTRUCCIÓN CLAVE: Si el usuario menciona algo relacionado con estos hitos o si está cerca de esas páginas, ¡USA ESTA INFORMACIÓN! 
-        Ofrece datos curiosos sobre el autor, el contexto histórico o el estilo literario. 
-        Ejemplo: "¡Ah! Estás en la parte de la Falsa Tortuga. ¿Sabías que Lewis Carroll usó este personaje para criticar la educación victoriana?"
-        `;
+    try {
+        const res = await fetch('/api/leo/chat', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(userId ? { 'x-user-id': userId } : {}),
+            },
+            body: JSON.stringify({
+                mensaje: mensajeUsuario,
+                historial: historialChat,
+                contentId: contextoLibroActual?.id,
+                contenidoPagina: contenidoPaginaActual,
+                visualContext,
+                readerProfile,
+                sessionMemory,
+            }),
+        });
+        if (!res.ok) {
+            return '¡Hola! Soy Leo 🦀. Mi conexión con la biblioteca central está fallando un poco. ¿Me repites eso?';
+        }
+        const data = await res.json();
+        return data.answer || '¡Hola! Soy Leo 🦀. Estoy releyendo un clásico. ¿En qué puedo ayudarte con tu lectura?';
+    } catch (error) {
+        logAiError('chatConBibliotecario', error);
+        return '¡Hola! Soy Leo 🦀. Mi conexión con la biblioteca central está fallando un poco. ¿Me repites eso?';
     }
-
-    let systemInstruction = `
-      Eres "Leo", el Mediador Pedagógico Virtual de Chibalete+.
-      Tu misión es conversar con los estudiantes guiándote EXCLUSIVAMENTE por los 8 Objetivos Pedagógicos de la plataforma.
-      
-      TUS 8 OBJETIVOS DE MEDIACIÓN (ÚSALOS EN CADA INTERACCIÓN):
-      1. COMPRENDER (Global): Haz preguntas sobre la estructura del texto y su significado general. Pide que lo expliquen con sus palabras.
-      2. INFERIR (Implícito): Lanza preguntas tipo "¿Qué crees que pensaba este personaje?" o "¿Por qué pasó esto si no lo dice?".
-      3. EVALUAR (Crítico): Propón debates. "¿Estás de acuerdo?", "¿Qué sesgo ves aquí?". Detecta falacias.
-      4. INTEGRAR (Fuentes): Ayuda a conectar dos textos del catálogo. "¿En qué se parece esto al otro libro que leíste?".
-      5. CONECTAR (Vida/Contexto): Pregunta "¿Has vivido algo así?", "¿Cómo se ve esto en tu barrio?".
-      6. VOCABULARIO/METACOGNICIÓN: Define palabras por contexto. Pregunta "¿Qué hiciste para entender esa parte difícil?".
-      7. EXPRESAR (Creación): Invita a escribir finales alternativos o cartas. "¿Qué le dirías al autor?".
-      8. DISFRUTAR (Estético): Celebra el avance. Pregunta sobre emociones. "¿Qué sentiste en esa escena?".
-
-      SISTEMA DE PREMIOS (PUNTOS DE MAGIA):
-      Si el estudiante muestra una reflexión profunda, conecta ideas, o demuestra entusiasmo genuino, PUEDES PREMIARLO.
-      Para hacerlo, escribe en una línea nueva al final de tu mensaje: [AWARD_POINTS: 5] (Máximo 5 puntos por interacción).
-      Dile explícitamente "Te he dado 5 puntos de magia por esa gran respuesta".
-      Úsalo con moderación (solo cuando sea muy bueno).
-
-      REGLA DE ORO DE CONTENIDO:
-      Toda la conversación debe surgir y volver a los contenidos de la App (los libros del catálogo).
-      NO hables de cosas externas a menos que sea para conectarlas con un libro de la biblioteca.
-      Si el usuario habla de un tema X, busca en el catálogo un libro relacionado y recomiéndalo.
-
-      CATÁLOGO DE LA BIBLIOTECA (TUS HERRAMIENTAS):
-      ${catalogo}
-    `;
-
-    if (visualContext) {
-      systemInstruction += `
-        *** MODO ÁLBUM (VISUAL) ***
-        Estás viendo: Libro "${visualContext.bookTitle}", Página ${visualContext.pageIndex + 1}.
-        Texto: "${visualContext.regionText}"
-        Aplica los objetivos 2 (Inferir) y 8 (Disfrutar) enfocándote en la IMAGEN.
-      `;
-    } else {
-      systemInstruction += `
-        ${criticalContext}
-      `;
-    }
-
-    if (contextoLibroActual && !visualContext) {
-      systemInstruction += `
-        CONTEXTO DE LECTURA (TEXTO):
-        Libro: "${contextoLibroActual.titulo}" de ${contextoLibroActual.autor}.
-        Descripción: ${contextoLibroActual.descripcion_corta}
-        Texto visible ahora: "${contenidoPaginaActual ? contenidoPaginaActual.substring(0, 500) : 'N/A'}..."
-        
-        Usa este texto para formular preguntas específicas sobre la trama y estructura.
-      `;
-    }
-
-    const recentHistory = historialChat.slice(-10).map(msg => ({
-      role: msg.role === 'model' ? 'model' : 'user',
-      parts: [{ text: msg.text }]
-    }));
-
-    if (!ai) return "¡Hola! Soy Leo 🦀. Veo que no tienes configurada mi mente (API Key), así que solo puedo saludarte. ¡Sigue leyendo!";
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        ...recentHistory,
-        { role: 'user', parts: [{ text: mensajeUsuario }] }
-      ],
-      config: {
-        systemInstruction: systemInstruction,
-      }
-    });
-
-    return response.text || "¡Hola! Soy Leo 🦀. Estoy releyendo un clásico. ¿En qué puedo ayudarte con tu lectura?";
-
-  } catch (error) {
-    console.error("Error en chatConBibliotecario:", error);
-    return "¡Hola! Soy Leo 🦀. Mi conexión con la biblioteca central está fallando un poco. ¿Me repites eso?";
-  }
 };
 
-// --- VISION SIMULATION FOR ALBUM BOOKS ---
-/**
- * Simulates Gemini Vision API analyzing an illustration.
- * Returns bounding boxes for narrative regions.
- */
-export const analizarIlustracionAlbum = async (imageUrl: string): Promise<AlbumRegion[]> => {
-  // In a real implementation, we would send the image to Gemini 2.5 Pro or Flash
-  // and ask for JSON bounding boxes of key narrative elements.
-  // Here, we simulate "Smart Detection" for the specific "Tortuga" book demo
+// --- ALBUM ILLUSTRATION ANALYSIS (multimodal) ---
 
-  return new Promise(resolve => {
-    setTimeout(() => {
-      // Simulated "AI Detected Regions"
-      const mockRegions: AlbumRegion[] = [
-        { id: `reg-${Date.now()}-1`, text: "Detectado: Protagonista principal.", x: 10, y: 10, width: 40, height: 40 },
-        { id: `reg-${Date.now()}-2`, text: "Detectado: Elemento secundario.", x: 60, y: 50, width: 30, height: 30 },
-      ];
-      resolve(mockRegions);
-    }, 1500);
-  });
+// Valid enum values used by sanitization — kept here so the sanitizer never
+// depends on runtime imports from types.
+const _REGION_TYPES     = ['focus', 'challenge'] as const;
+const _PEDAGOGICAL_OBJS = ['literal', 'inferential', 'reflective', 'writing'] as const;
+
+/**
+ * Sanitizes a raw region object returned by the model before it enters editor state.
+ *
+ * Rules:
+ *   text           — required, trimmed, capped at 200 chars; region rejected if empty
+ *   x, y           — clamped to [0, 90] (leaves room for minimum box size)
+ *   width, height  — clamped to [10, 60]; additionally capped so x+w ≤ 100, y+h ≤ 100
+ *   type           — must be 'focus' | 'challenge'; defaults to 'focus'
+ *   pedagogicalObjective — must be a valid enum value; omitted otherwise
+ *   leoHint        — optional, trimmed, capped at 200 chars
+ *
+ * Returns null when the region is unsalvageable (no text, non-finite coords).
+ */
+function _sanitizeRegion(raw: unknown): Omit<AlbumRegion, 'id'> | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const r = raw as Record<string, unknown>;
+
+    const text = typeof r.text === 'string' ? r.text.trim().substring(0, 200) : '';
+    if (!text) return null;
+
+    const rx = Number(r.x ?? 0);
+    const ry = Number(r.y ?? 0);
+    const rw = Number(r.width  ?? 10);
+    const rh = Number(r.height ?? 10);
+    if (!isFinite(rx) || !isFinite(ry) || !isFinite(rw) || !isFinite(rh)) return null;
+
+    const x      = Math.max(0, Math.min(90, rx));
+    const y      = Math.max(0, Math.min(90, ry));
+    const width  = Math.max(10, Math.min(60, rw,  100 - x));
+    const height = Math.max(10, Math.min(60, rh,  100 - y));
+
+    const type: AlbumRegion['type'] =
+        _REGION_TYPES.includes(r.type as any) ? (r.type as 'focus' | 'challenge') : 'focus';
+
+    const region: Omit<AlbumRegion, 'id'> = { text, x, y, width, height, type };
+
+    if (_PEDAGOGICAL_OBJS.includes(r.pedagogicalObjective as any)) {
+        region.pedagogicalObjective = r.pedagogicalObjective as AlbumRegion['pedagogicalObjective'];
+    }
+    const hint = typeof r.leoHint === 'string' ? r.leoHint.trim().substring(0, 200) : '';
+    if (hint) region.leoHint = hint;
+
+    return region;
+}
+
+/**
+ * Sends an album illustration to Gemini and returns 3–6 suggested narrative
+ * regions for reading mediation.
+ *
+ * @param imageFile  The raw File uploaded by the editor (from AlbumPageDraft.file).
+ *                   Must be an image MIME type.
+ * @returns          Array of sanitized AlbumRegion objects without id fields.
+ *                   Caller is responsible for assigning stable ids before storing.
+ * @throws           Error with a user-facing message if the model call fails or
+ *                   the response cannot be parsed. Caller should catch and show
+ *                   the message in the editor UI.
+ */
+export const analizarIlustracionAlbum = async (imageFile: File): Promise<Omit<AlbumRegion, 'id'>[]> => {
+    if (!ai) {
+        throw new Error('No hay clave de API configurada. Agrega VITE_GEMINI_API_KEY en .env.local.');
+    }
+
+    // Convert File → base64 string (strip the data:mime;base64, prefix)
+    const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result as string;
+            const comma  = result.indexOf(',');
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(new Error('No se pudo leer el archivo de imagen.'));
+        reader.readAsDataURL(imageFile);
+    });
+
+    const mimeType = imageFile.type || 'image/jpeg';
+
+    const prompt = `Eres un asistente pedagógico que analiza ilustraciones de libros álbum infantiles para una plataforma de lectura mediada.
+
+TAREA: Identifica entre 3 y 6 regiones visualmente distintas y narrativamente significativas en esta imagen. Estas regiones se usarán para guiar la comprensión lectora y la literacidad visual con niños.
+
+REGLAS DE SALIDA:
+- Devuelve ÚNICAMENTE JSON válido. Sin markdown, sin explicaciones.
+- Entre 3 y 6 regiones en total. Nunca más de 6.
+- Cada región debe corresponder a un elemento claramente visible en la imagen.
+- NO inventes ni describas elementos que no estén presentes visualmente.
+
+COORDENADAS:
+- x e y son el extremo superior izquierdo de la caja, en porcentaje del área de imagen (0–100).
+- width y height son el tamaño de la caja en porcentaje.
+- Tamaño mínimo: 10×10. Tamaño máximo: 60×60.
+- Las cajas no deben solaparse significativamente.
+- Evita cajas que cubran toda la imagen o que sean demasiado genéricas.
+
+PRIORIDAD DE SELECCIÓN (en orden):
+1. Personaje(s) principal(es): cara, expresión, postura corporal.
+2. Acción central o conflicto visible en la escena.
+3. Objetos con carga emocional o simbólica significativa.
+4. Elementos del fondo que aporten contexto narrativo o emocional.
+
+CAMPOS:
+- text: Descripción narrativa breve en español para lectores infantiles. Máximo 2 oraciones.
+- type: Usa "focus" para regiones narrativas estándar. Usa "challenge" SOLO si el elemento es visualmente ambiguo, está parcialmente oculto o es un momento de descubrimiento intencional.
+- pedagogicalObjective: Elige el más adecuado:
+    "literal"     — algo directamente visible y nombrable
+    "inferential" — algo que requiere inferir más allá de lo visible
+    "reflective"  — algo que invita a evaluar o conectar con experiencias propias
+    "writing"     — algo que puede inspirar producción escrita
+- leoHint: Una oración interna en español para el asistente de IA (nunca se muestra al estudiante). Opcional.`;
+
+    let rawJson: unknown;
+    try {
+        const response = await ai.models.generateContent({
+            model: GEMINI_FLASH_LATEST,
+            contents: [
+                {
+                    role: 'user',
+                    parts: [
+                        { inlineData: { mimeType, data: base64 } },
+                        { text: prompt },
+                    ],
+                },
+            ],
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        regions: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    text:                 { type: Type.STRING },
+                                    x:                    { type: Type.NUMBER },
+                                    y:                    { type: Type.NUMBER },
+                                    width:                { type: Type.NUMBER },
+                                    height:               { type: Type.NUMBER },
+                                    type:                 { type: Type.STRING },
+                                    pedagogicalObjective: { type: Type.STRING },
+                                    leoHint:              { type: Type.STRING },
+                                },
+                                required: ['text', 'x', 'y', 'width', 'height', 'type'],
+                            },
+                        },
+                    },
+                    required: ['regions'],
+                },
+            },
+        });
+        rawJson = JSON.parse(response.text ?? '{}');
+    } catch (error) {
+        logAiError('analizarIlustracionAlbum', error);
+        throw new Error('El modelo no pudo analizar la imagen. Verifica la clave API o intenta con otra imagen.');
+    }
+
+    const rawRegions = Array.isArray((rawJson as any)?.regions) ? (rawJson as any).regions : [];
+
+    // Sanitize each region; reject unsalvageable ones; cap at 6
+    const sanitized = (rawRegions as unknown[])
+        .slice(0, 6)
+        .map(_sanitizeRegion)
+        .filter((r): r is Omit<AlbumRegion, 'id'> => r !== null);
+
+    if (sanitized.length === 0) {
+        throw new Error('El modelo no devolvió regiones válidas. Intenta con otra imagen o ajusta la ilustración.');
+    }
+
+    return sanitized;
 }

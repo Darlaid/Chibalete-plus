@@ -14,9 +14,9 @@ const TTS_MODE = process.env.TTS_MODE || 'real';
 
 export const AI_CONFIG = {
     tts: {
-        primary: { provider: 'openai', model: 'tts-1' },
-        fallback: { provider: 'openai', model: 'tts-1' }, // Desactivado Fallback Gemini temporalmente (Fase 4.1)
-        maxInputTokens: 2000, 
+        primary:  { provider: 'openai', model: 'tts-1' },
+        fallback: { provider: 'gemini', model: 'gemini-2.5-flash-preview-tts' },
+        maxInputTokens: 2000,
     },
     text_light: {
         primary: { provider: 'gemini', model: 'gemini-1.5-flash' },
@@ -24,8 +24,15 @@ export const AI_CONFIG = {
         maxInputTokens: 4000
     },
     chat: {
-        primary: { provider: 'openai', model: 'gpt-4o-mini' },
-        fallback: { provider: 'gemini', model: 'gemini-1.5-flash' }
+        primary:  { provider: 'openai',  model: 'gpt-4o-mini' },
+        fallback: { provider: 'gemini',  model: 'gemini-1.5-flash' },
+    },
+    // chat_visual: album mode — image attached. Gemini is primary because it
+    // handles inlineData natively. OpenAI fallback is text-only (imageData
+    // is silently ignored on that branch) — acceptable graceful degradation.
+    chat_visual: {
+        primary:  { provider: 'gemini', model: 'gemini-1.5-flash' },
+        fallback: { provider: 'openai', model: 'gpt-4o-mini' },
     },
     maxRetries: 2,
     timeoutMs: 15000,
@@ -45,7 +52,7 @@ const getOpenAI = () => {
     return null;
 };
 
-const getGemini = () => {
+export const getGemini = () => {
     if (geminiClient) return geminiClient;
     if (process.env.GEMINI_API_KEY) {
         geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY, apiVersion: 'v1beta' });
@@ -75,12 +82,21 @@ const getMockResponse = (taskType, payload) => {
         return Buffer.alloc(1024, 0);
     } else if (taskType === 'text_light') {
         return "[MOCK] Resumen generado sin costo.";
-    } else if (taskType === 'chat') {
+    } else if (taskType === 'chat' || taskType === 'chat_visual') {
         return "[MOCK] Respuesta del asistente pedagógico simulada.";
     }
     return "[MOCK]";
 };
 
+// INVARIANT — systemInstruction delivery contract:
+//   Every provider + taskType combination that accepts a systemInstruction MUST
+//   deliver it to the model without loss.
+//   • OpenAI (chat / chat_visual): prepended as { role:'system', content } — first
+//     message in the array. There is no top-level 'system' parameter.
+//   • Gemini (chat / chat_visual): passed via config.systemInstruction.
+//   • text_light: single-shot, no system instruction (caller builds a self-contained prompt).
+//   Violating this invariant silently strips Leo's entire pedagogical context and
+//   MODO ÁLBUM section, causing hallucinations and policy violations.
 const executeWithProvider = async (provider, model, taskType, payload) => {
     // Guards
     if (taskType === 'tts' && payload.text?.length > AI_CONFIG.tts.maxInputTokens) {
@@ -105,11 +121,23 @@ const executeWithProvider = async (provider, model, taskType, payload) => {
                 messages: [{ role: "user", content: payload.text }]
             });
             return { provider, model, data: completion.choices[0].message.content };
-        } else if (taskType === 'chat') {
+        } else if (taskType === 'chat' || taskType === 'chat_visual') {
+            // OpenAI chat.completions has no top-level 'system' parameter.
+            // System instruction must be the first message with role:'system'.
+            // This applies to both normal chat (primary) and album fallback
+            // (chat_visual when Gemini is unavailable) — Leo's full pedagogical
+            // context and MODO ÁLBUM section are preserved in either path.
+            // imageData is intentionally not used here: OpenAI text-only is the
+            // accepted degradation when Gemini is unavailable.
+            if (!payload.systemInstruction) {
+                log(`[aiEngine] WARN taskType=${taskType} provider=openai — systemInstruction missing; Leo context will be absent`);
+            }
+            const messagesWithSystem = payload.systemInstruction
+                ? [{ role: 'system', content: payload.systemInstruction }, ...payload.messages]
+                : payload.messages;
             const completion = await ai.chat.completions.create({
                 model: model,
-                messages: payload.messages,
-                system: payload.systemInstruction || undefined
+                messages: messagesWithSystem,
             });
             return { provider, model, data: completion.choices[0].message.content };
         }
@@ -122,6 +150,7 @@ const executeWithProvider = async (provider, model, taskType, payload) => {
                 model: model,
                 contents: [{ parts: [{ text: payload.text }] }],
                 config: {
+                    responseModalities: ['AUDIO'],
                     response_mime_type: "audio/mp3",
                     speech_config: {
                         voice_config: {
@@ -141,11 +170,30 @@ const executeWithProvider = async (provider, model, taskType, payload) => {
                 contents: payload.text
             });
             return { provider, model, data: response.text };
-        } else if (taskType === 'chat') {
-            const convertedMessages = payload.messages.map(m => ({
-                role: m.role === 'user' ? 'user' : 'model',
-                parts: [{ text: m.content || m.text }]
-            }));
+        } else if (taskType === 'chat' || taskType === 'chat_visual') {
+            if (!payload.systemInstruction) {
+                log(`[aiEngine] WARN taskType=${taskType} provider=gemini — systemInstruction missing; Leo context will be absent`);
+            }
+            const convertedMessages = payload.messages.map((m, idx, arr) => {
+                const parts = [{ text: m.content || m.text || '' }];
+
+                // Inject image into the last user message when imageData is present.
+                // Multimodal only supported on Gemini — OpenAI fallback is text-only.
+                const isLastUser = idx === arr.length - 1 && m.role === 'user';
+                if (isLastUser && payload.imageData?.base64) {
+                    parts.push({
+                        inlineData: {
+                            mimeType: payload.imageData.mimeType ?? 'image/jpeg',
+                            data:     payload.imageData.base64,
+                        },
+                    });
+                }
+
+                return {
+                    role:  m.role === 'user' ? 'user' : 'model',
+                    parts,
+                };
+            });
             const response = await ai.models.generateContent({
                 model: model,
                 contents: convertedMessages,
@@ -174,24 +222,37 @@ export const runHybridTask = async (taskType, payload) => {
     const config = AI_CONFIG[taskType];
     if (!config) throw new Error(`Unknown task type: ${taskType}`);
 
-    const primaryOption = config.primary;
+    const primaryOption  = config.primary;
     const fallbackOption = config.fallback;
 
+    // ── DIAGNÓSTICO: verificar keys antes de intentar ──────────────────────────
+    const hasOpenAI = !!process.env.OPENAI_API_KEY;
+    const hasGemini = !!process.env.GEMINI_API_KEY;
+    log(`[AI] runHybridTask task=${taskType} openai_key=${hasOpenAI} gemini_key=${hasGemini}`);
+
+    // ── PRIMARY ────────────────────────────────────────────────────────────────
+    let primaryError = null;
     let attempts = 0;
     while (attempts < AI_CONFIG.maxRetries) {
         try {
-            log(`[AI] Task=${taskType} Provider=${primaryOption.provider} Model=${primaryOption.model}`);
+            log(`[AI] PRIMARY task=${taskType} provider=${primaryOption.provider} model=${primaryOption.model}`);
             const result = await executeWithProvider(primaryOption.provider, primaryOption.model, taskType, payload);
+            log(`[AI] PRIMARY success provider=${primaryOption.provider}`);
             return result;
         } catch (error) {
             attempts++;
-            log(`[AI] Primary failed (${error.message}), Attempt ${attempts}/${AI_CONFIG.maxRetries}`);
-            if (error.message.includes('missing')) break; // Don't retry if key missing
-            
-            // Falla rápida y definitiva para límites estrictos, sin retries inútiles
-            const errMsg = error.message ? error.message.toLowerCase() : '';
-            if (errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('rate limit') || errMsg.includes('403') || errMsg.includes('401')) {
-                log(`[AI] Strict API Limit hit. Aborting primary retries immediately.`);
+            primaryError = error;
+            const msg = error.message ?? '';
+            log(`[AI] PRIMARY failed attempt=${attempts} error="${msg}"`);
+
+            // No reintentar si la key no existe — el problema es de configuración
+            if (msg.includes('missing')) break;
+
+            // No reintentar en errores definitivos de auth / quota
+            const low = msg.toLowerCase();
+            if (low.includes('401') || low.includes('403') || low.includes('429') ||
+                low.includes('quota') || low.includes('rate limit')) {
+                log(`[AI] PRIMARY abort — auth/quota error, no retry`);
                 break;
             }
 
@@ -200,29 +261,31 @@ export const runHybridTask = async (taskType, payload) => {
         }
     }
 
-    // Fallback
-    // Bloqueo estricto para TTS en Fase 4.1: No hay fallback para evitar dobles llamadas a OpenAI tras error
-    if (taskType === 'tts') {
-        const err = new Error("Provider exhausted limit or failed. No fallback active for TTS.");
-        err.status = 500;
-        throw err;
-    }
-
-    log(`[AI] Primary failed, trying fallback provider=${fallbackOption.provider} model=${fallbackOption.model}`);
+    // ── FALLBACK ───────────────────────────────────────────────────────────────
+    log(`[AI] FALLBACK task=${taskType} provider=${fallbackOption.provider} model=${fallbackOption.model} (primary_err="${primaryError?.message}")`);
     attempts = 0;
     while (attempts < AI_CONFIG.maxRetries) {
         try {
             const result = await executeWithProvider(fallbackOption.provider, fallbackOption.model, taskType, payload);
+            log(`[AI] FALLBACK success provider=${fallbackOption.provider}`);
             return result;
         } catch (error) {
             attempts++;
-            log(`[AI] Fallback failed (${error.message}), Attempt ${attempts}/${AI_CONFIG.maxRetries}`);
-            if (error.message.includes('missing')) break;
+            const msg = error.message ?? '';
+            log(`[AI] FALLBACK failed attempt=${attempts} error="${msg}"`);
+
+            if (msg.includes('missing')) {
+                // Fallback key también ausente — lanzar con diagnóstico completo
+                throw new Error(`All providers failed: primary="${primaryError?.message}" fallback="${msg}"`);
+            }
             if (attempts >= AI_CONFIG.maxRetries) {
-                log(`[AI] All providers failed for task=${taskType}`);
-                throw new Error("All AI providers failed.");
+                throw new Error(`All providers failed: primary="${primaryError?.message}" fallback="${msg}"`);
             }
             await new Promise(r => setTimeout(r, 1000 * attempts));
         }
     }
+
+    // Esta línea es inalcanzable — el while siempre lanza si no retorna.
+    // Defensive throw para satisfacer el análisis de tipos.
+    throw new Error(`runHybridTask: unreachable exit for task=${taskType}`);
 };

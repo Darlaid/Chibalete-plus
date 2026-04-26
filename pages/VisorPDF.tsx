@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import type { Content } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
+import * as analyticsService from '../services/analyticsService';
 import { Sun, Moon, ChevronLeft, ChevronRight, Loader2, Minus, Plus, Maximize, Minimize, Smartphone, Info, X, Tag, User } from 'lucide-react';
 import { useDevice } from '../hooks/useDevice';
 import MobileOrientationOverlay from '../components/MobileOrientationOverlay';
 import PinchZoomContainer from '../components/PinchZoomContainer';
+import { getResumeToast } from '../utils/canonicalProgress';
 
 declare const pdfjsLib: any;
 
@@ -23,6 +25,11 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [showInfo, setShowInfo] = useState(false);
+    // D/E: Resume toast — shown once after PDF init when progress > 0
+    const [resumeToast, setResumeToast] = useState<{ label: string; crossMode: boolean; fromRemote: boolean } | null>(null);
+    const resumeToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // E: Stores whether remote progress was adopted for cross-device hint.
+    const fromRemoteProgressRef = useRef(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -114,16 +121,52 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
 
                     // Resume Logic
                     if (user) {
+                        // E: Fetch remote progress before computing resume page — ensures cross-device
+                        // accuracy. 3s timeout, silent on failure. PDF load itself takes longer so
+                        // this usually resolves before we reach this line.
+                        const fromRemote = await dataService.fetchAndMergeRemoteProgress(user.id, content.id).catch(() => false);
+                        fromRemoteProgressRef.current = fromRemote;
+
                         const progress = dataService.getProgresoUsuarioLibro(user.id, content.id);
                         if (progress && progress.porcentaje > 0) {
-                            let p = Math.floor((progress.porcentaje / 100) * doc.numPages);
-                            if (p > 1 && p % 2 !== 0) p = p - 1;
+                            // E: Prefer anchor.type='page' (exact page number) over percentage translation.
+                            // Without anchor: (porcentaje/100 * numPages) can land 1-2 pages off due to rounding.
+                            // With anchor: the exact page that was open when progress was saved.
+                            const anchor = progress.canonicalProgress?.anchor;
+                            let p: number;
+                            if (anchor?.type === 'page' && anchor.value > 0) {
+                                p = anchor.value; // exact page — no translation needed
+                            } else {
+                                p = Math.floor((progress.porcentaje / 100) * doc.numPages);
+                            }
+                            if (p > 1 && p % 2 !== 0) p = p - 1; // spread-view: snap to even page
                             const target = Math.max(1, p);
                             setPageNum(target === 1 ? 1 : (target % 2 === 0 ? target : target - 1));
+
+                            // D/E: Resume toast — notify user we're restoring their position.
+                            const lastMode = progress.canonicalProgress?.lastInteractedMode ?? (progress as any).last_device_mode;
+                            const toast = getResumeToast(progress.porcentaje, lastMode, 'pdf', fromRemote);
+                            if (toast) {
+                                setResumeToast(toast);
+                                if (resumeToastTimerRef.current) clearTimeout(resumeToastTimerRef.current);
+                                resumeToastTimerRef.current = setTimeout(() => setResumeToast(null), 5000);
+                            }
                         }
                         // Record this reader open (sessionsCount + lastOpenedAt)
                         dataService.recordReaderOpen(user.id, content.id, 'pdf');
                         sessionStartRef.current = Date.now();
+                        analyticsService.track({
+                            event: 'session_start',
+                            userId: user.id,
+                            contentId: content.id,
+                            timestamp: Date.now(),
+                            streak: 0,
+                            level: 0,
+                            sessionDuration: 0,
+                            source: 'pdf',
+                        });
+                        sessionStartedRef.current = true;
+                        analyticsService.startHeartbeat({ userId: user.id, contentId: content.id, sessionStartRef });
                     }
 
                     // Trigger FIT
@@ -207,22 +250,78 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
     // -- Saving Progress --
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const sessionStartRef = useRef<number>(Date.now()); // Session timer for totalTimeMs
+    const sessionStartedRef = useRef<boolean>(false);   // guard: only emit session_end if session_start fired
+    // Refs to read latest pageNum/numPages in the unmount-only effect below
+    const pageNumRef = useRef<number>(pageNum);
+    const numPagesRef = useRef<number>(numPages);
+
+    // Progress-saving effect: fires on page changes, saves progress and emits page_change.
+    // Cleanup only cancels the debounce timer and flushes progress — never touches session lifecycle.
     useEffect(() => {
+        pageNumRef.current = pageNum;
+        numPagesRef.current = numPages;
+
         if (user && numPages > 0) {
             if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
             saveTimeoutRef.current = setTimeout(() => {
                 // emit physical page out of total pages, not percentage.
+                // E: anchor type='page' stores the exact page number for same-mode precision.
                 dataService.updateProgreso(
                     user.id, content.id, pageNum, numPages, undefined, 'pdf',
-                    { lastMode: 'pdf', elapsedMs: Date.now() - sessionStartRef.current }
+                    { lastMode: 'pdf', elapsedMs: Date.now() - sessionStartRef.current },
+                    { type: 'page', value: pageNum }
                 );
+                // page_change event — only after session is live
+                if (sessionStartedRef.current) {
+                    analyticsService.track({
+                        event: 'page_change',
+                        userId: user.id,
+                        contentId: content.id,
+                        timestamp: Date.now(),
+                        streak: 0,
+                        level: 0,
+                        sessionDuration: Date.now() - sessionStartRef.current,
+                        pageNumber: pageNum,
+                        totalPages: numPages,
+                        progressPercentage: Math.round((pageNum / numPages) * 100),
+                    });
+                }
             }, 1000);
         }
-        return () => { 
-            if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current); 
+        return () => {
+            if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
             dataService.forceFlush();
         };
     }, [pageNum, numPages, user, content.id]);
+
+    // Unmount-only effect: emits session_end and stops heartbeat exactly once when the
+    // component is destroyed. Uses refs for pageNum/numPages so it always reads the
+    // latest position even though deps are empty.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        return () => {
+            if (sessionStartedRef.current && user) {
+                analyticsService.track({
+                    event: 'session_end',
+                    userId: user.id,
+                    contentId: content.id,
+                    timestamp: Date.now(),
+                    streak: 0,
+                    level: 0,
+                    sessionDuration: Date.now() - sessionStartRef.current,
+                    progressPercentage: numPagesRef.current > 0
+                        ? Math.round((pageNumRef.current / numPagesRef.current) * 100)
+                        : 0,
+                    source: 'pdf',
+                });
+                analyticsService.flush();
+            }
+            analyticsService.stopHeartbeat();
+        };
+    // Empty deps: intentional. This effect runs its cleanup only on unmount.
+    // pageNum and numPages are read from refs (pageNumRef / numPagesRef) which are
+    // kept in sync by the progress-saving effect above.
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
 
     // -- Canvas Renderer --
@@ -441,6 +540,40 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
 
                 {!isLoading && !error && pdfDoc && <RenderContent />}
             </main>
+
+            {/* D: RESUME TOAST — shown once per open when progress ≥ 5% */}
+            {resumeToast && (
+                <div
+                    className={`fixed bottom-32 left-6 z-50 px-4 py-3 rounded-2xl shadow-xl border animate-in slide-in-from-bottom-5 fade-in duration-400 max-w-xs flex items-center gap-3 ${
+                        isDarkMode
+                            ? 'bg-gray-800/95 text-gray-100 border-gray-600 backdrop-blur-sm'
+                            : 'bg-white/95 text-gray-800 border-gray-200 backdrop-blur-sm'
+                    }`}
+                    role="status"
+                    aria-live="polite"
+                >
+                    <span className="text-lg shrink-0">📖</span>
+                    <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold leading-snug">
+                            {resumeToast.fromRemote
+                                ? 'Actualizado desde otro dispositivo'
+                                : resumeToast.crossMode
+                                    ? 'Continuando desde otro modo'
+                                    : 'Continuando donde lo dejaste'}
+                        </p>
+                        <p className={`text-xs leading-snug truncate ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                            Retomando desde {resumeToast.label}
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => { if (resumeToastTimerRef.current) clearTimeout(resumeToastTimerRef.current); setResumeToast(null); }}
+                        className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
+                        aria-label="Cerrar"
+                    >
+                        <X size={14} />
+                    </button>
+                </div>
+            )}
 
             {/* Thumbnail Footer */}
             {!isLoading && !error && pdfDoc && (

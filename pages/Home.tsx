@@ -9,6 +9,7 @@ import ProgressUpdater from '../components/ProgressUpdater';
 import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, User, CommunityPost, Assignment } from '../types';
 import { MessageSquare, Heart, PenTool, ClipboardList, CheckCircle, Camera, Video, X, Upload, Check, Mic, StopCircle, Play, Square, Lightbulb, Calendar as CalendarIcon, ChevronLeft, ChevronRight, CheckSquare, Gift, BookOpen, Users, Plus, Zap } from 'lucide-react';
+import { isMediator, isAdmin } from '../utils/permissions';
 import QuickClubModal from '../components/QuickClubModal';
 
 // Helper to handle local dates without timezone shifting
@@ -83,7 +84,7 @@ const Home: React.FC = () => {
             setNuevos(dataService.getNuevosTitulos(user.roles).map(content => ({ content })));
             setRecomendados(dataService.getRecomendadosComunidad(user.roles).map(content => ({ content })));
 
-            if (user.roles.includes('profesor') || user.roles.includes('mediador') || user.roles.includes('administrador')) {
+            if (isMediator(user) || isAdmin(user)) {
                 setArticulosPedagogicos(dataService.getArticulosPedagogicos().map(content => ({ content })));
             }
 
@@ -196,10 +197,10 @@ const Home: React.FC = () => {
 
     const getGreeting = () => {
         const firstName = user.nombre_completo.split(' ')[0];
-        if (user.roles.includes('administrador')) {
+        if (isAdmin(user)) {
             return `Hola, ${firstName} Administrador`;
         }
-        if (user.roles.includes('profesor') || user.roles.includes('mediador')) {
+        if (isMediator(user)) {
             return `Bienvenido, Profesor ${firstName}`;
         }
         return `Hola, ${firstName}`;
@@ -269,7 +270,7 @@ const Home: React.FC = () => {
                     {getGreeting()}
                 </h1>
                 <div className="mt-2 flex items-center gap-2 flex-wrap min-h-[24px]">
-                    {(user.roles.includes('administrador') || user.roles.includes('profesor') || user.roles.includes('mediador')) && (
+                    {(isAdmin(user) || isMediator(user)) && (
                         <div className="flex flex-wrap items-center gap-3">
                             <p className="text-md text-gray-500 dark:text-gray-400">Tus roles:</p>
                             {user.roles.map(role => (
@@ -359,7 +360,7 @@ const Home: React.FC = () => {
             <div className="px-4 md:px-8 mb-6 space-y-3">
 
                 {/* 1. ADMIN: Pending Reward Requests */}
-                {user.roles.includes('administrador') && (() => {
+                {isAdmin(user) && (() => {
                     const pendingRewards = dataService.getRewardRequests('submitted');
                     if (pendingRewards.length === 0) return null;
                     return (
@@ -553,7 +554,7 @@ const Home: React.FC = () => {
             </section>
 
             {/* Ideas y Reflexiones (Profesores/Admin Only) */}
-            {(user.roles.includes('profesor') || user.roles.includes('mediador') || user.roles.includes('administrador')) && articulosPedagogicos.length > 0 && (
+            {(isMediator(user) || isAdmin(user)) && articulosPedagogicos.length > 0 && (
                 <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-gray-800 dark:to-gray-900 py-2 my-6">
                     <div className="px-4 md:px-8 mb-2 flex items-center gap-2">
                         <Lightbulb className="text-yellow-500" />

@@ -14,6 +14,17 @@ import type {
     Assignment,
     AssignmentSubmission,
     PedagogicalStats,
+    StudentLearningSignals,
+    StudentPedagogicalRecommendation,
+    StudentRecommendationBundle,
+    LeoTeacherAdvisorSummary,
+    StudentLongitudinalContext,
+    PedagogicalSignals,
+    PedagogicalObjective,
+    LeoAdvisorContext,
+    PedagogicalRecommendation,
+    LeoSuggestion,
+    SignalLevel,
     Group,
     JournalEntry,
     Section,
@@ -24,6 +35,15 @@ import type {
     Bundle
 } from '../types';
 import { persistenceService } from './persistenceService';
+import { isMediator, isAdmin, hasMediatorRole, hasAdminRole } from '../utils/permissions';
+
+// Fase F: Entry in the persistent failed-sync queue.
+interface FailedSyncEntry {
+    userId: string;
+    contentId: string;
+    payload: string;  // JSON body — exactly what would be sent to /api/progress/:u/:c/sync
+    addedAt: string;  // ISO timestamp — used for 24h TTL pruning
+}
 
 class DataService {
     private users: User[] = [];
@@ -53,6 +73,15 @@ class DataService {
     private currentSessionId: string = crypto.randomUUID();
     private sessionStartTimeMs: number = Date.now();
 
+    // Fase F — Sync eventual: entries that failed to sync and need retry.
+    // Persisted to localStorage so they survive page reload.
+    // Key: `${userId}__${contentId}` — same as pendingSyncs.
+    // Max 50 entries; entries older than 24h are pruned (stale progress unlikely to help).
+    private failedSyncs: Map<string, FailedSyncEntry> = new Map();
+    private static readonly FAILED_SYNCS_KEY = 'chibalete_failed_syncs';
+    private static readonly FAILED_SYNCS_MAX = 50;
+    private static readonly FAILED_SYNCS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
     /**
      * Fase E3 — Árbitro temporal del servidor.
      * Offset en ms entre el reloj del servidor y el reloj local del cliente.
@@ -65,6 +94,27 @@ class DataService {
     private apiUrl = '/api';
 
     private initializationPromise: Promise<void>;
+
+    /**
+     * getSessionUserId — Lee el userId de la sesion activa.
+     * AuthContext guarda en localStorage (remember=true) o sessionStorage (remember=false).
+     * Devuelve string vacio si no hay sesion activa.
+     */
+    private getSessionUserId(): string {
+        return localStorage.getItem('chibalete_user_id')
+            ?? sessionStorage.getItem('chibalete_user_id')
+            ?? '';
+    }
+
+    /**
+     * Headers para operaciones de escritura que requieren rol administrador.
+     * Usa x-user-id del usuario logueado — el backend valida el rol.
+     * No embebe secretos en el bundle.
+     */
+    private get adminWriteHeaders(): Record<string, string> {
+        const userId = this.getSessionUserId();
+        return { 'x-user-id': userId };
+    }
 
     constructor() {
         // --- USERS LOADING ---
@@ -107,32 +157,21 @@ class DataService {
 
         this.checkServerConnection();
 
-        // FALLBACK ADMIN FOR LOCAL DEV
-        if (!this.users.find(u => u.email === 'admin@chibalete.com')) {
-            console.log("Injecting fallback admin user");
-            this.users.push({
-                id: 'admin-1',
-                nombre_usuario: 'admin',
-                nombre_completo: 'Administrador Local',
-                email: 'admin@chibalete.com',
-                password: 'chibalete123',
-                roles: ['administrador'],
-                colegio: 'Chibalete',
-                curso: 'Staff',
-                fecha_nacimiento: '1990-01-01',
-                avatar_url: '',
-                bio_corta: 'Admin de sistema',
-                libros_leidos: 0,
-                seguidores: 0,
-                seguidos: 0,
-                nivel_lectura: 'Feroz',
-                fecha_registro: new Date().toISOString(),
-                progreso: {},
-                puntos: 0,
-                nivel_inmersivo: 1,
-                daily_shared_words: 0
-            } as any);
-        }
+        // Fase F: Restore failed-sync queue from localStorage (survives page reload).
+        try {
+            const rawFailed = localStorage.getItem(DataService.FAILED_SYNCS_KEY);
+            if (rawFailed) {
+                const obj = JSON.parse(rawFailed) as Record<string, FailedSyncEntry>;
+                Object.entries(obj).forEach(([k, v]) => {
+                    if (v?.userId && v?.contentId && v?.payload) {
+                        this.failedSyncs.set(k, v);
+                    }
+                });
+            }
+        } catch { /* localStorage unavailable or corrupt — silent */ }
+
+        // Fallback admin local-dev removido en 2026-04-26 official build.
+        // Produccion usa unicamente usuarios reales sincronizados desde /api/users.
         
         this.startSyncEngine();
     }
@@ -146,7 +185,7 @@ class DataService {
     // Default admin creation removed for production cleanup
 
 
-    // --- SYNC ENGINE (Phase 3.4) ---
+    // --- SYNC ENGINE (Phase 3.4 / Fase F) ---
     private startSyncEngine() {
         if (typeof window !== 'undefined' && !this.syncInterval) {
             // Buffer flush every 15s
@@ -156,7 +195,13 @@ class DataService {
             window.addEventListener('beforeunload', () => this.flushSync(true));
             window.addEventListener('visibilitychange', () => {
                 if (document.visibilityState === 'hidden') this.flushSync(true);
+                // Fase F: retry failed syncs when tab becomes visible again
+                if (document.visibilityState === 'visible') this.retryFailedSyncs();
             });
+
+            // Fase F: retry on network reconnect and tab focus
+            window.addEventListener('online', () => this.retryFailedSyncs());
+            window.addEventListener('focus', () => this.retryFailedSyncs());
         }
     }
 
@@ -165,6 +210,10 @@ class DataService {
     }
 
     private flushSync(isTerminal = false) {
+        // Fase F: drain failed-sync queue first (opportunistic — same send path).
+        // Only on non-terminal flushes; terminal (unload) keepalive budget is scarce.
+        if (!isTerminal) this.retryFailedSyncs();
+
         if (this.pendingSyncs.size === 0) return;
 
         this.pendingSyncs.forEach((prog, key) => {
@@ -180,22 +229,91 @@ class DataService {
             const hash = JSON.stringify(syncPayload);
             if (this.lastSyncedPayloads.get(key) === hash) return; // Deduplicate
 
-            if ('sendBeacon' in navigator) {
-                const url = `${this.apiUrl}/progress/${usuario_id}/${contenido_id}/sync`;
-                const blob = new Blob([hash], { type: 'application/json' });
-                navigator.sendBeacon(url, blob);
-            } else if (!isTerminal) { // fetch is cancelled on terminal exit, fallback only if active
-                fetch(`${this.apiUrl}/progress/${usuario_id}/${contenido_id}/sync`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: hash
-                }).catch(err => console.warn('[Sync] Flush failed:', err));
-            }
+            // keepalive: true survives page-unload; supports custom headers (unlike sendBeacon)
+            fetch(`${this.apiUrl}/progress/${usuario_id}/${contenido_id}/sync`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-user-id': usuario_id },
+                body: hash,
+                keepalive: true
+            }).then(res => {
+                if (res.ok) {
+                    // Success: mark as synced and remove from failed queue if present.
+                    this.lastSyncedPayloads.set(key, hash);
+                    if (this.failedSyncs.has(key)) {
+                        this.failedSyncs.delete(key);
+                        this.saveFailedSyncs();
+                    }
+                } else {
+                    // Server returned error (4xx/5xx) — add to retry queue.
+                    this.addToFailedSyncs(key, usuario_id, contenido_id, hash);
+                }
+            }).catch(() => {
+                // Network failure — add to retry queue.
+                this.addToFailedSyncs(key, usuario_id, contenido_id, hash);
+            });
 
+            // Optimistic mark — prevents the same payload being re-queued on the next interval
+            // before the response arrives. If the fetch fails, addToFailedSyncs handles retry.
             this.lastSyncedPayloads.set(key, hash);
         });
 
         this.pendingSyncs.clear();
+    }
+
+    // Fase F helpers ────────────────────────────────────────────────────────────
+
+    private addToFailedSyncs(key: string, userId: string, contentId: string, payload: string): void {
+        // Overwrite any previous entry for this key — the new payload is always more recent.
+        this.failedSyncs.set(key, { userId, contentId, payload, addedAt: new Date().toISOString() });
+        // Cap at FAILED_SYNCS_MAX — evict the oldest entry when over limit.
+        if (this.failedSyncs.size > DataService.FAILED_SYNCS_MAX) {
+            const oldest = this.failedSyncs.keys().next().value;
+            if (oldest) this.failedSyncs.delete(oldest);
+        }
+        this.saveFailedSyncs();
+    }
+
+    private retryFailedSyncs(): void {
+        if (this.failedSyncs.size === 0) return;
+        const cutoff = Date.now() - DataService.FAILED_SYNCS_TTL_MS;
+        let pruned = false;
+
+        this.failedSyncs.forEach((entry, key) => {
+            const age = new Date(entry.addedAt).getTime();
+            if (age < cutoff) {
+                // Prune stale entries — progress this old is unlikely to be useful.
+                this.failedSyncs.delete(key);
+                pruned = true;
+                return;
+            }
+
+            // Attempt retry — fire-and-forget with success/failure callbacks.
+            fetch(`${this.apiUrl}/progress/${entry.userId}/${entry.contentId}/sync`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-user-id': entry.userId },
+                body: entry.payload,
+                keepalive: true
+            }).then(res => {
+                if (res.ok) {
+                    this.failedSyncs.delete(key);
+                    this.lastSyncedPayloads.set(key, entry.payload);
+                    this.saveFailedSyncs();
+                }
+                // Non-ok response: stays in failedSyncs for next retry opportunity.
+            }).catch(() => {
+                // Network still down: stays in failedSyncs.
+            });
+        });
+
+        if (pruned) this.saveFailedSyncs();
+    }
+
+    private saveFailedSyncs(): void {
+        try {
+            const obj: Record<string, FailedSyncEntry> = {};
+            this.failedSyncs.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(DataService.FAILED_SYNCS_KEY, JSON.stringify(obj));
+        } catch { /* QuotaExceededError — silent; retry on next opportunity */ }
     }
 
 
@@ -267,7 +385,7 @@ class DataService {
     private async initializeUsersAndGroupsFromApi() {
         try {
             // USERS
-            const usersRes = await fetch(`${this.apiUrl}/users`, { headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' } });
+            const usersRes = await fetch(`${this.apiUrl}/users`);
             if (usersRes.ok) {
                 const rawUsers: any[] = await usersRes.json();
                 if (Array.isArray(rawUsers)) {
@@ -282,7 +400,7 @@ class DataService {
             }
 
             // GROUPS
-            const groupsRes = await fetch(`${this.apiUrl}/groups`, { headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' } });
+            const groupsRes = await fetch(`${this.apiUrl}/groups`);
             if (groupsRes.ok) {
                 const apiGroups: Group[] = await groupsRes.json();
                 if (Array.isArray(apiGroups)) {
@@ -298,7 +416,7 @@ class DataService {
             }
 
             // SCHOOLS
-            const schoolsRes = await fetch(`${this.apiUrl}/schools`, { headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' } });
+            const schoolsRes = await fetch(`${this.apiUrl}/schools`);
             if (schoolsRes.ok) {
                 const apiSchools: School[] = await schoolsRes.json();
                 if (Array.isArray(apiSchools)) {
@@ -329,7 +447,7 @@ class DataService {
     // --- SYNC METHODS ---
     async syncUserProgress(userId: string) {
         try {
-            const res = await fetch(`${this.apiUrl}/progress/user/${userId}`);
+            const res = await fetch(`${this.apiUrl}/progress/user/${userId}`, { headers: { 'x-user-id': userId } });
             if (res.ok) {
                 const data = await res.json();
                 const apiProgress = data.progressList || [];
@@ -385,10 +503,11 @@ class DataService {
 
         const url = parentId ? `${this.apiUrl}/upload?parentId=${encodeURIComponent(parentId)}` : `${this.apiUrl}/upload`;
 
+        const uploadUserId = this.getSessionUserId();
         const response = await fetch(url, {
             method: 'POST',
             headers: {
-                'x-admin-secret': 'chibalete-secure-upload-2025'
+                'x-user-id': uploadUserId,
             },
             body: formData
         });
@@ -406,11 +525,12 @@ class DataService {
     // after files were already uploaded. Fire-and-forget — failures are silently ignored.
     async purgeOrphanFile(url: string): Promise<void> {
         try {
+            const purgeUserId = this.getSessionUserId();
             await fetch(`${this.apiUrl}/upload/purge`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-admin-secret': 'chibalete-secure-upload-2025'
+                    'x-user-id': purgeUserId,
                 },
                 body: JSON.stringify({ url })
             });
@@ -433,17 +553,21 @@ class DataService {
     }
 
     async saveContentToApi(contentItem: Content): Promise<void> {
+        const saveUserId = this.getSessionUserId();
         const response = await fetch(`${this.apiUrl}/content`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-admin-secret': 'chibalete-secure-upload-2025'
+                'x-user-id': saveUserId,
             },
             body: JSON.stringify(contentItem)
         });
 
         if (!response.ok) {
-            throw new Error('Failed to save content metadata');
+            // Expose the server's error body so callers can surface it to the UI.
+            // Previously swallowed a 400 "Faltan campos obligatorios" as a generic message.
+            const errBody = await response.json().catch(() => ({}));
+            throw new Error(errBody.error || `Error ${response.status} al guardar metadata`);
         }
 
         // Update local state immediately
@@ -451,10 +575,11 @@ class DataService {
     }
 
     async deleteContent(id: string): Promise<void> {
+        const deleteUserId = this.getSessionUserId();
         const response = await fetch(`${this.apiUrl}/content/${id}`, {
             method: 'DELETE',
             headers: {
-                'x-admin-secret': 'chibalete-secure-upload-2025'
+                'x-user-id': deleteUserId,
             }
         });
 
@@ -468,10 +593,11 @@ class DataService {
     }
 
     async retryContent(id: string): Promise<Content> {
+        const retryUserId = this.getSessionUserId();
         const response = await fetch(`${this.apiUrl}/content/${id}/retry`, {
             method: 'POST',
             headers: {
-                'x-admin-secret': 'chibalete-secure-upload-2025'
+                'x-user-id': retryUserId,
             }
         });
 
@@ -508,8 +634,8 @@ class DataService {
     }
 
     async validarCredenciales(email: string, password?: string): Promise<User | undefined> {
-        // God Mode for Local Dev
-        if (email === 'admin@chibalete.com' && password === 'chibalete123') {
+        // God Mode: solo activo en desarrollo local, nunca en producción
+        if (import.meta.env.DEV && email === 'admin@chibalete.com' && password === 'chibalete123') {
             return this.users.find(u => u.email === 'admin@chibalete.com');
         }
 
@@ -527,14 +653,25 @@ class DataService {
                     return data.user;
                 }
             } else if (res.status === 401) {
-                return undefined; // Invalid credentials confirmed by server
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error || 'Credenciales inválidas');
+            } else if (res.status === 429) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error || 'Demasiados intentos. Intenta nuevamente en 15 minutos.');
+            } else {
+                throw new Error(`Error del servidor (${res.status})`);
             }
-        } catch (e) {
-            console.warn('Server auth failed, falling back to local:', e);
+        } catch (e: any) {
+            // Re-throw errors with known meaning (401, 429, server errors)
+            if (e.message && !e.message.startsWith('Failed to fetch') && !e.message.includes('NetworkError')) {
+                throw e;
+            }
+            // Network failure: throw descriptive error
+            throw new Error('Sin conexión con el servidor. Verifica tu red.');
         }
 
-        // 2. Fallback to Local (Offline)
-        return this.users.find(u => u.email === email && (password ? u.password === password : true));
+        // Fallback unreachable when server responds, kept only as type guard
+        return undefined;
     }
 
     async crearUsuariosMasivos(newUsers: any[]): Promise<{ created: number; duplicates: number; errors: ImportRowError[] }> {
@@ -545,12 +682,13 @@ class DataService {
         // Procesar de a uno con await para evitar escrituras concurrentes en users_db.json
         for (const u of newUsers) {
             try {
-                let roles: ('lector' | 'profesor' | 'mediador' | 'administrador')[] = ['lector'];
+                // DT-05: 'profesor' eliminado del modelo. Safety net: mapear → 'mediador' si llega de CSV legacy.
+                let roles: ('lector' | 'mediador' | 'administrador')[] = ['lector'];
                 if (u.roles && Array.isArray(u.roles)) {
                     roles = u.roles;
                 } else if (typeof u.role === 'string') {
                     const r = u.role.toLowerCase().trim();
-                    roles = r === 'mediador' ? ['mediador'] : (r === 'profesor' ? ['profesor'] : ['lector']);
+                    roles = (r === 'mediador' || r === 'profesor') ? ['mediador'] : ['lector'];
                 }
 
                 // SUBFASE 3.2: Pasar mediatorKind si viene del CSV y es válido
@@ -560,12 +698,21 @@ class DataService {
                     ? mkRaw as 'teacher' | 'librarian' | 'coordinator' | 'parent'
                     : undefined;
 
+                // Normaliza colegio del CSV contra schools_db (case-insensitive + trim).
+                // Si una escuela existe con la misma cadena en otra capitalizacion, usar su nombre canonico
+                // y evitar que se cree un grupo con casing distinto al de la escuela.
+                const csvColegio = (u.colegio || '').trim();
+                const matchedSchool = this.schools.find(s =>
+                    (s.name || '').trim().toLowerCase() === csvColegio.toLowerCase()
+                );
+                const canonicalColegio = matchedSchool ? matchedSchool.name : csvColegio;
+
                 const newUserObj = await this.createUser({
-                    nombre_completo: u.nombre_completo || u.nombre || '',
-                    email: u.email || '',
+                    nombre_completo: (u.nombre_completo || u.nombre || '').trim(),
+                    email: (u.email || '').trim().toLowerCase(),
                     password: u.password || 'chibalete123', // Usa la password del CSV
-                    colegio: u.colegio || '',
-                    curso: u.curso || '',
+                    colegio: canonicalColegio,
+                    curso: (u.curso || '').trim(),
                     roles,
                     ...(mediatorKind ? { mediatorKind } : {}),
                 });
@@ -597,7 +744,7 @@ class DataService {
 
                     // 3. Emparejamiento bidireccional
                     if (targetGroup) {
-                        const isTeacher = newUserObj.roles.includes('profesor') || newUserObj.roles.includes('mediador') || newUserObj.roles.includes('administrador');
+                        const isTeacher = isMediator(newUserObj) || isAdmin(newUserObj);
                         let groupNeedsUpdate = false;
 
                         if (isTeacher) {
@@ -670,7 +817,7 @@ class DataService {
         // SYNC TO BACKEND FIRST
         const response = await fetch(`${this.apiUrl}/users`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(newUser)
         });
 
@@ -692,7 +839,7 @@ class DataService {
     async updateUser(id: string, updates: Partial<User>) {
         const response = await fetch(`${this.apiUrl}/users/${id}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(updates)
         });
 
@@ -713,7 +860,7 @@ class DataService {
     async deleteUser(id: string) {
         const response = await fetch(`${this.apiUrl}/users/${id}`, {
             method: 'DELETE',
-            headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
+            headers: { ...this.adminWriteHeaders }
         });
 
         if (!response.ok) {
@@ -742,7 +889,7 @@ class DataService {
                 batchUpdatePromises.push(
                     fetch(`${this.apiUrl}/users/${u.id}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+                        headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
                         body: JSON.stringify(u)
                     })
                 );
@@ -757,7 +904,7 @@ class DataService {
                 batchUpdatePromises.push(
                     fetch(`${this.apiUrl}/groups/${g.id}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+                        headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
                         body: JSON.stringify(g)
                     })
                 );
@@ -792,7 +939,7 @@ class DataService {
     async createSchool(name: string): Promise<School> {
         const response = await fetch(`${this.apiUrl}/schools`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify({ name })
         });
         
@@ -809,6 +956,10 @@ class DataService {
 
     getUsuariosByColegio(colegio: string): User[] {
         return this.users.filter(u => u.colegio === colegio);
+    }
+
+    getAllUsuarios(): User[] {
+        return this.users;
     }
 
     getGroupsByColegio(colegio: string): Group[] {
@@ -857,7 +1008,7 @@ class DataService {
         // SYNC TO BACKEND
         const response = await fetch(`${this.apiUrl}/groups`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(newGroup)
         });
 
@@ -876,6 +1027,34 @@ class DataService {
         this.saveState('groups', this.groups);
 
         return finalGroup;
+    }
+
+    async joinOpenClub(groupId: string, userId: string): Promise<Group> {
+        const response = await fetch(`${this.apiUrl}/groups/${groupId}/join`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-user-id': userId
+            }
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error((err as any).error || 'No se pudo unir al club');
+        }
+
+        const updatedGroup = await response.json();
+        const normalized = this.normalizeGroupFrontend(updatedGroup);
+        const idx = this.groups.findIndex(g => g.id === groupId);
+        if (idx !== -1) {
+            this.groups[idx] = normalized;
+        } else {
+            this.groups.push(normalized);
+        }
+        this.saveState('groups', this.groups);
+        // Invalidate access cache so next content check reflects new membership immediately.
+        delete this.userContentAccessCache[userId];
+        return normalized;
     }
 
     async updateGroup(id: string, updates: Partial<Group>) {
@@ -917,7 +1096,7 @@ class DataService {
         
         const response = await fetch(`${this.apiUrl}/groups/${id}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(updates)
         });
 
@@ -968,7 +1147,7 @@ class DataService {
     async deleteGroup(id: string) {
         const response = await fetch(`${this.apiUrl}/groups/${id}`, {
             method: 'DELETE',
-            headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
+            headers: { ...this.adminWriteHeaders }
         });
 
         if (!response.ok) {
@@ -994,7 +1173,7 @@ class DataService {
 
             this.saveState('groups', this.groups);
 
-            // 1. Vincular al profesor entrante
+            // 1. Vincular al mediador entrante
             const newUser = this.getUsuarioById(teacherId);
             if (newUser) {
                 if (!newUser.groupIds) newUser.groupIds = [];
@@ -1021,6 +1200,13 @@ class DataService {
             // SYNC — solo mediatorIds como campo canónico (teacherId se deriva en updateGroup)
             this.updateGroup(groupId, { mediatorIds: group.mediatorIds });
         }
+    }
+
+    // --- Club Admin: especialización de mediador ---
+    // Llamar tras crear/editar un club desde admin para marcar al coordinador.
+    // No toca membresía de grupos ni flujos de Aula Viva.
+    async setMediatorKind(userId: string, kind: 'teacher' | 'librarian' | 'coordinator' | 'parent'): Promise<void> {
+        await this.updateUser(userId, { mediatorKind: kind });
     }
 
     addStudentsToGroup(groupId: string, studentIds: string[]) {
@@ -1109,7 +1295,7 @@ class DataService {
     async createBundle(data: Omit<Bundle, 'id'>): Promise<Bundle> {
         const response = await fetch(`${this.apiUrl}/bundles`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error('Failed to create bundle');
@@ -1121,7 +1307,7 @@ class DataService {
     async updateBundle(id: string, updates: Partial<Bundle>): Promise<void> {
         const response = await fetch(`${this.apiUrl}/bundles/${id}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(updates)
         });
         if (!response.ok) throw new Error('Failed to update bundle');
@@ -1133,7 +1319,7 @@ class DataService {
     async deleteBundle(id: string): Promise<void> {
         const response = await fetch(`${this.apiUrl}/bundles/${id}`, {
             method: 'DELETE',
-            headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
+            headers: { ...this.adminWriteHeaders }
         });
         if (!response.ok) throw new Error('Failed to delete bundle');
         this.bundles = this.bundles.filter(b => b.id !== id);
@@ -1184,12 +1370,16 @@ class DataService {
     }
 
     getContenidos(roles: string[], checkAccessForUserId?: string): Content[] {
-        // Filter out admin-only content like contexto_pedagogico if not an admin
-        const isAdmin = roles.includes('administrador');
-        let baseContent = isAdmin ? this.content : this.content.filter(c => c.tipo !== 'contexto_pedagogico');
+        // BYPASS ADMINISTRADOR: el admin ve TODO el catálogo incluyendo
+        // contenido tipo 'contexto_pedagogico' (guías pedagógicas internas).
+        // Lectores y mediadores no tienen acceso a ese tipo.
+        const rolesHasAdmin = hasAdminRole(roles);
+        let baseContent = rolesHasAdmin ? this.content : this.content.filter(c => c.tipo !== 'contexto_pedagogico');
 
-        // FASE 5: Filtro de catálogo por usuario
-        if (checkAccessForUserId && !isAdmin && !roles.includes('profesor') && !roles.includes('mediador')) {
+        // BYPASS ADMIN + MEDIADOR (FASE 5): admin y mediadores ven el catálogo
+        // completo sin restricción por usuario. Solo los lectores pasan por el
+        // motor de acceso por scope (group → organization → legacy).
+        if (checkAccessForUserId && !rolesHasAdmin && !hasMediatorRole(roles)) {
             const allowed = this.getEffectiveAccessibleContentIdsForUser(checkAccessForUserId);
             if (allowed !== 'all') {
                 baseContent = baseContent.filter(c => this.isContentAccessibleForUser(checkAccessForUserId, c.id, allowed));
@@ -1340,8 +1530,12 @@ class DataService {
 
     getEffectiveAccessibleContentIdsForUser(userId: string): string[] | 'all' {
         const user = this.getUsuarioById(userId);
-        if (!user || user.roles.includes('administrador') || user.roles.includes('profesor') || user.roles.includes('mediador')) {
-            return 'all'; // Profesores, mediadores y admins ven todo por defecto
+        // BYPASS ADMIN + MEDIADOR: administradores y mediadores tienen acceso irrestricto
+        // al catálogo — no están sujetos a reglas de scope.
+        // Regla de negocio intencional: el mediador necesita ver todo el contenido
+        // para poder asignarlo a sus grupos.
+        if (!user || isAdmin(user) || isMediator(user)) {
+            return 'all';
         }
 
         // 1. Resolver acceso por Organización (Colegio) de manera síncrona
@@ -1449,9 +1643,7 @@ class DataService {
 
     async fetchUserContentAccess(userId: string): Promise<ResolvedAccessState | null> {
         try {
-            const res = await fetch(`${this.apiUrl}/access/by-user/${userId}`, {
-                headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
-            });
+            const res = await fetch(`${this.apiUrl}/access/by-user/${userId}`);
             if (res.ok) {
                 return await res.json();
             }
@@ -1463,9 +1655,12 @@ class DataService {
     }
 
     isContentAccessibleForUser(userId: string, contentId: string, precalculatedAllowed?: string[] | 'all'): boolean {
-        // --- ADMIN BYPASS ---
+        // BYPASS ADMIN + MEDIADOR: administradores y mediadores tienen acceso garantizado
+        // a cualquier contenido sin pasar por el motor E7.
+        // Regla de negocio intencional: estos roles deben poder abrir cualquier
+        // contenido para revisarlo, aunque no sea parte del catálogo de su institución.
         const user = this.getUsuarioById(userId);
-        if (user && (user.roles?.includes('administrador') || user.roles?.includes('profesor') || user.roles?.includes('mediador'))) {
+        if (user && (isAdmin(user) || isMediator(user))) {
             return true;
         }
 
@@ -1485,7 +1680,7 @@ class DataService {
         if (allowed === 'all') return true;
         
         // Excepción puente FASE 5: Independiente del catálogo bloqueado público,
-        // si un profesor Asignó explícitamente contenido a un usuario, no se bloquea en Aula Viva.
+        // si un mediador asignó explícitamente contenido a un usuario, no se bloquea en Aula Viva.
         const isAssigned = this.assignments.some(a => 
             a.contentId === contentId && 
             this.groups.some(g => g.id === a.groupId && this.getGroupMemberIds(g).includes(userId))
@@ -1516,7 +1711,7 @@ class DataService {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-admin-secret': 'chibalete-secure-upload-2025'
+                ...this.adminWriteHeaders
             },
             body: JSON.stringify(rule)
         });
@@ -1585,9 +1780,51 @@ class DataService {
         }
     }
 
+    /**
+     * getLastPassageText — returns the actual sentence text at the reader's last known position.
+     *
+     * Strategy:
+     * 1. Read sentenceIndex from local progress (sync, no fetch).
+     * 2. If sentenceIndex === 0, return null — no useful anchor (PDF, VisorTexto, or unread).
+     * 3. Fetch TTS manifest (/uploads/audio/{contentId}/manifest.json).
+     *    The manifest contains pre-segmented sentences matching exactly what VisorInmersivo uses.
+     * 4. Flatten chunk.sentences arrays → index by sentenceIndex.
+     * 5. Any failure → return null silently (caller falls back to descripcion_corta).
+     *
+     * Only returns non-null for content read in VisorInmersivo with TTS generated.
+     */
+    async getLastPassageText(userId: string, contentId: string): Promise<string | null> {
+        try {
+            const prog = this.getProgresoUsuarioLibro(userId, contentId);
+            const sentenceIndex = prog?.canonicalProgress?.sentenceIndex ?? 0;
+            if (sentenceIndex === 0) return null;
+
+            const res = await fetch(`/uploads/audio/${contentId}/manifest.json`);
+            if (!res.ok) return null;
+            const manifest = await res.json();
+
+            if (!Array.isArray(manifest.chunks)) return null;
+
+            const allSentences: string[] = [];
+            for (const chunk of manifest.chunks) {
+                if (Array.isArray(chunk.sentences) && chunk.sentences.length > 0) {
+                    allSentences.push(...chunk.sentences);
+                } else if (typeof chunk.text === 'string' && chunk.text.trim()) {
+                    allSentences.push(chunk.text.trim());
+                }
+            }
+
+            if (allSentences.length === 0) return null;
+            const idx = Math.min(sentenceIndex, allSentences.length - 1);
+            return allSentences[idx] || null;
+        } catch (_) {
+            return null;
+        }
+    }
+
     getContenidosHijos(parentId: string, roles: string[] = []): Content[] {
-        const isAdmin = roles.includes('administrador');
-        return this.content.filter(c => c.parentId === parentId && (isAdmin || c.tipo !== 'contexto_pedagogico'));
+        const rolesHasAdmin = hasAdminRole(roles);
+        return this.content.filter(c => c.parentId === parentId && (rolesHasAdmin || c.tipo !== 'contexto_pedagogico'));
     }
 
     getNuevosTitulos(roles: string[]): Content[] {
@@ -1626,7 +1863,9 @@ class DataService {
         return userProgress.map(p => {
             const content = this.content.find(c => c.id === p.contenido_id);
             if (!content) return null;
-            if (roles.includes('administrador') || roles.includes('profesor') || roles.includes('mediador') || this.isContentAccessibleForUser(userId, content.id)) {
+            // BYPASS ADMIN + MEDIADOR: no se filtra el historial por acceso si el
+            // usuario tiene rol elevado. Los lectores sí pasan por isContentAccessibleForUser.
+            if (hasAdminRole(roles) || hasMediatorRole(roles) || this.isContentAccessibleForUser(userId, content.id)) {
                  return { content, progress: p };
             }
             return null;
@@ -1635,6 +1874,85 @@ class DataService {
 
     getProgresoUsuarioLibro(userId: string, contentId: string): ProgresoLectura | undefined {
         return this.progress.find(p => p.usuario_id === userId && p.contenido_id === contentId);
+    }
+
+    /**
+     * Fase E — Cross-device sync (read path).
+     *
+     * Fetches progress for (userId, contentId) from the backend and merges it into
+     * the local record when the remote copy is newer (latest updatedAt wins).
+     *
+     * Design constraints:
+     *   - 3-second hard timeout — never blocks the visor UI.
+     *   - Always resolves; errors are silently swallowed.
+     *   - Returns true when remote progress was adopted (caller can show UX hint).
+     *   - Returns false on network error, timeout, or when local is up to date.
+     *   - Does NOT overwrite a newer local record — safe to call during offline sessions.
+     */
+    async fetchAndMergeRemoteProgress(userId: string, contentId: string): Promise<boolean> {
+        if (!userId || !contentId) return false;
+        // Fase F: If we're about to talk to the server, drain the failed-sync queue first.
+        // This ensures the server has our latest writes before we read back its state.
+        this.retryFailedSyncs();
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3000);
+            const res = await fetch(
+                `${this.apiUrl}/progress/item/${userId}/${contentId}`,
+                { headers: { 'x-user-id': userId }, signal: controller.signal }
+            );
+            clearTimeout(timeoutId);
+
+            if (!res.ok) return false;
+            const body = await res.json();
+            if (!body.success || !body.progress) return false;
+
+            const remote = body.progress;
+            const remoteTs = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
+            if (!remoteTs) return false;
+
+            const local = this.progress.find(p => p.usuario_id === userId && p.contenido_id === contentId);
+            const localTs = local?.fecha_actualizacion
+                ? new Date(local.fecha_actualizacion).getTime()
+                : local?.updatedAt ? new Date(local.updatedAt).getTime() : 0;
+
+            // Local is up to date — nothing to do.
+            if (remoteTs <= localTs) return false;
+
+            // Remote is newer — merge canonical fields into local record.
+            const rcp = remote.canonicalProgress;
+            if (!rcp) return false;
+
+            if (local) {
+                local.porcentaje = Math.round(rcp.globalPercentage ?? local.porcentaje);
+                local.canonicalProgress = { ...local.canonicalProgress, ...rcp } as ProgresoLectura['canonicalProgress'];
+                local.fecha_actualizacion = remote.updatedAt;
+                local.updatedAt = remote.updatedAt;
+                local.last_device_mode = rcp.lastInteractedMode === 'pdf' ? 'pdf'
+                    : rcp.lastInteractedMode === 'immersive' ? 'immersive' : 'text';
+            } else {
+                // No local record at all — create a skeleton from remote data.
+                const skeleton: ProgresoLectura = {
+                    id: `prog-${Date.now()}`,
+                    usuario_id: userId,
+                    contenido_id: contentId,
+                    ultima_posicion: String(Math.round(rcp.globalPercentage ?? 0)),
+                    porcentaje: Math.round(rcp.globalPercentage ?? 0),
+                    fecha_actualizacion: remote.updatedAt,
+                    updatedAt: remote.updatedAt,
+                    canonicalProgress: rcp,
+                    last_device_mode: rcp.lastInteractedMode === 'pdf' ? 'pdf'
+                        : rcp.lastInteractedMode === 'immersive' ? 'immersive' : 'text',
+                    totalTimeMs: 0,
+                    sessionsCount: 0,
+                };
+                this.progress.push(skeleton);
+            }
+            this.saveState('progress', this.progress);
+            return true; // remote was adopted
+        } catch {
+            return false;
+        }
     }
 
     // Maps the legacy deviceMode string to the unified lastMode string
@@ -1651,20 +1969,28 @@ class DataService {
         totalPages: number,
         canonicalIndex?: number,
         deviceMode?: 'pdf' | 'text' | 'immersive',
-        metricsPatch?: { lastMode?: ProgresoLectura['lastMode']; elapsedMs?: number }
+        metricsPatch?: { lastMode?: ProgresoLectura['lastMode']; elapsedMs?: number },
+        // Fase E: per-visor precision anchor — stored alongside globalPercentage.
+        anchor?: { type: 'text' | 'sentence' | 'page'; value: number },
+        // Fase F: sub-anchor precision — full-precision float for same-mode rehidration.
+        // Only VisorTexto uses this (scroll precision). Other visors already have exact units.
+        viewportHint?: number
     ) {
         let prog = this.progress.find(p => p.usuario_id === userId && p.contenido_id === contentId);
         // Fallback for visual mapping (0-100)
         const porcentaje = totalPages > 0 ? Math.round((page / totalPages) * 100) : 0;
-        
+
         // Phase 3.3 Canonical Formatting
-        const canonicalPayload = {
+        const canonicalPayload: ProgresoLectura['canonicalProgress'] = {
             sentenceIndex: canonicalIndex || 0,
-            totalSentences: deviceMode === 'immersive' ? totalPages : 0, 
+            totalSentences: deviceMode === 'immersive' ? totalPages : 0,
             globalPercentage: porcentaje,
             contentAnchor: null,
             contentFingerprint: null,
-            lastInteractedMode: deviceMode || 'text'
+            lastInteractedMode: deviceMode || 'text',
+            // Fase E/F: attach precision anchor and viewportHint when provided
+            ...(anchor ? { anchor } : {}),
+            ...(viewportHint !== undefined && isFinite(viewportHint) ? { viewportHint } : {}),
         };
 
         const sessionPayload = {
@@ -1778,6 +2104,7 @@ class DataService {
             oralityAttemptsCount: 0,
             averageOralityScore: null,
             booksCompletedCount: 0,
+            recentInteractionTypes: [],
             preferredSupportType: null,
             updatedAt: new Date().toISOString(),
         };
@@ -1823,15 +2150,30 @@ class DataService {
         const user = this.getUsuarioById(userId);
         if (user) profile.booksCompletedCount = user.libros_terminados?.length ?? 0;
 
-        // Derive preferred support type (highest counter wins)
-        const counts: Record<'vocabulary' | 'inferential' | 'reflection', number> = {
-            vocabulary:  profile.vocabularySupportCount,
-            inferential: profile.inferentialPromptCount,
-            reflection:  profile.reflectionPromptCount,
-        };
-        const [best] = (Object.entries(counts) as [LeoReaderProfile['preferredSupportType'], number][])
-            .sort(([, a], [, b]) => b - a);
-        profile.preferredSupportType = (best[1] > 0) ? best[0] : null;
+        // Maintain rolling window (last 10 interactions)
+        if (!Array.isArray(profile.recentInteractionTypes)) profile.recentInteractionTypes = [];
+        if ((patch.vocabularyDelta  ?? 0) > 0) profile.recentInteractionTypes.push('vocabulary');
+        else if ((patch.inferentialDelta ?? 0) > 0) profile.recentInteractionTypes.push('inferential');
+        else if ((patch.reflectionDelta  ?? 0) > 0) profile.recentInteractionTypes.push('reflection');
+        profile.recentInteractionTypes = profile.recentInteractionTypes.slice(-10);
+
+        // Derive preferred support type from recent window; fall back to lifetime totals
+        const recent = profile.recentInteractionTypes;
+        if (recent.length > 0) {
+            const windowCounts: Record<string, number> = {};
+            for (const t of recent) windowCounts[t] = (windowCounts[t] ?? 0) + 1;
+            const [bestType] = Object.entries(windowCounts).sort(([, a], [, b]) => b - a);
+            profile.preferredSupportType = bestType[0] as LeoReaderProfile['preferredSupportType'];
+        } else {
+            const counts: Record<'vocabulary' | 'inferential' | 'reflection', number> = {
+                vocabulary:  profile.vocabularySupportCount,
+                inferential: profile.inferentialPromptCount,
+                reflection:  profile.reflectionPromptCount,
+            };
+            const [best] = (Object.entries(counts) as [LeoReaderProfile['preferredSupportType'], number][])
+                .sort(([, a], [, b]) => b - a);
+            profile.preferredSupportType = (best[1] > 0) ? best[0] : null;
+        }
         profile.updatedAt = new Date().toISOString();
 
         this.saveState('leoReaderProfiles', this.leoReaderProfiles);
@@ -1852,17 +2194,12 @@ class DataService {
 
     marcarComoTerminado(userId: string, contentId: string) {
         const payload = { updatedAt: new Date().toISOString() };
-        if ('sendBeacon' in navigator) {
-            const url = `${this.apiUrl}/progress/${userId}/${contentId}/complete`;
-            const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-            navigator.sendBeacon(url, blob);
-        } else {
-            fetch(`${this.apiUrl}/progress/${userId}/${contentId}/complete`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }).catch(e => console.warn('Sync Complete failed', e));
-        }
+        fetch(`${this.apiUrl}/progress/${userId}/${contentId}/complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+            body: JSON.stringify(payload),
+            keepalive: true
+        }).catch(e => console.warn('Sync Complete failed', e));
         
         // Local state reflection
         const content = this.getContenidoById(contentId);
@@ -2145,10 +2482,40 @@ class DataService {
             };
             assignment.studentSubmissions.push(submission);
             this.saveState('assignments', this.assignments);
+
+            // Persistencia server-side para exportación académica (fire-and-forget, no bloquea el flujo)
+            // Solo aplica a entregas de texto; blob URLs (audio/video/foto) se omiten.
+            if (typeof content === 'string' && !content.startsWith('blob:')) {
+                this.persistSubmissionToServer(assignmentId, studentId, content, assignment).catch(err => {
+                    console.warn('[dataService] Server submission persistence failed (non-blocking):', err);
+                });
+            }
         }
     }
 
-
+    private async persistSubmissionToServer(
+        taskId: string,
+        studentId: string,
+        responseText: string,
+        assignment: Assignment
+    ): Promise<void> {
+        await fetch(`${this.apiUrl}/submissions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-user-id': studentId,
+            },
+            body: JSON.stringify({
+                taskId,
+                studentId,
+                groupId:       assignment.groupId,
+                responseText,
+                contentId:     assignment.contentId || undefined,
+                source:        'task',
+                taskTitle:     assignment.contentTitle || undefined,
+            }),
+        });
+    }
 
     getGroupStudents(groupId: string): User[] {
         const group = this.groups.find(g => g.id === groupId);
@@ -2375,10 +2742,1631 @@ class DataService {
         this.journalEntries.push(newRequest);
         this.saveState('journalEntries', this.journalEntries);
 
-        return { success: true, message: 'Canje solicitado. Tu profesor revisará la solicitud.', remainingPoints: user.puntos };
+        return { success: true, message: 'Canje solicitado. Tu mediador revisará la solicitud.', remainingPoints: user.puntos };
     }
 
     // --- UTILS FOR TEACHER VIEW ---
+    // --- SEÑALES PEDAGÓGICAS BÁSICAS (base para Leo) ---
+    /**
+     * Deriva señales pedagógicas estructuradas a partir de las entregas reales del estudiante
+     * dentro de las tareas de un grupo. Sin LLM, sin llamadas al servidor.
+     * Diseñada para ser consumida por el panel docente y, en fases futuras, por Leo.
+     *
+     * @param studentId  ID del estudiante a analizar
+     * @param groupAssignments  Tareas activas del grupo (ya cargadas en AulaViva)
+     */
+    analyzeStudentLearningSignals(
+        studentId: string,
+        groupAssignments: Assignment[]
+    ): StudentLearningSignals {
+        // ── 1. Recopilar entregas de texto del estudiante ─────────────────────
+        // Excluye blob URLs (audio/video/foto) que no tienen contenido textual medible.
+        const enriched = groupAssignments
+            .map(a => {
+                const sub = a.studentSubmissions?.find(s => s.studentId === studentId);
+                return sub && typeof sub.content === 'string' && !sub.content.startsWith('blob:')
+                    ? { assignment: a, sub }
+                    : null;
+            })
+            .filter(Boolean) as { assignment: Assignment; sub: AssignmentSubmission }[];
+
+        const totalAssigned  = groupAssignments.length;
+        const totalSubmitted = enriched.length;
+        const completionRate = totalAssigned > 0
+            ? Math.round((totalSubmitted / totalAssigned) * 100)
+            : 0;
+
+        // ── 2. Volumen de escritura ────────────────────────────────────────────
+        const wordCounts = enriched.map(({ sub }) =>
+            sub.content.trim().split(/\s+/).filter(Boolean).length
+        );
+        const totalWordCount   = wordCounts.reduce((acc, n) => acc + n, 0);
+        const averageWordCount = totalSubmitted > 0
+            ? Math.round(totalWordCount / totalSubmitted)
+            : 0;
+
+        // writingVolumeLevel: low < 50 palabras promedio | medium 50–149 | high ≥ 150
+        const writingVolumeLevel: StudentLearningSignals['writingVolumeLevel'] =
+            averageWordCount < 50  ? 'low' :
+            averageWordCount < 150 ? 'medium' : 'high';
+
+        // ── 3. Consistencia / cumplimiento ────────────────────────────────────
+        // low < 40% | medium 40–74% | high ≥ 75%
+        const consistencyLevel: StudentLearningSignals['consistencyLevel'] =
+            completionRate < 40 ? 'low' :
+            completionRate < 75 ? 'medium' : 'high';
+
+        // ── 4. Nivel de elaboración escrita ───────────────────────────────────
+        // Heurística: % de respuestas "sustanciales" (≥ 80 palabras) + promedio global.
+        // initial: avg < 50 o < 30% sustanciales
+        // developing: avg 50–119 o < 60% sustanciales
+        // solid: avg ≥ 120 y ≥ 60% sustanciales
+        const substantialCount = wordCounts.filter(w => w >= 80).length;
+        const substantialRate  = totalSubmitted > 0 ? substantialCount / totalSubmitted : 0;
+
+        const writingDevelopmentLevel: StudentLearningSignals['writingDevelopmentLevel'] =
+            (averageWordCount < 50  || substantialRate < 0.3) ? 'initial' :
+            (averageWordCount < 120 || substantialRate < 0.6) ? 'developing' : 'solid';
+
+        // ── 5. Tendencia reciente ─────────────────────────────────────────────
+        // Compara primera mitad vs segunda mitad de entregas (ordenadas cronológicamente).
+        // Umbral: ±20% de variación en wordCount promedio.
+        let trend: StudentLearningSignals['trend'] = 'stable';
+
+        if (totalSubmitted === 0 || completionRate < 30) {
+            trend = 'needs_attention';
+        } else if (totalSubmitted >= 2) {
+            const sorted = [...enriched].sort(
+                (a, b) => new Date(a.sub.date).getTime() - new Date(b.sub.date).getTime()
+            );
+            const sortedWC = sorted.map(({ sub }) =>
+                sub.content.trim().split(/\s+/).filter(Boolean).length
+            );
+            const half         = Math.ceil(sortedWC.length / 2);
+            const firstAvg     = sortedWC.slice(0, half).reduce((a, b) => a + b, 0) / half;
+            const secondSlice  = sortedWC.slice(half);
+            const secondAvg    = secondSlice.length > 0
+                ? secondSlice.reduce((a, b) => a + b, 0) / secondSlice.length
+                : firstAvg;
+            const relativeDiff = firstAvg > 0 ? (secondAvg - firstAvg) / firstAvg : 0;
+
+            trend = relativeDiff >  0.20 ? 'improving' :
+                    relativeDiff < -0.20 ? 'irregular' : 'stable';
+        }
+
+        // ── 6. Resumen docente (plantilla, sin IA) ────────────────────────────
+        let summary: string;
+
+        if (totalSubmitted === 0) {
+            summary = 'No hay entregas registradas. No es posible derivar señales pedagógicas aún.';
+        } else {
+            const parts: string[] = [];
+
+            // Consistencia
+            parts.push(
+                consistencyLevel === 'high'   ? 'muestra buena constancia en la entrega de tareas' :
+                consistencyLevel === 'medium' ? 'ha entregado parte de las tareas asignadas' :
+                                               'presenta bajo nivel de cumplimiento en las tareas'
+            );
+
+            // Volumen
+            parts.push(
+                writingVolumeLevel === 'high'   ? 'con un volumen de escritura alto' :
+                writingVolumeLevel === 'medium' ? 'con un volumen de escritura medio' :
+                                                 'con un volumen de escritura reducido'
+            );
+
+            // Desarrollo
+            if (writingDevelopmentLevel !== 'initial') {
+                parts.push(
+                    writingDevelopmentLevel === 'solid'
+                        ? 'y un desarrollo escrito sólido'
+                        : 'y un desarrollo escrito en crecimiento'
+                );
+            }
+
+            let sentence = `El estudiante ${parts.join(', ')}.`;
+
+            // Tendencia
+            if      (trend === 'improving')       sentence += ' Se observa mejora en sus respuestas recientes.';
+            else if (trend === 'irregular')        sentence += ' Sus entregas muestran variabilidad en extensión.';
+            else if (trend === 'needs_attention')  sentence += ' Se recomienda acompañamiento y seguimiento cercano.';
+
+            summary = sentence;
+        }
+
+        // ── 7. Evidencia auditable ────────────────────────────────────────────
+        const lastEntry = enriched.length > 0
+            ? [...enriched].sort(
+                (a, b) => new Date(b.sub.date).getTime() - new Date(a.sub.date).getTime()
+              )[0]
+            : null;
+
+        return {
+            studentId,
+            totalAssigned,
+            totalSubmitted,
+            completionRate,
+            totalWordCount,
+            averageWordCount,
+            writingVolumeLevel,
+            consistencyLevel,
+            writingDevelopmentLevel,
+            trend,
+            summary,
+            evidence: {
+                basedOnAssignments: totalAssigned,
+                basedOnSubmissions: totalSubmitted,
+                lastSubmissionAt:   lastEntry?.sub.date,
+            },
+        };
+    }
+
+    /**
+     * Genera un conjunto de recomendaciones pedagógicas a partir de señales reales.
+     * Lógica basada en plantillas — sin LLM, determinista y auditable.
+     */
+    buildStudentPedagogicalRecommendations(signals: StudentLearningSignals): StudentRecommendationBundle {
+        const strengths: StudentPedagogicalRecommendation[] = [];
+        const alerts: StudentPedagogicalRecommendation[] = [];
+        const actions: StudentPedagogicalRecommendation[] = [];
+
+        // ── Fortalezas ────────────────────────────────────────────────────────
+        if (signals.consistencyLevel === 'high') {
+            strengths.push({
+                category: 'strength',
+                priority: 'low',
+                pedagogicalGoal: 'reading_habit',
+                title: 'Hábito lector sólido',
+                description: 'El estudiante entrega de forma consistente. Demuestra responsabilidad y compromiso con la lectura.',
+                rationale: `Tasa de cumplimiento: ${signals.completionRate}%.`,
+            });
+        }
+
+        if (signals.writingVolumeLevel === 'high') {
+            strengths.push({
+                category: 'strength',
+                priority: 'low',
+                pedagogicalGoal: 'writing',
+                title: 'Alto volumen de escritura',
+                description: 'Sus respuestas escritas son extensas, lo que indica disposición a elaborar ideas.',
+                rationale: `Promedio de palabras por entrega: ${signals.averageWordCount}.`,
+            });
+        } else if (signals.writingVolumeLevel === 'medium' && signals.writingDevelopmentLevel !== 'initial') {
+            strengths.push({
+                category: 'strength',
+                priority: 'low',
+                pedagogicalGoal: 'writing',
+                title: 'Escritura en crecimiento',
+                description: 'El estudiante produce textos de extensión moderada y muestra desarrollo en su expresión escrita.',
+                rationale: `Promedio de palabras: ${signals.averageWordCount}. Nivel de elaboración: ${signals.writingDevelopmentLevel}.`,
+            });
+        }
+
+        if (signals.writingDevelopmentLevel === 'solid') {
+            strengths.push({
+                category: 'strength',
+                priority: 'low',
+                pedagogicalGoal: 'writing',
+                title: 'Elaboración escrita sólida',
+                description: 'La mayoría de sus respuestas supera las 80 palabras con buena densidad de contenido.',
+                rationale: `Nivel de elaboración: sólido. Promedio: ${signals.averageWordCount} palabras.`,
+            });
+        }
+
+        if (signals.trend === 'improving') {
+            strengths.push({
+                category: 'strength',
+                priority: 'low',
+                pedagogicalGoal: 'reading_habit',
+                title: 'Tendencia positiva',
+                description: 'Sus entregas recientes son más elaboradas que las primeras. El estudiante está progresando.',
+                rationale: 'Tendencia: mejorando (segunda mitad con mayor volumen que la primera).',
+            });
+        }
+
+        // ── Alertas ───────────────────────────────────────────────────────────
+        if (signals.totalSubmitted === 0) {
+            alerts.push({
+                category: 'alert',
+                priority: 'high',
+                pedagogicalGoal: 'emotional',
+                title: 'Sin entregas registradas',
+                description: 'El estudiante no ha enviado ninguna respuesta escrita. Puede haber una barrera motivacional o técnica.',
+                rationale: `0 de ${signals.totalAssigned} tareas entregadas.`,
+            });
+        } else if (signals.consistencyLevel === 'low') {
+            alerts.push({
+                category: 'alert',
+                priority: 'high',
+                pedagogicalGoal: 'reading_habit',
+                title: 'Baja consistencia',
+                description: 'El estudiante entrega menos del 40% de las tareas asignadas. Se recomienda seguimiento cercano.',
+                rationale: `Tasa de cumplimiento: ${signals.completionRate}%.`,
+            });
+        } else if (signals.consistencyLevel === 'medium') {
+            alerts.push({
+                category: 'alert',
+                priority: 'medium',
+                pedagogicalGoal: 'reading_habit',
+                title: 'Consistencia irregular',
+                description: 'El estudiante entrega algo más de la mitad de las tareas. Hay margen de mejora en la regularidad.',
+                rationale: `Tasa de cumplimiento: ${signals.completionRate}%.`,
+            });
+        }
+
+        if (signals.writingDevelopmentLevel === 'initial' && signals.totalSubmitted > 0) {
+            alerts.push({
+                category: 'alert',
+                priority: 'medium',
+                pedagogicalGoal: 'writing',
+                title: 'Elaboración escrita inicial',
+                description: 'Las respuestas son breves o poco desarrolladas. El estudiante puede necesitar andamiaje para expresarse por escrito.',
+                rationale: `Promedio de palabras: ${signals.averageWordCount}. Nivel: inicial.`,
+            });
+        }
+
+        if (signals.trend === 'needs_attention') {
+            alerts.push({
+                category: 'alert',
+                priority: 'high',
+                pedagogicalGoal: 'metacognitive',
+                title: 'Requiere atención inmediata',
+                description: 'El patrón de entregas y volumen sugieren que el estudiante no está conectado con las actividades.',
+                rationale: `Tendencia: needs_attention. Cumplimiento: ${signals.completionRate}%.`,
+            });
+        }
+
+        if (signals.trend === 'irregular' && signals.totalSubmitted >= 3) {
+            alerts.push({
+                category: 'alert',
+                priority: 'low',
+                pedagogicalGoal: 'metacognitive',
+                title: 'Variabilidad en las respuestas',
+                description: 'El volumen escrito varía mucho entre entregas. Puede indicar falta de rutina o dificultad para sostener el esfuerzo.',
+                rationale: 'Tendencia: irregular (variación >20% entre primera y segunda mitad).',
+            });
+        }
+
+        // ── Acciones para el mediador ─────────────────────────────────────────
+        // Máximo 3 acciones, priorizadas según la situación del estudiante.
+        if (signals.totalSubmitted === 0 || signals.consistencyLevel === 'low' || signals.trend === 'needs_attention') {
+            actions.push({
+                category: 'action',
+                priority: 'high',
+                pedagogicalGoal: 'emotional',
+                title: 'Conversación individual',
+                description: 'Hablar con el estudiante para identificar qué barreras le impiden participar. Explorar factores motivacionales y técnicos.',
+                rationale: 'Bajo cumplimiento o ausencia total de entregas requiere contacto directo antes de escalarlo.',
+            });
+        }
+
+        if (signals.writingDevelopmentLevel === 'initial' && signals.totalSubmitted > 0) {
+            actions.push({
+                category: 'action',
+                priority: 'medium',
+                pedagogicalGoal: 'writing',
+                title: 'Andamiaje para la escritura',
+                description: 'Ofrecer preguntas guía más concretas o frases iniciadoras. Reducir la extensión mínima esperada y aumentarla gradualmente.',
+                rationale: 'Las respuestas breves sugieren que la tarea de escritura puede resultar intimidante sin apoyo.',
+            });
+        }
+
+        if (signals.writingVolumeLevel === 'high' && signals.writingDevelopmentLevel === 'solid') {
+            actions.push({
+                category: 'action',
+                priority: 'low',
+                pedagogicalGoal: 'critical',
+                title: 'Profundizar la reflexión crítica',
+                description: 'Proponer preguntas que exijan comparar, argumentar o cuestionar el texto. Este estudiante está listo para el nivel inferencial-crítico.',
+                rationale: 'Alto volumen y elaboración sólida indican capacidad para trabajar habilidades lectoras superiores.',
+            });
+        } else if (signals.writingVolumeLevel === 'medium' || signals.writingDevelopmentLevel === 'developing') {
+            actions.push({
+                category: 'action',
+                priority: 'medium',
+                pedagogicalGoal: 'writing',
+                title: 'Enriquecer las consignas',
+                description: 'Incluir preguntas que inviten a describir con más detalle o conectar con experiencias propias para aumentar el volumen natural de respuesta.',
+                rationale: 'Escritura en nivel medio puede crecer con consignas que activen el pensamiento personal.',
+            });
+        }
+
+        if (signals.trend === 'improving' && actions.length < 3) {
+            actions.push({
+                category: 'action',
+                priority: 'low',
+                pedagogicalGoal: 'reading_habit',
+                title: 'Reconocer el progreso',
+                description: 'Señalar explícitamente la mejora observada en sus últimas entregas. El reconocimiento positivo refuerza el hábito.',
+                rationale: 'Tendencia positiva: el estudiante mejora. El refuerzo consolida el comportamiento.',
+            });
+        }
+
+        if (signals.trend === 'irregular' && actions.length < 3) {
+            actions.push({
+                category: 'action',
+                priority: 'medium',
+                pedagogicalGoal: 'metacognitive',
+                title: 'Establecer rutina de lectura',
+                description: 'Sugerir días y horarios fijos para completar las actividades. La variabilidad suele responder a falta de estructura temporal.',
+                rationale: 'Tendencia irregular: las entregas varían mucho, lo que sugiere ausencia de rutina.',
+            });
+        }
+
+        // Limitar a 3 acciones
+        const topActions = actions.slice(0, 3);
+
+        // ── Titular resumen ───────────────────────────────────────────────────
+        let headline: string;
+        if (signals.totalSubmitted === 0) {
+            headline = 'Sin datos suficientes para recomendar — se necesita al menos una entrega.';
+        } else if (signals.consistencyLevel === 'high' && signals.writingDevelopmentLevel === 'solid') {
+            headline = 'Estudiante con buen nivel de participación y escritura desarrollada.';
+        } else if (signals.consistencyLevel === 'high' && signals.writingDevelopmentLevel !== 'solid') {
+            headline = 'Buena participación — foco en la profundidad de las respuestas.';
+        } else if (signals.consistencyLevel === 'low' || signals.trend === 'needs_attention') {
+            headline = 'Requiere atención: baja participación y/o patrón de inactividad.';
+        } else if (signals.writingDevelopmentLevel === 'initial') {
+            headline = 'Participa de forma irregular — apoyar el desarrollo de la escritura.';
+        } else {
+            headline = 'Participación y escritura en desarrollo — mantener seguimiento.';
+        }
+
+        return {
+            studentId: signals.studentId,
+            strengths,
+            alerts,
+            actions: topActions,
+            headline,
+        };
+    }
+
+    /**
+     * Produce una síntesis pedagógica de Leo para el docente.
+     *
+     * CONTRATO:
+     *  - Sin LLM. Sin Gemini. Sin llamadas externas.
+     *  - Toda salida trazable a señales y recomendaciones reales.
+     *  - Voz breve, pedagógica, no diagnóstica, no moralizante.
+     *  - Si no hay entregas suficientes, Leo habla con prudencia — no inventa.
+     */
+    buildLeoTeacherAdvisorSummary(
+        signals: StudentLearningSignals,
+        recommendations: StudentRecommendationBundle
+    ): LeoTeacherAdvisorSummary {
+        const {
+            studentId,
+            totalAssigned,
+            totalSubmitted,
+            completionRate,
+            averageWordCount,
+            writingVolumeLevel,
+            consistencyLevel,
+            writingDevelopmentLevel,
+            trend,
+        } = signals;
+
+        // ── A. Confianza ─────────────────────────────────────────────────────
+        // Heurística explícita:
+        //   low    → 0–1 entregas (evidencia insuficiente)
+        //   medium → 2–3 entregas, o ≥4 pero con consistencia baja
+        //   high   → ≥4 entregas Y consistencia media o alta
+        const confidence: LeoTeacherAdvisorSummary['confidence'] =
+            totalSubmitted <= 1                                                ? 'low' :
+            totalSubmitted >= 4 && consistencyLevel !== 'low'                  ? 'high' :
+                                                                                 'medium';
+
+        // ── B. Objetivo pedagógico dominante ─────────────────────────────────
+        // Regla de prioridad estricta (primera coincidencia):
+        //  1. Sin entregas → emotional (barrera motivacional/relacional)
+        //  2. needs_attention → reading_habit (desenganche sistémico)
+        //  3. consistencia baja → reading_habit (hábito es el cuello de botella)
+        //  4. escritura inicial → writing (expresión es el cuello de botella)
+        //  5. tendencia irregular → metacognitive (auto-regulación del ritmo)
+        //  6. consistencia media + escritura en desarrollo → writing
+        //  7. consistencia alta + escritura sólida + mejorando → critical (listo para profundizar)
+        //  8. consistencia alta + escritura sólida → writing (mayor calidad expresiva)
+        //  9. volumen alto → critical (hay masa, empujar profundidad)
+        // 10. default → reading_habit
+        let dominantGoal: LeoTeacherAdvisorSummary['dominantGoal'];
+
+        if (totalSubmitted === 0) {
+            dominantGoal = 'emotional';
+        } else if (trend === 'needs_attention') {
+            dominantGoal = 'reading_habit';
+        } else if (consistencyLevel === 'low') {
+            dominantGoal = 'reading_habit';
+        } else if (writingDevelopmentLevel === 'initial') {
+            dominantGoal = 'writing';
+        } else if (trend === 'irregular') {
+            dominantGoal = 'metacognitive';
+        } else if (consistencyLevel === 'medium' && writingDevelopmentLevel === 'developing') {
+            dominantGoal = 'writing';
+        } else if (consistencyLevel === 'high' && writingDevelopmentLevel === 'solid' && trend === 'improving') {
+            dominantGoal = 'critical';
+        } else if (consistencyLevel === 'high' && writingDevelopmentLevel === 'solid') {
+            dominantGoal = 'writing';
+        } else if (writingVolumeLevel === 'high') {
+            dominantGoal = 'critical';
+        } else {
+            dominantGoal = 'reading_habit';
+        }
+
+        // ── C. Headline ───────────────────────────────────────────────────────
+        // Frase breve de Leo al docente. Tono: pedagógico, no diagnóstico.
+        // Usa "conviene", "sería útil", "se observa", "puede beneficiarse".
+        const HEADLINES: Record<LeoTeacherAdvisorSummary['dominantGoal'], string> = {
+            emotional:      'Conviene acercarse antes de plantear nuevas exigencias.',
+            reading_habit:  totalSubmitted === 0
+                                ? 'Sin entregas registradas — sería útil explorar qué está pasando.'
+                                : 'Conviene reforzar la constancia antes de aumentar la exigencia escrita.',
+            writing:        writingDevelopmentLevel === 'initial'
+                                ? 'Se observa escritura inicial; puede beneficiarse de consignas más guiadas.'
+                                : 'El estudiante escribe con regularidad; conviene profundizar la expresión.',
+            metacognitive:  'Se observa variabilidad en las respuestas; sería útil consolidar una rutina de participación.',
+            critical:       trend === 'improving'
+                                ? 'El estudiante está progresando y puede estar listo para tareas de mayor profundidad.'
+                                : 'El nivel de participación y escritura permite avanzar hacia preguntas más interpretativas.',
+            inferential:    'Conviene introducir preguntas que conecten ideas dentro y entre textos.',
+            literal:        'Se recomienda fortalecer la comprensión de los elementos básicos del texto.',
+            vocabulary:     'Puede beneficiarse de actividades que amplíen el vocabulario desde el texto.',
+            fluency:        'Sería útil incluir actividades que favorezcan la fluidez lectora.',
+        };
+        const headline = HEADLINES[dominantGoal];
+
+        // ── D. Teacher guidance ───────────────────────────────────────────────
+        // 2–4 frases que unen señales + recomendaciones.
+        // Construidas de forma modular: frase de situación + frase de orientación
+        // (+ frase de tendencia si aplica).
+        let situationSentence: string;
+        if (totalSubmitted === 0) {
+            situationSentence = `Aún no hay entregas registradas para este estudiante (${totalAssigned} tarea${totalAssigned !== 1 ? 's' : ''} asignada${totalAssigned !== 1 ? 's' : ''}).`;
+        } else if (consistencyLevel === 'high') {
+            situationSentence = `El estudiante participa de forma consistente: entregó ${totalSubmitted} de ${totalAssigned} tareas (${completionRate}%).`;
+        } else if (consistencyLevel === 'medium') {
+            situationSentence = `El estudiante ha entregado parte de las tareas (${totalSubmitted} de ${totalAssigned}, ${completionRate}%), aunque todavía hay margen de mejora en la regularidad.`;
+        } else {
+            situationSentence = `La participación ha sido baja: ${totalSubmitted} de ${totalAssigned} tareas entregadas (${completionRate}%).`;
+        }
+
+        let writingSentence: string;
+        if (totalSubmitted === 0) {
+            writingSentence = 'No es posible analizar la escritura sin entregas previas.';
+        } else if (writingDevelopmentLevel === 'solid' && writingVolumeLevel === 'high') {
+            writingSentence = `Cuando responde, produce textos elaborados (promedio ${averageWordCount} palabras), lo que indica capacidad para trabajar ideas con profundidad.`;
+        } else if (writingDevelopmentLevel === 'solid') {
+            writingSentence = `Sus respuestas muestran buena elaboración (promedio ${averageWordCount} palabras), con ideas desarrolladas de forma coherente.`;
+        } else if (writingDevelopmentLevel === 'developing') {
+            writingSentence = `Su escritura está en desarrollo: promedio de ${averageWordCount} palabras por entrega, con crecimiento visible pero aún sin consolidarse.`;
+        } else {
+            writingSentence = `Las respuestas tienden a ser breves (promedio ${averageWordCount} palabras); puede beneficiarse de mayor andamiaje para expresarse por escrito.`;
+        }
+
+        let trendSentence = '';
+        if (trend === 'improving') {
+            trendSentence = 'Sus entregas más recientes son más elaboradas que las primeras, lo que sugiere un progreso real que conviene reconocer y sostener.';
+        } else if (trend === 'irregular') {
+            trendSentence = 'La extensión de sus respuestas varía bastante entre entregas, lo que puede indicar falta de rutina o de condiciones estables para responder.';
+        } else if (trend === 'needs_attention') {
+            trendSentence = 'El patrón general de participación y escritura sugiere que el estudiante puede necesitar acompañamiento cercano.';
+        }
+
+        // Añadir orientación final desde las recomendaciones (primera acción, si existe)
+        const firstAction = recommendations.actions[0];
+        const orientationSentence = firstAction
+            ? `Desde la mediación, ${firstAction.description.toLowerCase()}`
+            : '';
+
+        const guidanceParts = [situationSentence, writingSentence, trendSentence, orientationSentence]
+            .filter(Boolean)
+            .slice(0, 4); // máximo 4 frases
+        const teacherGuidance = guidanceParts.join(' ');
+
+        // ── E. Acción a corto plazo ───────────────────────────────────────────
+        // Una sola acción concreta y ejecutable, según dominantGoal.
+        const SHORT_TERM_ACTIONS: Record<LeoTeacherAdvisorSummary['dominantGoal'], string> = {
+            emotional:      'Iniciar una conversación individual breve para explorar cómo se siente con las actividades de lectura.',
+            reading_habit:  totalSubmitted === 0
+                                ? 'Proponer una primera tarea muy breve y de bajo umbral para generar una primera entrega.'
+                                : 'Establecer una meta semanal de entrega con recordatorio explícito y seguimiento.',
+            writing:        writingDevelopmentLevel === 'initial'
+                                ? 'Plantear una tarea breve con pregunta guiada y frase iniciadora para facilitar la expresión escrita.'
+                                : 'Proponer una consigna que invite a comparar o relacionar ideas del texto con experiencias propias.',
+            metacognitive:  'Establecer días y horarios fijos para las respuestas y comunicarlos de forma explícita al estudiante.',
+            critical:       trend === 'improving'
+                                ? 'Proponer una pregunta inferencial o de valoración sobre el texto más reciente y reconocer el progreso observado.'
+                                : 'Introducir una tarea con pregunta de opinión o debate que exija argumentar con evidencia del texto.',
+            inferential:    'Incluir una pregunta que pida al estudiante conectar dos ideas del texto o explicar una causa implícita.',
+            literal:        'Proponer una actividad de recuperación de información con preguntas directas sobre el texto.',
+            vocabulary:     'Invitar al estudiante a identificar y explicar tres palabras nuevas del texto en su próxima entrega.',
+            fluency:        'Proponer una relectura en voz alta de un fragmento breve para trabajar ritmo y comprensión simultánea.',
+        };
+        const shortTermAction = SHORT_TERM_ACTIONS[dominantGoal];
+
+        // ── F. Justificación (rationale) ──────────────────────────────────────
+        // Siempre referencia números concretos para mantener trazabilidad.
+        const consistencyLabel   = { low: 'baja', medium: 'media', high: 'alta' }[consistencyLevel];
+        const developLabel       = { initial: 'inicial', developing: 'en desarrollo', solid: 'sólida' }[writingDevelopmentLevel];
+        const trendLabel         = {
+            improving:       'mejorando',
+            stable:          'estable',
+            irregular:       'irregular',
+            needs_attention: 'requiere atención',
+        }[trend];
+        const goalLabel: Record<LeoTeacherAdvisorSummary['dominantGoal'], string> = {
+            emotional:     'motivación y vínculo',
+            reading_habit: 'hábito lector',
+            writing:       'expresión escrita',
+            metacognitive: 'auto-regulación',
+            critical:      'pensamiento crítico',
+            inferential:   'comprensión inferencial',
+            literal:       'comprensión literal',
+            vocabulary:    'vocabulario',
+            fluency:       'fluidez lectora',
+        };
+
+        const rationale =
+            totalSubmitted === 0
+                ? `Sin entregas registradas. ${totalAssigned} tarea${totalAssigned !== 1 ? 's' : ''} asignada${totalAssigned !== 1 ? 's' : ''}. Confianza: ${confidence}. Leo prioriza ${goalLabel[dominantGoal]}.`
+                : `Basado en: cumplimiento ${completionRate}% (consistencia ${consistencyLabel}), promedio ${averageWordCount} palabras (elaboración ${developLabel}), tendencia ${trendLabel}. Confianza: ${confidence}. Leo prioriza ${goalLabel[dominantGoal]}.`;
+
+        return {
+            studentId,
+            dominantGoal,
+            headline,
+            teacherGuidance,
+            shortTermAction,
+            rationale,
+            confidence,
+        };
+    }
+
+    /**
+     * buildStudentLongitudinalContext
+     * ─────────────────────────────────────────────────────────────────────────
+     * Construye una vista consolidada y segura del estudiante a partir de todas
+     * las fuentes de datos disponibles en el frontend.
+     *
+     * FUENTES:
+     *   tasks          ← this.assignments + studentSubmissions[]  (localStorage)
+     *   reading        ← this.progress (ProgresoLectura[])        (localStorage + API sync)
+     *   journal        ← this.journalEntries                      (localStorage)
+     *   leoInteraction ← this.leoReaderProfiles                   (localStorage)
+     *
+     * CONTRATO:
+     *   - Nunca lanza. Devuelve defaults seguros si falla cualquier bloque.
+     *   - Todos los numéricos son 0 por defecto (jamás undefined/NaN).
+     *   - Los campos de fecha son undefined cuando no hay dato (jamás null).
+     *   - Completamente síncrono — todos los datos están en memoria.
+     *   - No realiza inferencia, clasificación ni llamadas IA.
+     *
+     * LIMITACIONES CONOCIDAS (documentadas para futuras fases):
+     *   - history[] de sesiones vive solo en el servidor (progress_db.json);
+     *     el frontend solo tiene sessionsCount/totalTimeMs/lastOpenedAt.
+     *   - Leo no persiste logs individuales de interacción: solo contadores acumulados.
+     *   - journal no tiene sincronización server-side; solo está en localStorage.
+     *   - assignments dependen de que this.groups esté cargado desde la API.
+     */
+    buildStudentLongitudinalContext(studentId: string): StudentLongitudinalContext {
+        const activeSources: string[] = [];
+
+        // ── BLOQUE 1: TASKS ──────────────────────────────────────────────────
+        // Fuente: this.assignments, this.groups, assignment.studentSubmissions[]
+        // Ventana: tareas activas o completadas (excluye archivadas)
+        let tasks: StudentLongitudinalContext['tasks'] = {
+            total: 0, submitted: 0, pending: 0, avgWordCount: 0, textSubmissions: 0,
+        };
+
+        try {
+            // Canonical: find groups where student is a declared member
+            const studentGroupIds = new Set(
+                this.groups
+                    .filter(g => this.getGroupMemberIds(g).includes(studentId))
+                    .map(g => g.id)
+            );
+
+            // All non-archived assignments in those groups
+            const relevantAssignments = this.assignments.filter(
+                a => studentGroupIds.has(a.groupId) && a.status !== 'archived'
+            );
+
+            const total = relevantAssignments.length;
+            const textContents: string[] = [];
+            let lastActivityAt: string | undefined;
+
+            for (const assignment of relevantAssignments) {
+                const sub = (assignment.studentSubmissions ?? [])
+                    .find(s => s.studentId === studentId);
+                if (sub) {
+                    // Only count text submissions for word-count analysis
+                    // (blob: URLs are audio/video/photo — no word count)
+                    if (sub.content && !sub.content.startsWith('blob:')) {
+                        textContents.push(sub.content);
+                    }
+                    if (!lastActivityAt || sub.date > lastActivityAt) {
+                        lastActivityAt = sub.date;
+                    }
+                }
+            }
+
+            const submitted = relevantAssignments.filter(
+                a => (a.studentSubmissions ?? []).some(s => s.studentId === studentId)
+            ).length;
+
+            let avgWordCount = 0;
+            if (textContents.length > 0) {
+                const totalWords = textContents.reduce(
+                    (sum, text) => sum + text.trim().split(/\s+/).filter(Boolean).length,
+                    0
+                );
+                avgWordCount = Math.round(totalWords / textContents.length);
+            }
+
+            tasks = {
+                total,
+                submitted,
+                pending: total - submitted,
+                avgWordCount,
+                textSubmissions: textContents.length,
+                ...(lastActivityAt !== undefined && { lastActivityAt }),
+            };
+
+            if (total > 0) activeSources.push('tasks');
+        } catch (_) {
+            // Block degrades to defaults — never propagates
+        }
+
+        // ── BLOQUE 2: READING ────────────────────────────────────────────────
+        // Fuente: this.progress (ProgresoLectura[]), filtrado por usuario_id
+        // Ventana: todos los registros de progreso del estudiante
+        // Nota: history[] no disponible en frontend — se usa sessionsCount/totalTimeMs/lastOpenedAt
+        let reading: StudentLongitudinalContext['reading'] = {
+            booksStarted: 0, booksCompleted: 0,
+            totalSessions: 0, totalTimeSec: 0, avgSessionTimeSec: 0,
+        };
+
+        try {
+            const studentProgress = this.progress.filter(
+                p => p.usuario_id === studentId
+            );
+
+            if (studentProgress.length > 0) {
+                const booksStarted = studentProgress.length;
+
+                // Completed: porcentaje ≥ 100 OR in user.libros_terminados[]
+                const user = this.getUsuarioById(studentId);
+                const terminados = new Set(user?.libros_terminados ?? []);
+                const booksCompleted = studentProgress.filter(
+                    p => (p.porcentaje ?? 0) >= 100 || terminados.has(p.contenido_id)
+                ).length;
+
+                // Sessions and time: accumulated in frontend by recordReaderOpen / updateProgreso
+                // TIME UNIT: totalTimeSec is always SECONDS.
+                // Source field (prog.totalTimeMs) is in milliseconds → divided by 1000 here.
+                let totalSessions = 0;
+                let totalTimeSec  = 0;
+                let lastSessionAt: string | undefined;
+
+                for (const prog of studentProgress) {
+                    totalSessions += prog.sessionsCount ?? 0;
+                    totalTimeSec  += Math.round((prog.totalTimeMs ?? 0) / 1000);
+                    if (prog.lastOpenedAt) {
+                        if (!lastSessionAt || prog.lastOpenedAt > lastSessionAt) {
+                            lastSessionAt = prog.lastOpenedAt;
+                        }
+                    }
+                }
+
+                reading = {
+                    booksStarted,
+                    booksCompleted,
+                    totalSessions,
+                    totalTimeSec,
+                    avgSessionTimeSec: totalSessions > 0
+                        ? Math.round(totalTimeSec / totalSessions)
+                        : 0,
+                    ...(lastSessionAt !== undefined && { lastSessionAt }),
+                };
+
+                activeSources.push('reading');
+            }
+        } catch (_) {
+            // Block degrades to defaults
+        }
+
+        // ── BLOQUE 3: JOURNAL ────────────────────────────────────────────────
+        // Fuente: this.journalEntries (localStorage), método getJournalEntries()
+        // Ventana: todas las entradas del estudiante, sin restricción temporal
+        let journal: StudentLongitudinalContext['journal'] = {
+            entries: 0, avgLength: 0,
+            typeCounts: { personal: 0, task_draft: 0, other: 0 },
+        };
+
+        try {
+            // getJournalEntries devuelve sorted desc por fecha
+            const entries = this.getJournalEntries(studentId);
+
+            if (entries.length > 0) {
+                const avgLength = Math.round(
+                    entries.reduce((sum, e) => sum + (e.content?.length ?? 0), 0)
+                    / entries.length
+                );
+
+                // First entry is the most recent (sorted desc)
+                const lastEntryAt = entries[0]?.date;
+
+                const typeCounts = { personal: 0, task_draft: 0, other: 0 };
+                for (const entry of entries) {
+                    if      (entry.type === 'personal')   typeCounts.personal++;
+                    else if (entry.type === 'task_draft') typeCounts.task_draft++;
+                    else                                  typeCounts.other++;
+                }
+
+                journal = {
+                    entries: entries.length,
+                    avgLength,
+                    typeCounts,
+                    ...(lastEntryAt !== undefined && { lastEntryAt }),
+                };
+
+                activeSources.push('journal');
+            }
+        } catch (_) {
+            // Block degrades to defaults
+        }
+
+        // ── BLOQUE 4: LEO INTERACTION ────────────────────────────────────────
+        // Fuente: this.leoReaderProfiles (localStorage), método getLeoReaderProfile()
+        // Ventana: contadores acumulados de toda la vida del perfil
+        // Limitación: no hay log individual — solo contadores por tipo de evento.
+        let leoInteraction: StudentLongitudinalContext['leoInteraction'] = {
+            vocabularyEvents: 0, inferentialEvents: 0,
+            reflectionEvents: 0, oralityAttempts: 0, totalEvents: 0,
+        };
+
+        try {
+            const profile = this.getLeoReaderProfile(studentId);
+
+            const vocabEvents   = profile.vocabularySupportCount  ?? 0;
+            const inferEvents   = profile.inferentialPromptCount  ?? 0;
+            const reflectEvents = profile.reflectionPromptCount   ?? 0;
+            const oralAttempts  = profile.oralityAttemptsCount    ?? 0;
+            const totalEvents   = vocabEvents + inferEvents + reflectEvents + oralAttempts;
+
+            leoInteraction = {
+                vocabularyEvents:  vocabEvents,
+                inferentialEvents: inferEvents,
+                reflectionEvents:  reflectEvents,
+                oralityAttempts:   oralAttempts,
+                totalEvents,
+                // lastInteractionAt only meaningful when there are real events
+                ...(totalEvents > 0 && profile.updatedAt
+                    ? { lastInteractionAt: profile.updatedAt }
+                    : {}),
+            };
+
+            if (totalEvents > 0) activeSources.push('leo');
+        } catch (_) {
+            // Block degrades to defaults
+        }
+
+        // ── METADATOS DE TRAZABILIDAD ────────────────────────────────────────
+        const dataQuality: StudentLongitudinalContext['meta']['dataQuality'] =
+            activeSources.length >= 3 ? 'full'    :
+            activeSources.length >= 1 ? 'partial' : 'minimal';
+
+        return {
+            studentId,
+            generatedAt: new Date().toISOString(),
+            // Always 'lifetime' for now — field reserved for future time-scoped windows
+            timeWindow: { type: 'lifetime' },
+            tasks,
+            reading,
+            journal,
+            leoInteraction,
+            meta: {
+                sources:     activeSources,
+                dataQuality,
+            },
+        };
+    }
+
+    /**
+     * derivePedagogicalSignals
+     * ─────────────────────────────────────────────────────────────────────────
+     * Transforms a StudentLongitudinalContext into four simple, explainable
+     * pedagogical signals: readingHabit, writingEngagement, autonomy, consistency.
+     *
+     * NATURE: fully deterministic — no AI, no NLP, no external calls.
+     * CONTRACT:
+     *   - Reads ONLY from ctx (no side effects, no this.* access).
+     *   - Defaults conservatively: 'medium' when evidence is ambiguous.
+     *   - Never diagnoses, infers cognitive conditions, or overinterprets.
+     *   - Synchronous and pure — never throws.
+     *
+     * EDGE CASES:
+     *   - ctx.meta.dataQuality === 'minimal' → all signals 'low'.
+     *   - Partial data → missing sources are ignored, not extrapolated.
+     *   - High Leo usage with high reading → NOT classified as low autonomy.
+     */
+    derivePedagogicalSignals(ctx: StudentLongitudinalContext): PedagogicalSignals {
+        const notes: string[] = [];
+
+        // ── EARLY EXIT: no data ────────────────────────────────────────────────
+        if (ctx.meta.dataQuality === 'minimal') {
+            return {
+                readingHabit:      'low',
+                writingEngagement: 'low',
+                autonomy:          'low',
+                consistency:       'low',
+                meta: {
+                    basedOn: [],
+                    notes:   ['dataQuality is minimal — no activity data; all signals defaulted to low'],
+                },
+            };
+        }
+
+        // ── READING HABIT ─────────────────────────────────────────────────────
+        // Combines session count + total time. Both must be meaningful for 'high'.
+        // booksStarted ≥ 1 is added as a guardrail on 'high': prevents a false positive
+        // where all activity comes from a single repeated session with no real book opened.
+        //
+        //   high   → ≥ 6 sessions AND ≥ 900 s (≈ 15 min) AND ≥ 1 book started
+        //   medium → ≥ 2 sessions OR  ≥ 300 s (≈  5 min) — some activity
+        //   low    → otherwise
+        const { totalSessions, totalTimeSec, booksStarted } = ctx.reading;
+        let readingHabit: SignalLevel;
+
+        if (totalSessions >= 6 && totalTimeSec >= 900 && booksStarted >= 1) {
+            readingHabit = 'high';
+            notes.push(`readingHabit=high: ${totalSessions} sessions, ${totalTimeSec}s total, ${booksStarted} book(s) started`);
+        } else if (totalSessions >= 2 || totalTimeSec >= 300) {
+            readingHabit = 'medium';
+            notes.push(`readingHabit=medium: ${totalSessions} sessions, ${totalTimeSec}s total`);
+        } else {
+            readingHabit = 'low';
+            notes.push(`readingHabit=low: ${totalSessions} sessions, ${totalTimeSec}s total`);
+        }
+
+        // ── WRITING ENGAGEMENT ────────────────────────────────────────────────
+        // Intentionally combines tasks + journal — a student may write more in one
+        // than the other depending on their style; neither source alone is definitive.
+        //
+        //   high   → (textSubmissions ≥ 3 AND avgWordCount ≥ 30)   — rich task writing
+        //            OR (textSubmissions ≥ 2 AND journalEntries ≥ 2) — cross-source evidence
+        //   medium → textSubmissions ≥ 1 OR journalEntries ≥ 1       — some writing present
+        //   low    → no text evidence in either source
+        //
+        // avgWordCount ≥ 30: deliberately low bar — a sentence or two is enough to signal
+        // genuine text engagement (excludes near-empty submissions like single words).
+        const { textSubmissions, avgWordCount } = ctx.tasks;
+        const journalEntries = ctx.journal.entries;
+        let writingEngagement: SignalLevel;
+
+        const richTaskWriting    = textSubmissions >= 3 && avgWordCount >= 30;
+        const crossSourceWriting = textSubmissions >= 2 && journalEntries >= 2;
+
+        if (richTaskWriting || crossSourceWriting) {
+            writingEngagement = 'high';
+            notes.push(
+                `writingEngagement=high: ${textSubmissions} text submissions (avg ${avgWordCount} words), ${journalEntries} journal entries`
+            );
+        } else if (textSubmissions >= 1 || journalEntries >= 1) {
+            writingEngagement = 'medium';
+            notes.push(
+                `writingEngagement=medium: ${textSubmissions} text submissions, ${journalEntries} journal entries`
+            );
+        } else {
+            writingEngagement = 'low';
+            notes.push(`writingEngagement=low: no text submissions and no journal entries`);
+        }
+
+        // ── AUTONOMY ──────────────────────────────────────────────────────────
+        // Interprets independent reading vs Leo-assisted reading.
+        //
+        // KEY RULE: Leo usage is NOT penalized on its own. Normal and moderate use
+        // is healthy and expected. Only extreme imbalance (very high Leo relative to
+        // almost no reading sessions) signals reduced autonomy.
+        //
+        // leoRatio = Leo events per reading session (proxy for reliance per session).
+        //
+        // Priority order (first match wins):
+        //   1. low    → zero sessions AND zero Leo events — no engagement at all
+        //   2. low    → leoRatio > 5 with at least 1 session — extreme dependence
+        //               (> 5 Leo events per session indicates heavy scaffolding)
+        //   3. high   → ≥ 5 sessions AND leoRatio ≤ 2 — reads often, modest Leo use
+        //   4. medium → everything else (balanced, occasional, or ambiguous)
+        const leoEvents = ctx.leoInteraction.totalEvents;
+        const leoRatio  = totalSessions > 0 ? leoEvents / totalSessions : 0;
+        let autonomy: SignalLevel;
+
+        if (totalSessions === 0 && leoEvents === 0) {
+            autonomy = 'low';
+            notes.push(`autonomy=low: no reading sessions and no Leo interaction`);
+        } else if (totalSessions > 0 && leoRatio > 5) {
+            autonomy = 'low';
+            notes.push(
+                `autonomy=low: extreme Leo dependence — leoRatio=${leoRatio.toFixed(1)} events/session (threshold: >5)`
+            );
+        } else if (totalSessions >= 5 && leoRatio <= 2) {
+            autonomy = 'high';
+            notes.push(
+                `autonomy=high: ${totalSessions} sessions, leoRatio=${leoRatio.toFixed(1)} events/session`
+            );
+        } else {
+            autonomy = 'medium';
+            notes.push(
+                `autonomy=medium: ${totalSessions} sessions, ${leoEvents} Leo events (leoRatio=${leoRatio.toFixed(1)})`
+            );
+        }
+
+        // ── CONSISTENCY ───────────────────────────────────────────────────────
+        // Uses recency of most recent activity across reading, journal, tasks.
+        //
+        // NOTE: consistency is evaluated relative to current system time (Date.now()).
+        // ctx.timeWindow is currently always 'lifetime' and does not filter the data.
+        // Future versions may align recency thresholds with ctx.timeWindow boundaries
+        // when time-scoped contexts (last_7d, last_30d) are introduced.
+        //
+        //   high   → ≥ 2 sources with activity in last 14 days — recent and multi-modal
+        //   medium → ≥ 1 source with activity in last 30 days  — some recent engagement
+        //   low    → no timestamps, or all activity older than 30 days
+        const nowMs = Date.now();
+        const daysSince = (iso?: string): number | null => {
+            if (!iso) return null;
+            const t = new Date(iso).getTime();
+            return isNaN(t) ? null : Math.floor((nowMs - t) / 86_400_000);
+        };
+
+        const recencies = [
+            daysSince(ctx.reading.lastSessionAt),
+            daysSince(ctx.journal.lastEntryAt),
+            daysSince(ctx.tasks.lastActivityAt),
+        ].filter((d): d is number => d !== null);
+
+        const recent14 = recencies.filter(d => d <= 14).length;
+        const recent30 = recencies.filter(d => d <= 30).length;
+        let consistency: SignalLevel;
+
+        if (recent14 >= 2) {
+            consistency = 'high';
+            notes.push(`consistency=high: ${recent14} source(s) with activity in last 14 days`);
+        } else if (recent30 >= 1) {
+            consistency = 'medium';
+            notes.push(`consistency=medium: ${recent30} source(s) with activity in last 30 days`);
+        } else {
+            consistency = 'low';
+            notes.push(
+                recencies.length === 0
+                    ? `consistency=low: no activity timestamps available`
+                    : `consistency=low: most recent activity older than 30 days`
+            );
+        }
+
+        // ── meta.basedOn ──────────────────────────────────────────────────────
+        // Constructed intentionally from the sources that actually contributed signal
+        // data — not a copy of ctx.meta.sources (which reflects data presence, not
+        // signal derivation). Deduplicated via Set.
+        //
+        // readingHabit     → 'reading'         (always, even if low)
+        // writingEngagement→ 'tasks', 'journal' (only if evidence was non-zero)
+        // autonomy         → 'reading', 'leo'  (leo only if events > 0)
+        // consistency      → sources that had a parseable timestamp
+        const basedOnSet = new Set<string>();
+
+        // reading always consulted for readingHabit and autonomy
+        basedOnSet.add('reading');
+
+        // tasks consulted if text submissions were present
+        if (textSubmissions > 0) basedOnSet.add('tasks');
+
+        // journal consulted if entries were present
+        if (journalEntries > 0) basedOnSet.add('journal');
+
+        // leo consulted for autonomy if any events recorded
+        if (leoEvents > 0) basedOnSet.add('leo');
+
+        // consistency: add sources that had a parseable timestamp
+        if (daysSince(ctx.reading.lastSessionAt)  !== null) basedOnSet.add('reading');
+        if (daysSince(ctx.journal.lastEntryAt)    !== null) basedOnSet.add('journal');
+        if (daysSince(ctx.tasks.lastActivityAt)   !== null) basedOnSet.add('tasks');
+
+        return {
+            readingHabit,
+            writingEngagement,
+            autonomy,
+            consistency,
+            meta: {
+                basedOn: [...basedOnSet],
+                notes,
+            },
+        };
+    }
+
+    /**
+     * buildLeoAdvisorContext
+     * ─────────────────────────────────────────────────────────────────────────
+     * Bridges interpreted signals → structured pedagogical context.
+     *
+     * Takes:  StudentLongitudinalContext (raw data) + PedagogicalSignals (interpretation)
+     * Builds: objectives (strengths/focus), factual evidence, confidence
+     *
+     * NATURE: deterministic — no AI, no text generation, no external calls.
+     * CONTRACT:
+     *   - Pure function: reads only from ctx and signals, no side effects.
+     *   - Strengths/focus arrays may be empty (medium signals are neutral, not classified).
+     *   - Evidence is numerical/structural — never interpretive language.
+     *   - Confidence comes from ctx.meta.dataQuality (not re-derived).
+     *   - meta.basedOn is inherited from signals.meta.basedOn (not re-derived from ctx).
+     *   - Never throws.
+     */
+    buildLeoAdvisorContext(
+        ctx:     StudentLongitudinalContext,
+        signals: PedagogicalSignals
+    ): LeoAdvisorContext {
+
+        // ── EARLY EXIT: minimal data ───────────────────────────────────────────
+        // No signal is reliable enough to classify — return empty objectives.
+        if (ctx.meta.dataQuality === 'minimal') {
+            return {
+                studentId:  ctx.studentId,
+                signals,
+                objectives: { strengths: [], focus: [] },
+                evidence:   { summary: ['No sufficient activity data'] },
+                meta: {
+                    confidence: 'low',
+                    basedOn:    [],
+                },
+            };
+        }
+
+        // ── OBJECTIVES: signal → objective mapping ─────────────────────────────
+        // high   → strength (observable positive behavior worth recognizing)
+        // low    → focus    (area that would benefit from targeted attention)
+        // medium → neutral  (insufficient signal to classify; deliberately excluded)
+        //
+        // The 4 signals map 1:1 to the 4 PedagogicalObjectives.
+        // Canonical objective order (stable across all consumers):
+        //   1. reading_habit  2. writing_expression  3. autonomy  4. consistency
+        // classify() calls below must preserve this order — do not reorder them.
+        const strengths: PedagogicalObjective[] = [];
+        const focus:     PedagogicalObjective[] = [];
+
+        const classify = (signal: SignalLevel, objective: PedagogicalObjective): void => {
+            if      (signal === 'high') strengths.push(objective);
+            else if (signal === 'low')  focus.push(objective);
+            // medium: intentionally not classified
+        };
+
+        classify(signals.readingHabit,      'reading_habit');      // 1
+        classify(signals.writingEngagement, 'writing_expression'); // 2
+        classify(signals.autonomy,          'autonomy');           // 3
+        classify(signals.consistency,       'consistency');        // 4
+
+        // ── EVIDENCE SUMMARY ──────────────────────────────────────────────────
+        // Short, factual lines from real ctx values. No interpretation.
+        // Only non-zero sources are included. Capped to 5 items (contract).
+        //
+        // Evidence order is intentional:
+        //   1. reading sessions + time + books started   — primary learning activity
+        //   2. text submissions (or blob-only note)      — writing output from tasks
+        //   3. journal entries + avg length              — reflective writing
+        //   4. Leo interactions                          — support/scaffolding usage
+        //   5. task completion rate                      — overall completion indicator
+        // This order prioritizes primary activity before support and completion signals.
+        const summary: string[] = [];
+
+        if (ctx.reading.totalSessions > 0) {
+            summary.push(
+                `${ctx.reading.totalSessions} reading session(s), ` +
+                `${ctx.reading.totalTimeSec}s total, ` +
+                `${ctx.reading.booksStarted} book(s) started`
+            );
+        }
+
+        if (ctx.tasks.textSubmissions > 0) {
+            summary.push(
+                `${ctx.tasks.textSubmissions} text submission(s), avg ${ctx.tasks.avgWordCount} words`
+            );
+        } else if (ctx.tasks.submitted > 0) {
+            // Submitted but no text content (audio / video / photo only)
+            summary.push(`${ctx.tasks.submitted} submission(s) — no text content`);
+        }
+
+        if (ctx.journal.entries > 0) {
+            summary.push(
+                `${ctx.journal.entries} journal entry/entries, avg ${ctx.journal.avgLength} chars`
+            );
+        }
+
+        if (ctx.leoInteraction.totalEvents > 0) {
+            summary.push(`${ctx.leoInteraction.totalEvents} Leo interaction(s)`);
+        }
+
+        if (ctx.tasks.total > 0 || ctx.tasks.submitted > 0) {
+            // Show submitted/total when total is known; show submitted-only when total
+            // appears inconsistent (submitted > total or total unexpectedly zero).
+            const completionLine = ctx.tasks.total > 0
+                ? `${ctx.tasks.submitted}/${ctx.tasks.total} assigned task(s) submitted`
+                : `${ctx.tasks.submitted} submitted task(s) — total count unavailable`;
+            summary.push(completionLine);
+        }
+
+        // Fallback: partial dataQuality but all values happened to be zero
+        if (summary.length === 0) {
+            summary.push('No activity data available for this student');
+        }
+
+        // Enforce contract: evidence.summary max 5 items.
+        // Order is already intentional (see comment above); slice preserves priority.
+        const finalSummary = summary.slice(0, 5);
+
+        // ── CONFIDENCE ────────────────────────────────────────────────────────
+        // Direct mapping from ctx.meta.dataQuality — no re-derivation.
+        // NOTE: confidence currently reflects data source availability (how many
+        // sources contributed data), NOT evidence richness, recency quality, or
+        // pedagogical depth. Future versions may incorporate those dimensions.
+        const confidenceMap = {
+            full:    'high'    as const,
+            partial: 'medium'  as const,
+            minimal: 'low'     as const,
+        };
+
+        return {
+            studentId:  ctx.studentId,
+            signals,
+            objectives: { strengths, focus },
+            evidence:   { summary: finalSummary },
+            meta: {
+                confidence: confidenceMap[ctx.meta.dataQuality],
+                basedOn:    [...signals.meta.basedOn],
+            },
+        };
+    }
+
+    /**
+     * buildPedagogicalRecommendations
+     * ─────────────────────────────────────────────────────────────────────────
+     * Produces max 3 actionable recommendations from a LeoAdvisorContext.
+     *
+     * RULES:
+     *   focus objectives     → type = 'develop', priority = high or medium
+     *   strength objectives  → type = 'reinforce', priority = low
+     *   medium objectives    → ignored (no recommendation generated)
+     *
+     * PRIORITY ASSIGNMENT:
+     *   reading_habit  develop → high   (foundational behavior)
+     *   consistency    develop → high   (recency gap affects all other signals)
+     *   writing_expr   develop → medium (important but secondary)
+     *   autonomy       develop → medium (nuanced; not always urgent)
+     *   all reinforce          → low    (sustain, not urgency)
+     *
+     * CONFIDENCE GUARD:
+     *   If advisor.meta.confidence === 'low', all 'high' priorities are downgraded
+     *   to 'medium' — we do not make strong claims on unreliable data.
+     *
+     * NATURE: deterministic — no AI, no text generation, no external calls.
+     * CONTRACT:
+     *   - Returns 0–3 items (empty array is valid when all signals are medium).
+     *   - Ordered by priority: high → medium → low.
+     *   - Actions are Spanish, concrete, and observable.
+     *   - Justifications are Spanish and factual — no speculation.
+     *   - Never throws.
+     */
+    buildPedagogicalRecommendations(advisor: LeoAdvisorContext): PedagogicalRecommendation[] {
+
+        // ── LOOKUP TABLES ─────────────────────────────────────────────────────
+        // All text is Spanish (app language). Actions are specific and observable.
+        // Justifications are factual statements grounded in the signal level.
+
+        const DEVELOP_PRIORITY: Record<PedagogicalObjective, PedagogicalRecommendation['priority']> = {
+            reading_habit:      'high',    // foundational; absence affects everything else
+            writing_expression: 'medium',  // important but not as immediately blocking
+            autonomy:           'medium',  // nuanced signal; avoid overstating urgency
+            consistency:        'high',    // recency gap is the most actionable signal
+        };
+
+        const DEVELOP_ACTION: Record<PedagogicalObjective, string> = {
+            reading_habit:
+                'proponer al menos una sesión de lectura semanal con registro del tiempo invertido',
+            writing_expression:
+                'asignar una tarea breve de escritura reflexiva con pregunta guiada y frase iniciadora',
+            // Leo is a tool, not a problem. Action emphasizes observation, not removal.
+            autonomy:
+                'proponer una sesión de lectura con uso limitado de Leo para observar el nivel de autonomía',
+            consistency:
+                'acordar días fijos de actividad con el estudiante y hacer seguimiento explícito la primera semana',
+        };
+
+        // Static fallback justifications (Spanish, factual, signal-level grounded).
+        // Used when real values cannot be extracted from signal notes.
+        const DEVELOP_JUSTIFICATION: Record<PedagogicalObjective, string> = {
+            reading_habit:
+                'frecuencia de sesiones de lectura y tiempo acumulado por debajo del nivel esperado',
+            writing_expression:
+                '0 entregas de texto y 0 entradas de bitácora registradas',
+            autonomy:
+                'actividad de lectura autónoma ausente o dependencia elevada del soporte Leo',
+            consistency:
+                'sin actividad reciente registrada en ninguna fuente de datos del estudiante',
+        };
+
+        const REINFORCE_ACTION: Record<PedagogicalObjective, string> = {
+            reading_habit:
+                'reconocer el hábito lector y proponer títulos de mayor complejidad o extensión',
+            writing_expression:
+                'proponer una consigna de escritura más abierta para expandir la expresión personal',
+            autonomy:
+                'mantener el nivel de autonomía actual e incorporar textos con mayor desafío cognitivo',
+            consistency:
+                'mantener la regularidad e incorporar variedad en los tipos de actividad propuestos',
+        };
+
+        // Static fallback justifications for reinforce recommendations.
+        const REINFORCE_JUSTIFICATION: Record<PedagogicalObjective, string> = {
+            reading_habit:
+                'frecuencia de sesiones y tiempo de lectura en nivel sostenido',
+            writing_expression:
+                'entregas de texto regulares con extensión media adecuada o bitácora activa',
+            autonomy:
+                'sesiones de lectura frecuentes con uso moderado de Leo',
+            consistency:
+                'actividad reciente registrada en múltiples fuentes en los últimos 14 días',
+        };
+
+        const PRIORITY_ORDER: Record<PedagogicalRecommendation['priority'], number> = {
+            high: 0, medium: 1, low: 2,
+        };
+
+        // ── CONFIDENCE GUARD ──────────────────────────────────────────────────
+        // When data coverage is minimal, 'high' priority claims are unreliable.
+        // Downgrade to 'medium' to avoid overstatement on thin evidence.
+        const safePriority = (
+            p: PedagogicalRecommendation['priority']
+        ): PedagogicalRecommendation['priority'] => {
+            return (advisor.meta.confidence === 'low' && p === 'high') ? 'medium' : p;
+        };
+
+        // ── GROUNDED JUSTIFICATION HELPER ─────────────────────────────────────
+        // NOTE: signals.meta.notes is currently human-readable traceability.
+        // Future versions may expose structured evidence objects to avoid string parsing.
+        //
+        // groundedJustification() tries three paths in order:
+        //   1. advisor.evidence.summary — intentional presentation lines; preferred
+        //      because they are produced for display and are less likely to change format
+        //   2. advisor.signals.meta.notes — internal tracing strings; kept as fallback
+        //      only; parsing is isolated here so it does not spread to other places
+        //   3. static fallback text — always safe; used when both paths above fail
+
+        // Helper: find the first evidence summary line containing a keyword
+        const evLine = (keyword: string): string | undefined =>
+            advisor.evidence.summary.find(l => l.includes(keyword));
+
+        // Helper: strip "signalKey=level: " from a note and return the factual fragment.
+        // Returns null if the note for this objective is absent.
+        const noteData = (noteKey: string): string | null => {
+            const note = advisor.signals.meta.notes?.find(n => n.startsWith(noteKey + '='));
+            return note ? note.replace(/^[^:]+:\s*/, '').trim() : null;
+        };
+
+        const groundedJustification = (
+            objective: PedagogicalObjective,
+            fallback:  string
+        ): string => {
+
+            switch (objective) {
+
+                case 'reading_habit': {
+                    // PATH 1 — evidence: "N reading session(s), Ts total[, B book(s) started]"
+                    const line = evLine('reading session');
+                    if (line) {
+                        const m = line.match(/^(\d+) reading session.*?(\d+)s total/);
+                        if (m) return `${m[1]} sesiones de lectura con ${m[2]}s acumulados`;
+                    }
+                    // PATH 2 — note fallback: "N sessions, Ts total"
+                    const data = noteData('readingHabit');
+                    if (data) {
+                        const m = data.match(/^(\d+) sessions, (\d+)s total/);
+                        if (m) return `${m[1]} sesiones de lectura con ${m[2]}s acumulados`;
+                    }
+                    break;
+                }
+
+                case 'writing_expression': {
+                    // PATH 1 — evidence: "N text submission(s), avg W words"
+                    //                 + "N journal entry/entries, avg L chars"
+                    // Both lines are optional; missing lines default to 0.
+                    const textLine    = evLine('text submission');
+                    const journalLine = evLine('journal entry');
+                    const noTextLine  = evLine('no text content'); // blob-only submissions
+
+                    const textCount    = textLine?.match(/^(\d+)/)?.[1];
+                    const journalCount = journalLine?.match(/^(\d+)/)?.[1];
+
+                    if (textCount !== undefined || journalCount !== undefined) {
+                        return `${textCount ?? '0'} entrega(s) de texto y ${journalCount ?? '0'} entrada(s) de bitácora registradas`;
+                    }
+
+                    // No text submissions at all — check for blob-only case
+                    if (noTextLine) {
+                        const m = noTextLine.match(/^(\d+)/);
+                        if (m) return `${m[1]} entrega(s) sin texto escrito y 0 entrada(s) de bitácora`;
+                    }
+
+                    // PATH 2 — note fallback: "N text submissions…J journal entries"
+                    const data = noteData('writingEngagement');
+                    if (data) {
+                        if (data.includes('no text submissions'))
+                            return '0 entregas de texto y 0 entradas de bitácora registradas';
+                        const m = data.match(/(\d+) text submissions.*?(\d+) journal entries/);
+                        if (m) return `${m[1]} entrega(s) de texto y ${m[2]} entrada(s) de bitácora registradas`;
+                    }
+                    break;
+                }
+
+                case 'autonomy': {
+                    // PATH 1 — evidence: compute from reading sessions + Leo interaction counts.
+                    // Avoids note parsing entirely by doing arithmetic on structured numbers.
+                    const readingLine = evLine('reading session');
+                    const leoLine     = evLine('Leo interaction');
+
+                    const nSessions = readingLine ? parseInt(readingLine.match(/^(\d+)/)?.[1] ?? '0', 10) : 0;
+                    const nLeo      = leoLine     ? parseInt(leoLine.match(/^(\d+)/)?.[1]     ?? '0', 10) : 0;
+
+                    if (nSessions === 0 && nLeo === 0)
+                        return 'sin sesiones de lectura ni interacción con Leo registradas';
+
+                    if (nSessions > 0) {
+                        const ratio = (nLeo / nSessions).toFixed(1);
+                        return `${nSessions} sesiones con ratio Leo de ${ratio} eventos/sesión`;
+                    }
+
+                    if (nLeo > 0)
+                        return `${nLeo} interacciones Leo sin sesiones de lectura registradas`;
+
+                    // PATH 2 — note fallback (only reached if evidence lines were missing)
+                    const data = noteData('autonomy');
+                    if (data) {
+                        if (data.includes('no reading sessions'))
+                            return 'sin sesiones de lectura ni interacción con Leo registradas';
+                        const mRatio = data.match(/leoRatio=([\d.]+)/);
+                        if (mRatio) return `dependencia elevada de Leo (${mRatio[1]} eventos/sesión)`;
+                    }
+                    break;
+                }
+
+                case 'consistency': {
+                    // PATH 1 — no evidence line exists for consistency (timestamps are not
+                    // included in evidence.summary). Note parsing is primary for this objective.
+                    // PATH 2 — note parsing (primary here, not fallback)
+                    const data = noteData('consistency');
+                    if (data) {
+                        if (data.includes('no activity timestamps'))
+                            return 'sin fechas de actividad registradas';
+                        if (data.includes('older than 30 days'))
+                            return 'actividad más reciente con más de 30 días de antigüedad';
+                        const m = data.match(/^(\d+) source/);
+                        if (m) return `${m[1]} fuente(s) con actividad reciente registrada`;
+                    }
+                    break;
+                }
+            }
+
+            // PATH 3 — static fallback (always safe)
+            return fallback;
+        };
+
+        // ── BUILD RECOMMENDATIONS ─────────────────────────────────────────────
+        // Each recommendation is tied to a PedagogicalObjective.
+        // This enables grouping and narrative synthesis in Leo (future layer).
+        //
+        // Objectives arrive in canonical order (reading_habit → writing_expression
+        // → autonomy → consistency) because buildLeoAdvisorContext preserves it.
+        const recs: PedagogicalRecommendation[] = [];
+
+        for (const obj of advisor.objectives.focus) {
+            recs.push({
+                objective:     obj,
+                type:          'develop',
+                priority:      safePriority(DEVELOP_PRIORITY[obj]),
+                action:        DEVELOP_ACTION[obj],
+                justification: groundedJustification(obj, DEVELOP_JUSTIFICATION[obj]),
+            });
+        }
+
+        for (const obj of advisor.objectives.strengths) {
+            recs.push({
+                objective:     obj,
+                type:          'reinforce',
+                priority:      'low',    // reinforce is never urgent
+                action:        REINFORCE_ACTION[obj],
+                justification: groundedJustification(obj, REINFORCE_JUSTIFICATION[obj]),
+            });
+        }
+
+        // ── SORT + CAP ────────────────────────────────────────────────────────
+        // Sort by priority (high → medium → low); secondary sort preserves canonical
+        // objective order within the same priority tier (stable because focus always
+        // precedes strengths, and both iterate in canonical order).
+        recs.sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+
+        return recs.slice(0, 3);
+    }
+
+    /**
+     * buildLeoSuggestion
+     * ─────────────────────────────────────────────────────────────────────────
+     * Final layer: converts structured pedagogical data into a short, teacher-
+     * facing narrative. The output is a synthesis, not a generation — Leo only
+     * reorganizes what the structured layers already established.
+     *
+     * INPUTS:
+     *   advisor         — LeoAdvisorContext (objectives, evidence, confidence)
+     *   recommendations — PedagogicalRecommendation[] (actions + justifications)
+     *
+     * NATURE: deterministic — no AI, no free text generation.
+     * CONTRACT:
+     *   - summary: 1–2 sentences; neutral, factual, no diagnosis.
+     *   - recommendations: max 3 action lines with brief parenthetical justification.
+     *   - evidence: reused / lightly translated from advisor.evidence.summary.
+     *   - Introduces NO new insights or data not already present in inputs.
+     *   - Never throws.
+     *
+     * TONE RULES:
+     *   - Neutral and professional — no judgment, no motivational language.
+     *   - Teacher-oriented — addresses the mediator, not the student.
+     *   - Spanish throughout.
+     */
+    buildLeoSuggestion(
+        advisor:         LeoAdvisorContext,
+        recommendations: PedagogicalRecommendation[]
+    ): LeoSuggestion {
+
+        // ── OBJECTIVE LABELS (Spanish) ────────────────────────────────────────
+        const LABEL: Record<PedagogicalObjective, string> = {
+            reading_habit:      'hábito lector',
+            writing_expression: 'expresión escrita',
+            autonomy:           'autonomía lectora',
+            consistency:        'regularidad de actividad',
+        };
+
+        // ── EVIDENCE TRANSLATION ──────────────────────────────────────────────
+        // Lightly translates advisor.evidence.summary lines to Spanish.
+        // Uses exact-format matching (lines are produced by buildLeoAdvisorContext).
+        // Unknown lines are passed through unchanged — no data is invented.
+
+        // Proper Spanish pluralization helper.
+        // Returns "N singular" or "N plural" based on n.
+        const pl = (n: number, singular: string, plural: string): string =>
+            `${n} ${n === 1 ? singular : plural}`;
+
+        const translateLine = (line: string): string => {
+            let m: RegExpMatchArray | null;
+
+            // "N reading session(s), Ts total, B book(s) started"
+            m = line.match(/^(\d+) reading session\(s\), (\d+)s total, (\d+) book\(s\) started$/);
+            if (m) {
+                const sessions = pl(+m[1], 'sesión', 'sesiones');
+                const books    = pl(+m[3], 'libro iniciado', 'libros iniciados');
+                return `${sessions} de lectura (${m[2]} s) — ${books}`;
+            }
+
+            // "N text submission(s), avg W words"
+            m = line.match(/^(\d+) text submission\(s\), avg (\d+) words$/);
+            if (m) return `${pl(+m[1], 'entrega', 'entregas')} de texto (prom. ${m[2]} palabras)`;
+
+            // "N submission(s) — no text content"
+            m = line.match(/^(\d+) submission\(s\) — no text content$/);
+            if (m) return `${pl(+m[1], 'entrega', 'entregas')} sin texto escrito`;
+
+            // "N journal entry/entries, avg L chars"
+            m = line.match(/^(\d+) journal entry\/entries, avg (\d+) chars$/);
+            if (m) return `${pl(+m[1], 'entrada', 'entradas')} de bitácora (prom. ${m[2]} caracteres)`;
+
+            // "N Leo interaction(s)"
+            m = line.match(/^(\d+) Leo interaction\(s\)$/);
+            if (m) return `${pl(+m[1], 'interacción', 'interacciones')} con Leo`;
+
+            // "N/M assigned task(s) submitted"
+            m = line.match(/^(\d+)\/(\d+) assigned task\(s\) submitted$/);
+            if (m) {
+                const taskWord = +m[1] === 1 ? 'tarea asignada completada' : 'tareas asignadas completadas';
+                return `${m[1]}/${m[2]} ${taskWord}`;
+            }
+
+            // "N submitted task(s) — total count unavailable"
+            m = line.match(/^(\d+) submitted task\(s\) — total count unavailable$/);
+            if (m) return `${pl(+m[1], 'tarea entregada', 'tareas entregadas')} (total no disponible)`;
+
+            // Pass through unknown lines unchanged
+            return line;
+        };
+
+        const translatedEvidence = advisor.evidence.summary.map(translateLine).slice(0, 5);
+
+        // ── EDGE CASE: minimal confidence ─────────────────────────────────────
+        // Insufficient data to make any reliable claim — say so honestly.
+        if (advisor.meta.confidence === 'low') {
+            return {
+                summary:         'No hay suficiente información para generar una recomendación sólida.',
+                recommendations: [],
+                evidence:        translatedEvidence.length > 0
+                                     ? translatedEvidence
+                                     : ['Sin datos de actividad suficientes'],
+            };
+        }
+
+        // ── EDGE CASE: no recommendations ─────────────────────────────────────
+        // All signals were medium — no clear gap or strength to act on.
+        if (recommendations.length === 0) {
+            return {
+                summary:         'El estudiante presenta un comportamiento equilibrado sin áreas prioritarias de intervención.',
+                recommendations: [],
+                evidence:        translatedEvidence,
+            };
+        }
+
+        // ── SUMMARY CONSTRUCTION ──────────────────────────────────────────────
+        // Two-sentence structure:
+        //   Sentence 1 — describes the observed situation (what the data shows)
+        //   Sentence 2 — frames the action direction (what the teacher should consider)
+        //
+        // Driven by advisor.objectives (not by recommendations list) so the summary
+        // reflects the full pedagogical picture, not just the first recommendation.
+        //
+        // VARIANT SELECTION: deterministic, based on studentId character sum mod 2.
+        // Same studentId always produces the same variant — no randomness.
+        // Variants share identical meaning; only phrasing differs.
+        const { strengths, focus } = advisor.objectives;
+
+        const focusStr    = focus.map(o => LABEL[o]).join(' y ');
+        const strengthStr = strengths.map(o => LABEL[o]).join(' y ');
+
+        const idVariant = advisor.studentId
+            .split('').reduce((acc, c) => acc + c.charCodeAt(0), 0) % 2;
+
+        let summary: string;
+
+        if (strengths.length === 0 && focus.length > 0) {
+            // Only gaps — development needed
+            summary = idVariant === 0
+                ? `Se observa baja actividad en ${focusStr}. Conviene establecer acciones específicas en estas dimensiones.`
+                : `El estudiante muestra poca actividad en ${focusStr}. Se recomienda atención focalizada en estas áreas.`;
+
+        } else if (focus.length === 0 && strengths.length > 0) {
+            // Only strengths — doing well
+            summary = idVariant === 0
+                ? `El estudiante muestra actividad sostenida en ${strengthStr}. Se sugiere aumentar gradualmente el nivel de desafío.`
+                : `Se observa un comportamiento positivo en ${strengthStr}. Puede ser el momento de ampliar el nivel de exigencia.`;
+
+        } else {
+            // Mixed: some strengths, some gaps
+            summary = idVariant === 0
+                ? `Se observa actividad positiva en ${strengthStr}, con oportunidad de desarrollo en ${focusStr}. Se recomienda aprovechar las fortalezas como punto de partida.`
+                : `El estudiante muestra avances en ${strengthStr}, con áreas por fortalecer en ${focusStr}. Conviene partir de lo que ya funciona bien.`;
+        }
+
+        // ── RECOMMENDATION LINES ──────────────────────────────────────────────
+        // Each line: capitalize(action) + (justification) in parentheses.
+        // Justification is already grounded in real evidence (from buildPedagogicalRecommendations).
+        //
+        // FUTURE: recommendation.justification is directly traceable to evidence lines.
+        // UI layer may highlight matching evidence fragments.
+        const capitalize = (s: string): string =>
+            s.length > 0 ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+
+        const recLines = recommendations.slice(0, 3).map(r =>
+            `${capitalize(r.action)} (${r.justification})`
+        );
+
+        return {
+            summary,
+            recommendations: recLines,
+            evidence:        translatedEvidence,
+        };
+    }
+
     getTeacherGroups(userId: string): Group[] {
         const user = this.getUsuarioById(userId);
         return this.groups.filter(g =>
@@ -2405,7 +4393,7 @@ class DataService {
 
         const res = await fetch(url, {
             method,
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(section)
         });
         if (!res.ok) throw new Error('Failed to save section');
@@ -2416,15 +4404,13 @@ class DataService {
         await fetch(`${this.apiUrl
             } / sections / ${id} `, {
             method: 'DELETE',
-            headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
+            headers: { ...this.adminWriteHeaders }
         });
     }
 
     async getSchoolConfig(schoolName: string): Promise<SchoolConfig> {
         try {
-            const res = await fetch(`${this.apiUrl}/schools/${encodeURIComponent(schoolName)}/config`, {
-                headers: { 'x-admin-secret': 'chibalete-secure-upload-2025' }
-            });
+            const res = await fetch(`${this.apiUrl}/schools/${encodeURIComponent(schoolName)}/config`);
             if (res.ok) {
                 const config = await res.json();
                 // Fase E4: guardar con timestamp de inserción para TTL
@@ -2443,7 +4429,7 @@ class DataService {
     async saveSchoolConfig(config: SchoolConfig): Promise<SchoolConfig> {
         const res = await fetch(`${this.apiUrl}/schools/${encodeURIComponent(config.schoolName)}/config`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-admin-secret': 'chibalete-secure-upload-2025' },
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
             body: JSON.stringify(config)
         });
         if (!res.ok) throw new Error('Failed to save school config');

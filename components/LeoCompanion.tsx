@@ -2,7 +2,24 @@ import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, UserCircle2 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
+import * as analyticsService from '../services/analyticsService';
 import type { PedagogicalStage, LeoReaderProfile } from '../types';
+import type { LeoTriggerReason } from '../utils/leoTriggerEngine';
+import { resolveLeoActions } from '../utils/leoActions';
+import type { LeoActionId } from '../utils/leoActions';
+
+// Contextual hint shown beside each suggested action button
+const ACTION_REASONS: Partial<Record<LeoActionId, string>> = {
+    resume:           'Sigue desde donde vas',
+    quick_recap:      'Revisemos lo importante',
+    continue_reading: 'Continúa sin detenerte',
+    simplify:         'Si algo no quedó claro',
+    define_word:      'Aclaremos una palabra',
+    ask_question:     'Para seguir pensando',
+    reflect:          'Conéctalo contigo',
+    open_anchor:      'Hay una nota aquí',
+    play_audio:       'Escucha mientras lees',
+};
 
 interface LeoCompanionProps {
     contentId: string;
@@ -29,9 +46,16 @@ interface LeoCompanionProps {
     };
     onMemoryUpdate?: (updates: Partial<LeoCompanionProps['sessionMemory']>) => void;
     onNavigate?: (index: number) => void;
+    initialMessage?: string | null; // Pre-set message from visor smart intervention
+    // Phase 5.4: visible actions
+    triggerReason?: LeoTriggerReason | null;
+    hasAnchorAvailable?: boolean;
+    hasAudioAvailable?: boolean;
+    isAudioPlaying?: boolean;
+    onAction?: (actionId: string) => void;
 }
 
-export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIndex, exactSentence, onClose, sessionMemory, difficultyLevel, pedagogicalStage, readerProfile, leoContext, onMemoryUpdate, onNavigate }) => {
+export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIndex, exactSentence, onClose, sessionMemory, difficultyLevel, pedagogicalStage, readerProfile, leoContext, onMemoryUpdate, onNavigate, initialMessage, triggerReason, hasAnchorAvailable, hasAudioAvailable, isAudioPlaying, onAction }) => {
     const { user } = useAuth();
     const [mode, setMode] = useState<'menu' | 'vocab' | 'question' | 'loading' | 'result'>('menu');
     const [inputValue, setInputValue] = useState('');
@@ -52,7 +76,9 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
         }
 
         if (lastQ === 'vocab') return "¿Quieres que te explique alguna palabra nueva de esta parte?";
-        if (lastQ === 'question') return "¿Quieres que revisemos juntos el sentido de esta parte del texto?";
+        if (lastQ === 'inferential') return "¿Quieres que exploremos juntos el sentido de esta parte del texto?";
+        if (lastQ === 'reflection') return "¿Tienes más reflexiones sobre lo que leíste? Cuéntame.";
+        if (lastQ === 'question') return "¿Quieres que revisemos juntos el sentido de esta parte del texto?"; // legacy
         if (hasAnchors) return "Parece que ya habías analizado este texto antes. ¿En qué te puedo ayudar ahora?";
         if (hasProgress) return "¡Qué bueno verte continuar leyendo! ¿Tienes alguna duda sobre lo que llevas del texto?";
         
@@ -60,52 +86,47 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
     }, [sessionMemory]);
 
     const suggestedActions = React.useMemo(() => {
-        if (!sessionMemory) return [];
-        const actions = [];
-        
-        const hasProgress = sessionMemory.sessionReadingProgress > 5;
-        const lastQ = sessionMemory.lastQuestionType;
-        const hasAnchors = sessionMemory.recentAnchors && sessionMemory.recentAnchors.length > 0;
-        const lastAnchor = hasAnchors ? sessionMemory.recentAnchors[sessionMemory.recentAnchors.length - 1] : null;
+        const resolved = resolveLeoActions({
+            triggerReason: triggerReason ?? null,
+            hasAnchorAvailable: hasAnchorAvailable ?? false,
+            hasAudioAvailable: hasAudioAvailable ?? false,
+            isAudioPlaying: isAudioPlaying ?? false,
+        });
 
-        if (lastAnchor !== null && lastAnchor !== currentIndex && onNavigate) {
-            actions.push({ 
-                reason: 'Te quedaste en otra parte',
-                label: 'Continuar donde iba', 
-                action: () => { onNavigate(lastAnchor); onClose(); } 
-            });
-        }
-
-        if (lastQ === 'vocab') {
-            actions.push({ 
-                reason: 'Vimos palabras aquí',
-                label: 'Explicar vocabulario', 
-                action: () => askLeo('vocab', 'Explícame las palabras más difíciles o clave de este fragmento.') 
-            });
-        } else if (lastQ === 'question') {
-            actions.push({ 
-                reason: 'Antes hiciste una pregunta',
-                label: 'Revisar sentido', 
-                action: () => askLeo('question', 'Ayúdame a revisar el sentido y la idea principal de este texto.') 
-            });
-        } else if (hasAnchors) {
-            actions.push({ 
-                reason: 'Ya exploraste esta parte',
-                label: 'Explicar de nuevo', 
-                action: () => askLeo('question', 'Resume brevemente este fragmento para que pueda entenderlo mejor.') 
-            });
-        }
-
-        if (hasProgress || hasAnchors || lastQ) {
-            actions.push({ 
-                reason: '¿Todo claro?',
-                label: 'Seguir leyendo', 
-                action: onClose 
-            });
-        }
-
-        return actions.slice(0, 3); // Max 3 acciones para no saturar
-    }, [sessionMemory, onClose]);
+        return resolved.map(action => {
+            let handler: () => void;
+            switch (action.id) {
+                case 'resume':
+                case 'continue_reading':
+                    handler = onClose;
+                    break;
+                case 'quick_recap':
+                    handler = () => askLeo('question', 'Haz un breve resumen de lo que ha pasado hasta este punto del texto, de forma clara y simple.', 'inferential');
+                    break;
+                case 'simplify':
+                    handler = () => askLeo('question', 'Explica este fragmento de forma más sencilla, como si se lo contaras a alguien que empieza a leer.', 'inferential');
+                    break;
+                case 'ask_question':
+                    handler = () => askLeo('question', 'Hazme una sola pregunta pedagógica sobre lo que acabo de leer en este fragmento.', 'inferential');
+                    break;
+                case 'reflect':
+                    handler = () => askLeo('question', 'Propón una breve reflexión: ¿qué conexiones puedo hacer entre este fragmento y mi propia experiencia?', 'reflection');
+                    break;
+                case 'define_word':
+                    handler = () => setMode('vocab');
+                    break;
+                case 'open_anchor':
+                    handler = () => { onAction?.('open_anchor'); onClose(); };
+                    break;
+                case 'play_audio':
+                    handler = () => { onAction?.('play_audio'); onClose(); };
+                    break;
+                default:
+                    handler = onClose;
+            }
+            return { reason: ACTION_REASONS[action.id] ?? '', label: action.label, action: handler };
+        });
+    }, [triggerReason, hasAnchorAvailable, hasAudioAvailable, isAudioPlaying, onClose]);
 
     useEffect(() => {
         return () => {
@@ -113,27 +134,32 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
         };
     }, []);
 
-    async function askLeo(type: 'vocab' | 'question', payload: string) {
+    async function askLeo(
+        type: 'vocab' | 'question',
+        payload: string,
+        interactionKind?: 'vocab' | 'inferential' | 'reflection'
+    ) {
         if (!payload.trim()) return;
         setMode('loading');
         setAnswer('');
-        
+
         try {
-            // Update local memory preemptively so Leo context gets richer
+            // Write specific interaction kind to memory so greetingMessage and server prompt are accurate.
+            // interactionKind overrides the generic 'question' type when provided.
             if (onMemoryUpdate && sessionMemory) {
                 onMemoryUpdate({
-                    lastQuestionType: type,
+                    lastQuestionType: interactionKind ?? type,
                     recentAnchors: [...(sessionMemory.recentAnchors || []), currentIndex]
                 });
             }
-            
+
             if (abortControllerRef.current) abortControllerRef.current.abort();
             abortControllerRef.current = new AbortController();
 
             const userId = user?.id;
             const res = await fetch('/api/leo/ask', {
                 method: 'POST',
-                headers: { 
+                headers: {
                     'Content-Type': 'application/json',
                     ...(userId ? { 'x-user-id': userId } : {})
                 },
@@ -153,9 +179,26 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
             const data = await res.json();
             if (data && data.success) {
                 setAnswer(data.answer);
-                // Phase 5.5: accumulate inferential profile counter on question interactions
+                // Track Leo interaction in analytics pipeline
+                if (user?.id) {
+                    analyticsService.track({
+                        event: 'leo_interaction',
+                        userId: user.id,
+                        contentId,
+                        timestamp: Date.now(),
+                        streak: 0,
+                        level: 0,
+                        sessionDuration: 0,
+                        interactionType: type,
+                        surface: 'reader',
+                    });
+                }
+                // Route profile delta to the correct counter based on interactionKind
                 if (type === 'question' && user?.id) {
-                    dataService.updateLeoReaderProfile(user.id, { inferentialDelta: 1 });
+                    dataService.updateLeoReaderProfile(user.id, {
+                        inferentialDelta: interactionKind === 'reflection' ? 0 : 1,
+                        reflectionDelta:  interactionKind === 'reflection' ? 1 : 0,
+                    });
                 }
             } else {
                 setAnswer(data?.answer || data?.error || "Leo está un poco confundido. Intenta luego.");
@@ -195,7 +238,7 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                     {mode === 'menu' && (
                         <div className="space-y-4 w-full">
                             <p className="text-gray-600 dark:text-gray-300 text-center mb-6 font-medium leading-relaxed px-2">
-                                {greetingMessage}
+                                {initialMessage ?? greetingMessage}
                             </p>
                             <button onClick={() => setMode('vocab')} className="w-full py-4 px-6 bg-indigo-50 border border-indigo-100 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:border-indigo-800 dark:hover:bg-indigo-800/50 rounded-2xl flex items-center justify-between text-indigo-700 dark:text-indigo-300 transition-all font-bold">
                                 <span>💡 Explicar vocabulario</span>
@@ -209,8 +252,8 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                                     <p className="text-[10px] uppercase font-bold text-gray-400 text-center tracking-wider mb-1">Para ti</p>
                                     {suggestedActions.map((act, i) => (
                                         <div key={i} className="flex items-center justify-between bg-gray-50 dark:bg-gray-800/40 px-3 py-2 rounded-xl">
-                                            <span className="text-xs text-gray-500 font-medium mr-2 leading-tight">{act.reason}</span>
-                                            <button 
+                                            {act.reason && <span className="text-xs text-gray-500 font-medium mr-2 leading-tight">{act.reason}</span>}
+                                            <button
                                                 onClick={act.action}
                                                 className="shrink-0 px-3 py-1.5 bg-indigo-100 hover:bg-indigo-200 dark:bg-indigo-900/60 dark:hover:bg-indigo-800 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold rounded-lg transition-colors shadow-sm"
                                             >

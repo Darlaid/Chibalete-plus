@@ -1,14 +1,21 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import type { Content } from '../types';
+import type { Content, Assignment } from '../types';
+import { getOfflineText, saveOfflineText } from '../utils/offlineTextCache';
+import { getResumeToast } from '../utils/canonicalProgress';
 import { ChevronLeft, Type, Volume2, VolumeX, Globe, Moon, Sun, Loader2, Ruler, Image as ImageIcon, X, Mic, RefreshCw, Settings, ChevronUp, ChevronDown, Minus, Plus } from 'lucide-react';
 import { generarAudioTTS, generarMicroResumenRecordatorio } from '../services/geminiService';
+import type { LeoSessionMemory } from '../services/geminiService';
 import { dataService } from '../services/dataService';
+import { shouldTriggerLeo } from '../utils/leoTriggerEngine';
+import type { LeoTriggerReason } from '../utils/leoTriggerEngine';
+import { deriveInitialDifficulty } from '../utils/leoStage';
 import { OralityModal } from '../components/OralityModal';
 import { LeoCompanion } from '../components/LeoCompanion';
 import Chatbot from '../components/Chatbot';
+import * as analyticsService from '../services/analyticsService';
 
 // Helper: PCM to WAV
 const pcmToWav = (pcmData: Uint8Array, sampleRate: number = 24000, numChannels: number = 1) => {
@@ -19,6 +26,50 @@ const pcmToWav = (pcmData: Uint8Array, sampleRate: number = 24000, numChannels: 
     const pcmView = new Uint8Array(buffer, 44); pcmView.set(pcmData); return buffer;
 };
 
+// C2: Session cache for legacy TTS audio — avoids redundant Gemini API calls on replay.
+// Module-level singleton: survives re-renders, resets only on full page reload.
+// Design: LRU Map, max 5 entries (~200 KB total at 300-char chunks per entry), session-only.
+// Why not localStorage: audio base64 is large (~40 KB each); storing it persistently would
+// blow through quota quickly and provide little benefit vs. the manifest (persistent audio).
+const legacyTtsCache = new Map<string, string>(); // key: contentId+lang+text, value: base64
+const LEGACY_TTS_CACHE_MAX = 5;
+
+function getLegacyCache(key: string): string | null {
+    const v = legacyTtsCache.get(key);
+    if (!v) return null;
+    // Refresh LRU position: delete and re-insert moves entry to end of iteration order.
+    legacyTtsCache.delete(key);
+    legacyTtsCache.set(key, v);
+    return v;
+}
+function setLegacyCache(key: string, value: string): void {
+    if (legacyTtsCache.size >= LEGACY_TTS_CACHE_MAX) {
+        // Evict oldest (first in insertion order).
+        const oldest = legacyTtsCache.keys().next().value;
+        if (oldest !== undefined) legacyTtsCache.delete(oldest);
+    }
+    legacyTtsCache.set(key, value);
+}
+
+// B2: Local calculation of days remaining — no backend dependency.
+// Returns a label and urgency level for the task banner in VisorTexto.
+function calcDaysLeft(dueDate: string): { label: string; urgency: 'ok' | 'soon' | 'overdue' } {
+    try {
+        const due = new Date(dueDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        due.setHours(0, 0, 0, 0);
+        const diff = Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        if (diff < 0)  return { label: 'Vencida',   urgency: 'overdue' };
+        if (diff === 0) return { label: 'Vence hoy', urgency: 'soon' };
+        if (diff === 1) return { label: 'Mañana',    urgency: 'soon' };
+        if (diff <= 3)  return { label: `${diff} días`, urgency: 'soon' };
+        return { label: `${diff} días`, urgency: 'ok' };
+    } catch {
+        return { label: '—', urgency: 'ok' };
+    }
+}
+
 const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const { user } = useAuth();
     const location = useLocation();
@@ -27,23 +78,54 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const initialLang = queryParams.get('lang') === 'en' ? 'en' : (queryParams.get('lang') === 'pt' ? 'pt' : 'es');
 
     const [language, setLanguage] = useState<'es' | 'en' | 'pt'>(initialLang as any);
-    const [fontSize, setFontSize] = useState(18);
-    const [isDarkMode, setIsDarkMode] = useState(false);
+
+    // --- ACCESSIBILITY PREFERENCES — persisted to localStorage with 'vt_' prefix.
+    // Lazy initializers run synchronously before first render: no flash, no layout shift.
+    const [fontSize, setFontSize] = useState<number>(() => {
+        try {
+            const v = localStorage.getItem('vt_fontSize');
+            const n = v ? parseInt(v, 10) : 18;
+            return n >= 14 && n <= 32 ? n : 18;
+        } catch { return 18; }
+    });
+    const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+        try { return localStorage.getItem('vt_darkMode') === 'true'; } catch { return false; }
+    });
+    // High-contrast: black bg + white text. Mutually exclusive with dark mode.
+    const [isHighContrast, setIsHighContrast] = useState<boolean>(() => {
+        try { return localStorage.getItem('vt_highContrast') === 'true'; } catch { return false; }
+    });
+
     const [text, setText] = useState<string>('');
     const [loading, setLoading] = useState(true);
+
+    // B4: True when text was loaded from offline cache (network failed, cache hit).
+    // Drives the "Modo sin conexión" banner so the student knows they're reading cached content.
+    const [offlineMode, setOfflineMode] = useState(false);
+
+    // B1: Active assignments for this content — loaded from dataService (localStorage-backed).
+    // Works offline because dataService stores assignments in localStorage on every sync.
+    const [activeTasks, setActiveTasks] = useState<Assignment[]>([]);
+    const [showTaskPanel, setShowTaskPanel] = useState(true); // start expanded
 
     // Display Menu State
     const [isDisplayMenuOpen, setIsDisplayMenuOpen] = useState(false);
 
     // Accessibility State
-    const [isDyslexicFont, setIsDyslexicFont] = useState(false);
-    const [showRuler, setShowRuler] = useState(false);
+    const [isDyslexicFont, setIsDyslexicFont] = useState<boolean>(() => {
+        try { return localStorage.getItem('vt_dyslexicFont') === 'true'; } catch { return false; }
+    });
+    const [showRuler, setShowRuler] = useState<boolean>(() => {
+        try { return localStorage.getItem('vt_showRuler') === 'true'; } catch { return false; }
+    });
     const [mouseY, setMouseY] = useState(0);
 
     // TTS State
     const [isPlaying, setIsPlaying] = useState(false);
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
     const [audioLoading, setAudioLoading] = useState(false);
+    // Visible error feedback when TTS fails — auto-clears after 6s
+    const [audioError, setAudioError] = useState<string | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
 
     // Visualizer
@@ -56,17 +138,20 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
     // Leo Phase 5 MVP
     const [showLeoCompanion, setShowLeoCompanion] = useState(false);
+    const [leoInitialMsg, setLeoInitialMsg] = useState<string | null>(null);
+    const [leoTriggerReason, setLeoTriggerReason] = useState<LeoTriggerReason | null>(null);
     
     // --- LEO SESSION MEMORY ---
     const defaultLeoMemory = {
         recentAnchors: [],
         lastQuestionType: null,
         sessionReadingProgress: 0,
-        difficultyLevel: "medio",
-        pedagogicalStage: 'comprehension',
+        difficultyLevel: user?.id ? deriveInitialDifficulty(dataService.getLeoReaderProfile(user.id)) : "medio" as const,
+        pedagogicalStage: 'comprehension' as const,
+        behavior: { pauses: 0, replays: 0 },
     };
     
-    const [leoMemory, setLeoMemory] = useState<any>(() => {
+    const [leoMemory, setLeoMemory] = useState<LeoSessionMemory>(() => {
         try {
             const stored = sessionStorage.getItem(`leo_session_${content?.id}`);
             return stored ? JSON.parse(stored) : defaultLeoMemory;
@@ -89,6 +174,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 
                 // --- B1.5: Trigger visible memory hint ---
                 if (persisted.sessionReadingProgress > 5 || (persisted.recentAnchors && persisted.recentAnchors.length > 0)) {
+                    setLeoTriggerReason('welcome_back');
                     setShowLeoWelcome(true);
                     setTimeout(() => { if (isMounted) setShowLeoWelcome(false); }, 6000);
                 }
@@ -97,6 +183,19 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         })();
         return () => { isMounted = false; };
     }, [user?.id, content?.id]);
+
+    // B1: Load active assignments for this content from local dataService.
+    // getAssignmentsForStudent reads from localStorage (persistenceService) — works offline.
+    // Runs whenever user or content changes so the panel is always in sync with local state.
+    useEffect(() => {
+        if (!user?.id) { setActiveTasks([]); return; }
+        try {
+            const all = dataService.getAssignmentsForStudent(user.id);
+            setActiveTasks(all.filter(a => a.contentId === content.id));
+        } catch {
+            setActiveTasks([]); // dataService read failure is non-fatal
+        }
+    }, [user?.id, content.id]);
 
     const memorySaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     useEffect(() => {
@@ -115,7 +214,13 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     }, [leoMemory, content.id, isMemoryLoaded, user]);
 
     const [showLeoWelcome, setShowLeoWelcome] = useState(false);
-    
+
+    // D/E: Resume toast — shown once when text loads and we resume from saved progress (≥5%).
+    const [resumeToast, setResumeToast] = useState<{ label: string; crossMode: boolean; fromRemote: boolean } | null>(null);
+    const resumeToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // E: Stores whether the remote progress fetch adopted a newer server record.
+    const fromRemoteProgressRef = useRef(false);
+
     // Sync State
     const [initialScrollSet, setInitialScrollSet] = useState(false);
 
@@ -123,8 +228,19 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         if (user) dataService.addToHistory(user.id, content.id);
         if (user) dataService.recordReaderOpen(user.id, content.id, 'texto');
         setLoading(true); setAudioUrl(null); setIsPlaying(false); setShowGalleryVisualizer(false);
+        setOfflineMode(false); // reset on content/language change
         setInitialScrollSet(false);
+        // C1: Reset audio position and cancel any in-flight legacy TTS request.
+        // currentAudioIndex staying at e.g. 12 on a new content would play the wrong segment.
+        // audioLoading staying true would show a stuck spinner on the new content.
+        setCurrentAudioIndex(0);
+        setAudioLoading(false);
+        legacyTtsGenRef.current += 1; // any pending generarAudioTTS call will see a stale genId
         sessionStartRef.current = Date.now(); // Reset session timer on content/user change
+        analyticsSessionFiredRef.current = false;
+        analyticsBlocksRef.current = 0;
+        analyticsLastThresholdRef.current = 0;
+        analyticsProgressRef.current = 0;
 
         const loadContent = async () => {
             try {
@@ -135,6 +251,12 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
                 console.log(`[Visor] Loading Content: ${content.titulo} (${language})`);
 
+                // E: Kick off remote progress fetch in parallel with the text load.
+                // If it resolves before setLoading(false), the scroll-resume effect sees the best data.
+                const remoteProgressPromise = user
+                    ? dataService.fetchAndMergeRemoteProgress(user.id, content.id).catch(() => false)
+                    : Promise.resolve(false);
+
                 if (targetUrl) {
                     try {
                         const response = await fetch(targetUrl);
@@ -142,6 +264,20 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                             const textData = await response.text();
                             if (textData && !textData.trim().startsWith("<!DOCTYPE")) {
                                 setText(textData);
+                                // B3/B4: Cache the text for offline reading.
+                                // Always overwrites the previous entry — 1-book-at-a-time design.
+                                // Failure is silent (quota / private mode): the read session proceeds normally.
+                                saveOfflineText({
+                                    contentId: content.id,
+                                    title: content.titulo,
+                                    autor: content.autor,
+                                    portada_url: content.portada_url,
+                                    texto: textData,
+                                    language,
+                                    cachedAt: new Date().toISOString(),
+                                });
+                                // E: Wait for remote progress — ensures resume effect sees latest data.
+                                fromRemoteProgressRef.current = await remoteProgressPromise;
                                 setLoading(false);
                                 return;
                             }
@@ -149,6 +285,18 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     } catch (fetchErr) {
                         console.warn("[Visor] Network error fetching file:", fetchErr);
                     }
+                }
+
+                // B4: Network failed (or no URL configured) — try offline cache before showing error.
+                // Only serves cache for the exact same language to avoid wrong-language reads.
+                const offlineCached = getOfflineText(content.id, language);
+                if (offlineCached) {
+                    setText(offlineCached.texto);
+                    setOfflineMode(true);
+                    // E: Offline path — remote sync already failed (network down); mark as local-only.
+                    fromRemoteProgressRef.current = false;
+                    setLoading(false);
+                    return;
                 }
 
                 setText(`⚠️ ERROR DE CARGA DE CONTENIDO\n\nNo se pudo encontrar el archivo de texto para este libro.\n\nDetalles:\n- ID: ${content.id}\n- Idioma: ${language}\n- URL Buscada: ${targetUrl || 'Ninguna configurada'}`);
@@ -166,41 +314,84 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         return () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }
     }, [content, language, user]);
 
-    // Check Inactivity Logic
-    useEffect(() => {
-        const checkInactivity = async () => {
-            if (!user || checkedRecap) return;
-            setCheckedRecap(true);
-            const progress = dataService.getProgresoUsuarioLibro(user.id, content.id);
-
-            // Welcome Back
-            if (progress && progress.porcentaje > 0) {
-                try {
-                    const contextText = text.substring(0, 500) || content.descripcion_corta;
-                    const recap = await generarMicroResumenRecordatorio(contextText, content.titulo);
-                    setLeoRecapMessage(recap);
-                } catch (e) { console.error(e); }
-            }
-        };
-        if (!loading && text) checkInactivity();
-    }, [user, content, loading, text, checkedRecap]);
+    // [Removed] Orphaned recap effect (checkedRecap/setLeoRecapMessage never declared) — was a no-op / crash risk.
 
     // SYNC LOGIC: SCROLL
     useEffect(() => {
         if (!loading && text && user && !initialScrollSet) {
             const progress = dataService.getProgresoUsuarioLibro(user.id, content.id);
             if (progress && progress.porcentaje > 0) {
+                // F: Priority order for scroll precision:
+                // 1. viewportHint — full-precision float (e.g. 42.73%) saved by this visor
+                // 2. anchor.value — rounded integer (e.g. 42%) — same-mode, from any device
+                // 3. porcentaje — cross-mode fallback
+                const cp = progress.canonicalProgress;
+                const scrollPct = (cp?.viewportHint !== undefined && isFinite(cp.viewportHint))
+                    ? cp.viewportHint
+                    : (cp?.anchor?.type === 'text')
+                        ? cp.anchor.value
+                        : progress.porcentaje;
+
                 // Resume logic
                 setTimeout(() => {
-                    const scrollTarget = (progress.porcentaje / 100) * document.body.scrollHeight;
+                    const scrollTarget = (scrollPct / 100) * document.body.scrollHeight;
                     if (scrollTarget > 100) window.scrollTo({ top: scrollTarget, behavior: 'smooth' });
                 }, 500); // Slight delay for render
+
+                // D/E: Resume toast — tell the user where we're picking up from.
+                const lastMode = progress.canonicalProgress?.lastInteractedMode ?? progress.last_device_mode;
+                const fromRemote = fromRemoteProgressRef.current;
+                fromRemoteProgressRef.current = false; // consume once
+                const toast = getResumeToast(progress.porcentaje, lastMode, 'texto', fromRemote);
+                if (toast) {
+                    setResumeToast(toast);
+                    if (resumeToastTimerRef.current) clearTimeout(resumeToastTimerRef.current);
+                    resumeToastTimerRef.current = setTimeout(() => setResumeToast(null), 5000);
+                }
             }
             setInitialScrollSet(true);
         }
     }, [loading, text, user, content.id, initialScrollSet]);
+
+    // --- ANALYTICS: session_start ---
+    // Emite session_start una sola vez cuando el texto está cargado y el usuario es válido.
+    // El guard analyticsSessionFiredRef evita doble emisión si el efecto se vuelve a ejecutar.
+    useEffect(() => {
+        if (loading || !user?.id || !text || analyticsSessionFiredRef.current) return;
+        analyticsSessionFiredRef.current = true;
+        analyticsService.track({
+            event: 'session_start',
+            userId: user.id,
+            contentId: content.id,
+            timestamp: Date.now(),
+            streak: 0,
+            level: user.immersive_level ?? 1,
+            sessionDuration: 0,
+        });
+    }, [loading, user?.id, content.id, text]);
+
     // Session timer ref for totalTimeMs accumulation
     const sessionStartRef = useRef<number>(Date.now());
+    // Refs for Leo behavior tracking — persist across scroll/playback events
+    const prevScrollPctRef = useRef<number>(0);
+    const sentencesCountRef = useRef<number>(0);
+    // Leo trigger engine refs
+    const leoMemoryRef = useRef<LeoSessionMemory>(leoMemory);
+    const showLeoCompanionRef = useRef(false);
+    const isMemoryLoadedRef = useRef(false);      // guards against on-mount spurious triggers
+    const prevMemoryProgressRef = useRef(0);      // checkpoint crossing: previous progress value
+    const lastTriggerTimeRef = useRef<number>(0);
+    const lastActivityTimeRef = useRef<number>(Date.now()); // tracks last scroll for retention
+    const TRIGGER_COOLDOWN_MS = 5 * 60 * 1000;
+    // C1: Generation counter — increments on content/language change to cancel stale legacy TTS.
+    // Any in-flight `generarAudioTTS` call that completes after the counter advances is discarded.
+    const legacyTtsGenRef = useRef<number>(0);
+
+    // --- ANALYTICS REFS (ICDLI) ---
+    const analyticsSessionFiredRef = useRef(false);  // guard: no duplicar session_start
+    const analyticsBlocksRef = useRef(0);             // bloques completados en la sesión
+    const analyticsLastThresholdRef = useRef(0);      // último umbral de 25% alcanzado
+    const analyticsProgressRef = useRef(0);           // progreso actual para session_end
 
     // Save Progress logic
     const saveProgress = () => {
@@ -208,11 +399,18 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         const scrollTop = window.scrollY;
         const docHeight = document.body.scrollHeight - window.innerHeight;
         if (docHeight <= 0) return;
-        const percentage = Math.max(0, Math.min(100, Math.round((scrollTop / docHeight) * 100)));
+        // F: Store precise float in viewportHint (e.g. 42.73) alongside the rounded integer in
+        // anchor.value (e.g. 42). On resume, viewportHint drives the exact scroll target so we
+        // don't land ~0.5% off due to rounding. Difference on a 10 000px doc: ~50px precision gain.
+        const precisePct = Math.max(0, Math.min(100, (scrollTop / docHeight) * 100));
+        const percentage = Math.round(precisePct);
         // Phase 3.3 payload format: userId, contentId, physicalPage, totalPages, sentenceIndex, mode
+        // E: anchor type='text' stores the scroll percentage for same-mode precision.
         dataService.updateProgreso(
             user.id, content.id, percentage, 100, undefined, 'text',
-            { lastMode: 'texto', elapsedMs: Date.now() - sessionStartRef.current }
+            { lastMode: 'texto', elapsedMs: Date.now() - sessionStartRef.current },
+            { type: 'text', value: percentage },
+            precisePct  // F: viewportHint — full-precision scroll fraction
         );
     };
 
@@ -223,6 +421,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         const handleScroll = () => {
             // Only auto-save if user is logged in
             if (!user || loading) return;
+            lastActivityTimeRef.current = Date.now(); // keep retention timer fresh
 
             if (saveTimeoutRef.current) {
                 clearTimeout(saveTimeoutRef.current);
@@ -231,21 +430,58 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             saveTimeoutRef.current = setTimeout(() => {
                 saveProgress();
                 
-                // Also update sessionReadingProgress in Leo memory
+                // Also update sessionReadingProgress + position in Leo memory
                 const docHeight = document.body.scrollHeight - window.innerHeight;
                 if (docHeight > 0) {
                     const prog = Math.max(0, Math.min(100, Math.round((window.scrollY / docHeight) * 100)));
+                    const isBackward = prog < prevScrollPctRef.current - 5;
+                    prevScrollPctRef.current = prog;
                     setLeoMemory((prev: any) => {
-                        if (prev.sessionReadingProgress === prog) return prev;
+                        if (prev.sessionReadingProgress === prog && !isBackward) return prev;
                         // Simple pedagogical stage derivation
                         let newStage = prev.pedagogicalStage || 'comprehension';
                         const anchorsOpened = prev.recentAnchors?.length || 0;
                         if (prog >= 85) newStage = 'creation';
                         else if (prog >= 60 || anchorsOpened >= 5) newStage = 'reflection';
                         else if (prog >= 25 || anchorsOpened >= 2) newStage = 'interpretation';
-                        
-                        return { ...prev, sessionReadingProgress: prog, pedagogicalStage: newStage };
+                        const estimatedIdx = Math.floor((prog / 100) * sentencesCountRef.current);
+                        return {
+                            ...prev,
+                            sessionReadingProgress: prog,
+                            pedagogicalStage: newStage,
+                            lastSentenceIndex: estimatedIdx,
+                            lastReadAt: new Date().toISOString(),
+                            ...(isBackward ? {
+                                behavior: {
+                                    pauses: prev.behavior?.pauses ?? 0,
+                                    replays: (prev.behavior?.replays ?? 0) + 1,
+                                },
+                            } : {}),
+                        };
                     });
+
+                    // --- ANALYTICS: block_complete + progress tracking ---
+                    // Un "bloque" = cruzar un umbral de 25% de scroll.
+                    // Produce 4 eventos máximo por sesión (25, 50, 75, 100).
+                    analyticsProgressRef.current = prog;
+                    const BLOCK_THRESHOLDS = [25, 50, 75, 100] as const;
+                    const nextThreshold = BLOCK_THRESHOLDS.find(
+                        t => t > analyticsLastThresholdRef.current && prog >= t
+                    );
+                    if (nextThreshold && user?.id && analyticsSessionFiredRef.current) {
+                        analyticsLastThresholdRef.current = nextThreshold;
+                        analyticsBlocksRef.current += 1;
+                        analyticsService.track({
+                            event: 'block_complete',
+                            userId: user.id,
+                            contentId: content.id,
+                            timestamp: Date.now(),
+                            streak: 0,
+                            level: user.immersive_level ?? 1,
+                            sessionDuration: Date.now() - sessionStartRef.current,
+                            blocksCompleted: analyticsBlocksRef.current,
+                        });
+                    }
                 }
             }, 1000);
         };
@@ -254,10 +490,114 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         return () => {
             window.removeEventListener('scroll', handleScroll);
             if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+            // --- ANALYTICS: session_end ---
+            // Solo emite si la sesión fue iniciada para este contenido.
+            if (user?.id && analyticsSessionFiredRef.current) {
+                analyticsService.track({
+                    event: 'session_end',
+                    userId: user.id,
+                    contentId: content.id,
+                    timestamp: Date.now(),
+                    streak: 0,
+                    level: user.immersive_level ?? 1,
+                    sessionDuration: Date.now() - sessionStartRef.current,
+                    progressPercentage: analyticsProgressRef.current,
+                    source: 'unmount',
+                });
+                analyticsService.flush();
+            }
             dataService.forceFlush();
         };
     }, [user, content.id, loading]);
 
+    // --- LEO TRIGGER ENGINE ---
+    // Sync refs so closures inside intervals/effects are never stale.
+    useEffect(() => { leoMemoryRef.current = leoMemory; }, [leoMemory]);
+    useEffect(() => { showLeoCompanionRef.current = showLeoCompanion; }, [showLeoCompanion]);
+    useEffect(() => { isMemoryLoadedRef.current = isMemoryLoaded; }, [isMemoryLoaded]);
+
+    // Single fire path: cooldown + mutual-exclusion with open companion or welcome toast.
+    const fireIntervention = useCallback((msg: string, reason: LeoTriggerReason) => {
+        if (!isMemoryLoadedRef.current) return; // skip until hydration settles
+        const now = Date.now();
+        if (now - lastTriggerTimeRef.current < TRIGGER_COOLDOWN_MS) return;
+        if (showLeoCompanionRef.current) return;
+        lastTriggerTimeRef.current = now;
+        setLeoInitialMsg(msg);
+        setLeoTriggerReason(reason);
+        setShowLeoCompanion(true);
+        setShowLeoWelcome(false);
+    }, []);
+
+    // T1: Retention — reader has not scrolled for 45s
+    useEffect(() => {
+        const id = setInterval(() => {
+            const inactivityMs = Date.now() - lastActivityTimeRef.current;
+            const reason = shouldTriggerLeo({
+                memory: {
+                    sessionReadingProgress: leoMemoryRef.current.sessionReadingProgress,
+                    behavior: leoMemoryRef.current.behavior,
+                },
+                currentIndex: 0,
+                progress: leoMemoryRef.current.sessionReadingProgress,
+                inactivityMs,
+                isReturningUser: false,
+            });
+            if (reason === 'retention') {
+                fireIntervention('Llevo un rato en la misma parte. ¿Hay alguna palabra o idea que te esté costando?', 'retention');
+            }
+        }, 15_000);
+        return () => clearInterval(id);
+    }, [fireIntervention]);
+
+    // T2: Checkpoint — progress crosses 20/40/60/80.
+    // Passes prevMemoryProgressRef as the "before" value so the engine detects the crossing,
+    // then advances the ref to prevent re-firing on the same threshold.
+    useEffect(() => {
+        const prog = leoMemory.sessionReadingProgress;
+        const prevProg = prevMemoryProgressRef.current;
+        const reason = shouldTriggerLeo({
+            memory: {
+                sessionReadingProgress: prevProg,
+                behavior: leoMemory.behavior,
+            },
+            currentIndex: 0,
+            progress: prog,
+            inactivityMs: 0,
+            isReturningUser: false,
+        });
+        prevMemoryProgressRef.current = prog; // advance only after engine has seen prevProg
+        if (reason !== 'checkpoint') return;
+        const THRESHOLDS = [20, 40, 60, 80] as const;
+        const crossed = THRESHOLDS.find(t => prevProg < t && prog >= t);
+        if (!crossed) return;
+        const msgs: Record<number, string> = {
+            20: '¡Llevas un 20% del texto! ¿Qué está pasando en la historia hasta ahora?',
+            40: 'Ya llevas casi la mitad. ¿Hay algo que te haya sorprendido o confundido?',
+            60: 'Estás en la parte más intensa. ¿Quieres que hablemos de lo que está pasando?',
+            80: '¡Casi terminas! ¿Cómo crees que va a acabar esto?',
+        };
+        fireIntervention(msgs[crossed], 'checkpoint');
+    }, [leoMemory.sessionReadingProgress, fireIntervention]);
+
+    // T3: Confusion — fires when backward scrolls (replays) or TTS pauses accumulate.
+    // behavior is a new object reference only when pauses or replays actually change,
+    // so scroll jitter (forward-only) never re-runs this effect.
+    useEffect(() => {
+        const reason = shouldTriggerLeo({
+            memory: {
+                sessionReadingProgress: leoMemoryRef.current.sessionReadingProgress,
+                behavior: leoMemory.behavior,
+            },
+            currentIndex: 0,
+            progress: leoMemoryRef.current.sessionReadingProgress,
+            inactivityMs: 0,
+            isReturningUser: false,
+        });
+        if (reason === 'confusion') {
+            fireIntervention('Parece que volviste varias veces a esta parte. ¿Hay algo que no esté quedando claro? Puedo ayudarte a entenderlo.', 'confusion');
+        }
+    }, [leoMemory.behavior, fireIntervention]);
 
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => setMouseY(e.clientY);
@@ -277,7 +617,23 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     // --- TTS & MANIFEST LOGIC ---
     const [manifest, setManifest] = useState<Record<string, any> | null>(null);
     const [currentAudioIndex, setCurrentAudioIndex] = useState(0);
-    const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+    const [playbackSpeed, setPlaybackSpeed] = useState<number>(() => {
+        try {
+            const v = localStorage.getItem('vt_playbackSpeed');
+            const n = v ? parseFloat(v) : 1.0;
+            return n >= 0.75 && n <= 2.0 ? n : 1.0;
+        } catch { return 1.0; }
+    });
+
+    // Update Leo memory position when TTS advances to a new segment (forward only)
+    useEffect(() => {
+        if (currentAudioIndex === 0) return; // skip initial state and end-of-manifest reset
+        setLeoMemory((prev: any) => ({
+            ...prev,
+            lastSentenceIndex: currentAudioIndex,
+            lastReadAt: new Date().toISOString(),
+        }));
+    }, [currentAudioIndex]);
 
     // Load Manifest
     useEffect(() => {
@@ -306,6 +662,41 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         }
     }, [playbackSpeed]);
 
+    // --- A1: Write accessibility preferences to localStorage whenever they change.
+    // Lazy state initializers (above) read these on mount — no round-trip, no flash.
+    // try/catch: setItem throws in Safari private mode (SecurityError) or on QuotaExceededError.
+    // A failed write is silent — preferences revert to defaults next session but the visor keeps working.
+    useEffect(() => {
+        try {
+            localStorage.setItem('vt_fontSize',       String(fontSize));
+            localStorage.setItem('vt_darkMode',       String(isDarkMode));
+            localStorage.setItem('vt_highContrast',   String(isHighContrast));
+            localStorage.setItem('vt_dyslexicFont',   String(isDyslexicFont));
+            localStorage.setItem('vt_showRuler',      String(showRuler));
+            localStorage.setItem('vt_playbackSpeed',  String(playbackSpeed));
+        } catch { /* Storage unavailable (private mode / quota exceeded) — preferences lost on reload but visor works */ }
+    }, [fontSize, isDarkMode, isHighContrast, isDyslexicFont, showRuler, playbackSpeed]);
+
+    // --- A5: Auto-clear audioError after 6s so the banner doesn't linger forever.
+    useEffect(() => {
+        if (!audioError) return;
+        const t = setTimeout(() => setAudioError(null), 6000);
+        return () => clearTimeout(t);
+    }, [audioError]);
+
+    // --- A5: Flush Leo memory on unmount so fast navigation never loses progress.
+    // Uses leoMemoryRef (kept fresh by a sync effect above) to avoid stale closure.
+    // memorySaveTimeoutRef is also cancelled here to avoid a race with the debounce.
+    useEffect(() => {
+        return () => {
+            if (memorySaveTimeoutRef.current) clearTimeout(memorySaveTimeoutRef.current);
+            if (user?.id && content?.id) {
+                dataService.updateLeoMemory(user.id, content.id, leoMemoryRef.current);
+            }
+        };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     const playNextSegment = () => {
         if (!manifest) return;
         const nextIndex = currentAudioIndex + 1;
@@ -321,55 +712,118 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const playManifestAudio = (index: number) => {
         if (!manifest || !manifest[index]) return;
         const entry = manifest[index];
+        // Guard: malformed manifest entries (missing 'file') must not crash the player.
+        if (!entry?.file || typeof entry.file !== 'string') {
+            console.warn('[VisorTexto] Manifest entry missing or invalid file field at index', index);
+            setAudioError('Archivo de audio no disponible en este punto. Intenta avanzar.');
+            return;
+        }
         const url = `/uploads/${entry.file}`;
-
         if (audioRef.current) {
             audioRef.current.src = url;
-            audioRef.current.playbackRate = playbackSpeed; // Apply speed on load
+            audioRef.current.playbackRate = playbackSpeed;
             audioRef.current.play()
                 .then(() => setIsPlaying(true))
-                .catch(e => console.error("Play error:", e));
+                .catch(e => {
+                    console.error('[VisorTexto] Manifest audio play error:', e);
+                    setAudioError('No se pudo reproducir el audio. Intenta de nuevo.');
+                    setIsPlaying(false);
+                });
         }
     };
 
     const handleTTS = async () => {
-        if (isPlaying) {
-            audioRef.current?.pause();
-            setIsPlaying(false);
+        setAudioError(null);
+
+        // C1: Guard — prevent double-press while a Gemini request is already in-flight.
+        if (audioLoading) return;
+
+        // C4: Guard — text not yet loaded. Don't fire TTS on empty or stale content.
+        if (loading || !text.trim()) {
+            setAudioError('El texto aún se está cargando. Espera un momento.');
             return;
         }
 
-        // OPTION A: TURBO (Manifest)
-        if (manifest && Object.keys(manifest).length > 0) {
+        if (isPlaying) {
+            audioRef.current?.pause();
+            setIsPlaying(false);
+            setLeoMemory((prev: any) => ({
+                ...prev,
+                behavior: {
+                    pauses: (prev.behavior?.pauses ?? 0) + 1,
+                    replays: prev.behavior?.replays ?? 0,
+                },
+            }));
+            return;
+        }
+
+        // OPTION A: TURBO (Manifest pre-generado).
+        // C1: Only valid for Spanish — the server generates manifests from ES text only.
+        // Non-ES languages fall through to the legacy path.
+        if (manifest && Object.keys(manifest).length > 0 && language === 'es') {
             playManifestAudio(currentAudioIndex);
             return;
         }
 
-        // OPTION B: LEGACY (Live Gen - Warning: Limited to 300 chars)
+        // OPTION B: LEGACY — genera audio en tiempo real para los primeros 300 caracteres.
+        // Limitación intencional: generación completa de textos largos no es viable en tiempo real.
+        // El manifest es el modo correcto para libros completos; legacy solo cubre una vista previa.
         setAudioLoading(true);
+        // C1: Capture generation ID before the async wait.
+        // If content/language changes while awaiting, genId won't match and we discard the result.
+        const genId = legacyTtsGenRef.current;
         try {
             const textToRead = text.substring(0, 300);
-            const audioBase64 = await generarAudioTTS(textToRead);
-            if (audioBase64) {
-                const binaryString = atob(audioBase64);
-                const len = binaryString.length;
-                const bytes = new Uint8Array(len);
-                for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
-                const wavBuffer = pcmToWav(bytes, 24000, 1);
-                const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-                const url = URL.createObjectURL(blob);
-                setAudioUrl(url);
+            if (!textToRead.trim()) {
+                setAudioError('No hay texto disponible para leer.');
+                return;
+            }
 
-                if (audioRef.current) {
-                    audioRef.current.src = url;
-                    audioRef.current.play().then(() => setIsPlaying(true));
-                }
+            // C2: Check session cache before calling Gemini — same 300-char slice plays again.
+            const cacheKey = `${content.id}_${language}_${textToRead}`;
+            let audioBase64 = getLegacyCache(cacheKey);
+
+            if (!audioBase64) {
+                audioBase64 = await generarAudioTTS(textToRead);
+                // C2: Store in session cache on success (not on null — avoid caching failures).
+                if (audioBase64) setLegacyCache(cacheKey, audioBase64);
+            }
+
+            // C1: Stale check — content or language changed while we were awaiting Gemini.
+            // Discard the result silently; the new content's load effect cleared audioLoading already.
+            if (legacyTtsGenRef.current !== genId) return;
+
+            if (!audioBase64) {
+                setAudioError('No se pudo generar el audio. Verifica tu conexión e intenta de nuevo.');
+                return;
+            }
+            const binaryString = atob(audioBase64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+            const wavBuffer = pcmToWav(bytes, 24000, 1);
+            const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+            // Revoke previous BlobURL before creating a new one — prevents ObjectURL accumulation.
+            if (audioUrl) URL.revokeObjectURL(audioUrl);
+            const url = URL.createObjectURL(blob);
+            setAudioUrl(url);
+            if (audioRef.current) {
+                audioRef.current.src = url;
+                audioRef.current.playbackRate = playbackSpeed;
+                audioRef.current.play()
+                    .then(() => setIsPlaying(true))
+                    .catch(() => {
+                        setAudioError('El navegador bloqueó la reproducción. Toca la pantalla e intenta de nuevo.');
+                        setIsPlaying(false);
+                    });
             }
         } catch (e) {
-            console.error("Legacy TTS failed", e);
-            // L1: No alert — error visible in console, user can retry via the same button
+            if (legacyTtsGenRef.current !== genId) return; // stale: suppress error UI for old request
+            console.error('[VisorTexto] Legacy TTS failed:', e);
+            setAudioError('No se pudo reproducir el audio. Verifica tu conexión.');
         } finally {
-            setAudioLoading(false);
+            // C1: Only clear audioLoading if this is still the current generation.
+            // If content changed, the effect already set audioLoading=false; don't re-set it here.
+            if (legacyTtsGenRef.current === genId) setAudioLoading(false);
         }
     };
 
@@ -378,9 +832,15 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         // L4: No alert — button is disabled when empty (see toolbar below)
     }
 
-    // Derived sentences for Orality Lab
-    const sentences = text ? (text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text.substring(0, 200)]) : [];
+    // Derived sentences for Orality Lab — memoized: text only changes on content/language switch,
+    // not on scroll or state changes. Avoids re-running the regex on every render.
+    const sentences = useMemo(
+        () => text ? (text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text.substring(0, 200)]) : [],
+        [text]
+    );
     const currentIndex = currentAudioIndex < sentences.length ? currentAudioIndex : 0;
+    // Keep ref fresh so the scroll handler (stale closure) can read sentence count
+    sentencesCountRef.current = sentences.length;
 
     const scrollUp = () => {
         window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' });
@@ -391,10 +851,30 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     };
 
     return (
-        <div className={`min-h-screen flex flex-col font-serif transition-colors duration-300 ${isDarkMode ? 'bg-gray-900 text-gray-300' : 'bg-[#fdfbf7] text-gray-900'}`}>
+        <div className={`min-h-screen flex flex-col font-serif transition-colors duration-300 ${
+            isHighContrast ? 'bg-black text-white' :
+            isDarkMode     ? 'bg-gray-900 text-gray-300' :
+                             'bg-[#fdfbf7] text-gray-900'
+        }`}>
 
+            {/* A2: Audio error banner — auto-dismisses after 6s, also manually closable.
+                T3: HC variant uses yellow-on-black for maximum contrast (red-100 is unreadable on black). */}
+            {audioError && (
+                <div className={`sticky top-0 z-[60] flex items-center gap-2 px-4 py-2 text-sm font-medium border-b ${
+                    isHighContrast
+                        ? 'bg-yellow-400 text-black border-yellow-600'
+                        : 'bg-red-100 text-red-800 border-red-200'
+                }`} role="alert">
+                    <span className="flex-1">{audioError}</span>
+                    <button onClick={() => setAudioError(null)} className="p-1 rounded hover:bg-black/10" aria-label="Cerrar">×</button>
+                </div>
+            )}
 
-            <header className="sticky top-0 z-40 flex items-center justify-between p-3 bg-white/95 dark:bg-gray-800/95 backdrop-blur shadow-sm border-b border-gray-200 dark:border-gray-700">
+            <header className={`sticky top-0 z-40 flex items-center justify-between p-3 backdrop-blur shadow-sm border-b ${
+                isHighContrast
+                    ? 'bg-black border-white/40'
+                    : 'bg-white/95 dark:bg-gray-800/95 border-gray-200 dark:border-gray-700'
+            }`}>
                 <div className="flex items-center">
                     <button onClick={() => useNavigateTo(`/contenido/${content.id}`)} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 mr-1 min-w-[44px] min-h-[44px] flex items-center justify-center" aria-label="Volver">
                         <ChevronLeft size={24} />
@@ -407,17 +887,27 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                         onClick={handleTTS}
                         disabled={audioLoading}
                         className={`p-2 rounded-full transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${isPlaying ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700 text-indigo-600 dark:text-indigo-400'}`}
-                        title="Leer en voz alta"
+                        title={
+                            audioLoading ? 'Generando audio…' :
+                            isPlaying    ? 'Pausar lectura' :
+                            manifest && language === 'es' ? 'Leer en voz alta (libro completo)' :
+                            'Leer en voz alta (vista previa — primeros 300 caracteres)'
+                        }
                     >
                         {audioLoading ? <Loader2 size={24} className="animate-spin" /> : (isPlaying ? <VolumeX size={24} /> : <Volume2 size={24} />)}
                     </button>
 
+                    {/* A4: Orality lab button — BETA badge indicates experimental status.
+                        SpeechRecognition requires a microphone and, in Chrome Android, internet. */}
                     <button
                         onClick={() => setShowOralityModal(true)}
-                        className={`p-2 rounded-full transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900 dark:text-indigo-300`}
-                        title="Laboratorio de oralidad"
+                        className="relative p-2 rounded-full transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900 dark:text-indigo-300"
+                        title="Laboratorio de oralidad (Beta — requiere micrófono e internet)"
                     >
                         <Mic size={24} />
+                        <span className="absolute -top-1 -right-1 bg-amber-400 text-amber-900 text-[8px] font-black leading-none px-1 py-0.5 rounded-full select-none">
+                            BETA
+                        </span>
                     </button>
 
                     <button
@@ -430,11 +920,80 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 </div>
             </header>
 
+            {/* B4: Offline mode banner — shown only when text was loaded from cache, not on every offline visit */}
+            {offlineMode && (
+                <div className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold border-b ${
+                    isHighContrast
+                        ? 'bg-white text-black border-white/40'
+                        : 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700/40'
+                }`} role="status">
+                    <span className="text-sm">📴</span>
+                    <span className="flex-1">Leyendo en modo sin conexión — contenido descargado previamente</span>
+                </div>
+            )}
+
+            {/* B1: Task panel — shows active assignments for this book, works offline */}
+            {activeTasks.length > 0 && (
+                <div className={`border-b ${
+                    isHighContrast
+                        ? 'bg-black border-white/30'
+                        : 'bg-indigo-50 dark:bg-indigo-950/30 border-indigo-100 dark:border-indigo-900/50'
+                }`}>
+                    <button
+                        className={`w-full flex items-center justify-between px-4 py-2 text-xs font-bold uppercase tracking-wide ${
+                            isHighContrast ? 'text-white' : 'text-indigo-700 dark:text-indigo-300'
+                        }`}
+                        onClick={() => setShowTaskPanel(v => !v)}
+                        aria-expanded={showTaskPanel}
+                    >
+                        <span>📋 {activeTasks.length === 1 ? 'Tarea asignada' : `${activeTasks.length} tareas asignadas`}</span>
+                        <span className="text-lg leading-none">{showTaskPanel ? '▲' : '▼'}</span>
+                    </button>
+
+                    {showTaskPanel && (
+                        <div className="px-4 pb-3 space-y-2">
+                            {activeTasks.map(task => {
+                                const dl = calcDaysLeft(task.dueDate);
+                                return (
+                                    <div
+                                        key={task.id}
+                                        className={`rounded-lg p-3 ${
+                                            isHighContrast
+                                                ? 'bg-white/10 border border-white/30'
+                                                : 'bg-white dark:bg-gray-800 border border-indigo-100 dark:border-indigo-900/50 shadow-sm'
+                                        }`}
+                                    >
+                                        <div className="flex items-start justify-between gap-2">
+                                            <p className={`text-sm font-semibold leading-snug ${isHighContrast ? 'text-white' : 'text-gray-800 dark:text-gray-100'}`}>
+                                                {task.description
+                                                    ? task.description
+                                                    : <em className={`font-normal ${isHighContrast ? 'text-gray-400' : 'text-gray-400'}`}>Sin instrucciones del mediador</em>
+                                                }
+                                            </p>
+                                            <span className={`shrink-0 text-xs font-bold px-2 py-0.5 rounded-full ${
+                                                dl.urgency === 'overdue' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+                                                dl.urgency === 'soon'    ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
+                                                                           'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                                            } ${isHighContrast ? '!bg-white !text-black' : ''}`}>
+                                                {dl.label}
+                                            </span>
+                                        </div>
+                                        <p className={`text-xs mt-1 ${isHighContrast ? 'text-gray-300' : 'text-gray-500 dark:text-gray-400'}`}>
+                                            Fecha límite: {new Date(task.dueDate).toLocaleDateString('es', { day: 'numeric', month: 'long' })}
+                                        </p>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
+
             {isDisplayMenuOpen && (
-                <div className="fixed top-[60px] right-2 z-[70] bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-64 animate-in fade-in zoom-in-95">
+                <div className={`fixed top-[60px] right-2 z-[70] rounded-xl shadow-2xl p-4 w-64 animate-in fade-in zoom-in-95 border ${isHighContrast ? 'bg-black border-white/40 text-white' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'}`}>
                     <div className="space-y-4">
                         <div>
-                            <p className="text-xs font-bold text-gray-500 uppercase mb-2">Tamaño de Fuente</p>
+                            <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Tamaño de Fuente</p>
                             <div className="flex justify-between items-center bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
                                 <button onClick={() => setFontSize(s => Math.max(14, s - 2))} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded flex-1 text-center"><Type size={16} /></button>
                                 <span className="text-sm font-mono">{fontSize}px</span>
@@ -442,15 +1001,35 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                             </div>
                         </div>
 
-                        <div className="flex justify-between items-center">
-                            <span className="text-sm font-medium">Modo Oscuro</span>
-                            <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 bg-gray-100 dark:bg-gray-700 rounded-full">
-                                {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
-                            </button>
+                        {/* A3: Selector de 3 modos visuales — Claro / Oscuro / Alto Contraste.
+                            Alto contraste: fondo negro + texto blanco para máxima legibilidad. */}
+                        <div>
+                            <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Apariencia</p>
+                            <div className="grid grid-cols-3 gap-1">
+                                <button
+                                    onClick={() => { setIsDarkMode(false); setIsHighContrast(false); }}
+                                    className={`p-2 rounded text-xs font-bold border flex flex-col items-center gap-1 ${!isDarkMode && !isHighContrast ? 'bg-indigo-100 border-indigo-500 text-indigo-700' : 'border-gray-200 dark:border-gray-600'}`}
+                                >
+                                    <Sun size={14} />Claro
+                                </button>
+                                <button
+                                    onClick={() => { setIsDarkMode(true); setIsHighContrast(false); }}
+                                    className={`p-2 rounded text-xs font-bold border flex flex-col items-center gap-1 ${isDarkMode && !isHighContrast ? 'bg-indigo-100 border-indigo-500 text-indigo-700' : 'border-gray-200 dark:border-gray-600'}`}
+                                >
+                                    <Moon size={14} />Oscuro
+                                </button>
+                                <button
+                                    onClick={() => { setIsDarkMode(false); setIsHighContrast(true); }}
+                                    className={`p-2 rounded text-xs font-bold border flex flex-col items-center gap-1 ${isHighContrast ? 'bg-yellow-100 border-yellow-500 text-yellow-800' : 'border-gray-200 dark:border-gray-600'}`}
+                                    title="Fondo negro + texto blanco — máxima legibilidad"
+                                >
+                                    <span className="text-base leading-none font-black">HC</span>Alto C.
+                                </button>
+                            </div>
                         </div>
 
                         <div className="border-t border-gray-200 dark:border-gray-700 pt-2">
-                            <p className="text-xs font-bold text-gray-500 uppercase mb-2">Idioma del Texto</p>
+                            <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Idioma del Texto</p>
                             <div className="flex gap-2">
                                 <button
                                     onClick={() => setLanguage('es')}
@@ -477,7 +1056,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                         </div>
 
                         <div className="border-t border-gray-200 dark:border-gray-700 pt-2">
-                            <p className="text-xs font-bold text-gray-500 uppercase mb-2">Accesibilidad</p>
+                            <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Accesibilidad</p>
                             <div className="grid grid-cols-2 gap-2">
                                 <button
                                     onClick={() => setIsDyslexicFont(!isDyslexicFont)}
@@ -488,15 +1067,16 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                                 <button
                                     onClick={() => setShowRuler(!showRuler)}
                                     className={`p-2 rounded text-xs font-bold border ${showRuler ? 'bg-indigo-100 border-indigo-500 text-indigo-700' : 'border-gray-200 dark:border-gray-600'}`}
+                                    title="Banda de foco que sigue el cursor para guiar la lectura línea a línea"
                                 >
-                                    Regla Focal
+                                    Guía de lectura
                                 </button>
                             </div>
                         </div>
                     </div>
 
                     <div className="border-t border-gray-200 dark:border-gray-700 pt-2">
-                        <p className="text-xs font-bold text-gray-500 uppercase mb-2">Velocidad de Voz</p>
+                        <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Velocidad de Voz</p>
                         <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-lg">
                             <button onClick={() => setPlaybackSpeed(s => Math.max(0.75, s - 0.25))} className="p-1 hover:bg-white dark:hover:bg-gray-600 rounded"><Minus size={16} /></button>
                             <span className="flex-1 text-center text-xs font-bold">{playbackSpeed}x</span>
@@ -515,10 +1095,14 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 </div>
             )}
 
-            {/* SIDE FLOATING BUTTONS */}
+            {/* SIDE FLOATING BUTTONS — T3: HC variant: white bg + black text for maximum contrast */}
             <button
                 onClick={scrollUp}
-                className="fixed left-4 top-1/2 -translate-y-1/2 z-50 p-4 bg-gray-200/90 dark:bg-gray-700/90 hover:bg-indigo-600 hover:text-white rounded-full shadow-xl transition-all border border-gray-300 dark:border-gray-600 opacity-70 hover:opacity-100"
+                className={`fixed left-4 top-1/2 -translate-y-1/2 z-50 p-4 rounded-full shadow-xl transition-all opacity-70 hover:opacity-100 ${
+                    isHighContrast
+                        ? 'bg-white text-black hover:bg-yellow-300 border-2 border-white'
+                        : 'bg-gray-200/90 dark:bg-gray-700/90 hover:bg-indigo-600 hover:text-white border border-gray-300 dark:border-gray-600'
+                }`}
                 aria-label="Retroceder texto"
             >
                 <ChevronUp size={32} />
@@ -526,7 +1110,11 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
             <button
                 onClick={scrollDown}
-                className="fixed right-4 top-1/2 -translate-y-1/2 z-50 p-4 bg-gray-200/90 dark:bg-gray-700/90 hover:bg-indigo-600 hover:text-white rounded-full shadow-xl transition-all border border-gray-300 dark:border-gray-600 opacity-70 hover:opacity-100"
+                className={`fixed right-4 top-1/2 -translate-y-1/2 z-50 p-4 rounded-full shadow-xl transition-all opacity-70 hover:opacity-100 ${
+                    isHighContrast
+                        ? 'bg-white text-black hover:bg-yellow-300 border-2 border-white'
+                        : 'bg-gray-200/90 dark:bg-gray-700/90 hover:bg-indigo-600 hover:text-white border border-gray-300 dark:border-gray-600'
+                }`}
                 aria-label="Avanzar texto"
             >
                 <ChevronDown size={32} />
@@ -538,7 +1126,8 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     <div className="fixed inset-0 z-30 pointer-events-none overflow-hidden touch-none">
                         <div className="absolute top-0 left-0 right-0 bg-black/70 transition-all duration-75 ease-out" style={{ height: Math.max(0, mouseY - 60) }}></div>
                         <div className="absolute left-0 right-0 bg-black/70 transition-all duration-75 ease-out" style={{ top: mouseY + 60, bottom: 0 }}></div>
-                        <div className="absolute left-0 right-0 border-t-2 border-b-2 border-indigo-500/30 transition-all duration-75 ease-out" style={{ top: Math.max(0, mouseY - 60), height: 120 }}></div>
+                        {/* T3: HC uses white border — indigo/30 is invisible on black background */}
+                        <div className={`absolute left-0 right-0 border-t-2 border-b-2 transition-all duration-75 ease-out ${isHighContrast ? 'border-white/80' : 'border-indigo-500/30'}`} style={{ top: Math.max(0, mouseY - 60), height: 120 }}></div>
                     </div>
                 )
             }
@@ -576,16 +1165,32 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
             {
                 showLeoCompanion && sentences.length > 0 && (
-                    <LeoCompanion 
+                    <LeoCompanion
                         contentId={content.id}
                         currentIndex={currentIndex}
-                        exactSentence={sentences[currentIndex].trim()} 
-                        onClose={() => setShowLeoCompanion(false)} 
+                        exactSentence={sentences[currentIndex].trim()}
+                        onClose={() => { setShowLeoCompanion(false); setLeoInitialMsg(null); setLeoTriggerReason(null); }}
                         sessionMemory={leoMemory}
                         difficultyLevel={leoMemory.difficultyLevel}
                         pedagogicalStage={leoMemory.pedagogicalStage}
                         onMemoryUpdate={(updates) => setLeoMemory((prev: any) => ({ ...prev, ...updates }))}
                         onNavigate={(idx) => { setCurrentAudioIndex(idx); playManifestAudio(idx); }}
+                        initialMessage={leoInitialMsg}
+                        triggerReason={leoTriggerReason}
+                        hasAnchorAvailable={false}
+                        hasAudioAvailable={audioUrl !== null}
+                        isAudioPlaying={isPlaying}
+                        onAction={(actionId) => {
+                            console.log('[Leo] action:', actionId, '| trigger:', leoTriggerReason);
+                            if (actionId === 'play_audio' && audioUrl && audioRef.current) {
+                                setShowLeoCompanion(false);
+                                setLeoInitialMsg(null);
+                                setLeoTriggerReason(null);
+                                audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+                            } else if (actionId === 'play_audio') {
+                                console.warn('[Leo] play_audio failed: no audio loaded yet');
+                            }
+                        }}
                     />
                 )
             }
@@ -594,7 +1199,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             {showLeoWelcome && !showLeoCompanion && (
                 <div 
                     className="fixed bottom-24 right-6 z-50 bg-indigo-600/90 backdrop-blur-md text-white px-5 py-4 rounded-2xl shadow-2xl border border-indigo-400/30 animate-in slide-in-from-bottom-5 fade-in duration-500 max-w-xs cursor-pointer hover:bg-indigo-600 transition-colors" 
-                    onClick={() => { setShowLeoWelcome(false); setShowLeoCompanion(true); if (isPlaying) { audioRef.current?.pause(); setIsPlaying(false); } }}
+                    onClick={() => { setShowLeoWelcome(false); setShowLeoCompanion(true); if (isPlaying) { audioRef.current?.pause(); setIsPlaying(false); } /* leoTriggerReason already welcome_back from hydration */ }}
                 >
                     <div className="flex gap-3 items-start">
                         <MessageCircle size={22} className="text-indigo-200 shrink-0 mt-0.5" />
@@ -608,11 +1213,46 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 </div>
             )}
 
+            {/* D: RESUME TOAST — shown once per open when progress ≥ 5% */}
+            {resumeToast && (
+                <div
+                    className={`fixed bottom-24 left-6 z-50 px-4 py-3 rounded-2xl shadow-xl border animate-in slide-in-from-bottom-5 fade-in duration-400 max-w-xs flex items-center gap-3 ${
+                        isHighContrast
+                            ? 'bg-black text-white border-white/60'
+                            : 'bg-white/95 dark:bg-gray-800/95 text-gray-800 dark:text-gray-100 border-gray-200 dark:border-gray-600 backdrop-blur-sm'
+                    }`}
+                    role="status"
+                    aria-live="polite"
+                >
+                    <span className="text-lg shrink-0">📖</span>
+                    <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold leading-snug">
+                            {resumeToast.fromRemote
+                                ? 'Actualizado desde otro dispositivo'
+                                : resumeToast.crossMode
+                                    ? 'Continuando desde otro modo'
+                                    : 'Continuando donde lo dejaste'}
+                        </p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 leading-snug truncate">
+                            Retomando desde {resumeToast.label}
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => { if (resumeToastTimerRef.current) clearTimeout(resumeToastTimerRef.current); setResumeToast(null); }}
+                        className="shrink-0 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                        aria-label="Cerrar"
+                    >
+                        <X size={14} />
+                    </button>
+                </div>
+            )}
+
             {/* LEO FLOATING BUTTON */}
             {!showLeoCompanion && (
                 <button
                     onClick={() => {
                         setShowLeoWelcome(false);
+                        setLeoTriggerReason(null); // manual open — no trigger reason
                         setShowLeoCompanion(true);
                         if (isPlaying) { audioRef.current?.pause(); setIsPlaying(false); }
                     }}
@@ -625,7 +1265,14 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
             <main className="flex-1 max-w-3xl mx-auto w-full p-6 md:p-12 pb-32">
                 {loading ? <div className="flex justify-center py-20"><Loader2 size={40} className="animate-spin text-indigo-500" /></div> :
-                    <article className={`prose dark:prose-invert max-w-none leading-relaxed whitespace-pre-wrap ${isDyslexicFont ? 'font-opendyslexic' : ''}`} style={{ fontSize: `${fontSize}px` }}>{text}</article>}
+                    <article
+                        className={`prose max-w-none leading-relaxed whitespace-pre-wrap ${isDyslexicFont ? 'font-opendyslexic' : ''} ${isHighContrast ? '' : 'dark:prose-invert'}`}
+                        style={{
+                            fontSize: `${fontSize}px`,
+                            // HC override: inline color wins over prose's cascaded text-gray-* colors
+                            ...(isHighContrast ? { color: 'white', background: 'black' } : {}),
+                        }}
+                    >{text}</article>}
             </main>
         </div >
     );

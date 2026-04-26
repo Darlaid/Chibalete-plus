@@ -3,7 +3,12 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
-import { Home, Library, Search, User, LifeBuoy, Crown, Upload, LogOut, Users, PlayCircle, ShoppingBag, Gamepad2, GraduationCap, BarChart2, Clock, Menu, X, NotebookPen, Package, Gift, Sparkles } from 'lucide-react';
+import { isMediator, isAdmin, normalizeRoles } from '../utils/permissions';
+import {
+    Home, Library, Search, User, LifeBuoy, Upload, LogOut, Users,
+    PlayCircle, ShoppingBag, Gamepad2, GraduationCap, BarChart2,
+    Clock, Menu, X, NotebookPen, Package, Gift, Sparkles, Globe, Smartphone
+} from 'lucide-react';
 
 // Helper component for standard nav items with accessibility improvements
 const NavItem: React.FC<{ to: string; icon: React.ReactNode; label: string; mobileOnly?: boolean }> = ({ to, icon, label, mobileOnly }) => {
@@ -80,67 +85,103 @@ const Navbar: React.FC = () => {
 
     const recentItems = user ? dataService.getRecentHistory(user.id) : [];
 
-    // --- DESKTOP SIDEBAR ITEMS ---
+    // ---------------------------------------------------------------------------
+    // RBAC — evaluación de permisos para visibilidad del menú (Fase 1G.1)
+    //
+    // Variables derivadas (una sola evaluación por render):
+    //   normalizedRoles → array limpio para cualquier check puntual futuro
+    //   userIsAdmin     → true si 'administrador' está en los roles
+    //   userIsMediator  → true si 'mediador' está en los roles
+    //   canManage       → true para mediador | administrador
+    // DT-05: 'profesor' eliminado del modelo — isMediator() solo cubre 'mediador'.
+    // ---------------------------------------------------------------------------
+    const normalizedRoles = normalizeRoles(user?.roles);
+    const userIsAdmin     = normalizedRoles.includes('administrador');
+    const userIsMediator  = isMediator(user);
+    const canManage       = userIsAdmin || userIsMediator;
+
+    // Label contextual para /aula-viva:
+    // mediador/admin → "Aula Viva" (terminología pedagógica del sistema)
+    // lector         → "Mi Aula" (más accesible y personal)
+    const aulaLabel = canManage ? 'Aula Viva' : 'Mi Aula';
+
+    // ---------------------------------------------------------------------------
+    // DESKTOP SIDEBAR — items declarativos con agrupación semántica
+    // ---------------------------------------------------------------------------
+
+    // ── Sección Lectura ─── visible para todos los usuarios autenticados ────────
+    // /aula-viva tiene access='authenticated' en routePermissions; la página adapta
+    // su vista internamente (canManageClassroom en AulaViva.tsx).
     const navItemsDesktop = [
-        { to: '/', icon: <Home size={22} strokeWidth={2} />, label: 'Inicio' },
-        { to: '/biblioteca', icon: <Library size={22} strokeWidth={2} />, label: 'Biblioteca' },
-        { to: '/multimedia', icon: <PlayCircle size={22} strokeWidth={2} />, label: 'Multimedia' },
-        { to: '/trivia', icon: <Gamepad2 size={22} strokeWidth={2} />, label: 'Trívia' },
-        { to: '/tienda', icon: <ShoppingBag size={22} strokeWidth={2} />, label: 'Tienda' },
-        { to: '/bitacora', icon: <NotebookPen size={22} strokeWidth={2} />, label: 'Bitácora' }, // Added here
-        { to: '/buscar', icon: <Search size={22} strokeWidth={2} />, label: 'Buscar', mobileOnly: true },
+        { to: '/',         icon: <Home size={22} strokeWidth={2} />,         label: 'Inicio' },
+        { to: '/aula-viva', icon: <GraduationCap size={22} strokeWidth={2} />, label: aulaLabel },
+        { to: '/biblioteca', icon: <Library size={22} strokeWidth={2} />,     label: 'Biblioteca' },
+        { to: '/multimedia', icon: <PlayCircle size={22} strokeWidth={2} />,  label: 'Multimedia' },
+        { to: '/trivia',     icon: <Gamepad2 size={22} strokeWidth={2} />,    label: 'Trívia' },
+        { to: '/tienda',     icon: <ShoppingBag size={22} strokeWidth={2} />, label: 'Tienda' },
+        { to: '/bitacora',   icon: <NotebookPen size={22} strokeWidth={2} />, label: 'Bitácora' },
+        { to: '/clubs',      icon: <Globe size={22} strokeWidth={2} />,       label: 'Clubes' },
+        { to: '/buscar',     icon: <Search size={22} strokeWidth={2} />,      label: 'Buscar', mobileOnly: true },
         { to: user ? `/perfil/${user.id}` : '/auth', icon: <User size={22} strokeWidth={2} />, label: 'Perfil' },
     ];
 
+    // ── Sección Gestión ─── visibilidad graduada por rol ───────────────────────
+    // Orden: utilidades (todos) → mediación → administración
     const secondaryItemsDesktop = [
-        { to: '/soporte', icon: <LifeBuoy size={20} />, label: 'Soporte' },
-    ]
+        // Todos los usuarios autenticados
+        { to: '/soporte',       icon: <LifeBuoy size={20} />,   label: 'Soporte' },
+        { to: '/chibalete-lu',  icon: <Smartphone size={20} />, label: 'Chibalete LU' },
 
-    if (user?.roles.includes('administrador') || user?.roles.includes('profesor') || user?.roles.includes('mediador')) {
-        navItemsDesktop.splice(3, 0, { to: '/aula-viva', icon: <GraduationCap size={22} strokeWidth={2} />, label: 'Aula Viva' });
-    }
+        // ── Administración: solo administrador ─────────────────────────────────
+        ...(userIsAdmin ? [
+            { to: '/subir-contenido',    icon: <Upload size={20} />,    label: 'Subir' },
+            { to: '/admin-dashboard',    icon: <BarChart2 size={20} />, label: 'Panel Admin' },
+            { to: '/admin/productos',    icon: <Package size={20} />,   label: 'Productos' },
+            { to: '/admin/recompensas',  icon: <Gift size={20} />,      label: 'Recompensas' },
+            { to: '/admin/usuarios',     icon: <Users size={20} />,     label: 'Usuarios' },
+            { to: '/admin/experiencias', icon: <Sparkles size={20} />,  label: 'Experiencias' },
+        ] : []),
+    ];
 
-    if (user?.roles.includes('administrador')) {
-        secondaryItemsDesktop.push({ to: '/admin-dashboard', icon: <BarChart2 size={20} />, label: 'Panel Admin' });
-        secondaryItemsDesktop.push({ to: '/subir-contenido', icon: <Upload size={20} />, label: 'Subir' });
-        secondaryItemsDesktop.push({ to: '/admin/productos', icon: <Package size={20} />, label: 'Productos' });
-        secondaryItemsDesktop.push({ to: '/admin/recompensas', icon: <Gift size={20} />, label: 'Recompensas' });
-        secondaryItemsDesktop.push({ to: '/admin/usuarios', icon: <Users size={20} />, label: 'Usuarios' });
-        secondaryItemsDesktop.push({ to: '/admin/experiencias', icon: <Sparkles size={20} />, label: 'Experiencias' });
-    }
+    // ---------------------------------------------------------------------------
+    // MOBILE NAVIGATION — coherente con desktop en visibilidad y orden
+    // ---------------------------------------------------------------------------
 
-    // --- MOBILE NAVIGATION ---
     const mobileBottomBarItems = [
-        { to: '/', icon: <Home size={24} />, label: 'Inicio' },
+        { to: '/',   icon: <Home size={24} />,   label: 'Inicio' },
         { to: '/buscar', icon: <Search size={24} />, label: 'Buscar' },
         { to: user ? `/perfil/${user.id}` : '/auth', icon: <User size={24} />, label: 'Perfil' },
     ];
 
+    // Grid completo — mismo orden semántico que desktop.
     const mobileGridItems = [
-        { to: user ? `/perfil/${user.id}` : '/auth', icon: <User size={28} />, label: 'Perfil' },
-        { to: '/buscar', icon: <Search size={28} />, label: 'Buscar' },
-        { to: '/biblioteca', icon: <Library size={28} />, label: 'Biblioteca' },
-        { to: '/multimedia', icon: <PlayCircle size={28} />, label: 'Multimedia' },
-        { to: '/trivia', icon: <Gamepad2 size={28} />, label: 'Trívia' },
-        { to: '/tienda', icon: <ShoppingBag size={28} />, label: 'Tienda' },
-        { to: '/bitacora', icon: <NotebookPen size={28} />, label: 'Bitácora' }, // Added here
-        ...((user?.roles.includes('profesor') || user?.roles.includes('mediador') || user?.roles.includes('administrador'))
-            ? [{ to: '/aula-viva', icon: <GraduationCap size={28} />, label: 'Aula Viva' }]
-            : []),
-        { to: '/soporte', icon: <LifeBuoy size={28} />, label: 'Soporte' },
-        ...((user?.roles.includes('administrador')) ? [
-            { to: '/admin-dashboard', icon: <BarChart2 size={28} />, label: 'Panel Admin' },
-            { to: '/subir-contenido', icon: <Upload size={28} />, label: 'Subir' },
-            { to: '/admin/usuarios', icon: <Users size={28} />, label: 'Usuarios' },
-            { to: '/admin/experiencias', icon: <Sparkles size={28} />, label: 'Experiencias' }
-        ] : [])
+        // ── Sección Lectura ────────────────────────────────────────────────────
+        { to: user ? `/perfil/${user.id}` : '/auth', icon: <User size={28} />,         label: 'Perfil' },
+        { to: '/buscar',    icon: <Search size={28} />,        label: 'Buscar' },
+        { to: '/aula-viva', icon: <GraduationCap size={28} />, label: aulaLabel },
+        { to: '/biblioteca', icon: <Library size={28} />,       label: 'Biblioteca' },
+        { to: '/multimedia', icon: <PlayCircle size={28} />,    label: 'Multimedia' },
+        { to: '/trivia',     icon: <Gamepad2 size={28} />,      label: 'Trívia' },
+        { to: '/tienda',     icon: <ShoppingBag size={28} />,   label: 'Tienda' },
+        { to: '/bitacora',   icon: <NotebookPen size={28} />,   label: 'Bitácora' },
+        { to: '/clubs',      icon: <Globe size={28} />,         label: 'Clubes' },
+        { to: '/soporte',      icon: <LifeBuoy size={28} />,   label: 'Soporte' },
+        { to: '/chibalete-lu', icon: <Smartphone size={28} />, label: 'Chibalete LU' },
+
+        // ── Sección Administración: solo administrador ─────────────────────────
+        ...(userIsAdmin ? [
+            { to: '/subir-contenido',    icon: <Upload size={28} />,    label: 'Subir' },
+            { to: '/admin-dashboard',    icon: <BarChart2 size={28} />, label: 'Panel Admin' },
+            { to: '/admin/usuarios',     icon: <Users size={28} />,     label: 'Usuarios' },
+            { to: '/admin/productos',    icon: <Package size={28} />,   label: 'Productos' },
+            { to: '/admin/recompensas',  icon: <Gift size={28} />,      label: 'Recompensas' },
+            { to: '/admin/experiencias', icon: <Sparkles size={28} />,  label: 'Experiencias' },
+        ] : []),
     ];
 
     const handleLogout = (e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
-
-        // Direct logout for better UX, or use a custom modal instead of window.confirm which can be flaky
         logout();
         navigate('/bienvenida', { replace: true });
     };
@@ -220,7 +261,7 @@ const Navbar: React.FC = () => {
                         className="h-16 w-auto object-contain drop-shadow-sm hover:scale-105 transition-transform duration-300"
                     />
                     <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600 dark:from-indigo-400 dark:to-purple-400">
-                        Chibalete+ 2.0
+                        Chibalete+ 3.0.2
                     </span>
                 </div>
 

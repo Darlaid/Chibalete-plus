@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { UPLOADS_ROOT } from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,8 +39,7 @@ const safeReadJson = (filePath) => {
  * @returns {object}
  */
 export const retrieveStructuredContext = (contentId, chunkIndex) => {
-    const rootDir = path.resolve(__dirname, '..');
-    const baseDir = path.join(rootDir, 'uploads', 'leo_context');
+    const baseDir = path.join(UPLOADS_ROOT, 'leo_context');
     const folderPath = path.join(baseDir, contentId);
 
     const result = {
