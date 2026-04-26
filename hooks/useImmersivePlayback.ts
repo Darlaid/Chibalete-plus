@@ -251,7 +251,6 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // Único punto de escritura del índice. Actualiza ref (sync) + state (React) + callback.
     const setIdx = (idx: number) => {
         // [RS-DEBUG] traza para diagnostico de reading-sync — remover en cleanup
-        console.log('🔥 RS setIdx', { old: currentIdxRef.current, new: idx, status: statusRef.current });
         currentIdxRef.current = idx;
         setCurrentIndex(idx);
         ctx.onIndexChange.current(idx);
@@ -433,22 +432,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // ── LOAD — entry point principal para cualquier cambio de índice ──────────
     const load = useCallback(async (index: number, autoPlay = false): Promise<void> => {
         // [RS-DEBUG]
-        console.log('🔥 RS load', {
-            requested: index,
-            autoPlay,
-            currentIdxRef: currentIdxRef.current,
-            sentencesLen: ctx.sentencesRef.current.length,
-            audioSentencesLen: ctx.audioSentencesRef.current.length,
-            status: statusRef.current,
-            unmounted: ctx.unmountedRef.current,
-            tokenBefore: loadToken.current,
-        });
         if (ctx.unmountedRef.current) {
-            console.log('🔥 RS load: bail unmounted');
             return;
         }
         if (index < 0 || index >= ctx.sentencesRef.current.length) {
-            console.log('🔥 RS load: bail out-of-range', { index, sentencesLen: ctx.sentencesRef.current.length });
             return;
         }
 
@@ -583,7 +570,6 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // ── SKIP — salto explícito del usuario, siempre fuerza reproducción ───────
     const skip = useCallback((index: number): void => {
         // [RS-DEBUG]
-        console.log('🔥 RS skip', { requested: index, currentIdxRef: currentIdxRef.current, status: statusRef.current });
         const fromIdx = currentIdxRef.current;
         const delta   = index - fromIdx;
         // delta === 0: re-carga de la oración actual (no es un skip de navegación)
@@ -606,26 +592,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // (durante handleEnded auto-advance) producia delta=0 y reiniciaba la misma oracion.
     const skipNext = useCallback((): void => {
         const ref = currentIdxRef.current;
-        console.log('🔥 RS skipNext', { ref, sentencesLen: ctx.sentencesRef.current.length, status: statusRef.current });
         skip(ref + 1);
     }, [skip]);
 
     const skipPrev = useCallback((): void => {
         const ref = currentIdxRef.current;
-        console.log('🔥 RS skipPrev', { ref, sentencesLen: ctx.sentencesRef.current.length, status: statusRef.current });
         skip(Math.max(0, ref - 1));
     }, [skip]);
 
     // ── HANDLE ENDED — transición gapless entre fragmentos ───────────────────
     const handleEnded = useCallback(async (endedPlayer: 'A' | 'B'): Promise<void> => {
         // [RS-DEBUG]
-        console.log('🔥 RS handleEnded:enter', {
-            endedPlayer,
-            currentIdxRef: currentIdxRef.current,
-            status: statusRef.current,
-            unmounted: ctx.unmountedRef.current,
-            sentencesLen: ctx.sentencesRef.current.length,
-        });
         if (ctx.unmountedRef.current) return;
         if (statusRef.current !== 'playing') return;
 

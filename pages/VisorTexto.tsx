@@ -203,7 +203,6 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         // currentAudioIndex staying at e.g. 12 on a new content would play the wrong segment.
         // audioLoading staying true would show a stuck spinner on the new content.
         // [RS-DEBUG] traza para diagnostico — remover en cleanup
-        console.log('🔥 RS-VT setCurrentAudioIndex(0)', { caller: 'content-load-effect', contentId: content?.id, language, userId: user?.id });
         setCurrentAudioIndex(0);
         setAudioLoading(false);
         legacyTtsGenRef.current += 1; // any pending generarAudioTTS call will see a stale genId
@@ -635,20 +634,12 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         if (totalChunks <= 0) return;
         const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
         // [RS-DEBUG]
-        console.log('🔥 RS-VT seed-effect:fired', {
-            contentId: content.id,
-            totalChunks,
-            hasProg: !!prog,
-            pct: prog?.canonicalProgress?.globalPercentage ?? prog?.porcentaje ?? 0,
-            currentAudioIndexAtFire: currentAudioIndex,
-        });
         if (!prog) return;
         // Preferred: canonicalProgress.globalPercentage. Fallback: legacy porcentaje.
         const pct = prog.canonicalProgress?.globalPercentage ?? prog.porcentaje ?? 0;
         if (pct <= 0) return;
         const target = Math.min(Math.floor((pct / 100) * totalChunks), totalChunks - 1);
         if (target > 0) {
-            console.log('🔥 RS-VT setCurrentAudioIndex(target)', { caller: 'progress-seed', target, pct, totalChunks });
             setCurrentAudioIndex(target);
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -701,12 +692,10 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         if (!manifest) return;
         const nextIndex = currentAudioIndex + 1;
         // [RS-DEBUG]
-        console.log('🔥 RS-VT playNextSegment', { fromIndex: currentAudioIndex, nextIndex, hasNext: !!manifest[nextIndex] });
         if (manifest[nextIndex]) {
             setCurrentAudioIndex(nextIndex);
             playManifestAudio(nextIndex);
         } else {
-            console.log('🔥 RS-VT setCurrentAudioIndex(0)', { caller: 'playNextSegment-end', reason: 'manifest_end' });
             setIsPlaying(false);
             setCurrentAudioIndex(0);
         }
@@ -714,7 +703,6 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
     const playManifestAudio = (index: number) => {
         // [RS-DEBUG]
-        console.log('🔥 RS-VT playManifestAudio', { index, hasManifest: !!manifest, hasEntry: !!manifest?.[index] });
         if (!manifest || !manifest[index]) return;
         const entry = manifest[index];
         // Guard: malformed manifest entries (missing 'file') must not crash the player.
@@ -779,17 +767,10 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 if (pct > 0 && totalChunks > 0) {
                     idxToPlay = Math.min(Math.floor((pct / 100) * totalChunks), totalChunks - 1);
                     if (idxToPlay > 0) {
-                        console.log('🔥 RS-VT handleTTS:JIT-seed', { from: 0, to: idxToPlay, pct, totalChunks });
                         setCurrentAudioIndex(idxToPlay);
                     }
                 }
             }
-            console.log('🔥 RS-VT handleTTS:manifest-path', {
-                currentAudioIndex,
-                idxToPlay,
-                manifestKeys: Object.keys(manifest).length,
-                language,
-            });
             playManifestAudio(idxToPlay);
             return;
         }
