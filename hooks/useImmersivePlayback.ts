@@ -486,33 +486,37 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         setIdx(index);
 
         if (autoPlay) {
-            // NO emitir 'playing' ni onPlayChange(true) de forma optimista.
-            // Esperar resolución de play() para tener estado correcto.
-            // La UI permanece en 'loading' hasta confirmar (delay < 1 frame en blob URLs).
+            // OPTIMISTIC status (2026-04-26 hotfix): emitir 'playing' INMEDIATAMENTE.
+            // El UI ya refleja la intencion del usuario; si play() falla, retrocedemos.
+            // Esto evita que la UI quede atascada en 'loading' cuando un click rapido
+            // produce AbortError silencioso en el .catch (token-stale chains).
+            setStatus('playing');
+            ctx.onPlayChange.current(true);
+            sentenceStartTimeRef.current = Date.now();
+
             pActive.play()
                 .then(() => {
-                    // Re-verificar token: si el usuario saltó mientras play() asentaba, ignorar.
-                    if (token !== loadToken.current || ctx.unmountedRef.current) return;
-                    setStatus('playing');
-                    ctx.onPlayChange.current(true);
-                    sentenceStartTimeRef.current = Date.now(); // B4: play confirmado → inicio de medición
+                    // Confirmacion. Status ya es 'playing'; solo loggeamos.
                     log('play_start', { index, cached: audioCache.current.has(toChunkKey(index)) });
                 })
                 .catch((e: DOMException) => {
                     if (token !== loadToken.current || ctx.unmountedRef.current) return;
-                    // AbortError: pause() interrumpió play() antes de que resolviera.
-                    // No es un error — el usuario pidió pausa, que ya fue aplicada. Salir limpio.
-                    if (e.name === 'AbortError') return;
-                    // NotAllowedError = browser autoplay policy
-                    // NotSupportedError = formato de audio no soportado
+                    // AbortError: otro skip mas nuevo abortó este play. El nuevo ciclo
+                    // setea su propio status — no tocamos status aqui para no pisar al ciclo
+                    // mas reciente. Solo log.
+                    if (e.name === 'AbortError') {
+                        log('load_cancelled', { index, reason: 'play_aborted_by_newer_skip' });
+                        return;
+                    }
                     if (e.name === 'NotAllowedError') {
                         setStatus('blocked');
+                        ctx.onPlayChange.current(false);
                         log('autoplay_blocked', { index, error: e.name });
                     } else {
                         setStatus('error');
+                        ctx.onPlayChange.current(false);
                         log('play_fail', { index, error: e.name, message: e.message });
                     }
-                    ctx.onPlayChange.current(false);
                 });
         } else {
             setStatus('paused');

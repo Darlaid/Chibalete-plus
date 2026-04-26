@@ -766,13 +766,31 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         // C1: Only valid for Spanish — the server generates manifests from ES text only.
         // Non-ES languages fall through to the legacy path.
         if (manifest && Object.keys(manifest).length > 0 && language === 'es') {
-            // [RS-DEBUG]
+            // JIT seed (2026-04-26 hotfix): si currentAudioIndex es 0 y hay progreso
+            // guardado, calcular el indice correcto AL MOMENTO DEL CLICK. Esto es
+            // inmune al reset de linea ~205 (content-load effect que re-fire si user
+            // reference cambia en AuthContext).
+            // Si el usuario navego manualmente (idx != 0), respetamos su navegacion.
+            let idxToPlay = currentAudioIndex;
+            if (idxToPlay === 0 && user?.id && content?.id) {
+                const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
+                const totalChunks = Object.keys(manifest).length;
+                const pct = prog?.canonicalProgress?.globalPercentage ?? prog?.porcentaje ?? 0;
+                if (pct > 0 && totalChunks > 0) {
+                    idxToPlay = Math.min(Math.floor((pct / 100) * totalChunks), totalChunks - 1);
+                    if (idxToPlay > 0) {
+                        console.log('🔥 RS-VT handleTTS:JIT-seed', { from: 0, to: idxToPlay, pct, totalChunks });
+                        setCurrentAudioIndex(idxToPlay);
+                    }
+                }
+            }
             console.log('🔥 RS-VT handleTTS:manifest-path', {
                 currentAudioIndex,
+                idxToPlay,
                 manifestKeys: Object.keys(manifest).length,
                 language,
             });
-            playManifestAudio(currentAudioIndex);
+            playManifestAudio(idxToPlay);
             return;
         }
 
