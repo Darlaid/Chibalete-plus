@@ -214,6 +214,15 @@ export class NarrativeAudioEngine {
      */
     private _ambientPending = false;
 
+    /**
+     * Region pending — analogous to _ambientPending but for narration playback.
+     * If the FIRST region.play() is blocked (autoplay policy after a long await,
+     * e.g. TTS network fetch consuming user-activation), we queue { src, gen }
+     * here and retry on the next playEffect() (post-gesture moment).
+     * Cleared on success or on a newer playRegion (gen mismatch makes retry a no-op).
+     */
+    private _regionPending: { src: string; gen: number } | null = null;
+
     constructor(ttsProvider: TTSProvider) {
         this._tts = ttsProvider;
 
@@ -426,9 +435,16 @@ export class NarrativeAudioEngine {
         this._duck();
         try {
             await this._region.play();
+            // Success — drop any prior pending retry from a blocked attempt.
+            this._regionPending = null;
         } catch {
             // Autoplay blocked — unduck since nothing is playing.
-            if (gen === this._regionGen) this._unduck();
+            // Queue retry for next post-gesture call. The gen guard ensures
+            // a stale pending is silently skipped if a newer playRegion runs.
+            if (gen === this._regionGen) {
+                this._unduck();
+                this._regionPending = { src, gen };
+            }
         }
     }
 
@@ -577,6 +593,26 @@ export class NarrativeAudioEngine {
                 amb.play()
                     .then(() => this._ramp(amb, AMBIENT_BASE, 800))
                     .catch(() => { this._ambientPending = true; }); // still blocked — try again next event
+            }
+        }
+
+        // Post-gesture region resume — region narration may have been blocked
+        // at first tap if a long await (TTS fetch) consumed the user-activation flag.
+        // Same pattern as ambient: set src, duck, play; on failure re-queue.
+        // Gen guard makes stale pendings (older than current _regionGen) a no-op.
+        if (this._regionPending && this._regionPending.gen === this._regionGen) {
+            const { src, gen } = this._regionPending;
+            this._regionPending = null;
+            if (!this._muted) {
+                this._region.src = src;
+                this._duck();
+                this._region.play().catch(() => {
+                    // Still blocked — re-queue for next event, but only if gen still current.
+                    if (gen === this._regionGen) {
+                        this._unduck();
+                        this._regionPending = { src, gen };
+                    }
+                });
             }
         }
 
