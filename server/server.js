@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -26,6 +26,7 @@ import {
     computeSchoolMetrics,
 } from './metricsService.js';
 import { UPLOADS_ROOT, USERS_DB } from './config.js';
+import { withUsersLock, withFileLock } from './usersLock.js';
 import {
     getProgressItem,
     getProgressByUser,
@@ -105,7 +106,7 @@ app.use(express.json());
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 1500,
-    keyGenerator: (req) => req.headers['x-user-id'] || req.ip,
+    keyGenerator: (req) => req.headers['x-user-id'] || ipKeyGenerator(req),
     skip: (req) => req.path === '/api/health',
     standardHeaders: true,
     legacyHeaders: false,
@@ -576,6 +577,88 @@ const writeJSONAsync = async (file, data) => {
     _jsonCache.delete(file);
 };
 
+async function mutateUsers(fn) {
+    return withUsersLock(USERS_DB, () => {
+        _jsonCache.delete(USERS_DB);
+        const users = readJSON(USERS_DB);
+        return fn(users);
+    });
+}
+
+// ─── ROUND 4 TIER B: per-domain mutate helpers (cross-container atomic RMW) ─
+async function mutateGroups(fn) {
+    return withFileLock(GROUPS_DB, () => {
+        _jsonCache.delete(GROUPS_DB);
+        const data = readJSON(GROUPS_DB);
+        return fn(Array.isArray(data) ? data : []);
+    }, 'groupsLock');
+}
+async function mutateSections(fn) {
+    return withFileLock(SECTIONS_DB, () => {
+        _jsonCache.delete(SECTIONS_DB);
+        const data = readJSON(SECTIONS_DB);
+        return fn(Array.isArray(data) ? data : []);
+    }, 'sectionsLock');
+}
+async function mutateSchools(fn) {
+    return withFileLock(SCHOOLS_DB, () => {
+        _jsonCache.delete(SCHOOLS_DB);
+        const data = readJSON(SCHOOLS_DB);
+        return fn(Array.isArray(data) ? data : []);
+    }, 'schoolsLock');
+}
+async function mutateSchoolConfigs(fn) {
+    return withFileLock(SCHOOL_CONFIGS_DB, () => {
+        _jsonCache.delete(SCHOOL_CONFIGS_DB);
+        const data = readJSON(SCHOOL_CONFIGS_DB);
+        return fn(Array.isArray(data) ? data : []);
+    }, 'schoolConfigsLock');
+}
+async function mutateAccessRules(fn) {
+    return withFileLock(ACCESS_DB, () => {
+        _jsonCache.delete(ACCESS_DB);
+        const data = readJSON(ACCESS_DB);
+        return fn(Array.isArray(data) ? data : []);
+    }, 'accessLock');
+}
+async function mutateLeoMemory(fn) {
+    return withFileLock(LEO_MEMORY_DB, () => {
+        _jsonCache.delete(LEO_MEMORY_DB);
+        const raw = readJSON(LEO_MEMORY_DB);
+        return fn(raw);
+    }, 'leoMemoryLock');
+}
+async function mutateInterventions(fn) {
+    return withFileLock(INTERVENTIONS_DB, () => {
+        _jsonCache.delete(INTERVENTIONS_DB);
+        const raw = readJSON(INTERVENTIONS_DB);
+        const db = Array.isArray(raw?.interventions) ? raw : { interventions: [] };
+        return fn(db);
+    }, 'interventionsLock');
+}
+async function mutateUserAudit(fn) {
+    return withFileLock(USER_AUDIT_DB, () => {
+        _jsonCache.delete(USER_AUDIT_DB);
+        const raw = readJSON(USER_AUDIT_DB);
+        return fn(Array.isArray(raw) ? raw : []);
+    }, 'userAuditLock');
+}
+async function mutateSubmissions(fn) {
+    return withFileLock(SUBMISSIONS_DB, () => {
+        _jsonCache.delete(SUBMISSIONS_DB);
+        const raw = readJSON(SUBMISSIONS_DB);
+        return fn(Array.isArray(raw) ? raw : []);
+    }, 'submissionsLock');
+}
+async function mutateBundles(fn) {
+    return withFileLock(BUNDLES_DB, () => {
+        _jsonCache.delete(BUNDLES_DB);
+        const raw = readJSON(BUNDLES_DB);
+        return fn(Array.isArray(raw) ? raw : []);
+    }, 'bundlesLock');
+}
+// ─── END ROUND 4 TIER B helpers ─────────────────────────────────────────
+
 /**
  * Resuelve los IDs de contenido (libros) que pertenecen a un conjunto de colecciones.
  */
@@ -593,9 +676,9 @@ function resolveCollectionContentIds(collectionIds) {
 // se inicializan en accessService (ver más abajo, tras normalizeUser/normalizeGroup).
 // Solo se llaman en tiempo de petición, por lo que la inicialización diferida es segura.
 
-app.post('/api/access', requireAuth, (req, res) => {
+app.post('/api/access', requireAuth, async (req, res) => {
     const payload = req.body;
-    
+
     // --- ESTRICTA VALIDACIÓN DE PAYLOAD ---
     if (!['user', 'group', 'organization'].includes(payload.scope)) {
         return res.status(400).json({ error: "scope must be 'user', 'group', or 'organization'" });
@@ -612,7 +695,6 @@ app.post('/api/access', requireAuth, (req, res) => {
         }
     }
 
-    const rules = readJSON(ACCESS_DB);
     const newRule = {
         id: payload.id || `access-${Date.now()}`,
         scope: payload.scope,
@@ -622,13 +704,14 @@ app.post('/api/access', requireAuth, (req, res) => {
         expiresAt: parsedExpiresAt
     };
 
-    const index = rules.findIndex(r => r.id === newRule.id);
-    if (index > -1) rules[index] = newRule;
-    else rules.push(newRule);
-
-    writeJSON(ACCESS_DB, rules);
+    await mutateAccessRules((rules) => {
+        const index = rules.findIndex(r => r.id === newRule.id);
+        if (index > -1) rules[index] = newRule;
+        else rules.push(newRule);
+        writeJSON(ACCESS_DB, rules);
+    });
     log(`Access Rule created/updated: ${newRule.id} (scope=${newRule.scope}, scopeId=${newRule.scopeId})`, 'ACCESS_ENGINE');
-    
+
     res.json(newRule);
 });
 
@@ -805,12 +888,11 @@ app.get('/api/bundles', (req, res) => {
     }
 });
 
-app.post('/api/bundles', requireAuth, (req, res) => {
+app.post('/api/bundles', requireAuth, async (req, res) => {
     const payload = req.body;
     if (!payload.name || !payload.name.trim()) {
         return res.status(400).json({ error: 'El nombre de la experiencia es obligatorio' });
     }
-    const bundles = readJSON(BUNDLES_DB);
     const newBundle = {
         id: `bundle-${Date.now()}`,
         name: payload.name.trim(),
@@ -821,30 +903,40 @@ app.post('/api/bundles', requireAuth, (req, res) => {
         contentIds: Array.isArray(payload.contentIds) ? payload.contentIds : [],
         tags: Array.isArray(payload.tags) ? payload.tags : []
     };
-    bundles.push(newBundle);
-    writeJSON(BUNDLES_DB, bundles);
+    await mutateBundles((bundles) => {
+        bundles.push(newBundle);
+        writeJSON(BUNDLES_DB, bundles);
+    });
     log(`[BUNDLE] Created: ${newBundle.id} "${newBundle.name}"`);
     res.status(201).json(newBundle);
 });
 
-app.put('/api/bundles/:id', requireAuth, (req, res) => {
+app.put('/api/bundles/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
     const payload = req.body;
-    const bundles = readJSON(BUNDLES_DB);
-    const idx = bundles.findIndex(b => b.id === id);
-    if (idx === -1) return res.status(404).json({ error: 'Experiencia no encontrada' });
-    bundles[idx] = { ...bundles[idx], ...payload, id }; // id inmutable
-    writeJSON(BUNDLES_DB, bundles);
+    let updated = null;
+    const conflict = await mutateBundles((bundles) => {
+        const idx = bundles.findIndex(b => b.id === id);
+        if (idx === -1) return { conflict: 'not_found' };
+        bundles[idx] = { ...bundles[idx], ...payload, id }; // id inmutable
+        updated = bundles[idx];
+        writeJSON(BUNDLES_DB, bundles);
+        return null;
+    });
+    if (conflict) return res.status(404).json({ error: 'Experiencia no encontrada' });
     log(`[BUNDLE] Updated: ${id}`);
-    res.json(bundles[idx]);
+    res.json(updated);
 });
 
-app.delete('/api/bundles/:id', requireAuth, (req, res) => {
+app.delete('/api/bundles/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
-    const bundles = readJSON(BUNDLES_DB);
-    const filtered = bundles.filter(b => b.id !== id);
-    if (filtered.length === bundles.length) return res.status(404).json({ error: 'Experiencia no encontrada' });
-    writeJSON(BUNDLES_DB, filtered);
+    const conflict = await mutateBundles((bundles) => {
+        const filtered = bundles.filter(b => b.id !== id);
+        if (filtered.length === bundles.length) return { conflict: 'not_found' };
+        writeJSON(BUNDLES_DB, filtered);
+        return null;
+    });
+    if (conflict) return res.status(404).json({ error: 'Experiencia no encontrada' });
     log(`[BUNDLE] Deleted: ${id}`);
     res.json({ ok: true });
 });
@@ -1104,7 +1196,7 @@ app.get('/api/content/:id/access', (req, res) => {
 
 // DELETE CONTENT — M1: with full physical file cleanup
 // requireAdminRole ya está aplicado via app.use('/api/content', requireAdminRole) arriba.
-app.delete('/api/content/:id', (req, res) => {
+app.delete('/api/content/:id', async (req, res) => {
     const { id } = req.params;
     const actorId = req.headers['x-user-id'] ?? 'unknown';
     log(`[DELETE_START] contentId=${id} actor=${actorId}`, 'INFO');
@@ -1195,9 +1287,13 @@ app.delete('/api/content/:id', (req, res) => {
             if (deletedUrls.has(indexedUrl)) uploadHashIndex.delete(hash);
         }
 
-        // 7. Remove DB record — done last, after cleanup
-        contentList.splice(itemIndex, 1);
-        writeJSON(DB_FILE, contentList);
+        // 7. Remove DB record — done last, after cleanup (atomic cross-container)
+        await withFileLock(DB_FILE, () => {
+            const freshList = readJSON(DB_FILE);
+            const freshIdx = freshList.findIndex(c => c.id === id);
+            if (freshIdx !== -1) freshList.splice(freshIdx, 1);
+            writeJSON(DB_FILE, freshList);
+        }, 'contentLock');
         log(`[DELETE_SUCCESS] contentId=${id} actor=${actorId}`, 'SUCCESS');
 
         res.json({ success: true, message: 'Content deleted successfully' });
@@ -1390,51 +1486,41 @@ app.post('/api/upload/purge', (req, res) => {
  * @param {string} contentId - ID del contenido recién creado
  */
 function syncNewContentToOrgAccessRules(contentId) {
-    const now = Date.now();
-
-    let rules;
-    try {
-        rules = readJSON(ACCESS_DB);
-    } catch (e) {
-        log(`[ACCESS_SYNC] ERROR leyendo access_db.json para sync de ${contentId}: ${e.message}`, 'ERROR');
-        return;
-    }
-
-    if (!Array.isArray(rules) || rules.length === 0) {
-        log(`[ACCESS_SYNC] WARN: access_db.json está vacío. El contenido ${contentId} no fue asignado a ninguna regla de acceso. Revisión administrativa requerida.`, 'WARN');
-        return;
-    }
-
-    const activeOrgRules = rules.filter(r =>
-        r.scope === 'organization' &&
-        !(typeof r.expiresAt === 'number' && Number.isFinite(r.expiresAt) && now > r.expiresAt)
-    );
-
-    if (activeOrgRules.length === 0) {
-        log(`[ACCESS_SYNC] WARN: No existen reglas activas de scope 'organization' en access_db.json. El contenido ${contentId} no fue asignado automáticamente. Revisión administrativa requerida.`, 'WARN');
-        return;
-    }
-
-    let syncedCount = 0;
-    const updatedRules = rules.map(rule => {
-        if (rule.scope !== 'organization') return rule;
-        if (typeof rule.expiresAt === 'number' && Number.isFinite(rule.expiresAt) && now > rule.expiresAt) return rule;
-
-        const current = Array.isArray(rule.titleIds) ? rule.titleIds : [];
-        if (current.includes(contentId)) return rule; // Ya presente, sin cambio
-
-        syncedCount++;
-        return { ...rule, titleIds: [...current, contentId] };
-    });
-
-    if (syncedCount === 0) return; // Nada cambió
-
-    try {
-        writeJSON(ACCESS_DB, updatedRules);
-        log(`[ACCESS_SYNC] Contenido ${contentId} agregado a ${syncedCount} regla(s) de organización en access_db.json.`, 'INFO');
-    } catch (e) {
-        log(`[ACCESS_SYNC] ERROR escribiendo access_db.json tras sync de ${contentId}: ${e.message}. El contenido quedó guardado pero puede no ser visible para lectores con reglas E7 activas.`, 'ERROR');
-    }
+    // Sync signature preservada para callers sincronos en content handlers.
+    // El trabajo real corre en async+lock (fire-and-forget, never blocks response).
+    (async () => {
+        try {
+            const now = Date.now();
+            await mutateAccessRules((rules) => {
+                if (!Array.isArray(rules) || rules.length === 0) {
+                    log(`[ACCESS_SYNC] WARN: access_db.json está vacío. El contenido ${contentId} no fue asignado a ninguna regla de acceso. Revisión administrativa requerida.`, 'WARN');
+                    return;
+                }
+                const activeOrgRules = rules.filter(r =>
+                    r.scope === 'organization' &&
+                    !(typeof r.expiresAt === 'number' && Number.isFinite(r.expiresAt) && now > r.expiresAt)
+                );
+                if (activeOrgRules.length === 0) {
+                    log(`[ACCESS_SYNC] WARN: No existen reglas activas de scope 'organization' en access_db.json. El contenido ${contentId} no fue asignado automáticamente. Revisión administrativa requerida.`, 'WARN');
+                    return;
+                }
+                let syncedCount = 0;
+                const updatedRules = rules.map(rule => {
+                    if (rule.scope !== 'organization') return rule;
+                    if (typeof rule.expiresAt === 'number' && Number.isFinite(rule.expiresAt) && now > rule.expiresAt) return rule;
+                    const current = Array.isArray(rule.titleIds) ? rule.titleIds : [];
+                    if (current.includes(contentId)) return rule;
+                    syncedCount++;
+                    return { ...rule, titleIds: [...current, contentId] };
+                });
+                if (syncedCount === 0) return;
+                writeJSON(ACCESS_DB, updatedRules);
+                log(`[ACCESS_SYNC] Contenido ${contentId} agregado a ${syncedCount} regla(s) de organización en access_db.json.`, 'INFO');
+            });
+        } catch (e) {
+            log(`[ACCESS_SYNC] ERROR sync ${contentId}: ${e.message}`, 'ERROR');
+        }
+    })();
 }
 
 // ── Album data validation ─────────────────────────────────────────────────────
@@ -1535,7 +1621,7 @@ function validateAlbumData(albumData) {
 }
 
 // SAVE CONTENT METADATA
-app.post('/api/content', (req, res) => {
+app.post('/api/content', async (req, res) => {
     try {
         const newContent = req.body;
 
@@ -1616,9 +1702,18 @@ app.post('/api/content', (req, res) => {
             contentList.push(newContent);
         }
 
-        // 2. Transaccionalidad / Rollback Crítico
+        // 2. Transaccionalidad / Rollback Crítico (atomic cross-container lock)
         try {
-            writeJSON(DB_FILE, contentList);
+            await withFileLock(DB_FILE, () => {
+                const freshList = readJSON(DB_FILE);
+                const freshIdx = freshList.findIndex(c => c.id === newContent.id);
+                if (freshIdx >= 0) {
+                    freshList[freshIdx] = newContent;
+                } else {
+                    freshList.push(newContent);
+                }
+                writeJSON(DB_FILE, freshList);
+            }, 'contentLock');
         } catch (dbWriteErr) {
             // W4: Rollback physical files on DB write failure for BOTH create and update.
             if (index === -1) {
@@ -1659,24 +1754,24 @@ app.post('/api/content', (req, res) => {
             const relativePath = newContent.texto_plano_url.replace(/^\/uploads\//, '');
             const textFullPath = path.join(UPLOAD_DIR, relativePath);
 
-            // Progress Handler
+            // Progress Handler (fire-and-forget async to avoid blocking TTS engine)
             const onProgress = (status) => {
-                try {
-                    const currentList = readJSON(DB_FILE);
-                    const idx = currentList.findIndex(c => c.id === newContent.id);
-                    if (idx !== -1) {
-                        // Only update if changed significantly or status changed to avoid thrashing? 
-                        // For now, always update to show smooth progress bar.
-                        currentList[idx].processingStatus = status;
-                        // Determine main TTS status (DO NOT touch content.status, it stays disponible)
-                        if (status.status === 'processing') currentList[idx].ttsStatus = 'generando';
-                        if (status.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
-                        if (status.status === 'failed') currentList[idx].ttsStatus = 'error_proveedor';
-                        if (status.status === 'completed') currentList[idx].ttsStatus = 'listo';
-
-                        writeJSON(DB_FILE, currentList);
-                    }
-                } catch (e) { /* ignore DB locks/rates */ }
+                (async () => {
+                    try {
+                        await withFileLock(DB_FILE, () => {
+                            const currentList = readJSON(DB_FILE);
+                            const idx = currentList.findIndex(c => c.id === newContent.id);
+                            if (idx !== -1) {
+                                currentList[idx].processingStatus = status;
+                                if (status.status === 'processing') currentList[idx].ttsStatus = 'generando';
+                                if (status.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
+                                if (status.status === 'failed') currentList[idx].ttsStatus = 'error_proveedor';
+                                if (status.status === 'completed') currentList[idx].ttsStatus = 'listo';
+                                writeJSON(DB_FILE, currentList);
+                            }
+                        }, 'contentLock');
+                    } catch (e) { /* ignore DB locks/rates */ }
+                })();
             };
 
             ttsQueue.enqueue(newContent.id, () => generateAudioForContent(newContent.id, textFullPath, UPLOAD_DIR, onProgress))
@@ -1727,14 +1822,18 @@ app.post('/api/content', (req, res) => {
  *   details      — object: contexto mínimo relevante por evento
  */
 const writeAuditLog = (entry) => {
-    try {
-        const existing = readJSON(USER_AUDIT_DB);
-        const entries = Array.isArray(existing) ? existing : [];
-        entries.push({ ...entry, timestamp: new Date().toISOString() });
-        writeJSON(USER_AUDIT_DB, entries);
-    } catch (e) {
-        log(`[AUDIT] Error escribiendo entrada de auditoría: ${e.message}`, 'WARN');
-    }
+    // Sync signature preservada. Write corre async+lock (fire-and-forget).
+    const enriched = { ...entry, timestamp: new Date().toISOString() };
+    (async () => {
+        try {
+            await mutateUserAudit((entries) => {
+                entries.push(enriched);
+                writeJSON(USER_AUDIT_DB, entries);
+            });
+        } catch (e) {
+            log(`[AUDIT] Error escribiendo entrada de auditoría: ${e.message}`, 'WARN');
+        }
+    })();
 };
 
 // --- USER HELPERS ---
@@ -2227,7 +2326,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 // POST /api/invite-user
 // Solo admin. Crea usuario en estado 'invited' con token de 48h.
 // No requiere contraseña inicial — el usuario la elige al aceptar.
-app.post('/api/invite-user', requireAuth, (req, res) => {
+app.post('/api/invite-user', requireAuth, async (req, res) => {
     const { email, nombre_completo, roles, colegio, groupIds, mediatorKind } = req.body;
 
     if (!email || !nombre_completo) {
@@ -2235,40 +2334,11 @@ app.post('/api/invite-user', requireAuth, (req, res) => {
     }
 
     const normalizedEmail = normalizeEmail(email);
-    const users = readJSON(USERS_DB);
-
-    const existingIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
-
-    // Re-invitación: si el email ya existe pero la cuenta está en 'invited',
-    // regenerar token en lugar de lanzar error. Cubre el caso de token expirado.
-    if (existingIndex !== -1) {
-        const existing = users[existingIndex];
-        if (existing.accountStatus !== 'invited') {
-            // Cuenta activa o deshabilitada → no se puede reinvitar
-            return res.status(409).json({ error: 'El email ya está registrado con una cuenta activa' });
-        }
-        // Reinvitar: regenerar token y expiración, preservar el resto del perfil
-        const inviteToken     = crypto.randomBytes(32).toString('hex');
-        const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;
-        users[existingIndex]  = { ...existing, inviteToken, inviteExpiresAt };
-        writeJSON(USERS_DB, users);
-        log(`Invite regenerated: ${existing.email} (${existing.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
-        return res.status(200).json({
-            success:       true,
-            userId:        existing.id,
-            email:         existing.email,
-            inviteToken,
-            inviteExpiresAt,
-            activationUrl: `/#/activar?token=${inviteToken}`,
-            regenerated:   true,
-        });
-    }
-
-    const inviteToken   = crypto.randomBytes(32).toString('hex');  // 64 hex chars
-    const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;     // +48 horas
-
+    // Pre-generate outside lock (pure sync computation)
+    const inviteToken     = crypto.randomBytes(32).toString('hex');
+    const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;
     const newUser = normalizeUser({
-        id:               `user-${Date.now()}`,
+        id:               `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         email:            normalizedEmail,
         nombre_completo,
         nombre_usuario:   normalizedEmail.split('@')[0],
@@ -2285,13 +2355,46 @@ app.post('/api/invite-user', requireAuth, (req, res) => {
         accountStatus:    'invited',
         inviteToken,
         inviteExpiresAt,
-        // Sin password intencionalmente — se fija en /api/accept-invite
+        // Sin password intencionalmente
     });
 
-    users.push(newUser);
-    writeJSON(USERS_DB, users);
-    log(`Invite created: ${newUser.email} (${newUser.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+    // Lock: re-read -> check -> write (atomic across containers)
+    let result = null;
+    const conflict = await mutateUsers((users) => {
+        const existingIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+        if (existingIndex !== -1) {
+            const existing = users[existingIndex];
+            if (existing.accountStatus !== 'invited') return { conflict: 'active' };
+            // Re-invite: update token, preserve rest of profile
+            users[existingIndex] = { ...existing, inviteToken, inviteExpiresAt };
+            result = { regenerated: true, userId: existing.id, email: existing.email };
+            writeJSON(USERS_DB, users);
+            return null;
+        }
+        users.push(newUser);
+        result = { regenerated: false, userId: newUser.id, email: newUser.email };
+        writeJSON(USERS_DB, users);
+        return null;
+    });
 
+    if (conflict?.conflict === 'active') {
+        return res.status(409).json({ error: 'El email ya está registrado con una cuenta activa' });
+    }
+
+    if (result.regenerated) {
+        log(`Invite regenerated: ${result.email} (${result.userId}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+        return res.status(200).json({
+            success:       true,
+            userId:        result.userId,
+            email:         result.email,
+            inviteToken,
+            inviteExpiresAt,
+            activationUrl: `/#/activar?token=${inviteToken}`,
+            regenerated:   true,
+        });
+    }
+
+    log(`Invite created: ${newUser.email} (${newUser.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
     res.status(201).json({
         success:       true,
         userId:        newUser.id,
@@ -2317,40 +2420,32 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
     }
 
-    const users = readJSON(USERS_DB);
-    const index = users.findIndex(u => u.inviteToken === token);
+    // Hash BEFORE lock — async work must not run while holding the cross-process lock
+    const hashedPassword = await hashPasswordIfNeeded(password);
 
-    if (index === -1) {
-        // Respuesta genérica: no revelar si el token existió o no
-        return res.status(404).json({ error: 'Token inválido o ya utilizado' });
-    }
+    // Lock: re-read -> validate token -> activate -> write (atomic across containers)
+    let activated = null;
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u.inviteToken === token);
+        if (index === -1) return { conflict: 'not_found' };
+        const user = users[index];
+        if (user.accountStatus !== 'invited') return { conflict: 'already_active' };
+        if (!user.inviteExpiresAt || Date.now() > user.inviteExpiresAt) {
+            log(`Accept-invite rechazado — token expirado: ${user.email}`, 'ACCESS');
+            return { conflict: 'expired' };
+        }
+        const { inviteToken: _tok, inviteExpiresAt: _exp, ...rest } = user;
+        activated = { ...rest, password: hashedPassword, accountStatus: 'active' };
+        users[index] = activated;
+        writeJSON(USERS_DB, users);
+        return null;
+    });
 
-    const user = users[index];
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Token inválido o ya utilizado' });
+    if (conflict?.conflict === 'already_active') return res.status(409).json({ error: 'Esta cuenta ya fue activada' });
+    if (conflict?.conflict === 'expired') return res.status(410).json({ error: 'El enlace de invitación expiró. Solicita uno nuevo a tu administrador.', code: 'TOKEN_EXPIRED' });
 
-    if (user.accountStatus !== 'invited') {
-        return res.status(409).json({ error: 'Esta cuenta ya fue activada' });
-    }
-
-    if (!user.inviteExpiresAt || Date.now() > user.inviteExpiresAt) {
-        log(`Accept-invite rechazado — token expirado: ${user.email}`, 'ACCESS');
-        return res.status(410).json({
-            error:  'El enlace de invitación expiró. Solicita uno nuevo a tu administrador.',
-            code:   'TOKEN_EXPIRED',
-        });
-    }
-
-    // Activar cuenta: setear password, cambiar status, eliminar token
-    const { inviteToken: _tok, inviteExpiresAt: _exp, ...rest } = user;
-    const activated = {
-        ...rest,
-        password:      await hashPasswordIfNeeded(password),
-        accountStatus: 'active',
-    };
-
-    users[index] = activated;
-    writeJSON(USERS_DB, users);
     log(`Account activated: ${activated.email} (${activated.id})`, 'ACCESS');
-
     return res.status(200).json({
         success: true,
         user:    sanitizeUserForClient(activated),
@@ -2361,41 +2456,40 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
 // POST /api/resend-invite
 // Admin regenera token para usuario en estado 'invited'.
 // Acepta { email } o { userId } — al menos uno requerido.
-app.post('/api/resend-invite', requireAuth, (req, res) => {
+app.post('/api/resend-invite', requireAuth, async (req, res) => {
     const { email, userId } = req.body;
 
     if (!email && !userId) {
         return res.status(400).json({ error: 'Se requiere email o userId' });
     }
 
-    const users = readJSON(USERS_DB);
-    const index = email
-        ? users.findIndex(u => normalizeEmail(u.email) === normalizeEmail(email))
-        : users.findIndex(u => u.id === userId);
-
-    if (index === -1) {
-        return res.status(404).json({ error: 'Usuario no encontrado' });
-    }
-
-    const user = users[index];
-
-    if (user.accountStatus !== 'invited') {
-        return res.status(409).json({
-            error: `No se puede reenviar: la cuenta está en estado '${user.accountStatus}'`,
-        });
-    }
-
+    // Pre-generate outside lock (pure sync computation)
     const inviteToken     = crypto.randomBytes(32).toString('hex');
     const inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;
-    users[index]          = { ...user, inviteToken, inviteExpiresAt };
 
-    writeJSON(USERS_DB, users);
-    log(`Invite resent: ${user.email} (${user.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+    // Lock: re-read -> validate -> update -> write (atomic across containers)
+    let sentUser = null;
+    const conflict = await mutateUsers((users) => {
+        const index = email
+            ? users.findIndex(u => normalizeEmail(u.email) === normalizeEmail(email))
+            : users.findIndex(u => u.id === userId);
+        if (index === -1) return { conflict: 'not_found' };
+        const user = users[index];
+        if (user.accountStatus !== 'invited') return { conflict: 'wrong_status', status: user.accountStatus };
+        sentUser = user;
+        users[index] = { ...user, inviteToken, inviteExpiresAt };
+        writeJSON(USERS_DB, users);
+        return null;
+    });
 
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict?.conflict === 'wrong_status') return res.status(409).json({ error: `No se puede reenviar: la cuenta está en estado '${conflict.status}'` });
+
+    log(`Invite resent: ${sentUser.email} (${sentUser.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
     return res.status(200).json({
         success:       true,
-        userId:        user.id,
-        email:         user.email,
+        userId:        sentUser.id,
+        email:         sentUser.email,
         inviteToken,
         inviteExpiresAt,
         activationUrl: `/#/activar?token=${inviteToken}`,
@@ -2411,7 +2505,7 @@ app.post('/api/resend-invite', requireAuth, (req, res) => {
 // POST /api/auth/reset-request      (path canónico — usar en clientes nuevos como LU)
 // Público. Genera token temporal de 1h para usuarios activos.
 // Respuesta siempre 200 independientemente de si el email existe (anti-oracle).
-const handleResetRequest = (req, res) => {
+const handleResetRequest = async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
@@ -2419,24 +2513,29 @@ const handleResetRequest = (req, res) => {
     }
 
     const normalizedEmail = normalizeEmail(email);
-    const users = readJSON(USERS_DB);
-    const index = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+    // Pre-generate outside lock (pure sync computation)
+    const resetToken     = crypto.randomBytes(32).toString('hex');
+    const resetExpiresAt = Date.now() + 3600000; // +1 hora
 
-    // Solo generar token si la cuenta existe y está activa.
-    // Invited y disabled: no se genera token — respuesta genérica igual.
-    if (index !== -1 && isUserActive(users[index])) {
-        const resetToken     = crypto.randomBytes(32).toString('hex');
-        const resetExpiresAt = Date.now() + 3600000; // +1 hora
-        users[index]         = { ...users[index], resetToken, resetExpiresAt };
+    // Lock: re-read -> find active user -> update token -> write (atomic across containers)
+    let targetUserId = null;
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+        if (index === -1 || !isUserActive(users[index])) return { conflict: 'no_active_user' };
+        targetUserId = users[index].id;
+        users[index] = { ...users[index], resetToken, resetExpiresAt };
         writeJSON(USERS_DB, users);
+        return null;
+    });
+
+    if (!conflict) {
         log(`Password reset requested: ${normalizedEmail} expires=${new Date(resetExpiresAt).toISOString()}`, 'ACCESS');
         writeAuditLog({
             action:       'reset_password_request',
-            targetUserId: users[index].id,
+            targetUserId,
             actor:        null, // auto-servicio
             details:      { email: normalizedEmail, expiresAt: new Date(resetExpiresAt).toISOString() },
         });
-
         // En producción este token se enviaría por email, nunca en la respuesta.
         // Para entorno actual sin servicio de email, se devuelve para pruebas.
         return res.status(200).json({
@@ -2472,37 +2571,34 @@ const handleResetConfirm = async (req, res) => {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
     }
 
-    const users = readJSON(USERS_DB);
-    const index = users.findIndex(u => u.resetToken === token);
+    // Hash BEFORE lock — async work must not run while holding the cross-process lock
+    const hashedPassword = await hashPasswordIfNeeded(password);
 
-    if (index === -1) {
-        return res.status(404).json({ error: 'Token inválido o ya utilizado' });
-    }
+    // Lock: re-read -> validate token -> apply new password -> write (atomic across containers)
+    let updated = null;
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u.resetToken === token);
+        if (index === -1) return { conflict: 'not_found' };
+        const user = users[index];
+        if (!isUserActive(user)) {
+            log(`Reset rechazado — cuenta no activa: ${user.email} status=${user.accountStatus}`, 'ACCESS');
+            return { conflict: 'not_active' };
+        }
+        if (!user.resetExpiresAt || Date.now() > user.resetExpiresAt) {
+            log(`Reset rechazado — token expirado: ${user.email}`, 'ACCESS');
+            return { conflict: 'expired' };
+        }
+        const { resetToken: _rt, resetExpiresAt: _re, ...rest } = user;
+        updated = { ...rest, password: hashedPassword };
+        users[index] = updated;
+        writeJSON(USERS_DB, users);
+        return null;
+    });
 
-    const user = users[index];
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Token inválido o ya utilizado' });
+    if (conflict?.conflict === 'not_active') return res.status(409).json({ error: 'No se puede restablecer esta cuenta' });
+    if (conflict?.conflict === 'expired') return res.status(410).json({ error: 'El enlace de restablecimiento expiró. Solicita uno nuevo.', code: 'TOKEN_EXPIRED' });
 
-    if (!isUserActive(user)) {
-        log(`Reset rechazado — cuenta no activa: ${user.email} status=${user.accountStatus}`, 'ACCESS');
-        return res.status(409).json({ error: 'No se puede restablecer esta cuenta' });
-    }
-
-    if (!user.resetExpiresAt || Date.now() > user.resetExpiresAt) {
-        log(`Reset rechazado — token expirado: ${user.email}`, 'ACCESS');
-        return res.status(410).json({
-            error: 'El enlace de restablecimiento expiró. Solicita uno nuevo.',
-            code:  'TOKEN_EXPIRED',
-        });
-    }
-
-    // Aplicar nueva contraseña y eliminar token de un solo paso (mismo patrón que accept-invite)
-    const { resetToken: _rt, resetExpiresAt: _re, ...rest } = user;
-    const updated = {
-        ...rest,
-        password: await hashPasswordIfNeeded(password),
-    };
-
-    users[index] = updated;
-    writeJSON(USERS_DB, users);
     log(`Password reset completed: ${updated.email} (${updated.id})`, 'ACCESS');
     writeAuditLog({
         action:       'reset_password_confirm',
@@ -2510,7 +2606,6 @@ const handleResetConfirm = async (req, res) => {
         actor:        null, // auto-servicio via token
         details:      { email: updated.email },
     });
-
     return res.status(200).json({
         success: true,
         user:    sanitizeUserForClient(updated),
@@ -2527,36 +2622,27 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     }
 
     const normalizedEmail = normalizeEmail(newUser.email);
-    const users = readJSON(USERS_DB);
 
-    if (users.some(u => normalizeEmail(u.email) === normalizedEmail)) {
-        return res.status(409).json({ error: 'El email ya está registrado' });
-    }
-
-    if (newUser.id && users.some(u => u.id === newUser.id)) {
-        return res.status(409).json({ error: 'El ID de usuario ya existe' });
-    }
-
-    if (!newUser.id) {
-        newUser.id = `user-${Date.now()}`;
-    }
-
+    // Async work outside lock (hashing is slow, never hold lock during await)
+    if (!newUser.id) newUser.id = `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     newUser.password = await hashPasswordIfNeeded(newUser.password);
     newUser.roles = normalizeRoles(newUser.roles);
     newUser.email = normalizedEmail;
-
-    // Auth Pro: accountStatus explícito — nunca dejar null/vacío colarse como 'active'.
-    // Valores válidos: 'active' | 'invited' | 'disabled'.
-    // Si el admin no envía nada → 'active' (creación directa con password incluye activación implícita).
     const VALID_ACCOUNT_STATUSES = ['active', 'invited', 'disabled'];
-    if (!VALID_ACCOUNT_STATUSES.includes(newUser.accountStatus)) {
-        newUser.accountStatus = 'active';
-    }
-
+    if (!VALID_ACCOUNT_STATUSES.includes(newUser.accountStatus)) newUser.accountStatus = 'active';
     const userToSave = normalizeUser(newUser);
 
-    users.push(userToSave);
-    writeJSON(USERS_DB, users);
+    // Lock: re-read -> duplicate-check -> push -> write (atomic across containers)
+    const conflict = await mutateUsers((users) => {
+        if (users.some(u => normalizeEmail(u.email) === normalizedEmail)) return { conflict: 'dup_email' };
+        if (users.some(u => u.id === userToSave.id)) return { conflict: 'dup_id' };
+        users.push(userToSave);
+        writeJSON(USERS_DB, users);
+        return null;
+    });
+    if (conflict?.conflict === 'dup_email') return res.status(409).json({ error: 'El email ya está registrado' });
+    if (conflict?.conflict === 'dup_id')    return res.status(409).json({ error: 'El ID de usuario ya existe' });
+
     log(`User created: ${userToSave.email} (${userToSave.id})`, 'ACCESS');
     writeAuditLog({
         action:       'create_user',
@@ -2572,36 +2658,30 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
 app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
-    const users = readJSON(USERS_DB);
-    const index = users.findIndex(u => u.id === id);
+    if (updates.id && updates.id !== id) return res.status(400).json({ error: 'No se puede cambiar el ID del usuario' });
 
-    if (index === -1) {
-        return res.status(404).json({ error: 'Usuario no encontrado' });
-    }
-
-    if (updates.id && updates.id !== id) {
-        return res.status(400).json({ error: 'No se puede cambiar el ID del usuario' });
-    }
-
-    if (updates.email) {
-        const newEmail = normalizeEmail(updates.email);
-        // Validar duplicado si intenta cambiar su propio correo a otro existente
-        if (newEmail !== normalizeEmail(users[index].email)) {
-            if (users.some(u => normalizeEmail(u.email) === newEmail)) {
-                return res.status(409).json({ error: 'El nuevo email ya está en uso' });
-            }
-        }
-        updates.email = newEmail;
-    }
-    
-    const oldRoles = [...(users[index].roles || [])];
-    if (updates.roles) updates.roles = normalizeRoles(updates.roles);
+    // Async work outside lock (never await while holding the cross-process lock)
+    if (updates.roles)    updates.roles    = normalizeRoles(updates.roles);
     if (updates.password) updates.password = await hashPasswordIfNeeded(updates.password);
+    if (updates.email)    updates.email    = normalizeEmail(updates.email);
 
-    // Merge y renormalizar
-    const mergedUser = normalizeUser({ ...users[index], ...updates });
-    users[index] = mergedUser;
-    writeJSON(USERS_DB, users);
+    let mergedUser = null;
+    let oldRoles   = [];
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        if (updates.email && updates.email !== normalizeEmail(users[index].email)) {
+            if (users.some(u => normalizeEmail(u.email) === updates.email)) return { conflict: 'dup_email' };
+        }
+        oldRoles   = [...(users[index].roles || [])];
+        mergedUser = normalizeUser({ ...users[index], ...updates });
+        users[index] = mergedUser;
+        writeJSON(USERS_DB, users);
+        return null;
+    });
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict?.conflict === 'dup_email') return res.status(409).json({ error: 'El nuevo email ya está en uso' });
+
     log(`User updated: ${id}`, 'ACCESS');
 
     const actor = req.headers['x-user-id'] || null;
@@ -2628,18 +2708,19 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
 });
 
 // DELETE USER
-app.delete('/api/users/:id', requireAdminAccess, (req, res) => {
+app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
-    const users = readJSON(USERS_DB);
-    const index = users.findIndex(u => u.id === id);
+    let deletedUser = null;
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        deletedUser = users[index];
+        users.splice(index, 1);
+        writeJSON(USERS_DB, users);
+        return null;
+    });
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
 
-    if (index === -1) {
-        return res.status(404).json({ error: 'Usuario no encontrado' });
-    }
-
-    const deletedUser = users[index];
-    users.splice(index, 1);
-    writeJSON(USERS_DB, users);
     log(`User deleted: ${id}`, 'ACCESS');
     writeAuditLog({
         action:       'delete_user',
@@ -2660,27 +2741,29 @@ app.get('/api/schools', requireAuth, (req, res) => {
     }
 });
 
-app.post('/api/schools', requireAdminAccess, (req, res) => {
+app.post('/api/schools', requireAdminAccess, async (req, res) => {
     const newSchool = req.body;
     if (!newSchool.name) {
         return res.status(400).json({ error: 'Name is required' });
     }
 
-    const schools = readJSON(SCHOOLS_DB);
-    if (schools.some(s => s.name.toLowerCase() === newSchool.name.toLowerCase())) {
-        return res.status(409).json({ error: 'El Colegio ya existe' });
-    }
-
     if (!newSchool.id) {
         newSchool.id = `school-${Date.now()}`;
     }
-    
+
     if (!newSchool.createdAt) {
         newSchool.createdAt = new Date().toISOString();
     }
 
-    schools.push(newSchool);
-    writeJSON(SCHOOLS_DB, schools);
+    const conflict = await mutateSchools((schools) => {
+        if (schools.some(s => s.name.toLowerCase() === newSchool.name.toLowerCase())) {
+            return { conflict: 'exists' };
+        }
+        schools.push(newSchool);
+        writeJSON(SCHOOLS_DB, schools);
+        return null;
+    });
+    if (conflict) return res.status(409).json({ error: 'El Colegio ya existe' });
     invalidateSchoolsCache(); // SUBFASE 2.1: forzar recarga del cache tras nueva escuela
     log(`School created: ${newSchool.name}`, 'ACCESS');
 
@@ -2781,7 +2864,7 @@ app.get('/api/groups', requireAuth, (req, res) => {
     }
 });
 
-app.post('/api/groups', requireAdminAccess, (req, res) => {
+app.post('/api/groups', requireAdminAccess, async (req, res) => {
     const payload = req.body;
     if (!payload.name) {
         return res.status(400).json({ error: 'El nombre del grupo es obligatorio' });
@@ -2790,27 +2873,18 @@ app.post('/api/groups', requireAdminAccess, (req, res) => {
         payload.id = `group-${Date.now()}`;
     }
 
-    const groups = readJSON(GROUPS_DB);
-
-    if (groups.some(g => g.id === payload.id)) {
-        return res.status(409).json({ error: 'El ID del grupo ya existe' });
-    }
-
     // Aceptar nuevos campos + normalizar legacy antes de persistir
     const newGroup = normalizeGroup({
         ...payload,
-        // Campos seguros con defaults si el payload no los trae
         type:        payload.type        || 'course',
         mediatorIds: payload.mediatorIds || (payload.teacherId ? [payload.teacherId] : []),
         memberIds:   payload.memberIds   || payload.studentIds || [],
-        // Campos extendidos E2: aceptar si vienen, ignorar si no
         organizationId:       payload.organizationId       || undefined,
         availableContentIds:  payload.availableContentIds  || undefined,
         collectionIds:        payload.collectionIds        || undefined,
         accessStartsAt:       payload.accessStartsAt       || undefined,
         accessEndsAt:         payload.accessEndsAt         || undefined,
         accessRules:          payload.accessRules          || undefined,
-        // Clubes Externos
         kind:                 payload.kind                 || undefined,
         mediationMessage:     payload.mediationMessage     || undefined,
         mediationQuestions:   Array.isArray(payload.mediationQuestions) ? payload.mediationQuestions : undefined,
@@ -2819,78 +2893,82 @@ app.post('/api/groups', requireAdminAccess, (req, res) => {
         nextMilestone:        payload.nextMilestone        || undefined,
     });
 
-    groups.push(newGroup);
-    writeJSON(GROUPS_DB, groups);
+    const conflict = await mutateGroups((groups) => {
+        if (groups.some(g => g.id === payload.id)) {
+            return { conflict: 'dup_id' };
+        }
+        groups.push(newGroup);
+        writeJSON(GROUPS_DB, groups);
+        return null;
+    });
+    if (conflict) return res.status(409).json({ error: 'El ID del grupo ya existe' });
     log(`Group created: ${newGroup.id} (type=${newGroup.type})`, 'ACCESS');
     res.json(newGroup);
 });
 
-app.put('/api/groups/:id', requireAdminAccess, (req, res) => {
+app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
-    const groups = readJSON(GROUPS_DB);
-    const index = groups.findIndex(g => g.id === id);
-
-    if (index === -1) {
-        return res.status(404).json({ error: 'Grupo no encontrado' });
-    }
-
-    // Merge y renormalizar: preservar campos legacy del grupo existente,
-    // sobreescribir con updates y volver a normalizar para consistencia
-    const merged = normalizeGroup({ ...groups[index], ...updates });
-    groups[index] = merged;
-    writeJSON(GROUPS_DB, groups);
+    let merged = null;
+    const conflict = await mutateGroups((groups) => {
+        const index = groups.findIndex(g => g.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        merged = normalizeGroup({ ...groups[index], ...updates });
+        groups[index] = merged;
+        writeJSON(GROUPS_DB, groups);
+        return null;
+    });
+    if (conflict) return res.status(404).json({ error: 'Grupo no encontrado' });
     log(`Group updated: ${id} (type=${merged.type})`, 'ACCESS');
     res.json(merged);
 });
 
-app.delete('/api/groups/:id', requireAdminAccess, (req, res) => {
+app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
-    const groups = readJSON(GROUPS_DB);
-    const index = groups.findIndex(g => g.id === id);
-
-    if (index === -1) {
-        return res.status(404).json({ error: 'Grupo no encontrado' });
-    }
-
-    groups.splice(index, 1);
-    writeJSON(GROUPS_DB, groups);
+    const conflict = await mutateGroups((groups) => {
+        const index = groups.findIndex(g => g.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        groups.splice(index, 1);
+        writeJSON(GROUPS_DB, groups);
+        return null;
+    });
+    if (conflict) return res.status(404).json({ error: 'Grupo no encontrado' });
     log(`Group deleted: ${id}`, 'ACCESS');
     res.json({ success: true });
 });
 
 // --- CLUBES EXTERNOS: JOIN ---
-app.post('/api/groups/:id/join', requireUserAuth, (req, res) => {
+app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    const groups = readJSON(GROUPS_DB);
-    const index = groups.findIndex(g => g.id === id);
-
-    if (index === -1) {
-        return res.status(404).json({ error: 'Grupo no encontrado' });
-    }
-
-    const group = groups[index];
-
-    if (group.type !== 'club' || group.kind !== 'open') {
-        return res.status(403).json({ error: 'Este grupo no admite uniones directas' });
-    }
-
-    const memberIds = Array.isArray(group.memberIds) ? group.memberIds : [];
-    if (memberIds.includes(userId)) {
-        return res.json(normalizeGroup(group)); // idempotente
-    }
-
-    groups[index] = normalizeGroup({
-        ...group,
-        memberIds: [...memberIds, userId],
-        studentIds: [...new Set([...(Array.isArray(group.studentIds) ? group.studentIds : []), userId])]
+    let resultGroup = null;
+    const outcome = await mutateGroups((groups) => {
+        const index = groups.findIndex(g => g.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        const group = groups[index];
+        if (group.type !== 'club' || group.kind !== 'open') {
+            return { conflict: 'not_open_club' };
+        }
+        const memberIds = Array.isArray(group.memberIds) ? group.memberIds : [];
+        if (memberIds.includes(userId)) {
+            resultGroup = normalizeGroup(group); // idempotente
+            return { idempotent: true };
+        }
+        groups[index] = normalizeGroup({
+            ...group,
+            memberIds: [...memberIds, userId],
+            studentIds: [...new Set([...(Array.isArray(group.studentIds) ? group.studentIds : []), userId])]
+        });
+        resultGroup = groups[index];
+        writeJSON(GROUPS_DB, groups);
+        return null;
     });
-
-    writeJSON(GROUPS_DB, groups);
+    if (outcome?.conflict === 'not_found') return res.status(404).json({ error: 'Grupo no encontrado' });
+    if (outcome?.conflict === 'not_open_club') return res.status(403).json({ error: 'Este grupo no admite uniones directas' });
+    if (outcome?.idempotent) return res.json(resultGroup);
     log(`User ${userId} joined open club ${id}`, 'ACCESS');
-    res.json(groups[index]);
+    res.json(resultGroup);
 });
 
 // --- SECTIONS ROUTES ---
@@ -2911,37 +2989,43 @@ app.get('/api/sections', (req, res) => {
     }
 });
 
-app.post('/api/sections', requireAuth, (req, res) => {
+app.post('/api/sections', requireAuth, async (req, res) => {
     const newSection = req.body;
     if (!newSection.id) newSection.id = `section-${Date.now()}`;
 
-    const sections = readJSON(SECTIONS_DB);
-    sections.push(newSection);
-    writeJSON(SECTIONS_DB, sections);
+    await mutateSections((sections) => {
+        sections.push(newSection);
+        writeJSON(SECTIONS_DB, sections);
+    });
     res.json(newSection);
 });
 
-app.put('/api/sections/:id', requireAuth, (req, res) => {
+app.put('/api/sections/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
-    const sections = readJSON(SECTIONS_DB);
-    const index = sections.findIndex(s => s.id === id);
-
-    if (index === -1) return res.status(404).json({ error: 'Section not found' });
-
-    sections[index] = { ...sections[index], ...updates };
-    writeJSON(SECTIONS_DB, sections);
-    res.json(sections[index]);
+    let updated = null;
+    const conflict = await mutateSections((sections) => {
+        const index = sections.findIndex(s => s.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        sections[index] = { ...sections[index], ...updates };
+        updated = sections[index];
+        writeJSON(SECTIONS_DB, sections);
+        return null;
+    });
+    if (conflict) return res.status(404).json({ error: 'Section not found' });
+    res.json(updated);
 });
 
-app.delete('/api/sections/:id', requireAuth, (req, res) => {
+app.delete('/api/sections/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
-    const sections = readJSON(SECTIONS_DB);
-    const index = sections.findIndex(s => s.id === id);
-    if (index === -1) return res.status(404).json({ error: 'Section not found' });
-
-    sections.splice(index, 1);
-    writeJSON(SECTIONS_DB, sections);
+    const conflict = await mutateSections((sections) => {
+        const index = sections.findIndex(s => s.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        sections.splice(index, 1);
+        writeJSON(SECTIONS_DB, sections);
+        return null;
+    });
+    if (conflict) return res.status(404).json({ error: 'Section not found' });
     res.json({ success: true });
 });
 
@@ -2957,32 +3041,31 @@ app.get('/api/schools/:name/config', requireAuth, (req, res) => {
     }
 });
 
-app.post('/api/schools/:name/config', requireAdminAccess, (req, res) => {
+app.post('/api/schools/:name/config', requireAdminAccess, async (req, res) => {
     const { name } = req.params;
     const newConfig = req.body; // Expect { hiddenContentIds: [...] }
-
-    const configs = readJSON(SCHOOL_CONFIGS_DB);
-    const index = configs.findIndex(c => c.schoolName === name);
 
     const updatedConfig = {
         schoolName: name,
         hiddenContentIds: newConfig.hiddenContentIds || []
     };
 
-    if (index >= 0) {
-        configs[index] = updatedConfig;
-    } else {
-        configs.push(updatedConfig);
-    }
-
-    writeJSON(SCHOOL_CONFIGS_DB, configs);
+    await mutateSchoolConfigs((configs) => {
+        const index = configs.findIndex(c => c.schoolName === name);
+        if (index >= 0) {
+            configs[index] = updatedConfig;
+        } else {
+            configs.push(updatedConfig);
+        }
+        writeJSON(SCHOOL_CONFIGS_DB, configs);
+    });
     res.json(updatedConfig);
 });
 
 // RETRY/REPAIR ROUTE (Must be before static catch-all)
 // requireAdminRole aplicado vía app.use('/api/content', requireAdminRole).
 // requireAuth (x-admin-secret) fue removido: el frontend envía x-user-id, no el secret.
-app.post('/api/content/:id/retry', (req, res) => {
+app.post('/api/content/:id/retry', async (req, res) => {
     const { id } = req.params;
     const actorId = req.headers['x-user-id'] ?? 'unknown';
     log(`[RETRY_START] contentId=${id} actor=${actorId}`, 'INFO');
@@ -3003,35 +3086,41 @@ app.post('/api/content/:id/retry', (req, res) => {
             return res.status(409).json({ error: 'Ya hay un proceso de generación de audio en curso para este contenido. Espera a que termine.' });
         }
 
-        // Reset Status
-        content.status = 'disponible'; // Always disponible to read
-        content.ttsStatus = 'generando';
-        content.processingStatus = {
-            percentage: 0,
-            currentSentence: 0,
-            totalSentences: 0,
-            status: 'processing',
-            lastUpdated: new Date().toISOString()
-        };
-        writeJSON(DB_FILE, contentList);
+        // Reset Status (atomic cross-container lock)
+        await withFileLock(DB_FILE, () => {
+            const freshList = readJSON(DB_FILE);
+            const freshIdx = freshList.findIndex(c => c.id === id);
+            if (freshIdx !== -1) {
+                freshList[freshIdx].status = 'disponible';
+                freshList[freshIdx].ttsStatus = 'generando';
+                freshList[freshIdx].processingStatus = {
+                    percentage: 0, currentSentence: 0, totalSentences: 0,
+                    status: 'processing', lastUpdated: new Date().toISOString()
+                };
+                writeJSON(DB_FILE, freshList);
+            }
+        }, 'contentLock');
 
         // Async Trigger
         const relativePath = content.texto_plano_url.replace(/^\/uploads\//, '');
         const textFullPath = path.join(UPLOAD_DIR, relativePath);
 
         ttsQueue.enqueue(content.id, () => generateAudioForContent(content.id, textFullPath, UPLOAD_DIR, (progress) => {
-            // Re-read fresh to update
-            const currentList = readJSON(DB_FILE);
-            const idx = currentList.findIndex(c => c.id === id);
-            if (idx !== -1) {
-                // Merge status
-                currentList[idx].processingStatus = progress;
-                // If complete/failed
-                if (progress.status === 'completed') currentList[idx].ttsStatus = 'listo';
-                if (progress.status === 'failed' || progress.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
-                if (progress.status === 'processing') currentList[idx].ttsStatus = 'generando';
-                writeJSON(DB_FILE, currentList);
-            }
+            (async () => {
+                try {
+                    await withFileLock(DB_FILE, () => {
+                        const currentList = readJSON(DB_FILE);
+                        const idx = currentList.findIndex(c => c.id === id);
+                        if (idx !== -1) {
+                            currentList[idx].processingStatus = progress;
+                            if (progress.status === 'completed') currentList[idx].ttsStatus = 'listo';
+                            if (progress.status === 'failed' || progress.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
+                            if (progress.status === 'processing') currentList[idx].ttsStatus = 'generando';
+                            writeJSON(DB_FILE, currentList);
+                        }
+                    }, 'contentLock');
+                } catch (e) { /* ignore */ }
+            })();
         }))
             .then(r => {
                 if (r.abortedByProvider) log(`[RETRY_FAIL] contentId=${id} reason=provider_abort`, 'WARN');
@@ -3369,19 +3458,23 @@ app.post('/api/leo/ask', requireUserAuth, async (req, res) => {
         res.status(200).json({ success: true, answer: result.answer });
 
         // Persist Leo interaction metadata (fire-and-forget, never blocks response)
-        try {
-            const userId = req.headers['x-user-id'];
-            const contentId = req.body?.contentId ?? null;
-            const interactionType = req.body?.interactionType ?? 'chat';
-            const surface = req.body?.surface ?? 'reader';
-            const entry = { userId, contentId, timestamp: Date.now(), interactionType, surface };
-            const existing = readJSON(LEO_INTERACTIONS_DB) || [];
-            const updated = [...existing, entry];
-            const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
-            writeJSON(LEO_INTERACTIONS_DB, capped);
-        } catch (persistErr) {
-            log(`Leo interactions persist error: ${persistErr.message}`, 'WARN');
-        }
+        (async () => {
+            try {
+                const userId = req.headers['x-user-id'];
+                const contentId = req.body?.contentId ?? null;
+                const interactionType = req.body?.interactionType ?? 'chat';
+                const surface = req.body?.surface ?? 'reader';
+                const entry = { userId, contentId, timestamp: Date.now(), interactionType, surface };
+                await withFileLock(LEO_INTERACTIONS_DB, () => {
+                    const existing = readJSON(LEO_INTERACTIONS_DB) || [];
+                    const updated = [...existing, entry];
+                    const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
+                    writeJSON(LEO_INTERACTIONS_DB, capped);
+                }, 'leoInteractionsLock');
+            } catch (persistErr) {
+                log(`Leo interactions persist error: ${persistErr.message}`, 'WARN');
+            }
+        })();
     } catch (error) {
         log(`Leo ask error: ${error.message}`, 'WARN');
         const errStr = error.message.toLowerCase();
@@ -3424,29 +3517,30 @@ app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, (req, res) => {
     }
 });
 
-app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, (req, res) => {
+app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const payload = req.body;
         const key = makeProgressKey(userId, contentId);
 
-        const db = ensureLeoMemoryDbShape(readJSON(LEO_MEMORY_DB));
-        const existing = db.memoryMap[key] || {
-            recentAnchors: [],
-            lastQuestionType: null,
-            sessionReadingProgress: 0,
-            difficultyLevel: "medio",
-            pedagogicalStage: 'comprehension'
-        };
-
-        const newMemory = {
-            ...existing,
-            ...payload,
-            updatedAt: new Date().toISOString()
-        };
-
-        db.memoryMap[key] = newMemory;
-        writeJSON(LEO_MEMORY_DB, db);
+        let newMemory = null;
+        await mutateLeoMemory((raw) => {
+            const db = ensureLeoMemoryDbShape(raw);
+            const existing = db.memoryMap[key] || {
+                recentAnchors: [],
+                lastQuestionType: null,
+                sessionReadingProgress: 0,
+                difficultyLevel: "medio",
+                pedagogicalStage: 'comprehension'
+            };
+            newMemory = {
+                ...existing,
+                ...payload,
+                updatedAt: new Date().toISOString()
+            };
+            db.memoryMap[key] = newMemory;
+            writeJSON(LEO_MEMORY_DB, db);
+        });
 
         res.json({ success: true, memory: newMemory });
     } catch (e) {
@@ -3661,7 +3755,7 @@ function buildMetadatos(sub, student) {
 
 // POST /api/submissions — el estudiante persiste su entrega en el servidor
 // Complementa el guardado en localStorage; no reemplaza el flujo existente.
-app.post('/api/submissions', requireUserAuth, (req, res) => {
+app.post('/api/submissions', requireUserAuth, async (req, res) => {
     try {
         const { taskId, studentId, groupId, responseText, contentId, source, taskTitle } = req.body;
 
@@ -3674,13 +3768,7 @@ app.post('/api/submissions', requireUserAuth, (req, res) => {
             return res.status(403).json({ error: 'No autorizado: solo puedes enviar entregas propias' });
         }
 
-        const submissions = readJSON(SUBMISSIONS_DB);
-
-        // Reemplazar entrega previa del mismo estudiante para la misma tarea
-        const base = submissions.filter(s => !(s.taskId === taskId && s.studentId === studentId));
-
         const wordCount = responseText.trim().split(/\s+/).filter(Boolean).length;
-
         const newSub = {
             id:           `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             taskId,
@@ -3695,8 +3783,12 @@ app.post('/api/submissions', requireUserAuth, (req, res) => {
             ...(taskTitle  && { taskTitle }),
         };
 
-        base.push(newSub);
-        writeJSON(SUBMISSIONS_DB, base);
+        await mutateSubmissions((submissions) => {
+            // Reemplazar entrega previa del mismo estudiante para la misma tarea
+            const base = submissions.filter(s => !(s.taskId === taskId && s.studentId === studentId));
+            base.push(newSub);
+            writeJSON(SUBMISSIONS_DB, base);
+        });
 
         log(`Submission saved: task=${taskId} student=${studentId} words=${wordCount}`);
         res.status(201).json({ success: true, submission: newSub });
@@ -3895,20 +3987,7 @@ app.get('/api/students/:studentId/export-submissions', requireUserAuth, (req, re
     }
 });
 
-// --- STATIC FILES ---
-app.use('/uploads', express.static(UPLOAD_DIR));
 
-if (IS_PROD) {
-    const DIST_DIR = path.join(__dirname, '../dist');
-    app.use(express.static(DIST_DIR));
-    app.use((req, res) => {
-        if (req.accepts('html')) {
-            res.sendFile(path.join(DIST_DIR, 'index.html'));
-        } else {
-            res.status(404).json({ error: 'Not Found' });
-        }
-    });
-}
 
 
 // --- BACKGROUND JOBS (Passive Audio Audit Only) ---
@@ -3975,7 +4054,9 @@ const checkMissingTTS = async () => {
         }
 
         if (dbModified) {
-            writeJSON(DB_FILE, contentList);
+            await withFileLock(DB_FILE, () => {
+                writeJSON(DB_FILE, contentList);
+            }, 'contentLock');
             log('[Startup Audit] DB updated with pending TTS states and restored reader availability.', 'INFO');
         }
 
@@ -4003,7 +4084,7 @@ const checkMissingTTS = async () => {
 // Accepts a JSON array of ReadingEvent objects from the frontend.
 // Requires x-user-id header — events with a mismatching userId are discarded.
 // Rate-limited by the global /api/ limiter. Capped at 50k events rolling.
-app.post('/api/analytics/events', (req, res) => {
+app.post('/api/analytics/events', async (req, res) => {
     try {
         const events = req.body;
         if (!Array.isArray(events) || events.length === 0) {
@@ -4050,25 +4131,24 @@ app.post('/api/analytics/events', (req, res) => {
             return res.status(200).json({ ok: true, received: 0, discarded: events.length });
         }
 
-        const existing = readJSON(ANALYTICS_DB) || [];
+        const { received, deduplicated } = await withFileLock(ANALYTICS_DB, () => {
+            const existing = readJSON(ANALYTICS_DB) || [];
+            const existingEventIds = new Set(existing.map(e => e.eventId).filter(Boolean));
+            const deduped = validEvents.filter(e => {
+                if (!e.eventId) return true;
+                if (existingEventIds.has(e.eventId)) {
+                    log(`Analytics: evento duplicado descartado eventId=${e.eventId}`, 'DEBUG');
+                    return false;
+                }
+                return true;
+            });
+            const updated = [...existing, ...deduped];
+            const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
+            writeJSON(ANALYTICS_DB, capped);
+            return { received: deduped.length, deduplicated: validEvents.length - deduped.length };
+        }, 'analyticsLock');
 
-        // Idempotency: deduplicate by eventId — prevents double-write on LU retry
-        const existingEventIds = new Set(existing.map(e => e.eventId).filter(Boolean));
-        const deduped = validEvents.filter(e => {
-            if (!e.eventId) return true;              // legacy events without eventId always pass
-            if (existingEventIds.has(e.eventId)) {
-                log(`Analytics: evento duplicado descartado eventId=${e.eventId}`, 'DEBUG');
-                return false;
-            }
-            return true;
-        });
-
-        const updated = [...existing, ...deduped];
-        // Rolling cap: keep only the most recent 50k events
-        const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
-        writeJSON(ANALYTICS_DB, capped);
-
-        res.json({ ok: true, received: deduped.length, deduplicated: validEvents.length - deduped.length });
+        res.json({ ok: true, received, deduplicated });
     } catch (e) {
         log(`Analytics write error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'Failed to write analytics' });
@@ -4856,7 +4936,7 @@ function writeInterventionsDb(data) {
  * Body: { studentId, courseId, type, note, contentId?, patternsAtIntervention[], readingTimeMsAtIntervention }
  * Auth: mediador or administrador
  */
-app.post('/api/interventions', requireUserAuth, (req, res) => {
+app.post('/api/interventions', requireUserAuth, async (req, res) => {
     try {
         const requester = req.user;
         if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
@@ -4866,9 +4946,8 @@ app.post('/api/interventions', requireUserAuth, (req, res) => {
         if (!studentId || !courseId || !type) {
             return res.status(400).json({ error: 'Faltan campos: studentId, courseId, type' });
         }
-        const db = readInterventionsDb();
         const intervention = {
-            id:                          require('crypto').randomUUID(),
+            id:                          crypto.randomUUID(),
             mediatorId:                  requester.id,
             studentId,
             courseId,
@@ -4879,8 +4958,10 @@ app.post('/api/interventions', requireUserAuth, (req, res) => {
             readingTimeMsAtIntervention: Number(readingTimeMsAtIntervention) || 0,
             createdAt:                   new Date().toISOString(),
         };
-        db.interventions.push(intervention);
-        writeInterventionsDb(db);
+        await mutateInterventions((db) => {
+            db.interventions.push(intervention);
+            writeJSON(INTERVENTIONS_DB, db);
+        });
         log(`Intervention created: mediator=${requester.id} student=${studentId} type=${type}`, 'INFO');
         res.status(201).json({ success: true, intervention });
     } catch (e) {
@@ -5152,6 +5233,25 @@ app.post('/api/events', (req, res) => {
         res.status(500).json({ error: 'Error logging event' });
     }
 });
+
+
+// --- STATIC FILES ---
+app.use('/uploads', express.static(UPLOAD_DIR));
+
+if (IS_PROD) {
+    const DIST_DIR = path.join(__dirname, '../dist');
+    const INDEX_HTML = path.join(DIST_DIR, 'index.html');
+    app.use(express.static(DIST_DIR));
+    app.use((req, res) => {
+        // R4: fs.existsSync guard — si dist no existe (api container sin front),
+        // devolver 404 JSON en vez de 500 ENOENT al intentar sendFile.
+        if (req.accepts('html') && fs.existsSync(INDEX_HTML)) {
+            res.sendFile(INDEX_HTML);
+        } else {
+            res.status(404).json({ error: 'Not Found' });
+        }
+    });
+}
 
 app.listen(PORT, '0.0.0.0', () => {
     log(`Server running on port ${PORT}`);

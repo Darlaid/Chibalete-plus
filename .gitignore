@@ -102,8 +102,9 @@ dummy_text.txt
 /.claude/
 /Prompts/
 
-# Snapshot working dir (used by Phase 5 reconcile)
+# Snapshot working dirs (used by Phase 5 reconcile sprints)
 /_prod_snapshot_/
+/_api_snapshot_/
 
 # Ad-hoc scripts (whole directory ignored per sprint scope; legitimate scripts must be re-tracked explicitly)
 /scripts/
