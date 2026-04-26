@@ -1267,7 +1267,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 style={{ opacity: 1 - tranceIntensity * 0.80, transition: 'opacity 1.5s ease' }}
             >
                 <div className="flex items-center gap-6 bg-neutral-900/80 backdrop-blur-xl border border-white/10 px-8 py-4 rounded-2xl shadow-2xl">
-                    <button onClick={() => pb.skip(Math.max(0, currentIndex - 1))} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ChevronLeft size={24} /></button>
+                    <button onClick={() => pb.skipPrev()} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ChevronLeft size={24} /></button>
                     <button
                         onClick={togglePlay}
                         // QW-1: bloquear click mientras isHydrating. Evita el race donde el usuario
@@ -1297,7 +1297,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                                         : <Play size={32} className="ml-1 fill-current" />
                         }
                     </button>
-                    <button onClick={() => pb.skip(Math.min(sentences.length - 1, currentIndex + 1))} className="p-2 hover:bg-white/10 rounded-full transition-colors"><SkipForward size={24} /></button>
+                    <button onClick={() => pb.skipNext()} className="p-2 hover:bg-white/10 rounded-full transition-colors"><SkipForward size={24} /></button>
                     <div className="w-px h-8 bg-white/20 mx-2" />
                     <div className="flex flex-col items-center gap-1">
                         <button onClick={() => { const i = SPEEDS.indexOf(playbackSpeed); if (i < SPEEDS.length - 1) setPlaybackSpeed(SPEEDS[i + 1]); }} className="p-1 hover:bg-white/10 rounded-full"><Plus size={16} /></button>

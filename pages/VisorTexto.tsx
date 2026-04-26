@@ -623,6 +623,24 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         loadManifest();
     }, [content.id]);
 
+    // Reading-sync hotfix (2026-04-26): seed currentAudioIndex from saved progress
+    // so that "Escuchar" resumes near the user's last position instead of restarting at 0.
+    // Runs once when manifest + user + content are all available. Idempotent: only sets when
+    // target > 0, never overwrites a non-zero index the user already moved to in this session.
+    useEffect(() => {
+        if (!manifest || !user?.id || !content?.id) return;
+        const totalChunks = Object.keys(manifest).length;
+        if (totalChunks <= 0) return;
+        const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
+        if (!prog) return;
+        // Preferred: canonicalProgress.globalPercentage. Fallback: legacy porcentaje.
+        const pct = prog.canonicalProgress?.globalPercentage ?? prog.porcentaje ?? 0;
+        if (pct <= 0) return;
+        const target = Math.min(Math.floor((pct / 100) * totalChunks), totalChunks - 1);
+        if (target > 0) setCurrentAudioIndex(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [manifest, user?.id, content?.id]);
+
     // Speed Effect
     useEffect(() => {
         if (audioRef.current) {

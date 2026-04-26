@@ -109,6 +109,14 @@ export interface ImmersivePlayback {
     resume:      () => void;
     /** Salto explícito del usuario — siempre fuerza reproducción. */
     skip:        (index: number) => void;
+    /**
+     * Avanza una oración desde el índice actual (lectura ágil del ref interno,
+     * no del state — evita la race con React batching cuando se hace click
+     * justo al terminar una oración auto-advanced).
+     */
+    skipNext:    () => void;
+    /** Retrocede una oración desde el índice actual. Clamp en 0. */
+    skipPrev:    () => void;
     /** Llamar desde onEnded del elemento <audio>. */
     handleEnded: (player: 'A' | 'B') => void;
     /** Llamar desde onError del elemento <audio> — blob inválido o formato no soportado. */
@@ -568,6 +576,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         load(index, true);
     }, [load]);
 
+    // ── SKIP NEXT/PREV — leen del REF, no del state, para evitar race con React batching ────
+    // Resuelve el bug donde click en "avanzar" justo al terminar una oración
+    // (durante handleEnded auto-advance) producia delta=0 y reiniciaba la misma oracion.
+    const skipNext = useCallback((): void => {
+        skip(currentIdxRef.current + 1);
+    }, [skip]);
+
+    const skipPrev = useCallback((): void => {
+        skip(Math.max(0, currentIdxRef.current - 1));
+    }, [skip]);
+
     // ── HANDLE ENDED — transición gapless entre fragmentos ───────────────────
     const handleEnded = useCallback(async (endedPlayer: 'A' | 'B'): Promise<void> => {
         if (ctx.unmountedRef.current) return;
@@ -767,6 +786,8 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         pause,
         resume,
         skip,
+        skipNext,
+        skipPrev,
         handleEnded,
         handleAudioError,
         prefetch,
