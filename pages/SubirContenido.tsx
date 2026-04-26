@@ -688,6 +688,17 @@ const SubirContenido: React.FC = () => {
     // Loading + error state for uploads
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
+    // Double-submit guard — ref prevents concurrent submits even if state batching delays the disable
+    const submittingRef = useRef(false);
+
+    // Pre-upload file size validation — mirrors backend 50MB limit
+    const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+    const validateFileSize = (file: File | null, label: string): string | null => {
+        if (file && file.size > MAX_UPLOAD_BYTES) {
+            return `${label}: el archivo pesa ${(file.size / 1024 / 1024).toFixed(1)} MB y supera el límite de 50 MB.`;
+        }
+        return null;
+    };
 
     const handleRetryTTS = async (id: string) => {
         if (!confirm('¿Deseas reiniciar el proceso de generación de audio para este libro? esto puede tardar varios minutos.')) return;
@@ -705,11 +716,45 @@ const SubirContenido: React.FC = () => {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+
+        // Double-submit guard — ref check is synchronous, unlike state
+        if (submittingRef.current) return;
+        submittingRef.current = true;
+
+        // Admin identity guard — belt-and-suspenders before any network request
+        if (!user || !user.roles?.includes('administrador')) {
+            setUploadError('Error de permisos: tu sesión no tiene rol de administrador. Vuelve a iniciar sesión.');
+            submittingRef.current = false;
+            return;
+        }
+
+        // Session storage guard — verify x-user-id is available before any fetch
+        if (!dataService.hasActiveSession()) {
+            setUploadError('Tu sesión expiró. Vuelve a iniciar sesión como administrador y reintenta la publicación.');
+            submittingRef.current = false;
+            return;
+        }
+
+        // Pre-upload file size validation — fail fast, no roundtrip waste
+        const sizeErrors = [
+            validateFileSize(mainContent.coverFile, 'Portada'),
+            validateFileSize(mainContent.resourceFile, 'Archivo principal'),
+            validateFileSize(mainContent.textoPlanoFile, 'Texto plano (ES)'),
+            validateFileSize(mainContent.textoInglesFile, 'Texto (EN)'),
+            validateFileSize(mainContent.textoPortuguesFile, 'Texto (PT)'),
+            ...mainContent.ilustracionesFiles.map((f, i) => validateFileSize(f, `Ilustración ${i + 1}`)),
+            ...materiales.map((m, i) => validateFileSize(m.file, `Material ${i + 1}: ${m.titulo || 'sin nombre'}`)),
+        ].filter(Boolean);
+        if (sizeErrors.length > 0) {
+            setUploadError(sizeErrors.join('\n'));
+            submittingRef.current = false;
+            return;
+        }
+
         setIsUploading(true);
-        setUploadError(null);  // clear previous error on each attempt
+        setUploadError(null);
 
         // Declared OUTSIDE try so the catch block can access it for orphan cleanup.
-        // const inside try is block-scoped and invisible to catch — this was the ReferenceError.
         const uploadedUrlsForCleanup: string[] = [];
 
         try {
@@ -749,6 +794,11 @@ const SubirContenido: React.FC = () => {
                 if(url) uploadedUrlsForCleanup.push(url);
                 return url;
             };
+
+            // Hoisted so the materials loop (section 2) can access the uploaded cover URL
+            // without heuristics. Assigned inside the 'new' block below.
+            let savedCoverUrl: string | undefined;
+            let savedExistingContent: Content | undefined;
 
             // 1. Create OR Update Main Content
             if (uploadMode === 'new') { // Mode is 'new' even when editing (reused UI)
@@ -833,13 +883,20 @@ const SubirContenido: React.FC = () => {
 
                 // Upload Main Files for Content (Only if changed/present)
                 const coverUrl = await uploadIfFile(mainContent.coverFile);
+                savedCoverUrl = coverUrl; // hoist to outer scope for materials loop
                 const resourceUrl = await uploadIfFile(mainContent.resourceFile);
                 const txtEsUrl = await uploadIfFile(mainContent.textoPlanoFile);
                 const txtEnUrl = await uploadIfFile(mainContent.textoInglesFile);
                 const txtPtUrl = await uploadIfFile(mainContent.textoPortuguesFile);
 
-                // Illustrations: If new ones added, upload them. Ideally we append or replace. For simplicty, simple upload.
-                const illustrationUrls = await Promise.all(mainContent.ilustracionesFiles.map(f => dataService.uploadFile(f, parentId)));
+                // Illustrations: upload sequentially so each URL can be tracked for cleanup.
+                // Promise.all would lose partial results if one throws mid-array.
+                const illustrationUrls: string[] = [];
+                for (const f of mainContent.ilustracionesFiles) {
+                    const iUrl = await dataService.uploadFile(f, parentId);
+                    uploadedUrlsForCleanup.push(iUrl);
+                    illustrationUrls.push(iUrl);
+                }
 
                 // Upload Album Pages logic
                 let albumDataForApi: any[] | undefined = undefined;
@@ -885,6 +942,7 @@ const SubirContenido: React.FC = () => {
                 if (isUpdate) {
                     existingContent = existingParents.find(c => c.id === editingId);
                 }
+                savedExistingContent = existingContent; // hoist to outer scope for materials loop
 
                 const newContent: Content = {
                     // Default / New Values
@@ -947,16 +1005,21 @@ const SubirContenido: React.FC = () => {
                 await dataService.saveContentToApi(newContent);
             }
 
-            // 2. Create Child Materials
-            // We iterate sequentially to avoid overloading simpler servers, or parallel is fine.
+            // 2. Create Child Materials — sequential for orphan tracking
+            // savedCoverUrl es la URL real subida para el contenido padre — sin heurísticas.
+            // Fallback a la portada existente (edición) y luego a placeholder de emergencia.
+            const parentCoverUrl: string = savedCoverUrl || savedExistingContent?.portada_url || 'https://picsum.photos/200';
+
             for (let index = 0; index < materiales.length; index++) {
                 const mat = materiales[index];
                 // Check if File OR URL
                 if (mat.file || mat.url) {
-                    const matFileUrl = mat.file ? await dataService.uploadFile(mat.file, parentId) : (mat.url || '');
-                    const matCoverUrl = (uploadMode === 'new' && mainContent.coverFile)
-                        ? (await uploadIfFile(mainContent.coverFile) || 'https://picsum.photos/200') // Re-uploading implies duplication? Optimally reuse URL but getting it from above is cleaner in code for now. Actually, let's reuse if possible? No, file object is same, hash might be diff. Let's just use generic placeholder or re-upload.
-                        : 'https://picsum.photos/200';
+                    let matFileUrl = mat.url || '';
+                    if (mat.file) {
+                        matFileUrl = await dataService.uploadFile(mat.file, parentId);
+                        uploadedUrlsForCleanup.push(matFileUrl); // track for cleanup on failure
+                    }
+                    const matCoverUrl = parentCoverUrl;
 
                     const childContent: Content = {
                         id: `child-${parentId}-${index}-${Date.now()}`,
@@ -966,7 +1029,7 @@ const SubirContenido: React.FC = () => {
                         autor: mat.autor || mainContent.autor || 'Chibalete',
                         editorial: 'Chibalete',
                         descripcion_corta: mat.descripcion || `Material complementario para ${mainContent.titulo}`,
-                        portada_url: matCoverUrl.startsWith('http') ? matCoverUrl : matCoverUrl, // Simple check
+                        portada_url: matCoverUrl,
                         url_recurso: matFileUrl,
                         etiquetas: mat.etiquetas || ['Material', mat.tipo],
                         metricas: { veces_leido: 0, calificacion_promedio: 0 },
@@ -975,20 +1038,15 @@ const SubirContenido: React.FC = () => {
                         ...(mat.tipo === 'contexto_pedagogico' ? { useForLeoContext: true } : {})
                     } as Content;
 
-                    // If content has a REAL ID (not temporary timestamp), we Update instead of Create
-                    // Simple check: if ID doesn't start with 'child-' or is in our loaded list? 
-                    // Actually, if we loaded it, it has a real ID. If we created it new in UI, it has temp ID.
-                    // But dataService.saveContentToApi handles upsert if ID exists.
-                    // The issue: mat.id in state is EITHER real ID (from edit load) OR temp ID (Date.now).
-                    // We must determine if it's a temp ID to generate a NEW proper ID, or use existing.
-                    if (mat.id.length < 20 || mat.id.startsWith('child-')) {
-                        // Likely temp ID logic from prior code. Let's rely on saveContentToApi's ID logic.
-                    }
-                    // Wait, earlier logic generated unique ID always: id: `child-${parentId}-${index}-${Date.now()}`.
-                    // We should only use that for NEW items. For existing, use mat.id.
-
-                    if (!mat.id || !String(mat.id).includes('content-')) {
-                        // It's a new ui-generated item
+                    // ID resolution: materials loaded from the server have a stable ID
+                    // (stored in the content DB). Materials added fresh in this session
+                    // have a temp numeric ID from Date.now(). The reliable signal is
+                    // whether the ID exists in the list of server-loaded children (existingParents
+                    // doesn't have children, but we loaded them into `materiales` with their real IDs
+                    // via handleEditContent → dataService.getContenidosHijos). A purely numeric
+                    // string (length ≤ 15, all digits) is a Date.now() temp ID.
+                    const isServerPersisted = mat.id && mat.id.length > 15 && /\D/.test(mat.id);
+                    if (!isServerPersisted) {
                         childContent.id = `content-${Date.now()}-${index}`;
                     } else {
                         childContent.id = mat.id;
@@ -1001,48 +1059,47 @@ const SubirContenido: React.FC = () => {
             setCreatedContentId(parentId);
             setIsSubmitted(true);
             setIsUploading(false);
+            submittingRef.current = false;
 
         } catch (error: any) {
             console.error("Error al subir:", error);
-            
-            // W1: Best-effort purge of any files that were uploaded before the crash.
-            // Routed through dataService to keep auth centralized. Fire-and-forget.
-            if (uploadedUrlsForCleanup && uploadedUrlsForCleanup.length > 0) {
-                console.warn("⚠️ Intentando purga de archivos huérfanos:", uploadedUrlsForCleanup);
+
+            // Compensatory purge: best-effort cleanup of all uploaded files that
+            // weren't persisted because the operation failed. Fire-and-forget.
+            if (uploadedUrlsForCleanup.length > 0) {
+                console.warn(`⚠️ Purgando ${uploadedUrlsForCleanup.length} archivo(s) huérfano(s):`, uploadedUrlsForCleanup);
                 uploadedUrlsForCleanup.forEach(url => {
                     dataService.purgeOrphanFile(url); // best-effort, never throws
                 });
             }
 
-            const errorMessage =
+            const errorMessage: string =
                 error?.response?.data?.error ||
                 error?.message ||
                 String(error);
 
-            // Enhanced Error Feedback
-            let userFriendlyMessage = `Hubo un error (${errorMessage}).`;
-
-            if (errorMessage.includes("Invalid file type")) {
-                userFriendlyMessage = "Error: Tipo de archivo no permitido. Revisa las extensiones.";
-            } 
-            else if (
-                errorMessage.includes("File too large") ||
-                errorMessage.includes("supera el tamaño máximo permitido") ||
-                errorMessage.includes("500 MB")
-            ) {
-                userFriendlyMessage = "Error: El archivo es demasiado pesado (Max 500MB).";
-            } 
-            else if (errorMessage.includes("Network")) {
-                userFriendlyMessage = "Error de Red: No se pudo conectar con el servidor.";
-            } 
-            else if (errorMessage.includes("Unauthorized")) {
-                userFriendlyMessage = "Error de Permisos: No estás autorizado (Clave incorrecta). Verifique la configuración del servidor.";
+            // Map error signals to admin-friendly messages
+            let userFriendlyMessage: string;
+            if (errorMessage.includes('Invalid file type') || errorMessage.includes('extensión')) {
+                userFriendlyMessage = 'El tipo de archivo no está permitido. Revisa las extensiones aceptadas.';
+            } else if (errorMessage.includes('too large') || errorMessage.includes('demasiado pesado') || errorMessage.includes('50 MB') || errorMessage.includes('500 MB')) {
+                userFriendlyMessage = 'Un archivo supera el límite de 50 MB. Reduce su tamaño y vuelve a intentarlo.';
+            } else if (errorMessage.includes('Network') || errorMessage.includes('Failed to fetch') || errorMessage.includes('ERR_NETWORK')) {
+                userFriendlyMessage = 'Error de red: no se pudo conectar con el servidor. Verifica tu conexión y vuelve a intentarlo.\n\nSi los archivos ya habían subido antes del error, se intentó limpiarlos automáticamente.';
+            } else if (errorMessage.includes('401') || errorMessage.includes('x-user-id missing')) {
+                userFriendlyMessage = 'Tu sesión venció o no está activa. Vuelve a iniciar sesión como administrador.';
+            } else if (errorMessage.includes('403') || errorMessage.includes('Acceso denegado') || errorMessage.includes('rol administrador')) {
+                userFriendlyMessage = 'Tu cuenta no tiene permisos de administrador para realizar esta operación.';
+            } else if (errorMessage.includes('album_data inválido')) {
+                userFriendlyMessage = `El álbum tiene datos inválidos: ${errorMessage}`;
+            } else {
+                userFriendlyMessage = `Error al publicar: ${errorMessage}`;
             }
 
-            // L2: User sees only the friendly message; technical detail goes to console only
             console.error('[Upload Error - technical]', errorMessage);
             setUploadError(userFriendlyMessage);
-            setIsUploading(false); // always unblock UI — never leave the form frozen
+            setIsUploading(false);
+            submittingRef.current = false; // always release guard — never leave the form frozen
         }
     };
 

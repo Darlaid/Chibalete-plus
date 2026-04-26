@@ -107,6 +107,15 @@ class DataService {
     }
 
     /**
+     * hasActiveSession — true si hay un userId valido en storage. Sin network call.
+     * Usado por flujos admin (SubirContenido) para fail-fast antes de subir archivos.
+     */
+    public hasActiveSession(): boolean {
+        const id = this.getSessionUserId();
+        return !!(id && id.trim());
+    }
+
+    /**
      * Headers para operaciones de escritura que requieren rol administrador.
      * Usa x-user-id del usuario logueado — el backend valida el rol.
      * No embebe secretos en el bundle.
