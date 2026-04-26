@@ -202,6 +202,8 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         // C1: Reset audio position and cancel any in-flight legacy TTS request.
         // currentAudioIndex staying at e.g. 12 on a new content would play the wrong segment.
         // audioLoading staying true would show a stuck spinner on the new content.
+        // [RS-DEBUG] traza para diagnostico — remover en cleanup
+        console.debug('[RS-VT] setCurrentAudioIndex(0)', { caller: 'content-load-effect', contentId: content?.id, language, userId: user?.id });
         setCurrentAudioIndex(0);
         setAudioLoading(false);
         legacyTtsGenRef.current += 1; // any pending generarAudioTTS call will see a stale genId
@@ -632,12 +634,23 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         const totalChunks = Object.keys(manifest).length;
         if (totalChunks <= 0) return;
         const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
+        // [RS-DEBUG]
+        console.debug('[RS-VT] seed-effect:fired', {
+            contentId: content.id,
+            totalChunks,
+            hasProg: !!prog,
+            pct: prog?.canonicalProgress?.globalPercentage ?? prog?.porcentaje ?? 0,
+            currentAudioIndexAtFire: currentAudioIndex,
+        });
         if (!prog) return;
         // Preferred: canonicalProgress.globalPercentage. Fallback: legacy porcentaje.
         const pct = prog.canonicalProgress?.globalPercentage ?? prog.porcentaje ?? 0;
         if (pct <= 0) return;
         const target = Math.min(Math.floor((pct / 100) * totalChunks), totalChunks - 1);
-        if (target > 0) setCurrentAudioIndex(target);
+        if (target > 0) {
+            console.debug('[RS-VT] setCurrentAudioIndex(target)', { caller: 'progress-seed', target, pct, totalChunks });
+            setCurrentAudioIndex(target);
+        }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [manifest, user?.id, content?.id]);
 
@@ -687,16 +700,21 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const playNextSegment = () => {
         if (!manifest) return;
         const nextIndex = currentAudioIndex + 1;
+        // [RS-DEBUG]
+        console.debug('[RS-VT] playNextSegment', { fromIndex: currentAudioIndex, nextIndex, hasNext: !!manifest[nextIndex] });
         if (manifest[nextIndex]) {
             setCurrentAudioIndex(nextIndex);
             playManifestAudio(nextIndex);
         } else {
+            console.debug('[RS-VT] setCurrentAudioIndex(0)', { caller: 'playNextSegment-end', reason: 'manifest_end' });
             setIsPlaying(false);
             setCurrentAudioIndex(0);
         }
     };
 
     const playManifestAudio = (index: number) => {
+        // [RS-DEBUG]
+        console.debug('[RS-VT] playManifestAudio', { index, hasManifest: !!manifest, hasEntry: !!manifest?.[index] });
         if (!manifest || !manifest[index]) return;
         const entry = manifest[index];
         // Guard: malformed manifest entries (missing 'file') must not crash the player.
@@ -748,6 +766,12 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         // C1: Only valid for Spanish — the server generates manifests from ES text only.
         // Non-ES languages fall through to the legacy path.
         if (manifest && Object.keys(manifest).length > 0 && language === 'es') {
+            // [RS-DEBUG]
+            console.debug('[RS-VT] handleTTS:manifest-path', {
+                currentAudioIndex,
+                manifestKeys: Object.keys(manifest).length,
+                language,
+            });
             playManifestAudio(currentAudioIndex);
             return;
         }
