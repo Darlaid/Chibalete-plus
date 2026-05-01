@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import type { Content, Assignment } from '../types';
 import { getOfflineText, saveOfflineText } from '../utils/offlineTextCache';
 import { getResumeToast } from '../utils/canonicalProgress';
-import { ChevronLeft, Type, Volume2, VolumeX, Globe, Moon, Sun, Loader2, Ruler, Image as ImageIcon, X, Mic, RefreshCw, Settings, ChevronUp, ChevronDown, Minus, Plus } from 'lucide-react';
+import { ChevronLeft, Type, Volume2, VolumeX, Globe, Moon, Sun, Loader2, Ruler, Image as ImageIcon, X, Mic, RefreshCw, Settings, ChevronUp, ChevronDown, Minus, Plus, MessageCircle } from 'lucide-react';
 import { generarMicroResumenRecordatorio } from '../services/geminiService';
 import type { LeoSessionMemory } from '../services/geminiService';
 import { dataService } from '../services/dataService';
