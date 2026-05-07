@@ -327,6 +327,50 @@ echo "[CASO 9] Garantías de no-acción destructiva"
 }
 
 # ────────────────────────────────────────────────────────────────────
+# CASO 10 — Health/validate intra-container vía Node (no curl)
+# La imagen `chibalete/api` no incluye `curl`. El script debe usar
+# `docker exec ... node` en lugar de `docker exec ... curl` en los
+# health/validate intra-container. Bloque-4 fix (Sprint 022).
+# ────────────────────────────────────────────────────────────────────
+echo ""
+echo "[CASO 10] Health/validate intra-container vía Node (no curl)"
+{
+    # NO debe haber `docker exec ... curl` en código (comentarios sí permitidos)
+    has_docker_curl=$( ( grep -nE '^[^#]*docker exec[^"]*curl' "$DEPLOY_SCRIPT" \
+        | head -1 ) 2>/dev/null || true )
+    assert "código NO usa 'docker exec ... curl'" '[ -z "$has_docker_curl" ]'
+
+    # Helpers presentes
+    assert "docker_node_health() definido" 'grep -q "^docker_node_health()" "$DEPLOY_SCRIPT"'
+    assert "docker_node_validate() definido" 'grep -q "^docker_node_validate()" "$DEPLOY_SCRIPT"'
+
+    # Helpers usan `docker exec ... node` (no curl)
+    assert "docker_node_health usa 'docker exec ... node'" 'grep -A2 "^docker_node_health()" "$DEPLOY_SCRIPT" | grep -q "docker exec.*node"'
+    assert "docker_node_validate usa 'docker exec ... node'" 'grep -A2 "^docker_node_validate()" "$DEPLOY_SCRIPT" | grep -q "docker exec.*node"'
+
+    # Callers (poll/validate/commit-verify) usan los helpers
+    assert "poll_internal_health() llama docker_node_health" 'grep -A12 "^poll_internal_health()" "$DEPLOY_SCRIPT" | grep -q "docker_node_health"'
+    assert "validate_in_container() llama docker_node_validate" 'grep -A4 "^validate_in_container()" "$DEPLOY_SCRIPT" | grep -q "docker_node_validate"'
+
+    # Secret se pasa por env var de `docker exec -e`, NO por argv
+    assert "ADMIN_SECRET pasa via 'docker exec -e' (no argv)" 'grep -q "docker exec.*-e CHIB_ADMIN_SECRET" "$DEPLOY_SCRIPT"'
+    # ADMIN_SECRET NO debe aparecer en argv directo de un docker exec sin -e
+    has_argv_secret=$( ( grep -nE "docker exec[^\"]*\\\$ADMIN_SECRET[^=]" "$DEPLOY_SCRIPT" \
+        | head -1 ) 2>/dev/null || true )
+    assert "ADMIN_SECRET NO aparece en argv del docker exec" '[ -z "$has_argv_secret" ]'
+
+    # .gitattributes presente con regla LF para *.sh
+    GITATTR="$REPO_ROOT/.gitattributes"
+    assert ".gitattributes presente" '[ -f "$GITATTR" ]'
+    assert ".gitattributes fuerza LF para *.sh" 'grep -qE "^\*\.sh[[:space:]]+text[[:space:]]+eol=lf" "$GITATTR"'
+
+    # Scripts operacionales SIN CRLF en working tree
+    for s in scripts/deploy-backend.sh scripts/rollback-drill.sh scripts/backup-vps.sh scripts/deploy-smoke-release.sh scripts/__test__/deploy-backend-mocked.sh; do
+        assert "$s sin CRLF" '! file -b "$REPO_ROOT/'"$s"'" | grep -q CRLF'
+    done
+}
+
+# ────────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo " RESULTADO: pass=$PASS fail=$FAIL"

@@ -619,11 +619,11 @@ ssh root@VPS 'cd /var/www/chibalete && OLD=$(ls -1dt server.old-* | head -1) && 
 
 # 2) Restart staggered manual (NO ambos a la vez):
 ssh root@VPS 'docker stop chibalete_api_1 --time=30 && docker start chibalete_api_1'
-# Esperar healthy:
-ssh root@VPS 'docker exec chibalete_api_1 curl -s http://localhost:3000/api/health'
+# Esperar healthy (la imagen NO incluye curl; usar node):
+ssh root@VPS "docker exec -i chibalete_api_1 node -e 'require(\"http\").get(\"http://localhost:3000/api/health\",r=>r.pipe(process.stdout))'"
 
 ssh root@VPS 'docker stop chibalete_api_2 --time=30 && docker start chibalete_api_2'
-ssh root@VPS 'docker exec chibalete_api_2 curl -s http://localhost:3000/api/health'
+ssh root@VPS "docker exec -i chibalete_api_2 node -e 'require(\"http\").get(\"http://localhost:3000/api/health\",r=>r.pipe(process.stdout))'"
 
 # 3) Validate
 curl -sH "x-admin-secret: $S" $URL/api/admin/membership/validate | jq '.ok'
@@ -680,7 +680,7 @@ ssh root@72.60.158.97 'echo "--- docker ps ---"; docker ps --format "{{.Names}}\
 
 ### Health de las dos instancias
 ```bash
-ssh root@72.60.158.97 'for c in chibalete_api_1 chibalete_api_2; do echo "--- $c ---"; docker exec "$c" curl -s http://localhost:3000/api/health 2>&1; echo; done'
+ssh root@72.60.158.97 "for c in chibalete_api_1 chibalete_api_2; do echo \"--- \$c \---\"; docker exec -i \"\$c\" node -e 'require(\"http\").get(\"http://localhost:3000/api/health\",r=>r.pipe(process.stdout))' 2>&1; echo; done"
 ```
 
 ### Validate edge + counts

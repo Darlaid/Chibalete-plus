@@ -688,7 +688,7 @@ PASO RB.3 — Restart staggered (mismo patrón que deploy)
   ssh: docker stop chibalete_api_1 --time=30
   ssh: docker start chibalete_api_1
   ssh: wait healthy
-  ssh: docker exec chibalete_api_1 curl validate → ok=true
+  ssh: docker exec chibalete_api_1 node (validate) → ok=true
 
   ssh: docker stop chibalete_api_2 --time=30
   ssh: docker start chibalete_api_2
@@ -844,8 +844,8 @@ VPS
 [ ] docker ps: api_1 + api_2 con uptime < 10min, restarts=0
 [ ] /api/health vía edge → status=ok, uptime coherente con el restart
 [ ] /api/admin/membership/validate → ok=true, counts == baseline
-[ ] docker exec api_1 curl localhost:3000/api/health → ok
-[ ] docker exec api_2 curl localhost:3000/api/health → ok
+[ ] docker exec -i api_1 node -e 'require("http").get("http://localhost:3000/api/health",r=>r.pipe(process.stdout))' → status=ok
+[ ] docker exec -i api_2 node -e 'require("http").get("http://localhost:3000/api/health",r=>r.pipe(process.stdout))' → status=ok
 
 SMOKES (manuales en navegador, dos sesiones)
 [ ] Smoke A: assignTeacherToGroup + abrir Aula Viva

@@ -128,6 +128,27 @@ confirm() {
     esac
 }
 
+# HTTP GET intra-container vía Node — la imagen `chibalete/api` no incluye
+# `curl`. Imprime body en stdout y exit 0 si HTTP 200; vacío + exit !=0 si
+# fail. Mismo helper que en deploy-backend.sh (duplicado para evitar source).
+docker_node_health() {
+    local container="$1"
+    ssh_run "docker exec -i '$container' node" <<'NODE'
+const http = require("http");
+const req = http.get({host:"localhost",port:3000,path:"/api/health",timeout:5000}, r => {
+  let d = "";
+  r.on("data", c => d += c);
+  r.on("end", () => {
+    if (r.statusCode !== 200) process.exit(1);
+    process.stdout.write(d);
+    process.exit(0);
+  });
+});
+req.on("timeout", () => { req.destroy(); process.exit(4); });
+req.on("error", () => process.exit(3));
+NODE
+}
+
 # Espera health ok dentro de un container.
 poll_health() {
     local container="$1"
@@ -135,7 +156,7 @@ poll_health() {
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         local resp
-        resp=$(ssh_run "docker exec '$container' curl -sf --max-time 5 http://localhost:3000/api/health 2>/dev/null" || echo "")
+        resp=$(docker_node_health "$container" 2>/dev/null || echo "")
         if [ -n "$resp" ] && echo "$resp" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
             log "  ✓ $container healthy (${elapsed}s)"
             return 0

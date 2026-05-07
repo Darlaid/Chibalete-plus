@@ -234,6 +234,49 @@ free_gb_remote() {
     ssh_run "df -BG --output=avail '$path' 2>/dev/null | tail -1 | tr -dc '0-9'"
 }
 
+# HTTP GET intra-container vía Node — la imagen `chibalete/api` no incluye
+# `curl`. Imprime body en stdout y exit 0 si HTTP 200; vacío + exit !=0 si
+# fail. Timeout 5s. Reemplaza el patrón previo `docker exec ... curl`.
+docker_node_health() {
+    local container="$1"
+    ssh_run "docker exec -i '$container' node" <<'NODE'
+const http = require("http");
+const req = http.get({host:"localhost",port:3000,path:"/api/health",timeout:5000}, r => {
+  let d = "";
+  r.on("data", c => d += c);
+  r.on("end", () => {
+    if (r.statusCode !== 200) process.exit(1);
+    process.stdout.write(d);
+    process.exit(0);
+  });
+});
+req.on("timeout", () => { req.destroy(); process.exit(4); });
+req.on("error", () => process.exit(3));
+NODE
+}
+
+# Validate intra-container con ADMIN_SECRET. El secret se pasa por env var
+# `CHIB_ADMIN_SECRET` vía `docker exec -e` para que no aparezca en `ps` del
+# host ni del container. Devuelve el body siempre (incluso si HTTP !=200)
+# para que el caller pueda parsear `ok=false` con json_ok_true.
+docker_node_validate() {
+    local container="$1"
+    ssh_run "docker exec -i -e CHIB_ADMIN_SECRET=\"$ADMIN_SECRET\" '$container' node" <<'NODE'
+const http = require("http");
+const sec = process.env.CHIB_ADMIN_SECRET || "";
+const req = http.get({
+  host:"localhost", port:3000, path:"/api/admin/membership/validate",
+  timeout:30000, headers:{"x-admin-secret":sec}
+}, r => {
+  let d = "";
+  r.on("data", c => d += c);
+  r.on("end", () => { process.stdout.write(d); process.exit(r.statusCode === 200 ? 0 : 1); });
+});
+req.on("timeout", () => { req.destroy(); process.exit(4); });
+req.on("error", () => process.exit(3));
+NODE
+}
+
 # Extrae un campo string de JSON usando grep — evita dependencia jq para
 # checks binarios. Sólo válido para JSON plano sin escapes complejos.
 # Para parsing complejo (counts) sí usamos jq con `command -v jq` guard.
@@ -822,7 +865,8 @@ test -s '$REMOTE_BASE/server/server.js'
 }
 
 # ═════════════════════════════════════════════════════════════════════
-# Health poll INTERNO al container — usa docker exec curl, no edge
+# Health poll INTERNO al container — usa docker exec node, no edge
+# (la imagen `chibalete/api` no incluye `curl`; ver docker_node_health).
 # ═════════════════════════════════════════════════════════════════════
 poll_internal_health() {
     local container="$1"
@@ -831,7 +875,7 @@ poll_internal_health() {
     local resp
 
     while [ "$elapsed" -lt "$timeout" ]; do
-        resp=$(ssh_run "docker exec '$container' curl -sf --max-time 5 http://localhost:3000/api/health 2>/dev/null" || echo "")
+        resp=$(docker_node_health "$container" 2>/dev/null || echo "")
         if [ -n "$resp" ] && echo "$resp" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
             log "    healthy: $container (${elapsed}s)"
             # Pequeña gracia adicional para que loaders terminen
@@ -845,16 +889,12 @@ poll_internal_health() {
     return 1
 }
 
-# Validate aislado dentro del container — secret pasado vía stdin (no argv)
-# para que no aparezca en `ps` ni en logs. curl --config - lee headers de stdin.
+# Validate aislado dentro del container — secret pasado vía env var del
+# `docker exec -e` (no argv) para que no aparezca en `ps`. Implementación
+# en docker_node_validate (la imagen no incluye `curl`).
 validate_in_container() {
     local container="$1"
-    local resp
-    resp=$(ssh_run "docker exec -i '$container' curl --config - --max-time 30 -sS http://localhost:3000/api/admin/membership/validate" <<EOF
-header = "x-admin-secret: $ADMIN_SECRET"
-EOF
-)
-    echo "$resp"
+    docker_node_validate "$container"
 }
 
 # ═════════════════════════════════════════════════════════════════════
@@ -892,7 +932,7 @@ phase_b6() {
 
     # Verificar commit reportado por /api/health = nuestro GIT_SHA
     local health resp_commit
-    health=$(ssh_run "docker exec chibalete_api_1 curl -sf --max-time 5 http://localhost:3000/api/health")
+    health=$(docker_node_health chibalete_api_1)
     resp_commit=$(json_field_string "$health" commit)
     if [ "$resp_commit" != "$GIT_SHA_FULL" ] && [ "$resp_commit" != "$GIT_SHA" ]; then
         warn "  ⚠ api_1 reporta commit='$resp_commit', esperado='$GIT_SHA' (.deploy-info no se cargó?)"
