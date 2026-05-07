@@ -1,0 +1,349 @@
+name: a11y-baseline
+
+# ──────────────────────────────────────────────────────────────────────────
+# Auditoría real del Modo Accesible con axe-core (scripts/a11y-baseline.mjs).
+#
+# Diseño:
+#   - Job `resolve` genera la matriz dinámicamente desde data/content.json
+#     y data/users_db.json. Si el repo tiene 2 contents con texto_plano_url,
+#     la matriz audita 2 (loaded) + 3 (loading/error/access-denied) = 5 jobs.
+#     Si tiene 5 contents, son 5 + 3 = 8 jobs. La matriz NO se hardcodea.
+#   - Job `audit` levanta backend+frontend, espera, corre axe en el estado
+#     correspondiente y sube artifact por matriz. Cache de Playwright por
+#     versión pinneada del paquete.
+#   - Hoy NO bloquea merges — el equipo decide cuándo configurarlo como
+#     "required check" en branch protection. Ver docs/a11y/README.md.
+#   - Triggers conservadores (paths sensibles + manual). Evita gastar minutos
+#     de CI en PRs que no tocan el visor accesible.
+# ──────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      user_id:
+        description: 'USER_ID de fixture (id en data/users_db.json). Vacío = autodetectar.'
+        required: false
+        default: ''
+      content_id:
+        description: 'CONTENT_ID con texto_plano_url. Vacío = autodetectar todos.'
+        required: false
+        default: ''
+      strict:
+        description: 'Modo estricto (falla con critical/serious).'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+  pull_request:
+    paths:
+      - 'pages/VisorAccesible.tsx'
+      - 'components/accesible/**'
+      - 'utils/a11yDocumentParser.ts'
+      - 'hooks/useA11yAnalytics.ts'
+      - 'hooks/useAccessCheck.ts'
+      - 'scripts/a11y-baseline.mjs'
+      - '.github/workflows/a11y-baseline.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'pages/VisorAccesible.tsx'
+      - 'components/accesible/**'
+      - 'utils/a11yDocumentParser.ts'
+      - 'hooks/useA11yAnalytics.ts'
+      - 'hooks/useAccessCheck.ts'
+      - 'scripts/a11y-baseline.mjs'
+
+concurrency:
+  group: a11y-baseline-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Versión de Playwright pinneada en un solo lugar — cambia aquí cuando
+# se quiera actualizar. La cache de browsers se invalida automáticamente
+# al cambiar este valor (forma parte de la cache key).
+env:
+  PLAYWRIGHT_VERSION: '1.50.1'
+
+jobs:
+  # ── Job 1: resolve fixtures + construir matriz ─────────────────────────
+  resolve:
+    name: Resolve fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      matrix:    ${{ steps.gen.outputs.matrix }}
+      user_id:   ${{ steps.gen.outputs.user_id }}
+      n_loaded:  ${{ steps.gen.outputs.n_loaded }}
+      total:     ${{ steps.gen.outputs.total }}
+      warning:   ${{ steps.gen.outputs.warning }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate matrix from data fixtures
+        id: gen
+        env:
+          INPUT_USER_ID:    ${{ github.event.inputs.user_id }}
+          INPUT_CONTENT_ID: ${{ github.event.inputs.content_id }}
+        run: |
+          set -euo pipefail
+          node <<'EOF' > /tmp/matrix.json
+          const fs = require('fs');
+
+          const usersRaw   = JSON.parse(fs.readFileSync('data/users_db.json', 'utf8'));
+          const contentRaw = JSON.parse(fs.readFileSync('data/content.json',  'utf8'));
+          const users   = Array.isArray(usersRaw)   ? usersRaw   : (usersRaw.users   || Object.values(usersRaw));
+          const content = Array.isArray(contentRaw) ? contentRaw : (contentRaw.content || Object.values(contentRaw));
+
+          const inputUserId    = (process.env.INPUT_USER_ID    || '').trim();
+          const inputContentId = (process.env.INPUT_CONTENT_ID || '').trim();
+
+          // USER_ID: input > primer 'lector' > primer user.
+          let userId = inputUserId;
+          if (!userId) {
+            const lector = users.find(u => u && Array.isArray(u.roles) && u.roles.includes('lector'));
+            userId = (lector || users.find(u => u?.id) || {}).id || '';
+          }
+          if (!userId) {
+            console.error('::error::No se pudo resolver USER_ID. Verificar data/users_db.json.');
+            process.exit(2);
+          }
+
+          // CONTENT_IDs: input (single) o todos los Content con texto_plano_url.
+          let loadedContentIds = [];
+          if (inputContentId) {
+            loadedContentIds = [inputContentId];
+          } else {
+            loadedContentIds = content
+              .filter(c => c && typeof c.texto_plano_url === 'string' && c.texto_plano_url.length > 0)
+              .map(c => c.id)
+              .filter(Boolean);
+          }
+          if (loadedContentIds.length === 0) {
+            console.error('::error::No se encontró ningún Content con texto_plano_url.');
+            process.exit(2);
+          }
+
+          // Estados sintéticos (loading/error/access-denied) usan el primer
+          // content válido — el script intercepta los fetches, así que el
+          // contenido real es indiferente.
+          const probeContent = loadedContentIds[0];
+
+          const include = [
+            ...loadedContentIds.map(cid => ({ state: 'loaded',        content_id: cid })),
+            { state: 'loading',       content_id: probeContent },
+            { state: 'error',         content_id: probeContent },
+            { state: 'access-denied', content_id: probeContent },
+          ];
+
+          const matrix = { include };
+          const nLoaded = loadedContentIds.length;
+          const total   = include.length;
+
+          let warning = '';
+          if (nLoaded < 3) {
+            warning = `data/content.json tiene solo ${nLoaded} Content con texto_plano_url; el sprint pidió >=3. La matriz audita los ${nLoaded} disponibles + 3 estados sintéticos = ${total} jobs.`;
+            console.log(`::warning::${warning}`);
+          }
+
+          // Outputs separados (los pegamos en el job).
+          fs.writeFileSync('/tmp/user_id.txt',   userId);
+          fs.writeFileSync('/tmp/n_loaded.txt',  String(nLoaded));
+          fs.writeFileSync('/tmp/total.txt',     String(total));
+          fs.writeFileSync('/tmp/warning.txt',   warning);
+          process.stdout.write(JSON.stringify(matrix));
+          EOF
+
+          MATRIX=$(cat /tmp/matrix.json)
+          echo "matrix=$MATRIX"        >> "$GITHUB_OUTPUT"
+          echo "user_id=$(cat /tmp/user_id.txt)"   >> "$GITHUB_OUTPUT"
+          echo "n_loaded=$(cat /tmp/n_loaded.txt)" >> "$GITHUB_OUTPUT"
+          echo "total=$(cat /tmp/total.txt)"       >> "$GITHUB_OUTPUT"
+          WARN=$(cat /tmp/warning.txt)
+          if [ -n "$WARN" ]; then echo "warning=$WARN" >> "$GITHUB_OUTPUT"; fi
+
+          {
+            echo "## a11y-baseline · matriz resuelta"
+            echo ""
+            echo "- USER_ID: \`$(cat /tmp/user_id.txt)\`"
+            echo "- Contents con texto_plano_url: $(cat /tmp/n_loaded.txt)"
+            echo "- Total de jobs en la matriz: $(cat /tmp/total.txt)"
+            if [ -n "$WARN" ]; then
+              echo ""
+              echo "> ⚠ $WARN"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 2: audit (matriz dinámica) ─────────────────────────────────────
+  audit:
+    name: Audit /leer/accesible/:id
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
+
+    env:
+      NODE_ENV: development
+      CI: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install repo dependencies
+        run: npm ci
+
+      # ── Cache de Playwright browsers ──────────────────────────────────
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key:  ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      # Playwright + axe quedan como devDeps opt-in (no en package.json).
+      # Pin de versión hace que el cache sea consistente entre runs.
+      - name: Install Playwright + axe-core
+        run: |
+          npm install --no-save \
+            "playwright@${{ env.PLAYWRIGHT_VERSION }}" \
+            @axe-core/playwright
+
+      # Si el cache hit, el binario de Chromium ya está. Solo aseguramos
+      # las libs del sistema (apt deps) — operación rápida idempotente.
+      - name: Install Chromium (with browser)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium system deps only
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # ── Servicios en background ───────────────────────────────────────
+      - name: Start backend (port 3000)
+        run: |
+          mkdir -p .ci-logs
+          npm run server > .ci-logs/backend.log 2>&1 &
+          echo "$!" > .ci-logs/backend.pid
+
+      - name: Start frontend (port 5173)
+        run: |
+          npm run dev > .ci-logs/frontend.log 2>&1 &
+          echo "$!" > .ci-logs/frontend.pid
+
+      - name: Wait for services
+        run: |
+          set -euo pipefail
+          echo "Esperando backend :3000…"
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null -m 3 http://localhost:3000/api/lu/version; then
+              echo "  ✓ backend OK (intento $i)"
+              break
+            fi
+            sleep 2
+            if [ "$i" = "60" ]; then
+              echo "::error::Backend no respondió en 120s. Logs:"
+              tail -n 100 .ci-logs/backend.log || true
+              exit 2
+            fi
+          done
+
+          echo "Esperando frontend :5173…"
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null -m 3 http://localhost:5173/; then
+              echo "  ✓ frontend OK (intento $i)"
+              break
+            fi
+            sleep 2
+            if [ "$i" = "60" ]; then
+              echo "::error::Frontend no respondió en 120s. Logs:"
+              tail -n 100 .ci-logs/frontend.log || true
+              exit 2
+            fi
+          done
+
+      # ── Auditoría ─────────────────────────────────────────────────────
+      - name: Run axe baseline (state=${{ matrix.state }}, content=${{ matrix.content_id }})
+        id: axe
+        env:
+          USER_ID:    ${{ needs.resolve.outputs.user_id }}
+          CONTENT_ID: ${{ matrix.content_id }}
+          BASE_URL:   http://localhost:5173
+          A11Y_STATE: ${{ matrix.state }}
+        run: |
+          set -e
+          STRICT_INPUT="${{ github.event.inputs.strict }}"
+          if [ "$STRICT_INPUT" = "false" ]; then
+            echo "Modo no-estricto explícito (workflow_dispatch input)."
+            npm run a11y:test
+          else
+            npm run a11y:ci
+          fi
+
+      # ── Resumen visible en la UI del job ──────────────────────────────
+      - name: Append summary to GitHub job summary
+        if: always()
+        run: |
+          {
+            echo "## a11y-baseline — \`${{ matrix.state }}\` · \`${{ matrix.content_id }}\`"
+            echo ""
+            echo "USER_ID: \`${{ needs.resolve.outputs.user_id }}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -d docs/a11y ]; then
+            # El script genera baseline-{date}-{state}-{contentSlug}.md
+            MD=$(ls -1 docs/a11y/baseline-*-${{ matrix.state }}-*.md 2>/dev/null | tail -n 1 || true)
+            if [ -n "$MD" ] && [ -f "$MD" ]; then
+              cat "$MD" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "_No se encontró summary.md para este estado._" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      # ── Artifacts ─────────────────────────────────────────────────────
+      - name: Upload baseline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Nombre único por celda de la matriz (artifact names deben ser únicos
+          # dentro del workflow run en upload-artifact@v4).
+          name: a11y-baseline-${{ github.run_id }}-${{ matrix.state }}-${{ strategy.job-index }}
+          path: |
+            docs/a11y/baseline-*.json
+            docs/a11y/baseline-*.md
+            docs/a11y/baseline-*-error.png
+            .ci-logs/*.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ── Cleanup garantizado ───────────────────────────────────────────
+      - name: Stop services
+        if: always()
+        run: |
+          for pidfile in .ci-logs/backend.pid .ci-logs/frontend.pid; do
+            if [ -f "$pidfile" ]; then
+              PID=$(cat "$pidfile")
+              if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" 2>/dev/null || true
+                sleep 1
+                kill -9 "$PID" 2>/dev/null || true
+              fi
+            fi
+          done
+          pkill -f 'node server/server.js' 2>/dev/null || true
+          pkill -f 'vite' 2>/dev/null || true
+          true

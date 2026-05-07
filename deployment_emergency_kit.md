@@ -1,3 +1,35 @@
+# 🗄️ ARCHIVADO — Kit de Emergencia (PM2-first, primera instalación)
+
+> 🔴 **AVISO IMPORTANTE — DOCUMENTO ARCHIVADO**
+>
+> Este kit describe el setup **inicial PM2-first** que se usó para
+> instalar Chibalete+ desde cero en un VPS recién formateado, **antes**
+> del hardening Docker.
+>
+> **NO representa producción actual.** Producción corre como Docker
+> Compose con containers `chibalete_edge`, `chibalete_front`,
+> `chibalete_api_1`, `chibalete_api_2`. PM2 ya **NO gobierna producción**.
+>
+> **Si el VPS necesita reinstalación desde cero:** este kit ya no aplica
+> tal cual. Se requiere un nuevo runbook que prepare Docker + Docker
+> Compose y restaure desde backup. Hasta entonces, **NO seguir las
+> instrucciones aquí** sobre VPS de producción activa.
+>
+> **Si llegaste aquí buscando deploy regular:** detente. Lee
+> [`deployment_guide.md`](./deployment_guide.md), que es la **fuente
+> canónica operacional vigente**.
+>
+> **Contexto histórico:**
+> - Fecha aproximada: instalación inicial (PM2 + nginx host).
+> - Reemplazado por: stack Docker en `/opt/chibaleteplus/` con bind mounts.
+> - Sprint que cerró la transición: 022 Fase 2B.
+>
+> ---
+> *El contenido original sigue debajo, sin modificaciones, para auditoría
+> y trazabilidad histórica.*
+
+---
+
 # Guía Paso a Paso para Despliegue en VPS Nuevo (Modo Fácil)
 
 Este documento te guiará para configurar tu servidor VPS desde cero (recién formateado) y subir tu aplicación.

@@ -140,10 +140,19 @@ npm run preview      # Serve production build locally
 # Backend
 npm run server       # Start Express backend (server/server.js) on PORT 3000
 
-# Production (VPS)
-pm2 start ecosystem.config.cjs   # Start backend via PM2
-pm2 restart chibalete            # Restart app
+# Local backend with auto-restart (optional, dev only)
+pm2 start ecosystem.config.cjs   # NOTA: PM2 SOLO para dev local. Producción es Docker.
+                                 # El config tiene fail-fast que aborta si detecta
+                                 # marcadores de filesystem del VPS de producción.
 ```
+
+**Producción (VPS) NO usa PM2.** Producción corre como Docker Compose con
+4 containers (`chibalete_edge`, `chibalete_front`, `chibalete_api_1`,
+`chibalete_api_2`). Ver `deployment_guide.md` para el flujo de deploy
+real (build de imagen frontend / swap de bind mount + restart staggered
+backend). Cualquier instrucción `pm2` en docs históricas
+(`deployment_guide.legacy.md`, `deployment_emergency_kit.md`) está
+archivada y NO refleja producción actual.
 
 There are no configured lint or test commands.
 
@@ -174,12 +183,28 @@ ADMIN_SECRET=...       # Required for admin API routes (x-admin-secret header)
 
 **Reading viewers** (the core user-facing feature):
 - `VisorPDF` — PDF rendering via PDF.js (Mozilla CDN)
-- `VisorTexto` — Text reader with TTS support
-- `VisorInmersivo` — Accessible/immersive reading mode (OpenDyslexic font, high contrast)
+- `VisorTexto` — Modo Guiado: text reader with TTS, OpenDyslexic, high-contrast options
+- `VisorInmersivo` — Immersive reading mode (audio narration, sentence sync, BlockEngine/RewardEngine/TranceEngine)
 - `VisorAlbum` — Guided picture book mode
 - `VisorAudio`, `VisorVideo`
 
 `ContentRouter` component dynamically selects the right viewer based on content type.
+
+**Reader mode identifiers** (single source of truth: `utils/readerMode.ts`):
+
+| ID interno | Etiqueta UI | Ruta | Visor | Estado |
+|------------|-------------|------|-------|--------|
+| `pdf` | Modo Visual (PDF) | `/leer/pdf/:id` | VisorPDF | activo |
+| `text` | **Modo Guiado** | `/leer/texto/:id` | VisorTexto | activo |
+| `immersive` | Modo Inmersivo | `/leer/inmersivo/:id` | VisorInmersivo | activo |
+| `album` | Modo Álbum | `/ver/album/:id` | VisorAlbum | activo |
+| `accessible` | (Modo Guiado) | (= ruta de `text`) | (= VisorTexto) | **LEGACY** — solo para no romper datos persistidos en `progress_db.json` y `modeUsage.accessible`. **NO reutilizar.** |
+| `a11y` | Modo Accesible | `/leer/accesible/:id` | (sin implementar) | **RESERVADO** — para el nuevo Modo Accesible que se construirá desde cero |
+
+Reglas:
+- Código nuevo usa el tipo `ReaderMode` y los helpers `getReaderModeLabel` / `getReaderModeRoute` / `normalizeReaderMode` de `utils/readerMode.ts`.
+- Nunca escribir `'accessible'` en código nuevo: usar `'text'`.
+- No registrar la ruta `/leer/accesible/:id` ni emitir `'a11y'` al backend hasta que el visor exista y `BACKEND_READER_MODES` se amplíe.
 
 **Access control on the frontend:** `useAccessCheck` hook and `AccessWrapper` component call `/api/content/:id/access` before showing content. Never bypass this — the server is authoritative.
 
@@ -225,10 +250,24 @@ Single-file Express app (~1,946 lines) with JSON flat-file databases in `/data/`
 
 ### Deployment
 
-- Reverse proxy: Nginx → `localhost:3000` (Express)
-- Process manager: PM2 (`ecosystem.config.cjs`)
-- Static assets: Vite build output served by Nginx
-- See `deployment_guide.md` for full VPS (Hostinger) setup steps
+- **Topología producción:** Docker Compose en `/opt/chibaleteplus/docker-compose.yml`
+  (VPS Hostinger, single-host).
+- **4 containers:** `chibalete_edge` (nginx:alpine, puertos 80/443),
+  `chibalete_front` (imagen `chibalete/front:<tag>`, sin mounts),
+  `chibalete_api_1` y `chibalete_api_2` (imagen `chibalete/api:latest`,
+  con bind mounts a `/var/www/chibalete/data`, `data-critical`,
+  `public/uploads`, `server`).
+- **Frontend deploy** = build nueva imagen Docker + recreate container +
+  reload edge nginx.
+- **Backend deploy** = swap atómico de bind mount `/var/www/chibalete/server` +
+  restart staggered (`api_1` → validar → `api_2`). NO requiere rebuild de
+  imagen api salvo cambio de `package.json`.
+- **NO se usa PM2 en producción.** `ecosystem.config.cjs` es solo dev local
+  (con fail-fast runtime que aborta si detecta marcadores VPS).
+- **NO se usa nginx system en host.** Nginx vive en el container `chibalete_edge`.
+- Ver `deployment_guide.md` (canónico) para flujos paso a paso.
+- Documentos archivados: `deployment_guide.legacy.md` (PM2-first previo),
+  `deployment_emergency_kit.md` (instalación inicial PM2-first).
 
 ## Key Conventions
 
