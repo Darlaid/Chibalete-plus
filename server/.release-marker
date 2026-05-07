@@ -1,0 +1,10 @@
+# Chibalete+ — server/.release-marker
+# Generado por scripts/deploy-smoke-release.sh — NO editar a mano.
+# Plain text. NO leído por código de runtime — sólo evidencia humana.
+# Cada smoke release sobreescribe este archivo.
+release_tag=rel-2026-05-09-smoke-001
+git_sha=7ef157a7ff5c6a21367db83aa22aed3a98618da2
+parent_sha=7ef157a
+actor=nicolas.jimenez.a@gmail.com
+generated_at=2026-05-07T22:53:08Z
+notes=smoke release operacional Sprint 022
