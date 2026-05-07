@@ -84,13 +84,21 @@ CLEANUP_KEEP_FAILED="${CLEANUP_KEEP_FAILED:-5}"    # server.failed-* (forensics)
 # Lock (ver §LOCK STRATEGY abajo)
 REMOTE_LOCK_DIR="${REMOTE_LOCK_DIR:-/var/run/chib-deploy.lock}"
 
-# SSH options — ControlMaster reduce overhead en bucles de health-poll;
+# SSH options — ControlMaster deshabilitado deliberadamente.
+# En clientes Windows/Git-Bash y sandboxes CI, ControlMaster=auto +
+# múltiples invocaciones SSH concurrentes (acquire_lock) reproducen un
+# race condition: el primer SSH master crea el lock dir vía mkdir, la
+# sesión master muere por mux_client_request_session, el SSH siguiente
+# encuentra el dir existente sin metadata válida y aborta exit 11.
+# Con ControlMaster=no cada SSH es independiente y el race desaparece.
+# Trade-off aceptado: pequeño overhead por handshake en health-poll.
 # ConnectTimeout/ServerAlive evitan ssh zombie en redes flaky.
+# SSH_CM_DIR queda como dir residual benigno para preservar compatibilidad
+# con las funciones de cleanup (mkdir/rm-rf idempotentes); si en el futuro
+# se reactiva mux, las referencias existentes siguen funcionando.
 SSH_CM_DIR="${SSH_CM_DIR:-/tmp/chib-deploy-cm-$$}"
 SSH_OPTS=(
-    -o "ControlMaster=auto"
-    -o "ControlPath=$SSH_CM_DIR/cm-%r@%h:%p"
-    -o "ControlPersist=600"
+    -o "ControlMaster=no"
     -o "ConnectTimeout=15"
     -o "ServerAliveInterval=15"
     -o "ServerAliveCountMax=3"

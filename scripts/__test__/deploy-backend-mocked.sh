@@ -371,6 +371,43 @@ echo "[CASO 10] Health/validate intra-container vía Node (no curl)"
 }
 
 # ────────────────────────────────────────────────────────────────────
+# CASO 11 — SSH ControlMaster deshabilitado
+# Race condition reproducible (Bloque 5) entre acquire_lock y SSH mux
+# en clientes Windows/Git-Bash inducía exit 11 con metadata vacía. Fix
+# desactiva mux. Anti-regresión.
+# ────────────────────────────────────────────────────────────────────
+echo ""
+echo "[CASO 11] SSH ControlMaster deshabilitado (anti-race acquire_lock)"
+{
+    # NO debe haber ControlMaster=auto en código (sólo en comentarios)
+    has_cm_auto=$( ( grep -nE '^[^#]*ControlMaster=auto' "$DEPLOY_SCRIPT" \
+        | head -1 ) 2>/dev/null || true )
+    assert "código NO usa 'ControlMaster=auto'" '[ -z "$has_cm_auto" ]'
+
+    # Debe declarar ControlMaster=no explícitamente
+    assert "SSH_OPTS declara 'ControlMaster=no'" 'grep -qE "^[^#]*\"ControlMaster=no\"" "$DEPLOY_SCRIPT"'
+
+    # ControlPath ya no debe estar como opción activa de SSH
+    has_cp=$( ( grep -nE '^[^#]*-o[[:space:]]*"ControlPath' "$DEPLOY_SCRIPT" \
+        | head -1 ) 2>/dev/null || true )
+    assert "SSH_OPTS NO declara ControlPath" '[ -z "$has_cp" ]'
+
+    # ControlPersist ya no debe estar como opción activa
+    has_cpe=$( ( grep -nE '^[^#]*-o[[:space:]]*"ControlPersist' "$DEPLOY_SCRIPT" \
+        | head -1 ) 2>/dev/null || true )
+    assert "SSH_OPTS NO declara ControlPersist" '[ -z "$has_cpe" ]'
+
+    # SSH_CM_DIR queda definido (compat con cleanup/main idempotente)
+    assert "SSH_CM_DIR definido (compat residual)" 'grep -qE "^SSH_CM_DIR=" "$DEPLOY_SCRIPT"'
+
+    # mismo fix aplicado en rollback-drill.sh
+    ROLLBACK="$REPO_ROOT/scripts/rollback-drill.sh"
+    has_rb_cm_auto=$( ( grep -nE '^[^#]*ControlMaster=auto' "$ROLLBACK" \
+        | head -1 ) 2>/dev/null || true )
+    assert "rollback-drill NO usa ControlMaster=auto" '[ -z "$has_rb_cm_auto" ]'
+}
+
+# ────────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo " RESULTADO: pass=$PASS fail=$FAIL"
