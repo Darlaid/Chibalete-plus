@@ -69,7 +69,7 @@ const ReaderModeSelector: React.FC<ReaderModeSelectorProps> = ({ contentId, curr
             {content.texto_plano_url && (
                <button
                    onClick={() => handleSwitch('text')}
-                   title="Modo Lectura Fácil (Accesible)"
+                   title="Modo Guiado"
                    className={`p-3 rounded-xl transition-all ${currentMode === 'text' ? 'bg-indigo-600 text-white shadow-lg' : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-indigo-500'}`}
                >
                    <Type size={20} />

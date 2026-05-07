@@ -6,6 +6,17 @@ import {
     Users, BookOpen, School, BarChart2,
     ChevronRight, ExternalLink, FileText,
 } from 'lucide-react';
+// Sprint Data Backbone — Fase 4: sección aditiva con merge multi-escuela.
+import BackboneModeUsageSection, { type BackboneMetrics } from '../components/BackboneModeUsageSection';
+import { mergeBackboneMetrics } from '../utils/mergeBackboneMetrics';
+// Sprint Data Backbone — Fase 6A: embudos con merge multi-escuela aparte.
+import BackboneFunnelsSection, { type BackboneFunnels } from '../components/BackboneFunnelsSection';
+import { mergeBackboneFunnels } from '../utils/mergeBackboneFunnels';
+// Sprint Data Backbone — Fase 6B: insights con merge dedup-by-id.
+import BackboneInsightsSection, { type BackboneInsights } from '../components/BackboneInsightsSection';
+import { mergeBackboneInsights } from '../utils/mergeBackboneInsights';
+// Sprint Data Backbone — Fase 6C: alertas persistidas con histórico.
+import BackbonePersistentAlertsSection from '../components/BackbonePersistentAlertsSection';
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -611,6 +622,44 @@ const DashboardAdminLectura: React.FC = () => {
         [globalSummary, groupedAlerts, allCourses]
     );
 
+    // Sprint Data Backbone Fase 4: agregado de backboneMetrics de todas las
+    // escuelas visibles (respeta el filtro `selectedSchool`). Si una escuela
+    // no trae el campo (server viejo), simplemente queda fuera del merge.
+    const aggregatedBackboneMetrics = useMemo<BackboneMetrics | null>(() => {
+        const list: BackboneMetrics[] = [];
+        for (const m of visibleSchools) {
+            const bm = (m as { backboneMetrics?: BackboneMetrics }).backboneMetrics;
+            if (bm) list.push(bm);
+        }
+        return mergeBackboneMetrics(list);
+    }, [visibleSchools]);
+
+    // Sprint Data Backbone Fase 6A: agregado de funnels multi-escuela.
+    // Las tasas (conversionRate, dropoffs) se RECALCULAN desde los counts
+    // sumados — promediar tasas daría números falsos.
+    const aggregatedBackboneFunnels = useMemo<BackboneFunnels | null>(() => {
+        const list: BackboneFunnels[] = [];
+        for (const m of visibleSchools) {
+            const bf = (m as { backboneMetrics?: { funnels?: BackboneFunnels } })
+                .backboneMetrics?.funnels;
+            if (bf) list.push(bf);
+        }
+        return mergeBackboneFunnels(list);
+    }, [visibleSchools]);
+
+    // Sprint Data Backbone Fase 6B: insights mergeados por id (severity max,
+    // sampleSize sumado). No recomputamos las reglas sobre el agregado —
+    // ver doc de mergeBackboneInsights para limitaciones.
+    const aggregatedBackboneInsights = useMemo<BackboneInsights | null>(() => {
+        const list: BackboneInsights[] = [];
+        for (const m of visibleSchools) {
+            const bi = (m as { backboneMetrics?: { insights?: BackboneInsights } })
+                .backboneMetrics?.insights;
+            if (bi) list.push(bi);
+        }
+        return mergeBackboneInsights(list);
+    }, [visibleSchools]);
+
     // ── Loading / Error ─────────────────────────────────────────────────────
     if (loading) {
         return (
@@ -826,6 +875,26 @@ const DashboardAdminLectura: React.FC = () => {
                     </Card>
                 </div>
             )}
+
+            {/* ── DATA BACKBONE: USO POR MODO DE LECTURA ── */}
+            {/* Aditivo. Si ninguna escuela trae backboneMetrics, no renderiza. */}
+            <BackboneModeUsageSection metrics={aggregatedBackboneMetrics} />
+
+            {/* ── DATA BACKBONE: EMBUDOS DE CONVERSIÓN (Sprint 6A) ── */}
+            {/* Aditivo. Mergea funnels multi-escuela — null → no renderiza. */}
+            <BackboneFunnelsSection funnels={aggregatedBackboneFunnels} />
+
+            {/* ── DATA BACKBONE: INSIGHTS Y ALERTAS (Sprint 6B) ── */}
+            {/* Aditivo. Mergea insights por id (severity max, sampleSize sumado). */}
+            <BackboneInsightsSection insights={aggregatedBackboneInsights} />
+
+            {/* ── DATA BACKBONE: ALERTAS PERSISTIDAS (Sprint 6C) ── */}
+            {/* Lee /api/metrics/insights/states. Maneja vacío internamente. */}
+            <BackbonePersistentAlertsSection
+                available={true}
+                userId={user?.id}
+                scopeLevel="global"
+            />
 
             {/* ── FOOTER ── */}
             <p className="text-center text-xs text-gray-300 dark:text-gray-600">

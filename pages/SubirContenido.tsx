@@ -691,12 +691,33 @@ const SubirContenido: React.FC = () => {
     // Double-submit guard — ref prevents concurrent submits even if state batching delays the disable
     const submittingRef = useRef(false);
 
-    // Pre-upload file size validation — mirrors backend 50MB limit
-    const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-    const validateFileSize = (file: File | null, label: string): string | null => {
-        if (file && file.size > MAX_UPLOAD_BYTES) {
-            return `${label}: el archivo pesa ${(file.size / 1024 / 1024).toFixed(1)} MB y supera el límite de 50 MB.`;
-        }
+    // UX-5A — feedback de progreso por archivo durante la publicación.
+    // El estado vive aquí (no en dataService) porque sólo este formulario
+    // necesita rendering; el servicio devuelve un callback `onProgress`
+    // que actualiza este estado.
+    //
+    // Forma del estado:
+    //   { label, fraction, phase }
+    //   · label    — nombre humano del archivo en curso
+    //   · fraction — 0..1 mientras suben bytes; 1 cuando el último byte
+    //                salió pero el servidor sigue validando (la promesa
+    //                aún no resolvió)
+    //   · phase    — 'uploading' | 'processing'
+    //
+    // Cuando phase === 'processing' mostramos "Procesando…" en vez del
+    // porcentaje — el cliente ya entregó todo y el servidor está
+    // hasheando/validando, no avanza a 100% por culpa del cliente.
+    type UploadProgress = { label: string; fraction: number; phase: 'uploading' | 'processing' };
+    const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+
+    // Pre-upload validation — UX-5A. Removed the 50 MB hard cap (now
+    // delegated to backend `MAX_UPLOAD_BYTES` defensive limit). El
+    // formulario sigue protegiendo solo lo que el backend NO puede
+    // detectar a tiempo razonable: archivos vacíos (FormData de 0 bytes
+    // produce error críptico de multer) y archivos sin extensión legible.
+    const validateFileBasic = (file: File | null, label: string): string | null => {
+        if (!file) return null;
+        if (file.size === 0) return `${label}: el archivo está vacío.`;
         return null;
     };
 
@@ -735,18 +756,20 @@ const SubirContenido: React.FC = () => {
             return;
         }
 
-        // Pre-upload file size validation — fail fast, no roundtrip waste
-        const sizeErrors = [
-            validateFileSize(mainContent.coverFile, 'Portada'),
-            validateFileSize(mainContent.resourceFile, 'Archivo principal'),
-            validateFileSize(mainContent.textoPlanoFile, 'Texto plano (ES)'),
-            validateFileSize(mainContent.textoInglesFile, 'Texto (EN)'),
-            validateFileSize(mainContent.textoPortuguesFile, 'Texto (PT)'),
-            ...mainContent.ilustracionesFiles.map((f, i) => validateFileSize(f, `Ilustración ${i + 1}`)),
-            ...materiales.map((m, i) => validateFileSize(m.file, `Material ${i + 1}: ${m.titulo || 'sin nombre'}`)),
+        // Pre-upload sanity check — fail fast en archivos vacíos. El
+        // tope de tamaño se valida en el backend (defensive 2 GiB) y en
+        // nginx — el frontend ya no impone límite editorial artificial.
+        const basicErrors = [
+            validateFileBasic(mainContent.coverFile, 'Portada'),
+            validateFileBasic(mainContent.resourceFile, 'Archivo principal'),
+            validateFileBasic(mainContent.textoPlanoFile, 'Texto plano (ES)'),
+            validateFileBasic(mainContent.textoInglesFile, 'Texto (EN)'),
+            validateFileBasic(mainContent.textoPortuguesFile, 'Texto (PT)'),
+            ...mainContent.ilustracionesFiles.map((f, i) => validateFileBasic(f, `Ilustración ${i + 1}`)),
+            ...materiales.map((m, i) => validateFileBasic(m.file, `Material ${i + 1}: ${m.titulo || 'sin nombre'}`)),
         ].filter(Boolean);
-        if (sizeErrors.length > 0) {
-            setUploadError(sizeErrors.join('\n'));
+        if (basicErrors.length > 0) {
+            setUploadError(basicErrors.join('\n'));
             submittingRef.current = false;
             return;
         }
@@ -787,11 +810,39 @@ const SubirContenido: React.FC = () => {
             // Determine Parent ID (New, Existing-Linked, or Editing)
             const parentId = editingId ? editingId : (uploadMode === 'existing' ? selectedParentId : `content-${Date.now()}`);
 
-            // Helper to safely upload if file exists
-            const uploadIfFile = async (file: File | null) => {
+            // UX-5A — wrapper que reporta progreso visible al usuario por
+            // archivo. El backend tarda más de lo que dura el stream HTTP
+            // (validación binaria, hash con stream, mover a destino), así
+            // que distinguimos dos fases:
+            //   · 'uploading'  — bytes en vuelo, fraction = 0..1
+            //   · 'processing' — último byte ya salió, servidor validando
+            // Cuando el progress callback llega a 1 marcamos 'processing'
+            // hasta que la promesa resuelve.
+            const uploadWithProgress = async (file: File, label: string): Promise<string> => {
+                setUploadProgress({ label, fraction: 0, phase: 'uploading' });
+                try {
+                    const url = await dataService.uploadFile(file, parentId, (frac) => {
+                        setUploadProgress({
+                            label,
+                            fraction: frac,
+                            phase: frac >= 1 ? 'processing' : 'uploading',
+                        });
+                    });
+                    return url;
+                } finally {
+                    // Limpieza del progress queda a cargo del caller del
+                    // flujo completo (handleSubmit) — entre archivos se
+                    // sustituye por el siguiente label.
+                }
+            };
+
+            // Helper to safely upload if file exists. UX-5A: ahora con
+            // progreso visible. `label` es el nombre humano que aparece
+            // en la barra mientras sube ese archivo concreto.
+            const uploadIfFile = async (file: File | null, label: string) => {
                 if (!file) return undefined;
-                const url = await dataService.uploadFile(file, parentId);
-                if(url) uploadedUrlsForCleanup.push(url);
+                const url = await uploadWithProgress(file, label);
+                if (url) uploadedUrlsForCleanup.push(url);
                 return url;
             };
 
@@ -882,18 +933,19 @@ const SubirContenido: React.FC = () => {
                 }
 
                 // Upload Main Files for Content (Only if changed/present)
-                const coverUrl = await uploadIfFile(mainContent.coverFile);
+                const coverUrl = await uploadIfFile(mainContent.coverFile, 'Portada');
                 savedCoverUrl = coverUrl; // hoist to outer scope for materials loop
-                const resourceUrl = await uploadIfFile(mainContent.resourceFile);
-                const txtEsUrl = await uploadIfFile(mainContent.textoPlanoFile);
-                const txtEnUrl = await uploadIfFile(mainContent.textoInglesFile);
-                const txtPtUrl = await uploadIfFile(mainContent.textoPortuguesFile);
+                const resourceUrl = await uploadIfFile(mainContent.resourceFile, 'Archivo principal');
+                const txtEsUrl = await uploadIfFile(mainContent.textoPlanoFile, 'Texto plano (ES)');
+                const txtEnUrl = await uploadIfFile(mainContent.textoInglesFile, 'Texto (EN)');
+                const txtPtUrl = await uploadIfFile(mainContent.textoPortuguesFile, 'Texto (PT)');
 
                 // Illustrations: upload sequentially so each URL can be tracked for cleanup.
                 // Promise.all would lose partial results if one throws mid-array.
                 const illustrationUrls: string[] = [];
-                for (const f of mainContent.ilustracionesFiles) {
-                    const iUrl = await dataService.uploadFile(f, parentId);
+                for (let i = 0; i < mainContent.ilustracionesFiles.length; i++) {
+                    const f = mainContent.ilustracionesFiles[i];
+                    const iUrl = await uploadWithProgress(f, `Ilustración ${i + 1}/${mainContent.ilustracionesFiles.length}`);
                     uploadedUrlsForCleanup.push(iUrl);
                     illustrationUrls.push(iUrl);
                 }
@@ -902,18 +954,18 @@ const SubirContenido: React.FC = () => {
                 let albumDataForApi: any[] | undefined = undefined;
                 if (mainContent.tipo === 'libro_album') {
                     // Logic remains similar: upload if file present.
-                    albumDataForApi = await Promise.all(albumPages.map(async (p) => {
+                    albumDataForApi = await Promise.all(albumPages.map(async (p, pageIdx) => {
                         // Upload page image if a new file was selected
                         let pageUrl = p.imageUrl;
                         if (p.file instanceof File) {
-                            pageUrl = await dataService.uploadFile(p.file, parentId);
+                            pageUrl = await uploadWithProgress(p.file, `Página ${pageIdx + 1} (imagen)`);
                             if (pageUrl) uploadedUrlsForCleanup.push(pageUrl);
                         }
 
                         // Upload ambient audio file if one was selected in the editor
                         let ambientUrl = p.ambientAudioUrl;
                         if (p.ambientAudioFile instanceof File) {
-                            ambientUrl = await dataService.uploadFile(p.ambientAudioFile, parentId);
+                            ambientUrl = await uploadWithProgress(p.ambientAudioFile, `Página ${pageIdx + 1} (audio)`);
                             if (ambientUrl) uploadedUrlsForCleanup.push(ambientUrl);
                         }
 
@@ -1016,7 +1068,7 @@ const SubirContenido: React.FC = () => {
                 if (mat.file || mat.url) {
                     let matFileUrl = mat.url || '';
                     if (mat.file) {
-                        matFileUrl = await dataService.uploadFile(mat.file, parentId);
+                        matFileUrl = await uploadWithProgress(mat.file, `Material ${index + 1}: ${mat.titulo || 'sin nombre'}`);
                         uploadedUrlsForCleanup.push(matFileUrl); // track for cleanup on failure
                     }
                     const matCoverUrl = parentCoverUrl;
@@ -1059,6 +1111,7 @@ const SubirContenido: React.FC = () => {
             setCreatedContentId(parentId);
             setIsSubmitted(true);
             setIsUploading(false);
+            setUploadProgress(null);
             submittingRef.current = false;
 
         } catch (error: any) {
@@ -1078,12 +1131,17 @@ const SubirContenido: React.FC = () => {
                 error?.message ||
                 String(error);
 
-            // Map error signals to admin-friendly messages
+            // Map error signals to admin-friendly messages.
+            // UX-5A: el límite editorial artificial fue eliminado. El único
+            // tope que puede disparar mensaje de tamaño es el límite duro
+            // defensivo del backend (2 GiB) — y solo si un asset realmente
+            // lo excede. El backend devuelve `code: LIMIT_FILE_SIZE` con el
+            // límite real, así que no quemamos un número en el cliente.
             let userFriendlyMessage: string;
             if (errorMessage.includes('Invalid file type') || errorMessage.includes('extensión')) {
                 userFriendlyMessage = 'El tipo de archivo no está permitido. Revisa las extensiones aceptadas.';
-            } else if (errorMessage.includes('too large') || errorMessage.includes('demasiado pesado') || errorMessage.includes('50 MB') || errorMessage.includes('500 MB')) {
-                userFriendlyMessage = 'Un archivo supera el límite de 50 MB. Reduce su tamaño y vuelve a intentarlo.';
+            } else if (errorMessage.includes('LIMIT_FILE_SIZE') || errorMessage.includes('tope técnico') || errorMessage.includes('too large')) {
+                userFriendlyMessage = errorMessage; // El backend ya da mensaje con el tope real
             } else if (errorMessage.includes('Network') || errorMessage.includes('Failed to fetch') || errorMessage.includes('ERR_NETWORK')) {
                 userFriendlyMessage = 'Error de red: no se pudo conectar con el servidor. Verifica tu conexión y vuelve a intentarlo.\n\nSi los archivos ya habían subido antes del error, se intentó limpiarlos automáticamente.';
             } else if (errorMessage.includes('401') || errorMessage.includes('x-user-id missing')) {
@@ -1099,6 +1157,7 @@ const SubirContenido: React.FC = () => {
             console.error('[Upload Error - technical]', errorMessage);
             setUploadError(userFriendlyMessage);
             setIsUploading(false);
+            setUploadProgress(null);
             submittingRef.current = false; // always release guard — never leave the form frozen
         }
     };
@@ -2717,7 +2776,7 @@ const SubirContenido: React.FC = () => {
                                 <div className="bg-yellow-50 dark:bg-yellow-900/20 p-4 rounded-lg mb-4 border border-yellow-200 dark:border-yellow-700">
                                     <p className="text-sm text-yellow-800 dark:text-yellow-200 flex items-start">
                                         <span className="mr-2 text-lg">⚠️</span>
-                                        <b>Importante para Accesibilidad:</b> Para que funcionen el "Modo Lectura Accesible" (Dislexia/TTS) y el "Modo Inmersivo", es <u>obligatorio</u> subir el archivo de texto plano (.txt) correspondiente.
+                                        <b>Importante para Accesibilidad:</b> Para que funcionen el "Modo Guiado" (Dislexia/TTS) y el "Modo Inmersivo", es <u>obligatorio</u> subir el archivo de texto plano (.txt) correspondiente.
                                     </p>
                                 </div>
 
@@ -2902,6 +2961,38 @@ const SubirContenido: React.FC = () => {
                             <button onClick={() => setUploadError(null)} className="text-red-400 hover:text-red-600 shrink-0 ml-1">
                                 <X size={14} />
                             </button>
+                        </div>
+                    )}
+                    {/* UX-5A — barra de progreso por archivo. Solo se muestra
+                        durante uploads activos. En fase 'processing' (último
+                        byte ya salió pero el servidor sigue validando/hashing)
+                        cambiamos el texto para que el usuario sepa que el
+                        sistema está vivo aunque el % no avance. */}
+                    {isUploading && uploadProgress && (
+                        <div className="mb-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg px-4 py-3">
+                            <div className="flex items-center justify-between text-xs font-medium text-blue-800 dark:text-blue-200">
+                                <span className="truncate pr-2">{uploadProgress.label}</span>
+                                <span className="tabular-nums shrink-0">
+                                    {uploadProgress.phase === 'processing'
+                                        ? 'Procesando…'
+                                        : `${Math.round(uploadProgress.fraction * 100)}%`}
+                                </span>
+                            </div>
+                            <div
+                                role="progressbar"
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={Math.round(uploadProgress.fraction * 100)}
+                                aria-label={`Subida de ${uploadProgress.label}`}
+                                className="mt-2 w-full h-2 bg-blue-100 dark:bg-blue-950 rounded overflow-hidden"
+                            >
+                                <div
+                                    className={`h-full transition-all duration-200 ${uploadProgress.phase === 'processing' ? 'bg-blue-400 dark:bg-blue-500 animate-pulse w-full' : 'bg-blue-600 dark:bg-blue-400'}`}
+                                    style={uploadProgress.phase === 'processing'
+                                        ? undefined
+                                        : { width: `${Math.round(uploadProgress.fraction * 100)}%` }}
+                                />
+                            </div>
                         </div>
                     )}
                     <button

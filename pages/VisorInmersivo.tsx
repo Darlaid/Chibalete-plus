@@ -22,6 +22,9 @@ import { shouldTriggerLeo } from '../utils/leoTriggerEngine';
 import type { LeoTriggerReason } from '../utils/leoTriggerEngine';
 import { derivePedagogicalStage, deriveInitialDifficulty } from '../utils/leoStage';
 import { getResumeToast } from '../utils/canonicalProgress';
+// Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
+// Convive con analyticsService.track / usePlaybackAnalytics / pbLog. NO los reemplaza.
+import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
 
 // --- CONFIGURATION ---
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2.0];
@@ -214,6 +217,34 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         ? Math.round((currentIndex / sentences.length) * 100) : 0;
     const isTransitioningRef = useRef(false);
     isTransitioningRef.current = isTransitioning;
+
+    // ─── BACKBONE v1: paridad de sesión ──────────────────────────────────────
+    // Emite immersive.session_start / session_heartbeat / session_end hacia
+    // /api/v1/events. Es un canal nuevo en paralelo a:
+    //   - analyticsService.track legacy (analytics_db.json)
+    //   - usePlaybackAnalytics (playback_events.log)
+    //   - pbLog (/api/events)
+    // Ninguno de los anteriores se elimina ni se modifica.
+    //
+    // enabled: misma señal que la legacy session_start (post-hydration con
+    // sentences cargadas). Cuando isHydrating o sentences.length cambian,
+    // el hook reinicia su sesión interna sin afectar a los engines.
+    const backboneSession = useBackboneReadingSession({
+        enabled:    !isHydrating && !!user?.id && !!content?.id && sentences.length > 1,
+        userId:     user?.id,
+        contentId:  content.id,
+        mode:       'immersive',
+        getProgressFraction: () => {
+            const total = sentencesRef.current.length;
+            return total > 0 ? pb.currentIndex / total : 0;
+        },
+        getPayload: () => ({
+            source:               'VisorInmersivo',
+            currentSentenceIndex: pb.currentIndex,
+            totalSentences:       sentencesRef.current.length,
+            playbackSpeed,
+        }),
+    });
 
     // Always-fresh trigger: called at session end to start the next content.
     // Stored as a ref so closures with [] deps (block engine subscriber) always
@@ -423,6 +454,27 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             }));
         }
     }, [pb.isPlaying, sessionComplete]);
+
+    // ─── BACKBONE v1: audio_play / audio_pause + markActivity ─────────────────
+    // Watches pb.isPlaying transitions. Usa un ref propio (backbonePrevPlayingRef)
+    // para no chocar con prevIsPlayingRef del effect de Leo (que re-asigna ese ref
+    // en cada cambio). Emite eventos solo en transiciones — duplicados internos
+    // del player se deduplican server-side por eventId UNIQUE.
+    const backbonePrevPlayingRef = useRef(false);
+    useEffect(() => {
+        const wasPlaying = backbonePrevPlayingRef.current;
+        backbonePrevPlayingRef.current = pb.isPlaying;
+        if (pb.isPlaying && !wasPlaying) {
+            backboneSession.markActivity();
+            backboneSession.emitEvent('audio_play', {
+                payload: { sentenceIndex: pb.currentIndex },
+            });
+        } else if (!pb.isPlaying && wasPlaying) {
+            backboneSession.emitEvent('audio_pause', {
+                payload: { sentenceIndex: pb.currentIndex },
+            });
+        }
+    }, [pb.isPlaying, pb.currentIndex, backboneSession]);
 
     const pendingAnchor = useMemo(
         () => selectBestAnchor(anchorsMap[currentIndex] ?? [], leoMemory.difficultyLevel),

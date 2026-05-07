@@ -79,6 +79,8 @@ const VisorPDF = React.lazy(() => import('./pages/VisorPDF'));
 const VisorTexto = React.lazy(() => import('./pages/VisorTexto'));
 const VisorInmersivo = React.lazy(() => import('./pages/VisorInmersivo'));
 const VisorAlbum = React.lazy(() => import('./pages/VisorAlbum'));
+// Modo Accesible (mode='a11y') — Fase 0 hardening: protegido con ProtectedRoute + AccessWrapper.
+const VisorAccesible = React.lazy(() => import('./pages/VisorAccesible'));
 const GaleriaIlustraciones = React.lazy(() => import('./components/GaleriaIlustraciones'));
 const Bitacora = React.lazy(() => import('./pages/Bitacora'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
@@ -128,11 +130,11 @@ const getFriendlyReason = (rawReason?: string): string => {
 const AccessDeniedView: React.FC<{ reason?: string }> = ({ reason }) => {
     const navigate = useNavigate();
     const friendlyMessage = getFriendlyReason(reason);
-    
+
     return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 dark:bg-gray-900 p-8 text-center">
             <div className="text-6xl mb-4">🔒</div>
-            <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-2">Acceso no autorizado</h1>
+            <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-2">No tienes acceso a este contenido</h1>
             <p className="text-gray-500 dark:text-gray-400 mb-6 max-w-sm">
                 {friendlyMessage}
             </p>
@@ -142,6 +144,39 @@ const AccessDeniedView: React.FC<{ reason?: string }> = ({ reason }) => {
             >
                 ← Volver
             </button>
+        </div>
+    );
+};
+
+// --- UX-3B: Pantalla de error técnico de acceso (con reintentar) ---
+//
+// Distinta de AccessDeniedView: aquí el usuario probablemente SÍ tiene
+// acceso, pero el server no pudo verificarlo (5xx, red caída, sesión).
+// Ofrecer reintentar es la acción correcta — no enviar al usuario "atrás"
+// a navegar otra vez como si no tuviera permisos. Soporte agradece.
+const AccessErrorView: React.FC<{ reason?: string; onRetry: () => void }> = ({ reason, onRetry }) => {
+    const navigate = useNavigate();
+    return (
+        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 dark:bg-gray-900 p-8 text-center">
+            <div className="text-6xl mb-4">⚠️</div>
+            <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-2">No pudimos verificar tu acceso</h1>
+            <p className="text-gray-500 dark:text-gray-400 mb-6 max-w-sm">
+                {reason || 'Hubo un problema temporal al verificar tu acceso. Intenta de nuevo.'}
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                    onClick={onRetry}
+                    className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors shadow"
+                >
+                    Reintentar
+                </button>
+                <button
+                    onClick={() => navigate(-1)}
+                    className="px-5 py-2 bg-gray-200 dark:bg-gray-800 text-gray-800 dark:text-gray-100 font-medium rounded-lg hover:bg-gray-300 dark:hover:bg-gray-700 transition-colors"
+                >
+                    ← Volver
+                </button>
+            </div>
         </div>
     );
 };
@@ -170,9 +205,13 @@ const AccessWrapper: React.FC<{ children: (content: import('./types').Content) =
         );
     }
 
-    // Acceso denegado o error de servidor → vista segura, sin revelar el contenido
-    if (access.status === 'denied' || access.status === 'error') {
+    // UX-3B — diferenciamos denegación (no tienes acceso) de error técnico
+    // (no pudimos verificar). Esta última ofrece "Reintentar"; la primera no.
+    if (access.status === 'denied') {
         return <AccessDeniedView reason={access.reason} />;
+    }
+    if (access.status === 'error') {
+        return <AccessErrorView reason={access.reason} onRetry={access.retry} />;
     }
 
     // Acceso concedido por el servidor → renderizar el visor
@@ -200,6 +239,12 @@ const ImmersiveWrapper = () => {
 
 const AlbumWrapper = () => (
     <AccessWrapper>{(content) => <VisorAlbum content={content} />}</AccessWrapper>
+);
+
+// Modo Accesible: replica el patrón bloqueante de PDF/Texto/Álbum.
+// El visor NUNCA renderiza contenido si el servidor no autoriza.
+const AccesibleWrapper = () => (
+    <AccessWrapper>{(content) => <VisorAccesible content={content} />}</AccessWrapper>
 );
 
 const GalleryWrapper = () => (
@@ -305,6 +350,9 @@ const AppContent: React.FC = () => {
                 } />
                 <Route path="/leer/inmersivo/:id" element={
                     <ProtectedRoute access={getRouteAccess('/leer/inmersivo/:id')}><ImmersiveWrapper /></ProtectedRoute>
+                } />
+                <Route path="/leer/accesible/:id" element={
+                    <ProtectedRoute access={getRouteAccess('/leer/accesible/:id')}><AccesibleWrapper /></ProtectedRoute>
                 } />
                 <Route path="/ver/album/:id" element={
                     <ProtectedRoute access={getRouteAccess('/ver/album/:id')}><AlbumWrapper /></ProtectedRoute>

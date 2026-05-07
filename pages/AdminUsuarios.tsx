@@ -279,8 +279,27 @@ const AdminUsuarios: React.FC = () => {
         setIsUserModalOpen(true);
     };
 
-    const handleEditUser = (user: User) => {
-        setEditingUser({ ...user });
+    // Sprint 022 Fase 2A.2 — Caso CRÍTICO 2 cerrado.
+    //
+    // Antes: el form se abría con el snapshot de `user` que el caller
+    // tenía en su lista renderizada. Si otro admin (otra pestaña, otra
+    // sesión) había modificado los memberships de ese user en el
+    // intervalo, los checkboxes de groupIds reflejaban un estado vencido
+    // y guardar pisaba silenciosamente los cambios concurrentes vía el
+    // diff de PUT /api/users/:id.
+    //
+    // Ahora: refrescamos this.users una sola vez antes de abrir el form,
+    // y tomamos la versión más fresca disponible en cache. Si el refetch
+    // falla (red caída), abrimos con el cache actual y dejamos warn —
+    // el form sigue funcionando, solo sin garantía cross-actor.
+    const handleEditUser = async (user: User) => {
+        try {
+            await dataService.reloadUsers();
+        } catch (e) {
+            console.warn('[ADMIN_USUARIOS_RELOAD] failed; abriendo form con cache actual', (e as Error).message);
+        }
+        const fresh = dataService.getUsuarioById(user.id) ?? user;
+        setEditingUser({ ...fresh });
         setIsUserModalOpen(true);
     };
 

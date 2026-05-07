@@ -14,6 +14,7 @@ import crypto from 'crypto';
 import { fileTypeFromFile } from 'file-type';
 import archiver from 'archiver';
 
+import { buildHealthPayload, getHealthDefaults } from './healthHandler.js';
 import { ingestPedagogicalFile } from './leoIngester.js';
 import { normalizeRequest, dispatchInteraction } from './leoOrchestrator.js';
 import { getMediatorStudentSummary, getMediatorContentHistory } from './leoMediatorViewService.js';
@@ -28,6 +29,24 @@ import {
 import { UPLOADS_ROOT, USERS_DB } from './config.js';
 import { withUsersLock, withFileLock } from './usersLock.js';
 import {
+    resolveSingleGroupForSchool,
+    addUserIdToGroup,
+    addGroupIdToUser,
+    removeUserIdFromGroup,
+    removeGroupIdFromUser,
+    diffIds,
+    applyUserGroupsChange,
+    applyGroupMembersChange,
+    detachUserFromAllGroups,
+    detachGroupFromAllUsers,
+    unionGroupMemberIds,
+    getGroupMembers,
+    validateMembershipIntegrity,
+    ERR as GROUP_MEMBERSHIP_ERR,
+} from './groupMembershipService.js';
+import { buildGroupDiagnosis } from '../utils/groupDiagnosis.mjs';
+import { buildStudentStatus } from '../utils/studentStatus.mjs';
+import {
     getProgressItem,
     getProgressByUser,
     getAllProgressAsMap,
@@ -35,6 +54,37 @@ import {
     getProgressCount,
     closeDb as closeProgressDb,
 } from './progressService.js';
+// Data Backbone v1 — capa de eventos unificada (Sprint Fase 0).
+// Convive en paralelo con analytics_db.json / playback_events.log / log() — dual-write,
+// no reemplaza a nadie en Fase 0.
+import {
+    validateBackboneEvent,
+    insertEvent as insertBackboneEvent,
+    getBackboneEventsForMetrics,
+    getBackboneEventStats,
+} from './eventsService.js';
+import { ulid, isValidUlid } from './ulid.js';
+import {
+    aggregateBackboneMetrics,
+    emptyBackboneMetrics,
+} from './backboneMetrics.js';
+import {
+    computeBackboneFunnels,
+    emptyBackboneFunnels,
+} from './backboneFunnels.js';
+import {
+    computeBackboneInsights,
+    emptyBackboneInsights,
+} from './backboneInsights.js';
+import { processInsightsSnapshot } from './insightsStateEngine.js';
+import {
+    listStates             as listInsightStates,
+    listNotifications      as listInsightNotifications,
+    acknowledgeState       as ackInsightState,
+    dismissState           as dismissInsightState,
+    getScopeSummary        as getInsightsScopeSummary,
+    ensureDbOpen           as ensureInsightsDbOpen,
+} from './insightsStore.js';
 import {
     buildStudentReadingTimeMap,
     buildStudentSessionTimelines,
@@ -510,23 +560,44 @@ if (!fs.existsSync(USER_AUDIT_DB)) {
 
 // --- HELPER WRAPPERS ---
 // ── In-memory TTL cache for hot read-only JSON files ─────────────────────────
-// USERS_DB and DB_FILE are read on every request but rarely change.
+// DB_FILE and other JSON sources are read on every request but rarely change.
 // Caching them eliminates the dominant disk I/O bottleneck under load.
-// TTLs are conservative: stale data is a stale user record for ≤60s, acceptable.
-// writeJSON always invalidates so writes are immediately consistent.
+// writeJSON always invalidates so writes are immediately consistent within the
+// same process.
+//
+// MULTI-INSTANCE COHERENCE — UNCACHED_JSON_FILES
+// ----------------------------------------------
+// In multi-instance deployments (api_1 + api_2 behind nginx) each process
+// keeps its own _jsonCache. writeJSON only invalidates the cache of the
+// process that wrote — so a registration that hits api_1 leaves api_2
+// serving a stale list until its TTL expires. For files where read-after-
+// write coherence MUST hold across instances, list them here.
+//
+// USERS_DB belongs here because the admin invites/creates a user and expects
+// GET /api/users to reflect the change immediately on any instance. A 60s
+// TTL was tolerable on a single process but breaks the gestor de usuarios
+// in production (api_1 + api_2). This Set is the single source of truth for
+// "do not cache this file in-process"; both _getCachedJSON and _setCachedJSON
+// consult it (defense in depth).
+const UNCACHED_JSON_FILES = new Set([USERS_DB]);
+
 const _jsonCache = new Map(); // file → { data, expiresAt }
 const _JSON_TTL = {
-    [USERS_DB]: 60_000, // user records — 60s staleness acceptable
+    // Per-file TTL overrides. Empty by default — UNCACHED_JSON_FILES takes
+    // precedence over any TTL set here, so files in that Set are never cached
+    // regardless of this map.
 };
 const _JSON_TTL_DEFAULT = 30_000; // content.json and others — 30s
 
 const _getCachedJSON = (file) => {
+    if (UNCACHED_JSON_FILES.has(file)) return null;
     const entry = _jsonCache.get(file);
     if (entry && Date.now() < entry.expiresAt) return entry.data;
     return null;
 };
 
 const _setCachedJSON = (file, data) => {
+    if (UNCACHED_JSON_FILES.has(file)) return;
     const ttl = _JSON_TTL[file] ?? _JSON_TTL_DEFAULT;
     _jsonCache.set(file, { data, expiresAt: Date.now() + ttl });
 };
@@ -817,7 +888,14 @@ app.get('/api/server-time', (_req, res) => {
 
 // --- ROUTES ---
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+// Sprint 022 Fase 2B.4 — health endpoint enriquecido.
+// Defaults (service/instance/version/commit) se resuelven UNA VEZ al
+// startup; uptime y timestamp se computan por request. Sin auth, sin
+// locks, sin tocar data — seguro para polling externo y healthcheck del
+// edge. Backwards-compatible: `body.status === 'ok'` sigue siendo el
+// contrato de cualquier monitor previo.
+const _healthDefaults = getHealthDefaults();
+app.get('/api/health', (_req, res) => res.json(buildHealthPayload(_healthDefaults)));
 
 // --- SYSTEM METRICS (Phase 1 observability) ---
 app.get('/api/system/metrics', requireAdminAccess, (req, res) => {
@@ -1188,8 +1266,15 @@ app.get('/api/content/:id/access', (req, res) => {
 
     } catch (err) {
         log(`[access-check] Error inesperado: ${err.message}`, 'ERROR');
-        // Ante un error interno del servidor, falla de forma segura (denegado)
-        return res.status(500).json({ allowed: false, reason: 'Error de servidor al verificar acceso.' });
+        // UX-3B: distinguir error técnico (500 + errorCode ACCESS_CHECK_FAILED)
+        // de denegación legítima (403 + errorCode ACCESS_DENIED). El frontend
+        // los muestra distinto: error técnico ofrece reintentar, denegación
+        // dice "no tienes acceso". Mantenemos `allowed: false` por compat.
+        return res.status(500).json({
+            allowed:   false,
+            errorCode: 'ACCESS_CHECK_FAILED',
+            reason:    'Error de servidor al verificar acceso.',
+        });
     }
 });
 
@@ -1333,10 +1418,26 @@ const fileFilter = (req, file, cb) => {
     }
 };
 
-const upload = multer({ 
-    storage, 
+// Límite duro defensivo de uploads. NO es un límite editorial artificial —
+// es la frontera contra abuso (DoS por upload masivo / disco lleno). 2 GiB
+// cubre con holgura ecosistemas editoriales reales: EPUB ilustrados,
+// audiolibros completos, PDFs grandes, ZIPs de galerías. Si en el futuro
+// se necesita más, subir aquí y en `client_max_body_size` de nginx
+// simultáneamente — son los dos extremos de la misma cadena.
+//
+// Stack de defensa que se mantiene sobre el archivo aun bajo este límite:
+//   - diskStorage: el archivo NUNCA se carga entero en RAM.
+//   - fileFilter (capa 1): rechaza extensiones/MIMEs no permitidos antes
+//     de que multer comience a escribir.
+//   - magic numbers (capa 2): valida el contenido binario tras escribir.
+//   - hash con stream: dedup sin cargar en RAM.
+//   - safeUnlink en cualquier rama de error: no quedan huérfanos en TEMP.
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+const upload = multer({
+    storage,
     fileFilter,
-    limits: { fileSize: 50 * 1024 * 1024 } // 50MB límite para tolerar audios narrados largos y PDFs de cuentos.
+    limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
 
@@ -1344,19 +1445,48 @@ const upload = multer({
 app.post('/api/upload', (req, res) => {
     const actorId = req.headers['x-user-id'] ?? 'unknown';
     const parentId = req.query.parentId ?? 'none';
+    const startedAt = Date.now();
     log(`[UPLOAD_START] actor=${actorId} parentId=${parentId}`, 'INFO');
+
+    // Observabilidad de aborto: si el cliente cierra la conexión a mitad
+    // del stream (red caída, usuario cancela tab) queda log explícito.
+    // multer detiene la escritura automáticamente; este handler solo
+    // registra el evento.
+    let abortedByClient = false;
+    req.on('aborted', () => {
+        abortedByClient = true;
+        const elapsed = Date.now() - startedAt;
+        log(`[UPLOAD_ABORTED] actor=${actorId} parentId=${parentId} durationMs=${elapsed}`, 'WARN');
+    });
+
     upload.single('file')(req, res, async (err) => {
         if (err) {
-            log(`[UPLOAD_FAIL] actor=${actorId} reason=middleware error=${err.message}`, 'ERROR');
+            const elapsed = Date.now() - startedAt;
+            // LIMIT_FILE_SIZE es el código estable de multer para superar
+            // `limits.fileSize`. Lo distinguimos del resto porque el mensaje
+            // técnico ("File too large") no le sirve al admin — necesita
+            // saber el tope real configurado para decidir si insistir.
+            if (err.code === 'LIMIT_FILE_SIZE') {
+                const limitMB = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
+                log(`[UPLOAD_FAIL] actor=${actorId} reason=size_limit limitMB=${limitMB} durationMs=${elapsed}`, 'WARN');
+                return res.status(413).json({
+                    error: `El archivo supera el tope técnico de seguridad (${limitMB} MB). Si es un asset editorial legítimo, contacta al equipo para revisar el tope.`,
+                    code: 'LIMIT_FILE_SIZE',
+                    limitMB,
+                });
+            }
+            log(`[UPLOAD_FAIL] actor=${actorId} reason=middleware error=${err.message} durationMs=${elapsed}`, 'ERROR');
             return res.status(400).json({ error: err.message });
         }
         if (!req.file) {
-            log(`[UPLOAD_FAIL] actor=${actorId} reason=no_file`, 'WARN');
+            const elapsed = Date.now() - startedAt;
+            log(`[UPLOAD_FAIL] actor=${actorId} reason=no_file durationMs=${elapsed}`, 'WARN');
             return res.status(400).json({ error: 'No file uploaded' });
         }
 
         const tempPath = req.file.path;
-        
+        const sizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
+
         try {
             // Verificar Magic Numbers reales
             const fileTypeInfo = await fileTypeFromFile(tempPath);
@@ -1386,7 +1516,8 @@ app.post('/api/upload', (req, res) => {
             const dedupUrl = uploadHashIndex.get(fileHash);
             if (dedupUrl) {
                 safeUnlink(tempPath);
-                log(`[UPLOAD_DEDUP] actor=${actorId} url=${dedupUrl}`, 'INFO');
+                const elapsed = Date.now() - startedAt;
+                log(`[UPLOAD_DEDUP] actor=${actorId} url=${dedupUrl} sizeMB=${sizeMB} durationMs=${elapsed} mime=${fileTypeInfo?.mime ?? 'unknown'}`, 'INFO');
                 return res.status(200).json({
                     success: true,
                     url: dedupUrl,
@@ -1413,7 +1544,8 @@ app.post('/api/upload', (req, res) => {
             // Actualizar índice con el nuevo archivo
             uploadHashIndex.set(fileHash, fileUrl);
 
-            log(`[UPLOAD_SUCCESS] actor=${actorId} file=${req.file.filename} size=${req.file.size} parentId=${parentId}`, 'SUCCESS');
+            const elapsed = Date.now() - startedAt;
+            log(`[UPLOAD_SUCCESS] actor=${actorId} file=${req.file.filename} sizeMB=${sizeMB} durationMs=${elapsed} mime=${fileTypeInfo?.mime ?? 'text'} parentId=${parentId}`, 'SUCCESS');
             res.status(200).json({
                 success: true,
                 url: fileUrl,
@@ -1423,7 +1555,8 @@ app.post('/api/upload', (req, res) => {
             });
 
         } catch (validationErr) {
-            log(`[UPLOAD_FAIL] actor=${actorId} reason=validation_crash error=${validationErr.message}`, 'ERROR');
+            const elapsed = Date.now() - startedAt;
+            log(`[UPLOAD_FAIL] actor=${actorId} reason=validation_crash error=${validationErr.message} sizeMB=${sizeMB} durationMs=${elapsed} aborted=${abortedByClient}`, 'ERROR');
             safeUnlink(tempPath);
             res.status(415).json({ error: 'El archivo no pudo ser leído. Puede estar corrupto o truncado.' });
         }
@@ -2308,6 +2441,14 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
                 log(`Login bloqueado para ${normalizedEmail}: accountStatus=${user.accountStatus}`, 'ACCESS');
                 return res.status(401).json({ error: 'Credenciales inválidas' });
             }
+            // Sprint Modo Accesible — persistir lastLoginAt en el momento exacto
+            // del login exitoso. GET /api/students/:id/status lee este campo;
+            // sin esto, todos los estudiantes aparecen como REGISTERED_NO_LOGIN
+            // aunque hayan ingresado. Best-effort async: mismo patrón que el
+            // auto-upgrade del password — no bloqueamos la respuesta del login.
+            user.lastLoginAt = new Date().toISOString();
+            users[userIndex] = user;
+            writeJSONAsync(USERS_DB, users).catch(e => log(`lastLoginAt write error: ${e.message}`, 'ERROR'));
             log(`Login exitoso: ${normalizedEmail} ip=${req.ip}`, 'ACCESS');
             return res.json({ success: true, user: sanitizeUserForClient(user) });
         }
@@ -2333,6 +2474,33 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
         return res.status(400).json({ error: 'email y nombre_completo son obligatorios' });
     }
 
+    // GROUP_REQUIRED guard — Sprint membresías. Un lector no puede quedar
+    // huérfano: tiene que llegar a Aula Viva con groupIds poblado. Si el
+    // caller no envía groupIds, intentamos resolver vía single-group school
+    // a partir del nombre de `colegio`. Si tampoco resuelve, rechazamos.
+    const normalizedRoles = normalizeRoles(roles);
+    const isLectorInvite  = normalizedRoles.includes('lector');
+    let resolvedGroupIds  = Array.isArray(groupIds) ? groupIds.filter(g => typeof g === 'string' && g) : [];
+    if (isLectorInvite && resolvedGroupIds.length === 0) {
+        if (colegio) {
+            const groupsAll = readJSON(GROUPS_DB) || [];
+            const r = resolveSingleGroupForSchool(colegio, groupsAll);
+            if (r.error === GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP) {
+                return res.status(400).json({
+                    error: GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP,
+                    message: `La institución "${colegio}" tiene varios grupos. Especifica groupIds explícitamente.`,
+                });
+            }
+            if (r.groupId) resolvedGroupIds = [r.groupId];
+        }
+    }
+    if (isLectorInvite && resolvedGroupIds.length === 0) {
+        return res.status(400).json({
+            error:   GROUP_MEMBERSHIP_ERR.GROUP_REQUIRED,
+            message: 'Todo lector debe estar asignado a un grupo para aparecer en Aula Viva. Envía groupIds o crea primero un grupo para esta institución.',
+        });
+    }
+
     const normalizedEmail = normalizeEmail(email);
     // Pre-generate outside lock (pure sync computation)
     const inviteToken     = crypto.randomBytes(32).toString('hex');
@@ -2342,10 +2510,10 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
         email:            normalizedEmail,
         nombre_completo,
         nombre_usuario:   normalizedEmail.split('@')[0],
-        roles:            normalizeRoles(roles),
+        roles:            normalizedRoles,
         mediatorKind:     mediatorKind || undefined,
         colegio:          colegio || '',
-        groupIds:         Array.isArray(groupIds) ? groupIds : [],
+        groupIds:         resolvedGroupIds,
         avatar_url:       '',
         bio_corta:        '',
         libros_leidos:    0,
@@ -2358,26 +2526,48 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
         // Sin password intencionalmente
     });
 
-    // Lock: re-read -> check -> write (atomic across containers)
+    // Lock anidado: groupsLock exterior, usersLock interior. Misma orden que
+    // migrate-memberships.mjs (sin riesgo de deadlock con flujos sequential que
+    // toman uno solo). La escritura bidireccional es ATÓMICA: si falla la
+    // mitad-grupo, la mitad-usuario no se persiste. El antiguo try/catch que
+    // creaba el user igual y solo emitía WARN era el bug histórico (lector
+    // huérfano invisible en Aula Viva).
     let result = null;
-    const conflict = await mutateUsers((users) => {
-        const existingIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
-        if (existingIndex !== -1) {
-            const existing = users[existingIndex];
-            if (existing.accountStatus !== 'invited') return { conflict: 'active' };
-            // Re-invite: update token, preserve rest of profile
-            users[existingIndex] = { ...existing, inviteToken, inviteExpiresAt };
-            result = { regenerated: true, userId: existing.id, email: existing.email };
-            writeJSON(USERS_DB, users);
-            return null;
-        }
-        users.push(newUser);
-        result = { regenerated: false, userId: newUser.id, email: newUser.email };
-        writeJSON(USERS_DB, users);
-        return null;
-    });
+    let outcome = null;
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const users  = readJSON(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
 
-    if (conflict?.conflict === 'active') {
+            const existingIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+            if (existingIndex !== -1) {
+                const existing = users[existingIndex];
+                if (existing.accountStatus !== 'invited') { outcome = { conflict: 'active' }; return; }
+                // Re-invite: update token, preserve rest of profile (no membership write).
+                users[existingIndex] = { ...existing, inviteToken, inviteExpiresAt };
+                writeJSON(USERS_DB, users);
+                result = { regenerated: true, userId: existing.id, email: existing.email };
+                return;
+            }
+
+            // Mutación in-memory: primero grupos, luego user push.
+            let groupsTouched = false;
+            for (const gid of resolvedGroupIds) {
+                const g = groups.find(x => x?.id === gid);
+                if (g && addUserIdToGroup(g, newUser.id)) groupsTouched = true;
+            }
+
+            // Escribir GROUPS primero. Si falla, throw → lock libera, user no se crea.
+            if (groupsTouched) writeJSON(GROUPS_DB, groups);
+            users.push(newUser);
+            writeJSON(USERS_DB, users);
+            result = { regenerated: false, userId: newUser.id, email: newUser.email };
+        });
+    }, 'groupsLock');
+
+    if (outcome?.conflict === 'active') {
         return res.status(409).json({ error: 'El email ya está registrado con una cuenta activa' });
     }
 
@@ -2630,16 +2820,61 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     newUser.email = normalizedEmail;
     const VALID_ACCOUNT_STATUSES = ['active', 'invited', 'disabled'];
     if (!VALID_ACCOUNT_STATUSES.includes(newUser.accountStatus)) newUser.accountStatus = 'active';
+
+    // GROUP_REQUIRED guard — análogo a /api/invite-user. Lectores requieren
+    // groupIds explícito o resolución vía single-group school desde `colegio`.
+    const isLectorCreate = newUser.roles.includes('lector');
+    let resolvedGroupIds = Array.isArray(newUser.groupIds)
+        ? newUser.groupIds.filter(g => typeof g === 'string' && g)
+        : [];
+    if (isLectorCreate && resolvedGroupIds.length === 0) {
+        if (newUser.colegio) {
+            const groupsAll = readJSON(GROUPS_DB) || [];
+            const r = resolveSingleGroupForSchool(newUser.colegio, groupsAll);
+            if (r.error === GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP) {
+                return res.status(400).json({
+                    error: GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP,
+                    message: `La institución "${newUser.colegio}" tiene varios grupos. Especifica groupIds explícitamente.`,
+                });
+            }
+            if (r.groupId) resolvedGroupIds = [r.groupId];
+        }
+    }
+    if (isLectorCreate && resolvedGroupIds.length === 0) {
+        return res.status(400).json({
+            error:   GROUP_MEMBERSHIP_ERR.GROUP_REQUIRED,
+            message: 'Todo lector debe estar asignado a un grupo para aparecer en Aula Viva. Envía groupIds o crea primero un grupo para esta institución.',
+        });
+    }
+    newUser.groupIds = resolvedGroupIds;
+
     const userToSave = normalizeUser(newUser);
 
-    // Lock: re-read -> duplicate-check -> push -> write (atomic across containers)
-    const conflict = await mutateUsers((users) => {
-        if (users.some(u => normalizeEmail(u.email) === normalizedEmail)) return { conflict: 'dup_email' };
-        if (users.some(u => u.id === userToSave.id)) return { conflict: 'dup_id' };
-        users.push(userToSave);
-        writeJSON(USERS_DB, users);
-        return null;
-    });
+    // Lock anidado (groupsLock outer, usersLock inner) — escritura atómica
+    // bidireccional. El try/catch silencioso anterior dejaba lectores huérfanos
+    // si la escritura al grupo fallaba. Ahora cualquier fallo aborta la creación.
+    let conflict = null;
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const users  = readJSON(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+
+            if (users.some(u => normalizeEmail(u.email) === normalizedEmail)) { conflict = { conflict: 'dup_email' }; return; }
+            if (users.some(u => u.id === userToSave.id))                      { conflict = { conflict: 'dup_id' };    return; }
+
+            // Mutación in-memory primero, escritura después: groups → user.
+            let groupsTouched = false;
+            for (const gid of resolvedGroupIds) {
+                const g = groups.find(x => x?.id === gid);
+                if (g && addUserIdToGroup(g, userToSave.id)) groupsTouched = true;
+            }
+            if (groupsTouched) writeJSON(GROUPS_DB, groups);
+            users.push(userToSave);
+            writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
     if (conflict?.conflict === 'dup_email') return res.status(409).json({ error: 'El email ya está registrado' });
     if (conflict?.conflict === 'dup_id')    return res.status(409).json({ error: 'El ID de usuario ya existe' });
 
@@ -2665,22 +2900,55 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     if (updates.password) updates.password = await hashPasswordIfNeeded(updates.password);
     if (updates.email)    updates.email    = normalizeEmail(updates.email);
 
+    // Sprint 021 — drift bidireccional cerrado.
+    // Si updates.groupIds llega, calculamos diff oldGroupIds vs newGroupIds y
+    // sincronizamos los grupos en el mismo lock anidado (groups outer, users inner).
     let mergedUser = null;
     let oldRoles   = [];
-    const conflict = await mutateUsers((users) => {
-        const index = users.findIndex(u => u.id === id);
-        if (index === -1) return { conflict: 'not_found' };
-        if (updates.email && updates.email !== normalizeEmail(users[index].email)) {
-            if (users.some(u => normalizeEmail(u.email) === updates.email)) return { conflict: 'dup_email' };
-        }
-        oldRoles   = [...(users[index].roles || [])];
-        mergedUser = normalizeUser({ ...users[index], ...updates });
-        users[index] = mergedUser;
-        writeJSON(USERS_DB, users);
-        return null;
-    });
-    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
-    if (conflict?.conflict === 'dup_email') return res.status(409).json({ error: 'El nuevo email ya está en uso' });
+    let conflict   = null;
+    let groupDelta = { added: [], removed: [], missingGroupIds: [] };
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const users  = readJSON(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const index  = users.findIndex(u => u.id === id);
+            if (index === -1) { conflict = { conflict: 'not_found' }; return; }
+            if (updates.email && updates.email !== normalizeEmail(users[index].email)) {
+                if (users.some(u => normalizeEmail(u.email) === updates.email)) { conflict = { conflict: 'dup_email' }; return; }
+            }
+            oldRoles   = [...(users[index].roles || [])];
+            const oldGroupIds = Array.isArray(users[index].groupIds) ? [...users[index].groupIds] : [];
+            mergedUser = normalizeUser({ ...users[index], ...updates });
+            const newGroupIds = Array.isArray(mergedUser.groupIds) ? [...mergedUser.groupIds] : [];
+
+            const { added, removed } = diffIds(oldGroupIds, newGroupIds);
+            const applied = applyUserGroupsChange(groups, id, added, removed);
+            groupDelta = { added, removed, missingGroupIds: applied.missingGroupIds };
+
+            // Si el caller intentó añadir el user a un groupId que no existe,
+            // rechazamos en lugar de dejar groupIds huérfanos en el user.
+            if (applied.missingGroupIds.length > 0 && added.some(g => applied.missingGroupIds.includes(g))) {
+                conflict = { conflict: 'orphan_group', groupIds: applied.missingGroupIds };
+                return;
+            }
+
+            // Escribir GROUPS primero, USERS después. Mismo principio que en create:
+            // si la escritura del grupo falla, el user no queda con groupIds que
+            // ningún grupo reconoce.
+            if (applied.touched) writeJSON(GROUPS_DB, groups);
+            users[index] = mergedUser;
+            writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
+    if (conflict?.conflict === 'not_found')    return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict?.conflict === 'dup_email')    return res.status(409).json({ error: 'El nuevo email ya está en uso' });
+    if (conflict?.conflict === 'orphan_group') return res.status(400).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: `groupIds inexistentes: ${conflict.groupIds.join(', ')}` });
+
+    if (groupDelta.added.length || groupDelta.removed.length) {
+        log(`User ${id} groupIds delta — added=${JSON.stringify(groupDelta.added)} removed=${JSON.stringify(groupDelta.removed)}`, 'ACCESS');
+    }
 
     log(`User updated: ${id}`, 'ACCESS');
 
@@ -2710,25 +2978,39 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
 // DELETE USER
 app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
+    // Sprint 021 — borrado atómico bidireccional. Antes de quitar el user,
+    // limpiamos todas las referencias en groups.studentIds/memberIds para
+    // que ningún grupo quede con un IDs huérfano apuntando al user borrado.
     let deletedUser = null;
-    const conflict = await mutateUsers((users) => {
-        const index = users.findIndex(u => u.id === id);
-        if (index === -1) return { conflict: 'not_found' };
-        deletedUser = users[index];
-        users.splice(index, 1);
-        writeJSON(USERS_DB, users);
-        return null;
-    });
+    let conflict    = null;
+    let detachedFromGroupIds = [];
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const users  = readJSON(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const index  = users.findIndex(u => u.id === id);
+            if (index === -1) { conflict = { conflict: 'not_found' }; return; }
+            deletedUser = users[index];
+
+            detachedFromGroupIds = detachUserFromAllGroups(groups, id);
+            if (detachedFromGroupIds.length > 0) writeJSON(GROUPS_DB, groups);
+
+            users.splice(index, 1);
+            writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
     if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
 
-    log(`User deleted: ${id}`, 'ACCESS');
+    log(`User deleted: ${id} (detached from ${detachedFromGroupIds.length} groups)`, 'ACCESS');
     writeAuditLog({
         action:       'delete_user',
         targetUserId: id,
         actor:        req.headers['x-user-id'] || null,
-        details:      { email: deletedUser.email, roles: deletedUser.roles },
+        details:      { email: deletedUser.email, roles: deletedUser.roles, detachedFromGroupIds },
     });
-    res.json({ success: true });
+    res.json({ success: true, detachedFromGroupIds });
 });
 
 // --- SCHOOL MANAGEMENT ROUTES ---
@@ -2909,32 +3191,75 @@ app.post('/api/groups', requireAdminAccess, async (req, res) => {
 app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
-    let merged = null;
-    const conflict = await mutateGroups((groups) => {
-        const index = groups.findIndex(g => g.id === id);
-        if (index === -1) return { conflict: 'not_found' };
-        merged = normalizeGroup({ ...groups[index], ...updates });
-        groups[index] = merged;
-        writeJSON(GROUPS_DB, groups);
-        return null;
-    });
-    if (conflict) return res.status(404).json({ error: 'Grupo no encontrado' });
-    log(`Group updated: ${id} (type=${merged.type})`, 'ACCESS');
+    // Sprint 021 — drift bidireccional cerrado.
+    // normalizeGroup ya sincroniza studentIds = memberIds; comparamos union vs union
+    // y sincronizamos user.groupIds para los deltas (added/removed).
+    let merged     = null;
+    let conflict   = null;
+    let memberDelta = { added: [], removed: [], missingUserIds: [] };
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+            const index  = groups.findIndex(g => g.id === id);
+            if (index === -1) { conflict = { conflict: 'not_found' }; return; }
+
+            const oldMembers = unionGroupMemberIds(groups[index]);
+            merged = normalizeGroup({ ...groups[index], ...updates });
+            const newMembers = unionGroupMemberIds(merged);
+
+            const { added, removed } = diffIds(oldMembers, newMembers);
+            const applied = applyGroupMembersChange(users, id, added, removed);
+            memberDelta = { added, removed, missingUserIds: applied.missingUserIds };
+
+            // Si el caller intentó añadir userIds inexistentes al grupo, rechazamos
+            // antes de persistir — evita orphan_studentId/memberId.
+            if (applied.missingUserIds.length > 0 && added.some(u => applied.missingUserIds.includes(u))) {
+                conflict = { conflict: 'orphan_user', userIds: applied.missingUserIds };
+                return;
+            }
+
+            groups[index] = merged;
+            writeJSON(GROUPS_DB, groups);
+            if (applied.touched) writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
+    if (conflict?.conflict === 'not_found')   return res.status(404).json({ error: 'Grupo no encontrado' });
+    if (conflict?.conflict === 'orphan_user') return res.status(400).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND, message: `userIds inexistentes: ${conflict.userIds.join(', ')}` });
+
+    log(`Group updated: ${id} (type=${merged.type}) members delta added=${memberDelta.added.length} removed=${memberDelta.removed.length}`, 'ACCESS');
     res.json(merged);
 });
 
 app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
-    const conflict = await mutateGroups((groups) => {
-        const index = groups.findIndex(g => g.id === id);
-        if (index === -1) return { conflict: 'not_found' };
-        groups.splice(index, 1);
-        writeJSON(GROUPS_DB, groups);
-        return null;
-    });
-    if (conflict) return res.status(404).json({ error: 'Grupo no encontrado' });
-    log(`Group deleted: ${id}`, 'ACCESS');
-    res.json({ success: true });
+    // Sprint 021 — borrado atómico bidireccional. Antes de quitar el grupo,
+    // limpiamos su id de user.groupIds en todos los users para que ninguno
+    // quede con una referencia huérfana.
+    let conflict = null;
+    let detachedFromUserIds = [];
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+            const index  = groups.findIndex(g => g.id === id);
+            if (index === -1) { conflict = { conflict: 'not_found' }; return; }
+
+            detachedFromUserIds = detachGroupFromAllUsers(users, id);
+            if (detachedFromUserIds.length > 0) writeJSON(USERS_DB, users);
+
+            groups.splice(index, 1);
+            writeJSON(GROUPS_DB, groups);
+        });
+    }, 'groupsLock');
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Grupo no encontrado' });
+
+    log(`Group deleted: ${id} (detached from ${detachedFromUserIds.length} users)`, 'ACCESS');
+    res.json({ success: true, detachedFromUserIds });
 });
 
 // --- CLUBES EXTERNOS: JOIN ---
@@ -2942,33 +3267,458 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
+    // Sprint 021 — drift bidireccional cerrado.
+    // Antes solo se actualizaba group.memberIds/studentIds. Ahora también
+    // user.groupIds en el mismo lock anidado (groups outer, users inner) para
+    // que el lector quede correctamente conectado al club al unirse.
     let resultGroup = null;
-    const outcome = await mutateGroups((groups) => {
-        const index = groups.findIndex(g => g.id === id);
-        if (index === -1) return { conflict: 'not_found' };
-        const group = groups[index];
-        if (group.type !== 'club' || group.kind !== 'open') {
-            return { conflict: 'not_open_club' };
-        }
-        const memberIds = Array.isArray(group.memberIds) ? group.memberIds : [];
-        if (memberIds.includes(userId)) {
-            resultGroup = normalizeGroup(group); // idempotente
-            return { idempotent: true };
-        }
-        groups[index] = normalizeGroup({
-            ...group,
-            memberIds: [...memberIds, userId],
-            studentIds: [...new Set([...(Array.isArray(group.studentIds) ? group.studentIds : []), userId])]
+    let outcome     = null;
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+            const index  = groups.findIndex(g => g.id === id);
+            if (index === -1) { outcome = { conflict: 'not_found' }; return; }
+            const group = groups[index];
+            if (group.type !== 'club' || group.kind !== 'open') { outcome = { conflict: 'not_open_club' }; return; }
+
+            const u = users.find(x => x?.id === userId);
+            // Si el usuario autenticado no existe en USERS_DB, abortamos —
+            // sería el mismo bug histórico (membresía sin user real).
+            if (!u) { outcome = { conflict: 'user_missing' }; return; }
+
+            const groupChanged = addUserIdToGroup(group, userId);
+            const userChanged  = addGroupIdToUser(u, id);
+            if (!groupChanged && !userChanged) {
+                resultGroup = normalizeGroup(group); // ya estaba unido en ambos lados
+                outcome = { idempotent: true };
+                return;
+            }
+
+            groups[index] = normalizeGroup(group);
+            resultGroup   = groups[index];
+            writeJSON(GROUPS_DB, groups);
+            if (userChanged) writeJSON(USERS_DB, users);
         });
-        resultGroup = groups[index];
-        writeJSON(GROUPS_DB, groups);
-        return null;
-    });
-    if (outcome?.conflict === 'not_found') return res.status(404).json({ error: 'Grupo no encontrado' });
+    }, 'groupsLock');
+    if (outcome?.conflict === 'not_found')    return res.status(404).json({ error: 'Grupo no encontrado' });
     if (outcome?.conflict === 'not_open_club') return res.status(403).json({ error: 'Este grupo no admite uniones directas' });
+    if (outcome?.conflict === 'user_missing')  return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND, message: 'Usuario autenticado no existe en USERS_DB' });
     if (outcome?.idempotent) return res.json(resultGroup);
     log(`User ${userId} joined open club ${id}`, 'ACCESS');
     res.json(resultGroup);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint A — Asignación multi-grupo en colegios con varios grupos.
+//
+// Razón: hasta ahora el único camino para asignar miembros a un grupo era
+// PUT /api/groups/:id con el array memberIds completo (bulk-replace). Eso
+// no escala en colegios multi-grupo donde varios admins editan en paralelo
+// (last-write-wins) y no permite reportar fallos por usuario.
+//
+// Estos 3 endpoints exponen el flujo operativo correcto:
+//   GET    /api/groups/:groupId/candidates       → quiénes pueden entrar
+//   POST   /api/groups/:groupId/members          → asignar N usuarios (atómico)
+//   DELETE /api/groups/:groupId/members/:userId  → quitar 1 usuario
+//
+// Toda la lógica de membresía pasa por groupMembershipService → utils
+// (fuente única de verdad establecida en Sprint 021 Fases 1 y 2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper local para comparación normalizada de "misma institución".
+// Usa la misma convención (lowercase + trim) del fallback colegio del service.
+const _sameSchool = (userColegio, groupSchool) => {
+    if (typeof userColegio !== 'string' || typeof groupSchool !== 'string') return false;
+    return userColegio.trim().toLowerCase() === groupSchool.trim().toLowerCase();
+};
+
+// GET /api/groups/:groupId/candidates
+// Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
+// y admins (requireAuth). Filtra por misma institución y excluye a los que
+// ya son miembros (vía la fuente única getGroupMembers).
+app.get('/api/groups/:groupId/candidates', requireAuth, (req, res) => {
+    try {
+        const { groupId } = req.params;
+        const groups = readJSON(GROUPS_DB) || [];
+        const users  = readJSON(USERS_DB)  || [];
+
+        const group = groups.find(g => g?.id === groupId);
+        if (!group) return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: 'Grupo no encontrado' });
+
+        // Miembros actuales por la fuente única — incluye fallback colegio
+        // si los canales explícitos están vacíos. Lo necesitamos para EXCLUIR
+        // correctamente a quienes ya cuentan como miembros (no solo memberIds raw).
+        const currentMemberIds = new Set(getGroupMembers(group, users, { allGroups: groups, warnFn: () => {} }));
+
+        // Index para responder con `currentGroups` por candidato sin re-resolver
+        // por cada user.
+        const groupsByUser = new Map(); // userId → [groupId, ...]
+        for (const g of groups) {
+            const ids = getGroupMembers(g, users, { allGroups: groups, warnFn: () => {} });
+            for (const uid of ids) {
+                if (!groupsByUser.has(uid)) groupsByUser.set(uid, []);
+                groupsByUser.get(uid).push(g.id);
+            }
+        }
+
+        const candidates = [];
+        for (const u of users) {
+            if (!u?.id) continue;
+            // Solo lectores son candidatos pedagógicos para memberIds.
+            // (mediadores se gestionan en mediatorIds — fuera de scope acá.)
+            if (!Array.isArray(u.roles) || !u.roles.includes('lector')) continue;
+            if (currentMemberIds.has(u.id)) continue; // ya es miembro
+            // Misma institución: usar organizationId si ambos lo tienen,
+            // sino caer a comparación normalizada de colegio ↔ school.
+            const sameOrg = u.organizationId && group.organizationId && u.organizationId === group.organizationId;
+            const sameStr = _sameSchool(u.colegio, group.school);
+            if (!sameOrg && !sameStr) continue;
+
+            candidates.push({
+                userId:        u.id,
+                name:          u.nombre_completo || u.nombre_usuario || u.email || u.id,
+                email:         u.email || null,
+                colegio:       u.colegio || null,
+                currentGroups: groupsByUser.get(u.id) || [],
+            });
+        }
+
+        res.json({
+            groupId,
+            school:             group.school || null,
+            currentMemberCount: currentMemberIds.size,
+            candidates,
+        });
+    } catch (e) {
+        log(`GET /api/groups/${req.params.groupId}/candidates error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// POST /api/groups/:groupId/members
+// Asignación múltiple atómica. Body: { userIds: string[] }.
+// Para cada userId: valida existencia y aplica add bidireccional.
+// La transacción (groups + users) escribe AMBOS archivos en el mismo
+// lock anidado o ninguno — ningún estado parcial inconsistente.
+// Reporta por user: assigned (con alreadyMember si era idempotente) y failed.
+app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) => {
+    const { groupId } = req.params;
+    const body = req.body || {};
+    if (!Array.isArray(body.userIds)) {
+        return res.status(400).json({ error: 'userIds debe ser un array de strings' });
+    }
+    // Dedup + sanitización de entrada
+    const userIds = [...new Set(body.userIds.filter(x => typeof x === 'string' && x.length > 0))];
+    if (userIds.length === 0) {
+        return res.status(400).json({ error: 'userIds vacío' });
+    }
+    // Cap defensivo — no esperamos batches gigantes desde la UI
+    if (userIds.length > 500) {
+        return res.status(400).json({ error: 'max 500 userIds por request' });
+    }
+
+    let outcome  = null;
+    const assigned = [];
+    const failed   = [];
+
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+
+            const group = groups.find(g => g?.id === groupId);
+            if (!group) { outcome = { conflict: 'group_not_found' }; return; }
+
+            const userById = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
+            let groupsTouched = false;
+            let usersTouched  = false;
+
+            for (const uid of userIds) {
+                const u = userById.get(uid);
+                if (!u) {
+                    failed.push({ userId: uid, reason: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND });
+                    continue;
+                }
+                const groupChanged = addUserIdToGroup(group, uid);
+                const userChanged  = addGroupIdToUser(u, groupId);
+                if (groupChanged) groupsTouched = true;
+                if (userChanged)  usersTouched  = true;
+                assigned.push({
+                    userId:        uid,
+                    alreadyMember: !groupChanged && !userChanged,
+                });
+            }
+
+            // normalizeGroup re-sincroniza studentIds = memberIds explícitamente.
+            const idx = groups.findIndex(g => g?.id === groupId);
+            groups[idx] = normalizeGroup(group);
+
+            // Orden de escritura GROUPS_DB → USERS_DB (mismo principio que Fase 1).
+            if (groupsTouched) writeJSON(GROUPS_DB, groups);
+            if (usersTouched)  writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
+
+    if (outcome?.conflict === 'group_not_found') {
+        return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: 'Grupo no encontrado' });
+    }
+
+    log(`POST /api/groups/${groupId}/members assigned=${assigned.length} failed=${failed.length}`, 'ACCESS');
+    res.json({ groupId, assigned, failed });
+});
+
+// DELETE /api/groups/:groupId/members/:userId
+// Remoción individual con bidireccional cerrado. 404 si grupo o user no
+// existen; idempotente (responde 200 con removed:false si ya no era miembro).
+app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (req, res) => {
+    const { groupId, userId } = req.params;
+
+    let outcome      = null;
+    let groupChanged = false;
+    let userChanged  = false;
+
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+
+            const idx = groups.findIndex(g => g?.id === groupId);
+            if (idx === -1) { outcome = { conflict: 'group_not_found' }; return; }
+            const u = users.find(x => x?.id === userId);
+            if (!u) { outcome = { conflict: 'user_not_found' }; return; }
+
+            groupChanged = removeUserIdFromGroup(groups[idx], userId);
+            userChanged  = removeGroupIdFromUser(u, groupId);
+
+            if (groupChanged) groups[idx] = normalizeGroup(groups[idx]);
+            if (groupChanged) writeJSON(GROUPS_DB, groups);
+            if (userChanged)  writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
+
+    if (outcome?.conflict === 'group_not_found') return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: 'Grupo no encontrado' });
+    if (outcome?.conflict === 'user_not_found')  return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND,  message: 'Usuario no encontrado' });
+
+    log(`DELETE /api/groups/${groupId}/members/${userId} removed=${groupChanged || userChanged}`, 'ACCESS');
+    res.json({ groupId, userId, removed: groupChanged || userChanged });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 022 Fase A — endpoint de integridad de membresías.
+//
+// GET /api/admin/membership/validate
+//
+// Termómetro READ-ONLY del estado bidireccional user.groupIds ↔
+// group.studentIds/memberIds. Invoca el validador puro
+// `validateMembershipIntegrity` ya disponible en utils/groupMembership.mjs y
+// devuelve la lista de issues + counts agregados.
+//
+// Diseñado para tres usos:
+//   1. Pre-deploy: ejecutar contra el data/ del VPS antes de pm2 restart.
+//      Si issues.length > 0, NO desplegar — limpiar primero.
+//   2. Post-deploy: confirmar que el restart no introdujo regresión.
+//   3. Auditoría continua: panel admin puede polletear este endpoint para
+//      detectar drift cross-actor en producción.
+//
+// NO MUTA NADA. Es lectura pura. El response incluye `ok: true` cuando no
+// hay issues — facilita parsear con jq / scripts de CI.
+//
+// Auth: requireAdminAccess — coherente con los demás endpoints administrativos
+// del sprint. Lectores normales NO necesitan ver este detalle interno.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/admin/membership/validate', requireAdminAccess, (req, res) => {
+    const actor = req.headers['x-user-id'] || 'unknown';
+    log(`[MEMBERSHIP_VALIDATE_START] actor=${actor}`, 'INFO');
+    try {
+        const users  = readJSON(USERS_DB)  || [];
+        const groups = readJSON(GROUPS_DB) || [];
+        const result = validateMembershipIntegrity(users, groups);
+        const ok = result.issues.length === 0;
+        log(`[MEMBERSHIP_VALIDATE_RESULT] actor=${actor} ok=${ok} totalIssues=${result.issues.length} counts=${JSON.stringify(result.counts)}`, ok ? 'ACCESS' : 'WARN');
+        res.json({
+            ok,
+            issues: result.issues,
+            counts: result.counts,
+        });
+    } catch (e) {
+        log(`[MEMBERSHIP_VALIDATE_ERROR] actor=${actor} error=${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Internal Server Error', message: 'No se pudo ejecutar la validación de integridad.' });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint visibilidad — capa narrativa: el sistema explicándose a sí mismo.
+//
+// GET /api/groups/:id/diagnosis
+//
+// Devuelve el estado del grupo en lenguaje interpretable, listo para que la UI
+// (Aula Viva explicativa, panel del estudiante, futura integración con Modo
+// Accesible) muestre los mensajes tal cual sin re-interpretar.
+//
+// La respuesta es un GroupDiagnosis (ver utils/groupDiagnosis.d.ts):
+// healthStatus OK | WARNING | ERROR, conteos por canal de membresía,
+// inconsistencias e inconsistencias con message + cause + recommendedAction
+// ya redactados, y un summary.headline de una sola frase para cabeceras.
+//
+// Toda la lógica de membresía pasa por la fuente única (getGroupMembers,
+// getExplicitGroupMembers, applyLegacyColegioFallback) — este endpoint solo
+// orquesta lectura + helper. requireAuth (mediadores y admins).
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/groups/:id/diagnosis', requireAuth, (req, res) => {
+    try {
+        const { id } = req.params;
+        const groups = readJSON(GROUPS_DB) || [];
+        const users  = readJSON(USERS_DB)  || [];
+
+        const group = groups.find(g => g?.id === id);
+        if (!group) {
+            return res.status(404).json({
+                error:        GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND,
+                healthStatus: 'ERROR',
+                summary: {
+                    headline: 'Grupo no encontrado.',
+                    tone:     'error',
+                },
+            });
+        }
+
+        const diagnosis = buildGroupDiagnosis(group, users, groups);
+        res.json(diagnosis);
+    } catch (e) {
+        log(`GET /api/groups/${req.params.id}/diagnosis error: ${e.message}`, 'ERROR');
+        res.status(500).json({
+            error:        'Internal Server Error',
+            healthStatus: 'ERROR',
+            summary: {
+                headline: 'No se pudo obtener el diagnóstico del grupo.',
+                tone:     'error',
+            },
+        });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint Panel del estudiante — capa narrativa por lector.
+//
+// GET /api/students/:id/status
+//
+// Devuelve el estado del estudiante en lenguaje listo-para-UI (mismo patrón
+// que /api/groups/:id/diagnosis). El frontend renderiza message/cause/
+// recommendedAction directamente sin re-interpretar.
+//
+// Inputs que arma el endpoint:
+//   metrics.inAnyGroup        ← getGroupMembers sobre cada grupo
+//   metrics.hasContentAccess  ← accessService.getAccessibleContentIds()
+//   metrics.lastReadingEventAt, .booksStarted, .booksCompleted, .progressPercentage
+//                              ← getProgressByUser()
+//   logs.lastLoginAt          ← user.lastLoginAt (campo opcional; null si no existe)
+//   logs.recentErrorsCount    ← 0 hoy (no hay log per-user de errores)
+//
+// La lógica de transición de estado vive en utils/studentStatus.mjs (fuente
+// única). Este endpoint solo orquesta lectura + helper.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/students/:id/status', requireAuth, (req, res) => {
+    try {
+        const { id } = req.params;
+        const users  = readJSON(USERS_DB)  || [];
+        const groups = readJSON(GROUPS_DB) || [];
+
+        const user = users.find(u => u?.id === id);
+        if (!user) {
+            // Sentinel: shape mínimo compatible con StudentStatus para que la UI
+            // pueda mostrar SIEMPRE algo. Tono ERROR.
+            return res.status(404).json({
+                userId:             id,
+                name:               'Estudiante',
+                state:              'TECH_ISSUE',
+                tone:               'error',
+                headline:           'No se encontró el estudiante.',
+                message:            'No existe un estudiante con ese identificador.',
+                cause:              'El identificador es inválido o el estudiante fue eliminado.',
+                recommendedAction:  'Verificar el identificador o pedir apoyo al equipo técnico.',
+                lastLoginAt:        null,
+                lastReadingEventAt: null,
+                progress:           { booksStarted: 0, booksCompleted: 0, percentage: 0 },
+            });
+        }
+
+        // ── inAnyGroup: usa fuente única getGroupMembers (incluye fallback colegio)
+        const inAnyGroup = groups.some(g =>
+            getGroupMembers(g, users, { allGroups: groups, warnFn: () => {} }).includes(id)
+        );
+
+        // ── hasContentAccess: solo se evalúa si el user tiene grupo (sino NO_GROUP gana).
+        //    Si accessService devuelve 0 títulos y 0 colecciones, no hay contenido habilitado.
+        let hasContentAccess; // undefined = no calculado
+        if (inAnyGroup) {
+            try {
+                const access = getAccessibleContentIds(id) || {};
+                const titlesOk      = Array.isArray(access.titleIds)      && access.titleIds.length      > 0;
+                const collectionsOk = Array.isArray(access.collectionIds) && access.collectionIds.length > 0;
+                const broadAccess   = access.titleIds === 'all' || access.hasBroadAccess === true;
+                hasContentAccess = broadAccess || titlesOk || collectionsOk;
+            } catch (_) {
+                // Si el accessService falla, dejamos hasContentAccess undefined
+                // — el helper no activa NO_ACCESS y la UI no inventa estado.
+            }
+        }
+
+        // ── progress: agregamos sobre las entries del user.
+        const progressList = getProgressByUser(id) || [];
+        const booksStarted   = progressList.length;
+        const booksCompleted = progressList.filter(p =>
+            (p?.canonicalProgress?.globalPercentage ?? p?.porcentaje ?? 0) >= 90 || p?.isCompleted === true
+        ).length;
+        const progressPercentage = booksStarted === 0 ? 0 : Math.round(
+            progressList.reduce((acc, p) =>
+                acc + (p?.canonicalProgress?.globalPercentage ?? p?.porcentaje ?? 0), 0) / booksStarted
+        );
+        // lastReadingEventAt: el updatedAt más reciente de cualquier progreso
+        const lastReadingEventAt = progressList.reduce((latest, p) => {
+            const ts = p?.updatedAt || p?.fecha_actualizacion || null;
+            if (!ts) return latest;
+            if (!latest) return ts;
+            return new Date(ts) > new Date(latest) ? ts : latest;
+        }, null);
+
+        const metrics = {
+            inAnyGroup,
+            hasContentAccess,
+            lastReadingEventAt,
+            booksStarted,
+            booksCompleted,
+            progressPercentage,
+        };
+        const logs = {
+            lastLoginAt:       typeof user.lastLoginAt === 'string' ? user.lastLoginAt : null,
+            recentErrorsCount: 0, // No hay log per-user de errores hoy. TECH_ISSUE preparado para integración futura.
+        };
+
+        const status = buildStudentStatus(user, metrics, logs);
+        res.json(status);
+    } catch (e) {
+        log(`GET /api/students/${req.params.id}/status error: ${e.message}`, 'ERROR');
+        res.status(500).json({
+            userId:             req.params.id,
+            name:               'Estudiante',
+            state:              'TECH_ISSUE',
+            tone:               'error',
+            headline:           'No se pudo obtener el estado del estudiante.',
+            message:            'Ocurrió un error inesperado al consultar el estado.',
+            cause:              'El sistema encontró un problema interno al armar la respuesta.',
+            recommendedAction:  'Reintentar en unos momentos; si persiste, contactar al equipo técnico.',
+            lastLoginAt:        null,
+            lastReadingEventAt: null,
+            progress:           { booksStarted: 0, booksCompleted: 0, percentage: 0 },
+        });
+    }
 });
 
 // --- SECTIONS ROUTES ---
@@ -4148,6 +4898,16 @@ app.post('/api/analytics/events', async (req, res) => {
             return { received: deduped.length, deduplicated: validEvents.length - deduped.length };
         }, 'analyticsLock');
 
+        // ── DUAL-WRITE Backbone v1 (Fase 0) ──────────────────────────────────
+        // Best-effort: intenta espejar los eventos legacy en events.db. Cualquier
+        // fallo individual no afecta el response del endpoint legacy.
+        try {
+            const dualResult = dualWriteAnalyticsEventsToBackbone(validEvents, headerUserId);
+            log(`[EVENTS_V1] dual-write analytics: accepted=${dualResult.accepted} dedup=${dualResult.deduplicated} rejected=${dualResult.rejected}`, 'INFO');
+        } catch (e) {
+            log(`[EVENTS_V1] dual-write analytics error: ${e.message}`, 'WARN');
+        }
+
         res.json({ ok: true, received, deduplicated });
     } catch (e) {
         log(`Analytics write error: ${e.message}`, 'ERROR');
@@ -4652,12 +5412,90 @@ app.get('/api/metrics/student/:userId', (req, res) => {
 
     try {
         const raw = computeStudentMetrics(userId);
-        res.json(formatStudentResponse(raw));
+        const response = formatStudentResponse(raw);
+        // Sprint Data Backbone Fase 3: augment additivo. Si events.db falla,
+        // backboneMetrics es shape vacío válido (nunca rompe legacy).
+        response.backboneMetrics = safeLoadBackboneMetrics({
+            userIds: [userId],
+            windowDays: 30,
+        });
+        res.json(response);
     } catch (e) {
         log(`Metrics student error (${userId}): ${e.message}`, 'ERROR');
         res.status(500).json({ error: e.message });
     }
 });
+
+// ---------------------------------------------------------------------------
+// DATA BACKBONE METRICS — helper compartido por endpoints
+// ---------------------------------------------------------------------------
+//
+// Wrapper defensivo. Cualquier excepción al leer events.db (DB inexistente,
+// archivo corrupto, statement con error) se traduce a `emptyBackboneMetrics`
+// + log WARN. Los endpoints legacy nunca devuelven 500 por culpa del backbone.
+//
+function safeLoadBackboneMetrics(opts = {}) {
+    const windowDays = typeof opts.windowDays === 'number' && opts.windowDays > 0 ? opts.windowDays : 30;
+    try {
+        const result = getBackboneEventsForMetrics({
+            windowDays,
+            userIds:    opts.userIds,
+            contentIds: opts.contentIds,
+            modes:      opts.modes,
+        });
+        const meta = {
+            windowDays: result.windowDays,
+            windowFrom: result.windowFrom,
+            windowTo:   result.windowTo,
+        };
+        const metrics = aggregateBackboneMetrics(result.events, meta);
+
+        // Sprint Data Backbone Fase 6A: funnels aditivos. Si el cómputo
+        // falla por cualquier razón, devolvemos un shape vacío válido
+        // para no romper consumidores ni la respuesta del endpoint legacy.
+        try {
+            metrics.funnels = computeBackboneFunnels(result.events, meta);
+        } catch (e) {
+            log(`[BACKBONE_FUNNELS] compute failed: ${e.message}`, 'WARN');
+            metrics.funnels = emptyBackboneFunnels({ windowDays });
+        }
+
+        // Sprint Data Backbone Fase 6B: insights aditivos. Reglas puras
+        // sobre metrics + funnels. Mismo contrato defensivo: nunca rompen.
+        try {
+            metrics.insights = computeBackboneInsights({
+                metrics,
+                funnels:    metrics.funnels,
+                windowDays,
+            });
+        } catch (e) {
+            log(`[BACKBONE_INSIGHTS] compute failed: ${e.message}`, 'WARN');
+            metrics.insights = emptyBackboneInsights({ windowDays });
+        }
+        return metrics;
+    } catch (e) {
+        log(`[BACKBONE_METRICS] safeLoad failed: ${e.message}`, 'WARN');
+        const empty = emptyBackboneMetrics({ windowDays });
+        empty.funnels  = emptyBackboneFunnels({ windowDays });
+        empty.insights = emptyBackboneInsights({ windowDays });
+        return empty;
+    }
+}
+
+// Devuelve userIds únicos para un school dado los grupos cargados en cache.
+function collectSchoolUserIds(schoolName, groups) {
+    const set = new Set();
+    for (const g of groups) {
+        if (typeof g.school === 'string' && g.school.toLowerCase() === schoolName.toLowerCase()) {
+            const ids = [
+                ...(Array.isArray(g.studentIds)   ? g.studentIds   : []),
+                ...(Array.isArray(g.memberIds)    ? g.memberIds    : []),
+            ];
+            for (const id of ids) if (typeof id === 'string') set.add(id);
+        }
+    }
+    return [...set];
+}
 
 // GET /api/metrics/course/:courseId
 // Returns aggregated structured metrics for a course.
@@ -4692,6 +5530,16 @@ app.get('/api/metrics/course/:courseId', (req, res) => {
             ),
         }));
 
+        // Sprint Data Backbone Fase 3: backboneMetrics filtrado por los
+        // alumnos del curso. Aditivo, no rompe shape existente.
+        const courseUserIds = response.studentBreakdown
+            .map(s => s.userId)
+            .filter(id => typeof id === 'string');
+        response.backboneMetrics = safeLoadBackboneMetrics({
+            userIds:    courseUserIds,
+            windowDays: 30,
+        });
+
         res.json(response);
     } catch (e) {
         log(`Metrics course error (${courseId}): ${e.message}`, 'ERROR');
@@ -4718,12 +5566,359 @@ app.get('/api/metrics/school/:schoolId', (req, res) => {
 
     try {
         const raw = computeSchoolMetrics(schoolRecord.schoolName);
-        res.json(formatSchoolResponse(raw, schoolRecord));
+        const response = formatSchoolResponse(raw, schoolRecord);
+
+        // Sprint Data Backbone Fase 3: backboneMetrics agregado para todos
+        // los alumnos de la escuela. Aditivo.
+        const schoolUserIds = collectSchoolUserIds(schoolRecord.schoolName, groups);
+        response.backboneMetrics = safeLoadBackboneMetrics({
+            userIds:    schoolUserIds,
+            windowDays: 30,
+        });
+
+        res.json(response);
     } catch (e) {
         log(`Metrics school error (${schoolRecord.schoolName}): ${e.message}`, 'ERROR');
         res.status(500).json({ error: e.message });
     }
 });
+
+// ---------------------------------------------------------------------------
+// DATA BACKBONE — endpoint diagnóstico (admin only)
+// ---------------------------------------------------------------------------
+//
+// GET /api/metrics/backbone?windowDays=30
+//
+// Devuelve métricas globales del backbone v1, sin filtros de usuario. Útil
+// para validar el flujo end-to-end (events.db → aggregator → JSON) sin
+// pasar por la lógica legacy de metricsService.
+//
+// Si events.db no existe o falla, responde con shape vacío + 200 (no 500).
+//
+app.get('/api/metrics/backbone', (req, res) => {
+    if (!isAdminRequest(req)) {
+        const { users } = loadAndInitMetrics();
+        const requester = resolveRequester(req, users);
+        if (!requester || !isMediatorRole(requester)) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+    }
+
+    const windowDays = (() => {
+        const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
+        if (!Number.isFinite(raw) || raw <= 0) return 30;
+        return Math.min(raw, 180); // cap defensivo: 6 meses máximo en una request
+    })();
+
+    try {
+        const stats = (() => {
+            try {
+                return getBackboneEventStats({
+                    sinceTs: Date.now() - windowDays * 86_400_000,
+                });
+            } catch (e) {
+                log(`[BACKBONE_METRICS] stats failed: ${e.message}`, 'WARN');
+                return { total: 0, byMode: {}, windowFrom: null, windowTo: null };
+            }
+        })();
+
+        const backboneMetrics = safeLoadBackboneMetrics({ windowDays });
+        res.json({
+            ok: true,
+            stats,
+            backboneMetrics,
+        });
+    } catch (e) {
+        log(`[BACKBONE_METRICS] endpoint error: ${e.message}`, 'ERROR');
+        // Política Fase 3: nunca 500 por backbone — devolver vacío.
+        res.json({
+            ok: true,
+            stats:           { total: 0, byMode: {}, windowFrom: null, windowTo: null },
+            backboneMetrics: emptyBackboneMetrics({ windowDays }),
+        });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// DATA BACKBONE — funnels (Sprint 6A)
+// ---------------------------------------------------------------------------
+//
+// GET /api/metrics/funnels?windowDays=30
+//
+// Devuelve embudos de conversión (LU, lectura, a11y, inmersivo, pdf, álbum)
+// computados sobre eventos native del Backbone v1. Aditivo respecto al
+// shape `backboneMetrics` que ya se inyecta en /api/metrics/{student,course,
+// school,backbone} — este endpoint es la versión "diagnóstica" que devuelve
+// solo el bloque de funnels para consumo de dashboards/herramientas internas.
+//
+// Nunca 500. Si events.db falla, responde con shape vacío + 200.
+// Acceso: admin OR mediador autenticado (mismo gating que /api/metrics/backbone).
+//
+app.get('/api/metrics/funnels', (req, res) => {
+    if (!isAdminRequest(req)) {
+        const { users } = loadAndInitMetrics();
+        const requester = resolveRequester(req, users);
+        if (!requester || !isMediatorRole(requester)) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+    }
+
+    const windowDays = (() => {
+        const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
+        if (!Number.isFinite(raw) || raw <= 0) return 30;
+        return Math.min(raw, 180);
+    })();
+
+    try {
+        const result = getBackboneEventsForMetrics({ windowDays });
+        const funnels = computeBackboneFunnels(result.events, {
+            windowDays: result.windowDays,
+            windowFrom: result.windowFrom,
+            windowTo:   result.windowTo,
+        });
+        res.json({ ok: true, funnels });
+    } catch (e) {
+        log(`[BACKBONE_FUNNELS] endpoint error: ${e.message}`, 'WARN');
+        // Política Fase 3/6A: nunca 500 por backbone — devolver vacío.
+        res.json({ ok: true, funnels: emptyBackboneFunnels({ windowDays }) });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// DATA BACKBONE — insights (Sprint 6B)
+// ---------------------------------------------------------------------------
+//
+// GET /api/metrics/insights?windowDays=30
+//
+// Devuelve el resultado del agregador interpretativo: severitySummary +
+// lista de insights ordenados (critical → warning → info). Reglas puras
+// sobre `aggregateBackboneMetrics` + `computeBackboneFunnels`. No persiste
+// alertas; cada llamada recomputa.
+//
+// Acceso: admin OR mediador autenticado (mismo gating que funnels/backbone).
+// Nunca 500. Si el pipeline falla, responde con shape vacío.
+//
+app.get('/api/metrics/insights', (req, res) => {
+    if (!isAdminRequest(req)) {
+        const { users } = loadAndInitMetrics();
+        const requester = resolveRequester(req, users);
+        if (!requester || !isMediatorRole(requester)) {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+    }
+
+    const windowDays = (() => {
+        const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
+        if (!Number.isFinite(raw) || raw <= 0) return 30;
+        return Math.min(raw, 180);
+    })();
+
+    try {
+        const result = getBackboneEventsForMetrics({ windowDays });
+        const meta   = {
+            windowDays: result.windowDays,
+            windowFrom: result.windowFrom,
+            windowTo:   result.windowTo,
+        };
+        const metrics  = aggregateBackboneMetrics(result.events, meta);
+        const funnels  = computeBackboneFunnels(result.events, meta);
+        const insights = computeBackboneInsights({ metrics, funnels, windowDays });
+
+        // Sprint 6C: bloque `persisted` aditivo. Si insights.db falla,
+        // available=false y no rompemos la respuesta principal.
+        let persisted;
+        try {
+            const summary = getInsightsScopeSummary('global', null);
+            persisted = { available: true, ...summary };
+        } catch (e) {
+            log(`[INSIGHTS_PERSISTED] read failed: ${e.message}`, 'WARN');
+            persisted = { available: false, activeCount: 0, criticalCount: 0, warningCount: 0, lastSnapshotAt: null };
+        }
+
+        res.json({ ok: true, insights, persisted });
+    } catch (e) {
+        log(`[BACKBONE_INSIGHTS] endpoint error: ${e.message}`, 'WARN');
+        res.json({
+            ok: true,
+            insights:  emptyBackboneInsights({ windowDays }),
+            persisted: { available: false, activeCount: 0, criticalCount: 0, warningCount: 0, lastSnapshotAt: null },
+        });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// DATA BACKBONE — alertas persistidas (Sprint 6C)
+// ---------------------------------------------------------------------------
+//
+// Cinco endpoints para gestionar el ciclo de vida de las alertas:
+//   POST /api/metrics/insights/snapshot         → corre el state engine
+//   GET  /api/metrics/insights/states           → lista states con filtros
+//   POST /api/metrics/insights/:key/ack         → ack
+//   POST /api/metrics/insights/:key/dismiss     → dismiss N días
+//   GET  /api/metrics/insights/notifications    → cola pending
+//
+// Política de errores idéntica a /api/metrics/insights: nunca 500 si la
+// telemetría base sigue funcionando. Si insights.db falla, devolvemos
+// vacíos y log WARN.
+
+function requireAdminOrMediator(req, res) {
+    if (isAdminRequest(req)) return true;
+    const { users } = loadAndInitMetrics();
+    const requester = resolveRequester(req, users);
+    if (!requester || !isMediatorRole(requester)) {
+        res.status(403).json({ error: 'Acceso denegado' });
+        return false;
+    }
+    return true;
+}
+
+app.post('/api/metrics/insights/snapshot', (req, res) => {
+    if (!requireAdminOrMediator(req, res)) return;
+    const body = req.body ?? {};
+    const windowDays = (() => {
+        const raw = typeof body.windowDays === 'number' ? body.windowDays : 30;
+        if (!Number.isFinite(raw) || raw <= 0) return 30;
+        return Math.min(raw, 180);
+    })();
+    const scope = {
+        level: typeof body.scope?.level === 'string' ? body.scope.level : 'global',
+        id:    typeof body.scope?.id === 'string'    ? body.scope.id    : null,
+    };
+    const actorId = typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'] : null;
+
+    try {
+        ensureInsightsDbOpen();
+        const result   = getBackboneEventsForMetrics({ windowDays });
+        const meta     = { windowDays: result.windowDays, windowFrom: result.windowFrom, windowTo: result.windowTo };
+        const metrics  = aggregateBackboneMetrics(result.events, meta);
+        const funnels  = computeBackboneFunnels(result.events, meta);
+        const insights = computeBackboneInsights({ metrics, funnels, windowDays });
+        const r = processInsightsSnapshot({ insights, scope, windowDays, actorId });
+        log(`[INSIGHTS_SNAPSHOT] scope=${scope.level} new=${r.statesNew} updated=${r.statesUpdated} resolved=${r.statesResolved} notif=${r.notificationsCreated}`, 'INFO');
+        res.json({
+            ok: true,
+            snapshotId:           r.snapshotId,
+            stateSummary:         r.stateSummary,
+            notificationsCreated: r.notificationsCreated,
+            insightsPersisted:    r.insightsPersisted,
+        });
+    } catch (e) {
+        log(`[INSIGHTS_SNAPSHOT] error: ${e.message}`, 'WARN');
+        res.status(200).json({ ok: false, error: e.message });
+    }
+});
+
+app.get('/api/metrics/insights/states', (req, res) => {
+    if (!requireAdminOrMediator(req, res)) return;
+    try {
+        ensureInsightsDbOpen();
+        const filters = {
+            scopeLevel: typeof req.query.scopeLevel === 'string' ? req.query.scopeLevel : undefined,
+            scopeId:    typeof req.query.scopeId    === 'string' ? req.query.scopeId    : undefined,
+            status:     typeof req.query.status     === 'string' ? req.query.status     : undefined,
+            severity:   typeof req.query.severity   === 'string' ? req.query.severity   : undefined,
+            limit:      Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000),
+        };
+        const rows = listInsightStates(filters);
+        // Mapeo a camelCase para el frontend; payload se rehidrata desde JSON.
+        const states = rows.map(r => ({
+            insightKey:        r.insight_key,
+            scopeLevel:        r.scope_level,
+            scopeId:           r.scope_id,
+            type:              r.type,
+            severity:          r.severity,
+            title:             r.title,
+            status:            r.status,
+            firstSeenAt:       r.first_seen_at,
+            lastSeenAt:        r.last_seen_at,
+            lastValue:         r.last_value,
+            previousValue:     r.previous_value,
+            deltaValue:        r.delta_value,
+            occurrences:       r.occurrences,
+            dismissedUntil:    r.dismissed_until,
+            acknowledgedAt:    r.acknowledged_at,
+            acknowledgedBy:    r.acknowledged_by,
+            insight:           safeJsonParse(r.last_payload_json),
+            updatedAt:         r.updated_at,
+        }));
+        res.json({ ok: true, states, total: states.length });
+    } catch (e) {
+        log(`[INSIGHTS_STATES] error: ${e.message}`, 'WARN');
+        res.json({ ok: false, states: [], total: 0, error: e.message });
+    }
+});
+
+app.post('/api/metrics/insights/:insightKey/ack', (req, res) => {
+    if (!requireAdminOrMediator(req, res)) return;
+    const insightKey = String(req.params.insightKey ?? '');
+    const actorId = (req.body && typeof req.body.actorId === 'string')
+        ? req.body.actorId
+        : (typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'] : 'unknown');
+    if (!insightKey) return res.status(400).json({ error: 'insightKey required' });
+
+    try {
+        ensureInsightsDbOpen();
+        const ok = ackInsightState(insightKey, actorId, Date.now());
+        if (!ok) return res.status(404).json({ ok: false, error: 'state not found' });
+        res.json({ ok: true });
+    } catch (e) {
+        log(`[INSIGHTS_ACK] error: ${e.message}`, 'WARN');
+        res.json({ ok: false, error: e.message });
+    }
+});
+
+app.post('/api/metrics/insights/:insightKey/dismiss', (req, res) => {
+    if (!requireAdminOrMediator(req, res)) return;
+    const insightKey = String(req.params.insightKey ?? '');
+    const days = (() => {
+        const raw = (req.body && typeof req.body.days === 'number') ? req.body.days : 7;
+        if (!Number.isFinite(raw) || raw <= 0) return 7;
+        return Math.min(raw, 180);
+    })();
+    if (!insightKey) return res.status(400).json({ error: 'insightKey required' });
+
+    try {
+        ensureInsightsDbOpen();
+        const dismissedUntil = Date.now() + days * 86_400_000;
+        const ok = dismissInsightState(insightKey, dismissedUntil, Date.now());
+        if (!ok) return res.status(404).json({ ok: false, error: 'state not found' });
+        res.json({ ok: true, dismissedUntil });
+    } catch (e) {
+        log(`[INSIGHTS_DISMISS] error: ${e.message}`, 'WARN');
+        res.json({ ok: false, error: e.message });
+    }
+});
+
+app.get('/api/metrics/insights/notifications', (req, res) => {
+    if (!requireAdminOrMediator(req, res)) return;
+    try {
+        ensureInsightsDbOpen();
+        const status = typeof req.query.status === 'string' ? req.query.status : 'pending';
+        const limit  = Math.min(parseInt(String(req.query.limit ?? '100'), 10) || 100, 500);
+        const rows   = listInsightNotifications({ status, limit });
+        const notifications = rows.map(r => ({
+            notificationId: r.notification_id,
+            insightKey:     r.insight_key,
+            scopeLevel:     r.scope_level,
+            scopeId:        r.scope_id,
+            severity:       r.severity,
+            channel:        r.channel,
+            status:         r.status,
+            createdAt:      r.created_at,
+            sentAt:         r.sent_at,
+            payload:        safeJsonParse(r.payload_json),
+        }));
+        res.json({ ok: true, notifications, total: notifications.length });
+    } catch (e) {
+        log(`[INSIGHTS_NOTIF] error: ${e.message}`, 'WARN');
+        res.json({ ok: false, notifications: [], total: 0, error: e.message });
+    }
+});
+
+function safeJsonParse(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    try { return JSON.parse(raw); } catch { return null; }
+}
 
 // ---------------------------------------------------------------------------
 // REPORT ENDPOINTS
@@ -5209,6 +6404,15 @@ app.post('/api/playback-events', (req, res) => {
             if (err) log(`[PLAYBACK_EVENTS] Write error: ${err.message}`, 'WARN');
         });
 
+        // ── DUAL-WRITE Backbone v1 (Fase 0) ──────────────────────────────────
+        // Espejo en events.db. Best-effort, no bloquea el response.
+        try {
+            const dualResult = dualWritePlaybackEventsToBackbone(events, userId);
+            log(`[EVENTS_V1] dual-write playback: accepted=${dualResult.accepted} dedup=${dualResult.deduplicated} rejected=${dualResult.rejected}`, 'INFO');
+        } catch (e) {
+            log(`[EVENTS_V1] dual-write playback error: ${e.message}`, 'WARN');
+        }
+
         res.json({ ok: true, received: events.length });
     } catch (e) {
         // Falla silenciosa intencionada: analytics nunca debe interrumpir la experiencia
@@ -5228,11 +6432,284 @@ app.post('/api/events', (req, res) => {
         const { event, ts, ...rest } = req.body ?? {};
         if (typeof event !== 'string') return res.status(400).json({ error: 'event required' });
         log(`[EVENT] ${event} user=${userId} ts=${ts ?? Date.now()} ${JSON.stringify(rest)}`);
+
+        // ── DUAL-WRITE Backbone v1 (Fase 0) ──────────────────────────────────
+        // Antes los eventos warn-level del Inmersivo (manifest_fail, tts_fail,
+        // blob_invalid, autoplay_blocked, etc.) sólo iban al log del proceso y se
+        // perdían en cada reinicio. Ahora también se persisten en events.db.
+        try {
+            const dualResult = dualWriteSingleEventToBackbone(event, ts, rest, userId);
+            if (dualResult.accepted || dualResult.deduplicated) {
+                log(`[EVENTS_V1] dual-write event: accepted=${dualResult.accepted} dedup=${dualResult.deduplicated}`, 'INFO');
+            } else if (dualResult.rejected) {
+                log(`[EVENTS_V1] dual-write event rejected (${dualResult.reason})`, 'WARN');
+            }
+        } catch (e) {
+            log(`[EVENTS_V1] dual-write event error: ${e.message}`, 'WARN');
+        }
+
         res.json({ ok: true });
     } catch (e) {
         res.status(500).json({ error: 'Error logging event' });
     }
 });
+
+// ---------------------------------------------------------------------------
+// DATA BACKBONE v1 — POST /api/v1/events
+// Endpoint nuevo, en paralelo a los 3 endpoints legacy.
+// Recibe eventos canonicalizados ya con shape BackboneEvent. Valida estricto,
+// dedupa por event_id UNIQUE en SQLite (atomic INSERT OR IGNORE), responde
+// contadores. Nunca rompe el batch entero por un evento malformed.
+// ---------------------------------------------------------------------------
+app.post('/api/v1/events', (req, res) => {
+    try {
+        const headerUserId = req.headers['x-user-id'];
+        if (!headerUserId) {
+            return res.status(401).json({ error: 'x-user-id required' });
+        }
+
+        const events = req.body?.events;
+        if (!Array.isArray(events) || events.length === 0) {
+            return res.status(400).json({ error: 'events array required' });
+        }
+        if (events.length > 50) {
+            return res.status(400).json({ error: 'max 50 events per batch' });
+        }
+
+        let accepted     = 0;
+        let deduplicated = 0;
+        let rejected     = 0;
+        const errors     = [];
+
+        for (const incoming of events) {
+            // Si el cliente no envió eventId, generamos uno en backend.
+            // Sprint 5A: marcar payload._source = 'native' por defecto. Si el
+            // cliente ya viene con _source (por ejemplo replays internos) no
+            // se sobrescribe.
+            const evt = incoming && typeof incoming === 'object'
+                ? {
+                    ...incoming,
+                    eventId: incoming.eventId || ulid(),
+                    payload: {
+                        ...(incoming.payload || {}),
+                        _source: incoming.payload?._source || 'native',
+                    },
+                }
+                : incoming;
+
+            const v = validateBackboneEvent(evt, headerUserId);
+            if (!v.ok) {
+                rejected += 1;
+                errors.push({ eventId: evt?.eventId ?? null, error: v.error });
+                continue;
+            }
+            try {
+                const wasInserted = insertBackboneEvent(evt);
+                if (wasInserted) accepted += 1;
+                else            deduplicated += 1;
+            } catch (e) {
+                rejected += 1;
+                errors.push({ eventId: evt.eventId, error: 'insert failed' });
+                log(`[EVENTS_V1] insert error eventId=${evt.eventId}: ${e.message}`, 'WARN');
+            }
+        }
+
+        log(`[EVENTS_V1] POST /api/v1/events accepted=${accepted} dedup=${deduplicated} rejected=${rejected}`, 'INFO');
+        const response = { ok: true, accepted, deduplicated, rejected };
+        if (errors.length > 0 && !IS_PROD) response.errors = errors;
+        res.json(response);
+    } catch (e) {
+        log(`[EVENTS_V1] handler error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Failed to ingest events' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Helpers internos del Backbone v1 — transformación legacy → BackboneEvent.
+//
+// La inferencia de `mode` desde un evento legacy es heurística: el shape
+// histórico no tiene un campo `mode` explícito, así que mapeamos por
+// `source`, por nombre del evento y por presencia de campos típicos. El
+// resultado puede no coincidir 100% con la realidad (un block_complete
+// indistinguible entre Texto e Inmersivo, por ejemplo), pero es la mejor
+// señal disponible sin tocar el frontend en Fase 0.
+//
+// Cuando los visores migren al endpoint v1, mandarán `mode` explícito y
+// estos helpers dejarán de usarse. Los mantenemos solo como shim.
+// ---------------------------------------------------------------------------
+
+const ALBUM_LEGACY_EVENT_NAMES = new Set([
+    'route_selected', 'route_completed', 'region_visited', 'page_advance',
+    'leo_intervention_shown', 'leo_intervention_dismissed', 'leo_intervention_engaged',
+    'overlay_opened', 'overlay_closed', 'reread_started', 'reread_completed',
+    'album_session_start', 'album_session_end',
+]);
+
+const IMMERSIVE_LEGACY_EVENT_NAMES = new Set([
+    'transition_to_next_content', 'streak_break', 'level_up',
+]);
+
+function inferModeFromLegacyAnalyticsEvent(legacyEvent) {
+    // 1. Pista explícita
+    if (legacyEvent?.source === 'pdf') return 'pdf';
+
+    // 2. Nombres únicos de cada visor
+    if (legacyEvent?.event === 'page_change' || typeof legacyEvent?.pageNumber === 'number') {
+        return 'pdf';
+    }
+    if (legacyEvent?.event === 'session_heartbeat') {
+        // Hoy solo VisorPDF arranca heartbeat (analyticsService.startHeartbeat).
+        return 'pdf';
+    }
+    if (IMMERSIVE_LEGACY_EVENT_NAMES.has(legacyEvent?.event)) {
+        return 'immersive';
+    }
+    if (ALBUM_LEGACY_EVENT_NAMES.has(legacyEvent?.event)) {
+        return 'album';
+    }
+    // 3. Default conservador: VisorTexto es el caso más común sin pista explícita.
+    return 'text';
+}
+
+function legacyEventNameToBackbone(mode, legacyName) {
+    // Ya cumple {mode}.{action} si el legacy era prefijado (no es el caso hoy).
+    if (typeof legacyName === 'string' && /^[a-z][a-z0-9]*\.[a-z][a-z0-9_]*$/.test(legacyName)) {
+        return legacyName;
+    }
+    // Sanitización mínima: minúsculas, espacios → _, no-letras → quitar.
+    const action = String(legacyName || 'unknown')
+        .toLowerCase()
+        .replace(/\s+/g, '_')
+        .replace(/[^a-z0-9_]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '') || 'unknown';
+    return `${mode}.${action}`;
+}
+
+function transformAnalyticsLegacyToBackbone(legacyEvent, headerUserId) {
+    const mode = inferModeFromLegacyAnalyticsEvent(legacyEvent);
+    // sessionId: si trae uno (createAlbumEmitter lo agrega), úsalo. Si no, genera
+    // uno por evento — la correlación se pierde, pero los datos llegan.
+    const sessionId = typeof legacyEvent.sessionId === 'string' && legacyEvent.sessionId
+        ? legacyEvent.sessionId
+        : `legacy-${ulid()}`;
+
+    const eventId = isValidUlid(legacyEvent.eventId) ? legacyEvent.eventId : ulid();
+
+    // Campos canónicos quedan en columnas; el resto va al payload.
+    const {
+        event: _event, userId: _userId, contentId: _contentId, timestamp: _timestamp,
+        sessionId: _sessionId, eventId: _eventId, sessionDuration, elapsedMs,
+        progressPercentage, ...rest
+    } = legacyEvent;
+
+    return {
+        eventId,
+        schemaVersion: 1,
+        event: legacyEventNameToBackbone(mode, legacyEvent.event),
+        mode,
+        userId: legacyEvent.userId,
+        contentId: legacyEvent.contentId ?? null,
+        sessionId,
+        clientTs: typeof legacyEvent.timestamp === 'number' ? legacyEvent.timestamp : Date.now(),
+        elapsedMs: typeof elapsedMs === 'number' ? elapsedMs
+                  : typeof sessionDuration === 'number' ? sessionDuration
+                  : undefined,
+        progressFraction: typeof progressPercentage === 'number'
+            ? Math.max(0, Math.min(1, progressPercentage / 100))
+            : undefined,
+        // Sprint 5A: dual-write siempre marca _source='legacy' para que el
+        // agregador pueda priorizar eventos nativos cuando coexisten.
+        payload: { ...rest, _source: 'legacy' },
+    };
+}
+
+function dualWriteAnalyticsEventsToBackbone(legacyEvents, headerUserId) {
+    let accepted = 0, deduplicated = 0, rejected = 0;
+    for (const legacy of legacyEvents) {
+        try {
+            const backbone = transformAnalyticsLegacyToBackbone(legacy, headerUserId);
+            const v = validateBackboneEvent(backbone, headerUserId);
+            if (!v.ok) { rejected += 1; continue; }
+            const inserted = insertBackboneEvent(backbone);
+            if (inserted) accepted += 1; else deduplicated += 1;
+        } catch (e) {
+            rejected += 1;
+        }
+    }
+    return { accepted, deduplicated, rejected };
+}
+
+function dualWritePlaybackEventsToBackbone(legacyEvents, userId) {
+    let accepted = 0, deduplicated = 0, rejected = 0;
+    for (const legacy of legacyEvents) {
+        try {
+            // /api/playback-events viene del Modo Inmersivo (usePlaybackAnalytics).
+            // mode es siempre 'immersive'.
+            const sessionId = typeof legacy.sessionId === 'string' && legacy.sessionId
+                ? legacy.sessionId
+                : `legacy-${ulid()}`;
+            const eventId = isValidUlid(legacy.eventId) ? legacy.eventId : ulid();
+            const {
+                event: _event, sessionId: _sessionId, eventId: _eventId,
+                userId: _u, contentId: _c, ts, serverTs, ...rest
+            } = legacy;
+            const backbone = {
+                eventId,
+                schemaVersion: 1,
+                event: legacyEventNameToBackbone('immersive', legacy.event),
+                mode: 'immersive',
+                userId,
+                contentId: typeof legacy.contentId === 'string' ? legacy.contentId : null,
+                sessionId,
+                clientTs: typeof ts === 'number' ? ts : Date.now(),
+                payload: { ...rest, _source: 'legacy' },
+            };
+            const v = validateBackboneEvent(backbone, userId);
+            if (!v.ok) { rejected += 1; continue; }
+            const inserted = insertBackboneEvent(backbone);
+            if (inserted) accepted += 1; else deduplicated += 1;
+        } catch (e) {
+            rejected += 1;
+        }
+    }
+    return { accepted, deduplicated, rejected };
+}
+
+function dualWriteSingleEventToBackbone(eventName, ts, rest, userId) {
+    try {
+        // /api/events lo usa useImmersivePlayback.pbLog para warn-level
+        // (manifest_fail, tts_fail, blob_invalid, autoplay_blocked, etc.).
+        // mode = 'immersive' siempre.
+        const sessionId = typeof rest?.sessionId === 'string' && rest.sessionId
+            ? rest.sessionId
+            : `legacy-${ulid()}`;
+        const eventId = isValidUlid(rest?.eventId) ? rest.eventId : ulid();
+        const contentId = typeof rest?.contentId === 'string' ? rest.contentId : null;
+        const {
+            sessionId: _s, eventId: _e, contentId: _c, ...payload
+        } = rest || {};
+        const backbone = {
+            eventId,
+            schemaVersion: 1,
+            event: legacyEventNameToBackbone('immersive', eventName),
+            mode: 'immersive',
+            userId,
+            contentId,
+            sessionId,
+            clientTs: typeof ts === 'number' ? ts : Date.now(),
+            payload: { ...payload, _source: 'legacy' },
+        };
+        const v = validateBackboneEvent(backbone, userId);
+        if (!v.ok) return { accepted: 0, deduplicated: 0, rejected: 1, reason: v.error };
+        const inserted = insertBackboneEvent(backbone);
+        return inserted
+            ? { accepted: 1, deduplicated: 0, rejected: 0 }
+            : { accepted: 0, deduplicated: 1, rejected: 0 };
+    } catch (e) {
+        return { accepted: 0, deduplicated: 0, rejected: 1, reason: e.message };
+    }
+}
 
 
 // --- STATIC FILES ---

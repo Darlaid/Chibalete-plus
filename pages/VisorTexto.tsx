@@ -16,6 +16,12 @@ import { OralityModal } from '../components/OralityModal';
 import { LeoCompanion } from '../components/LeoCompanion';
 import Chatbot from '../components/Chatbot';
 import * as analyticsService from '../services/analyticsService';
+// Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
+// Se ejecuta en paralelo a analyticsService.track legacy. NO reemplaza nada.
+import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
+// Sprint Modo accesible (experiencia) — overlay opt-in que solo aparece
+// cuando el contexto del Modo accesible está activo. Si no, render = null.
+import { VisorTextoAccesibleOverlay } from '../components/accesible/VisorTextoAccesibleOverlay';
 
 // Cache de TTS legacy eliminada — /api/tts usa Cache-Control: 1h desde el servidor.
 // El navegador evita re-generar el mismo texto sin necesidad de cache en memoria.
@@ -65,8 +71,15 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         try { return localStorage.getItem('vt_highContrast') === 'true'; } catch { return false; }
     });
 
-    const [text, setText] = useState<string>('');
+    const [text, setText]       = useState<string>('');
     const [loading, setLoading] = useState(true);
+    // UX-3B — error de carga discreto + token de retry. Antes, errores se
+    // pintaban como "⚠️ ERROR DE CARGA…" dentro del propio article (texto
+    // visible al lector como si fuera el libro). Ahora se separa: loadError
+    // dispara una pantalla limpia con botón Reintentar.
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [retryNonce, setRetryNonce] = useState(0);
+    const retryLoad = useCallback(() => setRetryNonce(n => n + 1), []);
 
     // B4: True when text was loaded from offline cache (network failed, cache hit).
     // Drives the "Modo sin conexión" banner so the student knows they're reading cached content.
@@ -269,20 +282,26 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     return;
                 }
 
-                setText(`⚠️ ERROR DE CARGA DE CONTENIDO\n\nNo se pudo encontrar el archivo de texto para este libro.\n\nDetalles:\n- ID: ${content.id}\n- Idioma: ${language}\n- URL Buscada: ${targetUrl || 'Ninguna configurada'}`);
+                // UX-3B — error de carga: pantalla limpia con Reintentar
+                // en vez de "⚠️ ERROR DE CARGA…" pintado como texto del libro.
+                setLoadError(
+                    'No se pudo descargar el texto del libro. Verifica tu conexión e intenta de nuevo.',
+                );
                 setLoading(false);
 
             } catch (e) {
                 console.error("Critical error loading content:", e);
-                setText("Error crítico cargando el contenido.");
+                setLoadError('Error crítico cargando el contenido.');
                 setLoading(false);
             }
         };
 
+        // Reset del error al re-disparar la carga (retry o cambio de libro/idioma).
+        setLoadError(null);
         loadContent();
 
         return () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }
-    }, [content, language, user]);
+    }, [content, language, user, retryNonce]);
 
     // [Removed] Orphaned recap effect (checkedRecap/setLeoRecapMessage never declared) — was a no-op / crash risk.
 
@@ -362,6 +381,26 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const analyticsBlocksRef = useRef(0);             // bloques completados en la sesión
     const analyticsLastThresholdRef = useRef(0);      // último umbral de 25% alcanzado
     const analyticsProgressRef = useRef(0);           // progreso actual para session_end
+
+    // ─── BACKBONE v1: paridad de sesión ──────────────────────────────────────
+    // Emite text.session_start / text.session_heartbeat / text.session_end
+    // hacia /api/v1/events. Es un canal nuevo en paralelo a analyticsService.
+    // Las refs de progreso ya existentes (analyticsProgressRef en 0..100,
+    // sentencesCountRef) se leen vía getters — el hook usa ref pattern internamente
+    // y no invalida sus effects cuando cambian.
+    const backboneSession = useBackboneReadingSession({
+        enabled:    !loading && !!user?.id && !!text,
+        userId:     user?.id,
+        contentId:  content.id,
+        mode:       'text',
+        getProgressFraction: () => (analyticsProgressRef.current ?? 0) / 100,
+        getPayload: () => ({
+            source:        'VisorTexto',
+            language,
+            sentenceCount: sentencesCountRef.current,
+            offlineMode,
+        }),
+    });
 
     // Save Progress logic
     const saveProgress = () => {
@@ -1273,16 +1312,42 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             )}
 
             <main className="flex-1 max-w-3xl mx-auto w-full p-6 md:p-12 pb-32">
-                {loading ? <div className="flex justify-center py-20"><Loader2 size={40} className="animate-spin text-indigo-500" /></div> :
-                    <article
-                        className={`prose max-w-none leading-relaxed whitespace-pre-wrap ${isDyslexicFont ? 'font-opendyslexic' : ''} ${isHighContrast ? '' : 'dark:prose-invert'}`}
-                        style={{
-                            fontSize: `${fontSize}px`,
-                            // HC override: inline color wins over prose's cascaded text-gray-* colors
-                            ...(isHighContrast ? { color: 'white', background: 'black' } : {}),
-                        }}
-                    >{text}</article>}
+                {loading
+                    ? <div className="flex justify-center py-20"><Loader2 size={40} className="animate-spin text-indigo-500" /></div>
+                    : loadError
+                        // UX-3B — pantalla de error con Reintentar. role="alert"
+                        // para que AT lo anuncie. El botón llama retryLoad que
+                        // re-dispara el effect de carga sin reload manual.
+                        ? <div role="alert" className="py-12 text-center">
+                            <h1 className="text-2xl font-bold mb-3 text-gray-900 dark:text-gray-100">
+                                No se pudo cargar el libro
+                            </h1>
+                            <p className="text-gray-700 dark:text-gray-300 mb-6 max-w-md mx-auto">
+                                {loadError}
+                            </p>
+                            <button
+                                type="button"
+                                onClick={retryLoad}
+                                className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-700 focus-visible:outline-offset-2"
+                            >
+                                Reintentar
+                            </button>
+                          </div>
+                        : <article
+                            className={`prose max-w-none leading-relaxed whitespace-pre-wrap ${isDyslexicFont ? 'font-opendyslexic' : ''} ${isHighContrast ? '' : 'dark:prose-invert'}`}
+                            style={{
+                                fontSize: `${fontSize}px`,
+                                // HC override: inline color wins over prose's cascaded text-gray-* colors
+                                ...(isHighContrast ? { color: 'white', background: 'black' } : {}),
+                            }}
+                          >{text}</article>}
             </main>
+
+            {/* Sprint Modo accesible (experiencia) — barra "Nivel de lectura"
+                pixel, fija en la base de la ventana. Solo se renderiza cuando
+                el contexto del Modo accesible está activo; si no, devuelve
+                null y el visor queda exactamente igual que antes. */}
+            <VisorTextoAccesibleOverlay />
         </div >
     );
 };

@@ -6,6 +6,14 @@ import {
     Users, Clock, Zap, CheckCircle, BookOpen,
     ChevronUp, ChevronDown, Lightbulb, FileText, X, PenLine,
 } from 'lucide-react';
+// Sprint Data Backbone — Fase 4: sección aditiva, no rompe shape legacy.
+import BackboneModeUsageSection, { type BackboneMetrics } from '../components/BackboneModeUsageSection';
+// Sprint Data Backbone — Fase 6A: embudos de conversión (aditivo).
+import BackboneFunnelsSection, { type BackboneFunnels } from '../components/BackboneFunnelsSection';
+// Sprint Data Backbone — Fase 6B: insights y alertas (aditivo).
+import BackboneInsightsSection, { type BackboneInsights } from '../components/BackboneInsightsSection';
+// Sprint Data Backbone — Fase 6C: alertas persistidas con histórico.
+import BackbonePersistentAlertsSection from '../components/BackbonePersistentAlertsSection';
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -1949,6 +1957,38 @@ const DashboardMediador: React.FC = () => {
 
             {/* ── ACTION BLOCK ── */}
             <ActionBlock alerts={alerts} />
+
+            {/* ── DATA BACKBONE: USO POR MODO DE LECTURA ── */}
+            {/* Aditivo. Si data.backboneMetrics no existe (server viejo), no renderiza. */}
+            <BackboneModeUsageSection
+                metrics={(data as { backboneMetrics?: BackboneMetrics }).backboneMetrics ?? null}
+            />
+
+            {/* ── DATA BACKBONE: EMBUDOS DE CONVERSIÓN (Sprint 6A) ── */}
+            {/* Aditivo. Si backbone no trae funnels (server viejo), no renderiza. */}
+            <BackboneFunnelsSection
+                funnels={
+                    ((data as { backboneMetrics?: { funnels?: BackboneFunnels } })
+                        .backboneMetrics?.funnels) ?? null
+                }
+            />
+
+            {/* ── DATA BACKBONE: INSIGHTS Y ALERTAS (Sprint 6B) ── */}
+            {/* Aditivo. Si backbone no trae insights (server viejo), no renderiza. */}
+            <BackboneInsightsSection
+                insights={
+                    ((data as { backboneMetrics?: { insights?: BackboneInsights } })
+                        .backboneMetrics?.insights) ?? null
+                }
+            />
+
+            {/* ── DATA BACKBONE: ALERTAS PERSISTIDAS (Sprint 6C) ── */}
+            {/* Solo se monta si insights.db está disponible (lo decide el backend). */}
+            <BackbonePersistentAlertsSection
+                available={true}
+                userId={user?.id}
+                scopeLevel="global"
+            />
 
             {/* ── FOOTER ── */}
             <p className="text-center text-xs text-gray-300 dark:text-gray-600">

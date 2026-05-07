@@ -8,7 +8,13 @@
  *   import { init, computeStudentMetrics, computeCourseMetrics, computeSchoolMetrics }
  *     from './metricsService.js';
  *   init({ events, leoMemory, progress, groups, users });
+ *
+ * Sprint 021 Fase 2 — la resolución de miembros de grupo se delega a
+ * groupMembershipService.getGroupMembers (fuente única de verdad). Antes este
+ * archivo tenía su propia copia de getGroupStudentIds — eliminada.
  */
+
+import { getGroupMembers } from './groupMembershipService.js';
 
 // ---------------------------------------------------------------------------
 // MODULE STATE
@@ -382,17 +388,16 @@ function computeICDLI(rl, b, sessions, leoEntries) {
 // ---------------------------------------------------------------------------
 // GROUP STUDENT HELPERS
 // ---------------------------------------------------------------------------
-
-/** Resolve all student IDs from a group (handles both legacy and new schemas). */
-function getGroupStudentIds(group) {
-  const ids = new Set([
-    ...(group.studentIds ?? []),
-    ...(group.memberIds  ?? []),
-  ]);
-  for (const user of _users) {
-    if (user.groupIds?.includes(group.id)) ids.add(user.id);
-  }
-  return [...ids];
+// Sprint 021 Fase 2 — la implementación local de getGroupStudentIds fue
+// eliminada. Toda la lógica vive en utils/groupMembership.mjs vía
+// groupMembershipService.getGroupMembers. No reintroducir lógica aquí —
+// si la regla de membresía cambia, se cambia en una sola fuente.
+//
+// Wrapper liviano que pasa el state de módulo (_users, _groups) al servicio
+// canónico. Mantiene la firma `(group) => string[]` para que los call sites
+// existentes no cambien.
+function resolveGroupMemberIds(group) {
+  return getGroupMembers(group, _users, { allGroups: _groups });
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +575,7 @@ export function computeCourseMetrics(courseId) {
   const group = _groups.find(g => g.id === courseId);
   if (!group) throw new Error(`metricsService: group "${courseId}" not found`);
 
-  const studentIds    = getGroupStudentIds(group);
+  const studentIds    = resolveGroupMemberIds(group);
   const allStudents   = studentIds.map(id => computeStudentMetrics(id));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
   const { top, bottom } = topBottomByComposite(activeStudents, 0.20);
@@ -609,16 +614,16 @@ export function computeSchoolMetrics(schoolId) {
 
   const allStudentIds = new Set();
   for (const group of schoolGroups) {
-    for (const id of getGroupStudentIds(group)) allStudentIds.add(id);
+    for (const id of resolveGroupMemberIds(group)) allStudentIds.add(id);
   }
 
   const allStudents    = [...allStudentIds].map(id => computeStudentMetrics(id));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
 
   const courseBreakdown = schoolGroups
-    .filter(g => getGroupStudentIds(g).length > 0)
+    .filter(g => resolveGroupMemberIds(g).length > 0)
     .map(g => {
-      const groupStudentIds = getGroupStudentIds(g);
+      const groupStudentIds = resolveGroupMemberIds(g);
       const groupStudents   = groupStudentIds.map(id => computeStudentMetrics(id));
       const active          = groupStudents.filter(s => s.behavioral.totalSessions > 0);
       const compScores      = active.map(s => s.readingLevels.composite);

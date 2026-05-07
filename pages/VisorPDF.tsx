@@ -4,6 +4,9 @@ import type { Content } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import * as analyticsService from '../services/analyticsService';
+// Sprint Data Backbone — Fase 4B: paridad de sesión vía /api/v1/events.
+// Convive con analyticsService.track + startHeartbeat legacy. NO los reemplaza.
+import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
 import { Sun, Moon, ChevronLeft, ChevronRight, Loader2, Minus, Plus, Maximize, Minimize, Smartphone, Info, X, Tag, User } from 'lucide-react';
 import { useDevice } from '../hooks/useDevice';
 import MobileOrientationOverlay from '../components/MobileOrientationOverlay';
@@ -32,6 +35,23 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
     const fromRemoteProgressRef = useRef(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
+
+    // ─── BACKBONE v1: paridad de sesión ──────────────────────────────────────
+    // Emite pdf.session_start / session_heartbeat / session_end / progress hacia
+    // /api/v1/events. Convive con analyticsService legacy y dataService progress.
+    const backboneSession = useBackboneReadingSession({
+        enabled:    !!user?.id && !!content?.id && numPages > 0,
+        userId:     user?.id,
+        contentId:  content.id,
+        mode:       'pdf',
+        getProgressFraction: () => (numPages > 0 ? pageNum / numPages : 0),
+        getPayload: () => ({
+            source:      'VisorPDF',
+            currentPage: pageNum,
+            totalPages:  numPages,
+            zoomLevel:   scale,
+        }),
+    });
 
     // -- Auto Fit Logic --
     const autoFit = async (doc: any) => {
@@ -284,6 +304,11 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
                         pageNumber: pageNum,
                         totalPages: numPages,
                         progressPercentage: Math.round((pageNum / numPages) * 100),
+                    });
+                    // Backbone v1: pdf.progress (paralelo a page_change legacy).
+                    backboneSession.emitEvent('progress', {
+                        progressFraction: numPages > 0 ? pageNum / numPages : 0,
+                        payload: { currentPage: pageNum, totalPages: numPages },
                     });
                 }
             }, 1000);

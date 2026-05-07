@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Smartphone, Download, RefreshCw, CheckCircle, AlertTriangle } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { useLuAnalytics } from '../hooks/useLuAnalytics';
 
 interface LUConfig {
     version: string;
@@ -15,6 +17,22 @@ const ChibaleteLU: React.FC = () => {
     const [config, setConfig] = useState<LUConfig | null>(null);
     const [status, setStatus] = useState<Status>('loading');
 
+    const { user } = useAuth();
+    const analytics = useLuAnalytics({
+        userId:  user?.id,
+        enabled: !!user?.id,
+    });
+
+    // Refs para que la closure de fetchConfig siempre vea los trackers
+    // actuales sin re-crear la función ni mutar dependencias.
+    const analyticsRef = useRef(analytics);
+    analyticsRef.current = analytics;
+
+    // Guards para emitir cada *_view a lo sumo una vez por sesión, aunque
+    // el usuario haga refresh manual (botón "Intentar de nuevo").
+    const installViewSentRef = useRef(false);
+    const offlineViewSentRef = useRef(false);
+
     const fetchConfig = () => {
         setStatus('loading');
         fetch('/api/lu/version')
@@ -25,15 +43,57 @@ const ChibaleteLU: React.FC = () => {
             .then((data: LUConfig) => {
                 setConfig(data);
                 setStatus('ok');
+                analyticsRef.current.trackVersionCheck({
+                    version:               data.version,
+                    apkUrlAvailable:       typeof data.apkUrl === 'string' && data.apkUrl.length > 0,
+                    releaseNotesAvailable: typeof data.notes === 'string' && data.notes.length > 0,
+                });
             })
-            .catch(() => {
+            .catch((err: unknown) => {
                 setStatus('error');
+                analyticsRef.current.trackDownloadError({
+                    errorType: 'version_fetch_failed',
+                    message:   err instanceof Error ? err.message : 'unknown',
+                });
             });
     };
 
     useEffect(() => {
+        analyticsRef.current.trackPageView({ route: '/chibalete-lu' });
         fetchConfig();
     }, []);
+
+    // Una vez que la pantalla muestra instrucciones / ayuda offline (siempre
+    // visibles cuando status='ok'), emitir el *_view exactamente una vez.
+    useEffect(() => {
+        if (status !== 'ok') return;
+        if (!installViewSentRef.current) {
+            analyticsRef.current.trackInstallInstructionsView();
+            installViewSentRef.current = true;
+        }
+        if (!offlineViewSentRef.current) {
+            analyticsRef.current.trackOfflineHelpView();
+            offlineViewSentRef.current = true;
+        }
+    }, [status]);
+
+    const handleDownloadClick = () => {
+        const version = config?.version ?? '';
+        const apkUrl  = config?.apkUrl  ?? '';
+        if (!apkUrl) {
+            analyticsRef.current.trackDownloadError({
+                errorType: 'apk_url_missing',
+                message:   'apkUrl no disponible en la configuración',
+                version,
+            });
+            return;
+        }
+        analyticsRef.current.trackDownloadStart({ version, apkUrl });
+        // El <a download> dispara la descarga del browser de forma nativa;
+        // desde el frontend no podemos confirmar bytes recibidos, sólo el
+        // hito del click. Por eso method='browser_download'.
+        analyticsRef.current.trackDownloadSuccess({ version, method: 'browser_download' });
+    };
 
     return (
         <div className="p-4 md:p-8 max-w-2xl mx-auto">
@@ -119,6 +179,7 @@ const ChibaleteLU: React.FC = () => {
                         <a
                             href={config.apkUrl}
                             download
+                            onClick={handleDownloadClick}
                             className="flex items-center justify-center gap-2 w-full py-3 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold rounded-xl transition-colors shadow-sm text-base"
                         >
                             <Download size={18} />

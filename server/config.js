@@ -1,15 +1,24 @@
 /**
  * config.js — Rutas canónicas centralizadas del sistema Chibalete+
  *
- * PRODUCCIÓN (VPS):
- *   UPLOADS_ROOT  = /var/www/chibalete/public/uploads
- *   USERS_DB      = /var/www/chibalete/data-critical/usuarios_colegios_oro.json
+ * PRODUCCIÓN (VPS) — Docker Compose:
+ *   Las rutas reales en host (/var/www/chibalete/...) se exponen como
+ *   bind mounts dentro de los containers `chibalete_api_1` y
+ *   `chibalete_api_2` como /app/data, /app/data-critical,
+ *   /app/public/uploads y /app/server. Los valores efectivos los inyecta
+ *   el container desde su working directory + variables de entorno
+ *   definidas en docker-compose.yml.
  *
  * DESARROLLO LOCAL:
- *   Las variables de entorno pueden omitirse; se usarán las rutas relativas.
- *   Establecer en .env o en ecosystem.config.cjs:
- *     UPLOADS_ROOT=/var/www/chibalete/public/uploads
- *     USERS_DB=/var/www/chibalete/data-critical/usuarios_colegios_oro.json
+ *   Las variables de entorno pueden omitirse; se usan rutas relativas
+ *   al CWD del proceso. Setear en .env si necesitas apuntar a paths
+ *   distintos durante debugging:
+ *     UPLOADS_ROOT=/ruta/local/uploads
+ *     USERS_DB=/ruta/local/usuarios.json
+ *
+ *   NOTA: PM2 NO gobierna producción. Si usas `pm2 start
+ *   ecosystem.config.cjs` en local, el config respeta las mismas vars
+ *   de entorno. Ver banner del archivo ecosystem.config.cjs.
  */
 
 import path from 'path';

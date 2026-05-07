@@ -491,6 +491,14 @@ export interface ProgresoLectura {
     globalPercentage: number;
     contentAnchor: string | null;
     contentFingerprint: string | null;
+    /**
+     * Modo activo en el último playback. Tipo inline por compatibilidad con
+     * datos persistidos en progress_db.json y validación backend.
+     *
+     * 'accessible' es LEGACY = "Modo Guiado" (= 'text'). NO reutilizar este
+     * literal para el nuevo Modo Accesible — se reservó 'a11y' para eso.
+     * Para código nuevo usar el tipo ReaderMode de `utils/readerMode.ts`.
+     */
     lastInteractedMode: 'pdf' | 'text' | 'accessible' | 'immersive';
     // Fase E: per-visor precise anchor — improves same-mode rehidration accuracy.
     // When present and type matches the current visor, use value directly.
@@ -1231,6 +1239,12 @@ export interface PedagogicalStats {
 
   // New Metrics for Holistic View
   writingProgress: number; // 0-100 scale based on assignment grades
+  /**
+   * Uso porcentual por modo de lectura. La clave 'accessible' es LEGACY y
+   * corresponde al actual "Modo Guiado" (= 'text'). Se mantiene para no
+   * romper reportes históricos. El nuevo Modo Accesible (cuando se construya)
+   * usará la clave 'a11y'. Ver `utils/readerMode.ts`.
+   */
   modeUsage: { pdf: number, immersive: number, accessible: number, album: number }; // Percentage usage
   socioEmotionalScore: number; // 0-100 based on reflective questions
   vocationalAlignment: string[]; // e.g. ['Ciencias', 'Artes']

@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
-import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2 } from 'lucide-react';
+import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2, Glasses } from 'lucide-react';
 import { getOfflineTextEntry, saveOfflineText } from '../utils/offlineTextCache';
 import type { OfflineTextEntry } from '../utils/offlineTextCache';
 import StarRating from '../components/StarRating';
@@ -282,7 +282,12 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                       )}
                                       {content.texto_plano_url && (
                                         <button onClick={() => navigate(`/leer/texto/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
-                                            <FileText size={20} className="mr-2 text-green-400"/> Accesible
+                                            <FileText size={20} className="mr-2 text-green-400"/> Guiado
+                                        </button>
+                                      )}
+                                      {content.texto_plano_url && (
+                                        <button onClick={() => navigate(`/leer/accesible/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                            <Glasses size={20} className="mr-2 text-blue-400"/> Accesible
                                         </button>
                                       )}
                                     </>

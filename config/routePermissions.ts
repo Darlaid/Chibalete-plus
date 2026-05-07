@@ -201,6 +201,11 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     description: 'Visor inmersivo accesible',
   },
   {
+    path: '/leer/accesible/:id',
+    access: 'authenticated',
+    description: 'Modo Accesible (mode=a11y) — visor con AccessWrapper, paridad con PDF/Texto/Álbum',
+  },
+  {
     path: '/ver/album/:id',
     access: 'authenticated',
     description: 'Visor de libro-álbum guiado',

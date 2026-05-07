@@ -1,28 +1,44 @@
 /**
- * useAccessCheck — Fase Hardening E2
+ * useAccessCheck — Fase Hardening E2 + UX-3B.
  *
  * Hook de preflight de acceso a contenido.
  * Consulta el endpoint server-side GET /api/content/:id/access?userId=...
  * ANTES de que el visor de contenido se renderice.
  *
  * Estados posibles:
- *  - { status: 'checking' }   → esperando respuesta del servidor
- *  - { status: 'allowed' }    → acceso concedido
- *  - { status: 'denied', reason } → acceso denegado (el visor NO debe renderizarse)
- *  - { status: 'error', reason }  → error de red (comportamiento conservador: denegar)
+ *  - { status: 'checking' }       → esperando respuesta del servidor
+ *  - { status: 'allowed' }        → acceso concedido
+ *  - { status: 'denied', reason } → acceso denegado (403, denegación legítima)
+ *  - { status: 'error',  reason } → error técnico (5xx, red caída, sesión inválida)
+ *
+ * UX-3B — diferenciación 'denied' vs 'error':
+ *   El servidor distingue ahora entre denegación real (HTTP 403) y error
+ *   técnico (HTTP 500 + errorCode 'ACCESS_CHECK_FAILED'). El frontend
+ *   refleja eso: 'denied' es el "no tienes acceso" (sin acción del user),
+ *   'error' es el "no pudimos verificar, intenta de nuevo" (con retry).
+ *   Antes: ambos colapsaban a 'denied' silenciosamente.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 type AccessStatus = 'checking' | 'allowed' | 'denied' | 'error';
 
 interface AccessCheckResult {
     status: AccessStatus;
     reason?: string;
+    /**
+     * UX-3B — re-disparar el preflight sin recargar la página. El consumidor
+     * lo conecta al botón "Reintentar" cuando el status es 'error'. No tiene
+     * efecto en estados 'allowed'/'denied' (siempre dispara el effect, pero
+     * el resultado vuelve a converger).
+     */
+    retry: () => void;
 }
 
 export function useAccessCheck(contentId: string, userId: string | undefined): AccessCheckResult {
-    const [result, setResult] = useState<AccessCheckResult>({ status: 'checking' });
+    const [result, setResult]   = useState<Omit<AccessCheckResult, 'retry'>>({ status: 'checking' });
+    const [retryNonce, setNonce] = useState(0);
+    const retry = useCallback(() => setNonce(n => n + 1), []);
 
     useEffect(() => {
         // Reset a "checking" cada vez que cambia el contenido o usuario
@@ -49,19 +65,39 @@ export function useAccessCheck(contentId: string, userId: string | undefined): A
                 });
                 if (cancelled) return;
 
-                const data = await res.json();
+                const data = await res.json().catch(() => ({}));
                 if (cancelled) return;
 
-                if (data.allowed === true) {
+                // UX-3B — diferenciación por status:
+                //   2xx + allowed:true   → allowed
+                //   403 + allowed:false  → denied   (denegación legítima)
+                //   5xx / 401 / 400      → error    (técnico, ofrece retry)
+                //   2xx + allowed:false  → denied   (compat, no debería ocurrir)
+                if (res.ok && data.allowed === true) {
                     setResult({ status: 'allowed' });
+                } else if (res.status === 403) {
+                    setResult({
+                        status: 'denied',
+                        reason: data.reason || 'No tienes acceso a este contenido.',
+                    });
+                } else if (!res.ok) {
+                    // 5xx / 401 / 400 / etc. — error técnico, no permiso real.
+                    setResult({
+                        status: 'error',
+                        reason: data.reason || 'No pudimos verificar tu acceso. Intenta de nuevo.',
+                    });
                 } else {
-                    setResult({ status: 'denied', reason: data.reason || 'Acceso no autorizado.' });
+                    // res.ok pero allowed:false — fallback defensivo.
+                    setResult({
+                        status: 'denied',
+                        reason: data.reason || 'Acceso no autorizado.',
+                    });
                 }
             } catch (err) {
                 if (!cancelled) {
-                    // Error de red: conservadoramente bloquear render
+                    // fetch lanzó (red caída, DNS, etc.) — error técnico.
                     console.error('[useAccessCheck] Error de red al verificar acceso:', err);
-                    setResult({ status: 'error', reason: 'No se pudo verificar el acceso. Intenta de nuevo.' });
+                    setResult({ status: 'error', reason: 'No pudimos verificar tu acceso. Intenta de nuevo.' });
                 }
             }
         };
@@ -69,7 +105,7 @@ export function useAccessCheck(contentId: string, userId: string | undefined): A
         checkAccess();
 
         return () => { cancelled = true; };
-    }, [contentId, userId]);
+    }, [contentId, userId, retryNonce]);
 
-    return result;
+    return { ...result, retry };
 }

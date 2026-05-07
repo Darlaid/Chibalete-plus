@@ -11,6 +11,9 @@ import type { Content, AlbumPage, AlbumRegion, AlbumReadingRoute, RegionAction, 
 import { getObjectContainRect, viewportToImagePercent, isPointInRegion } from '../utils/albumGeometry';
 import { getRereadContext, incrementReadCount, recordRouteVisit, recordAlbumRouteSelected, recordAlbumRouteProgress } from '../utils/rereadStorage';
 import { createAlbumEmitter, generateSessionId } from '../services/analyticsService';
+// Sprint Data Backbone — Fase 4B: paridad de sesión vía /api/v1/events.
+// Convive con createAlbumEmitter legacy. NO lo reemplaza.
+import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
 import { useNarrativeAudio } from '../hooks/useNarrativeAudio';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, HelpCircle, Volume2, VolumeX, RotateCcw, Eye, EyeOff } from 'lucide-react';
 import confetti from 'canvas-confetti';
@@ -364,6 +367,24 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
         sessionId: sessionIdRef.current,
     }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // ─── BACKBONE v1: paridad de sesión ──────────────────────────────────────
+    // Emite album.session_start / session_heartbeat / session_end / progress
+    // hacia /api/v1/events. Convive con createAlbumEmitter legacy y con la
+    // persistencia de progreso vía dataService.updateProgreso. NO los reemplaza.
+    const backboneSession = useBackboneReadingSession({
+        enabled:    !!user?.id && !!content?.id && albumData.length > 0,
+        userId:     user?.id,
+        contentId:  content.id,
+        mode:       'album',
+        getProgressFraction: () =>
+            albumData.length > 0 ? (pageIndex + 1) / albumData.length : 0,
+        getPayload: () => ({
+            source:       'VisorAlbum',
+            currentSlide: pageIndex + 1,
+            totalSlides:  albumData.length,
+        }),
+    });
+
     // rereadContext: snapshot at mount — how many times the user has completed
     // this album and which routes they've visited across all reads.
     // Intentionally NOT reactive: we want the read-count that was true when the
@@ -565,8 +586,13 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
                 undefined, undefined,
                 { lastMode: 'album', elapsedMs: Date.now() - sessionStartRef.current }
             );
+            // Backbone v1: album.progress paralelo al save legacy.
+            backboneSession.emitEvent('progress', {
+                progressFraction: (pageIndex + 1) / albumData.length,
+                payload: { currentSlide: pageIndex + 1, totalSlides: albumData.length },
+            });
         }, 1000);
-    }, [pageIndex, user, content.id, albumData.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [pageIndex, user, content.id, albumData.length, backboneSession]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Reread session marker — fires once at mount, only when the reader has
     // completed this album at least once before (readCount ≥ 1).

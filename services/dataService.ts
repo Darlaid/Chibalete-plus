@@ -36,6 +36,32 @@ import type {
 } from '../types';
 import { persistenceService } from './persistenceService';
 import { isMediator, isAdmin, hasMediatorRole, hasAdminRole } from '../utils/permissions';
+// Sprint 021 Fase 2 — fuente única de verdad de membresía. Las mismas
+// helpers que importan server/groupMembershipService.js y
+// server/metricsService.js. Si la regla de membresía cambia, se cambia en
+// utils/groupMembership.mjs y las tres capas quedan consistentes
+// automáticamente. No re-implementar acá.
+//
+// Sprint 022 Fase B — addUserIdToGroup/removeUserIdFromGroup +
+// addGroupIdToUser/removeGroupIdFromUser se usan SOLAMENTE para refrescar
+// el cache local tras la respuesta del endpoint atómico backend. NO
+// reemplazan la transacción del backend — son aplicaciones in-memory de
+// las mismas primitivas que el backend ya persistió.
+import {
+    getGroupMembers,
+    addUserIdToGroup,
+    removeUserIdFromGroup,
+    addGroupIdToUser,
+    removeGroupIdFromUser,
+    unionGroupMemberIds,
+    diffIds,
+} from '../utils/groupMembership.mjs';
+// Sprint visibilidad — capa narrativa: shape de la respuesta del endpoint
+// GET /api/groups/:id/diagnosis. Lo importamos solo para que el método del
+// dataService devuelva un tipo público al consumidor (UI).
+import type { GroupDiagnosis } from '../utils/groupDiagnosis';
+// Sprint Panel del estudiante — shape de GET /api/students/:id/status.
+import type { StudentStatus } from '../utils/studentStatus';
 
 // Fase F: Entry in the persistent failed-sync queue.
 interface FailedSyncEntry {
@@ -453,6 +479,51 @@ class DataService {
         }
     }
 
+    /**
+     * Sprint 022 Fase 2A.2 — refetch puntual y minimalista de USERS.
+     *
+     * Diseñado para resolver el residual operacional de stale UI (ver
+     * USERS_CACHE_RISK documentado en sprints previos). NO se llama
+     * automáticamente en cada mutación — es escotilla disponible para
+     * componentes que necesiten freshness garantizado en momentos
+     * concretos:
+     *   - AulaViva.tsx al mount del panel (Caso CRÍTICO 1).
+     *   - AdminUsuarios.tsx al abrir form de edición (Caso CRÍTICO 2).
+     *
+     * Reglas:
+     *   - Solo refetcha USERS. No toca groups/schools — ya están frescos
+     *     vía savedGroup (updateGroup) y vía hidratación inicial.
+     *   - Reemplaza this.users completo desde el endpoint (server truth).
+     *   - Log `[USERS_CACHE_REFRESH]` solo si efectivamente reemplazó —
+     *     en error se loggea como warn aparte sin reemplazar.
+     *   - try/catch defensivo: si la red falla, devuelve el cache actual
+     *     y deja un warn. NO lanza — los callers son flujos UI que no
+     *     deben romperse por un refetch.
+     */
+    async reloadUsers(): Promise<User[]> {
+        try {
+            const res = await fetch(`${this.apiUrl}/users`);
+            if (!res.ok) {
+                console.warn(`[USERS_CACHE_REFRESH] failed status=${res.status}`);
+                return this.users;
+            }
+            const raw: any[] = await res.json();
+            if (!Array.isArray(raw)) {
+                console.warn('[USERS_CACHE_REFRESH] failed reason=non_array_payload');
+                return this.users;
+            }
+            const fresh = raw.filter(u => u && u.id) as User[];
+            const prevCount = this.users.length;
+            this.users = fresh;
+            this.saveState('users', this.users);
+            console.log(`[USERS_CACHE_REFRESH] op=reloadUsers prev=${prevCount} now=${fresh.length}`);
+            return this.users;
+        } catch (e) {
+            console.warn('[USERS_CACHE_REFRESH] failed reason=network', (e as Error).message);
+            return this.users;
+        }
+    }
+
     // --- SYNC METHODS ---
     async syncUserProgress(userId: string) {
         try {
@@ -502,32 +573,96 @@ class DataService {
     }
 
     // --- API UPLOAD METHODS ---
-    async uploadFile(file: File, parentId?: string): Promise<string> {
+    /**
+     * Sube un archivo al backend y devuelve la URL pública resultante.
+     *
+     * Implementación con XMLHttpRequest (no fetch) por una razón concreta:
+     * fetch NO expone progreso real de upload. El stream de subida
+     * desaparece para el cliente hasta que el servidor responde — para
+     * un asset editorial de varios cientos de MB eso significa ver el
+     * formulario "congelado" sin feedback durante minutos. XHR sí emite
+     * `progress` events sobre `xhr.upload`, lo que permite renderizar
+     * porcentaje real mientras los bytes salen.
+     *
+     * `onProgress` es opcional para no romper consumidores existentes.
+     * Si se provee, se invoca con un número entre 0 y 1 cada vez que el
+     * navegador emite un progress event (típicamente cada ~50-100 ms en
+     * conexiones reales). Cuando todos los bytes han salido pero el
+     * servidor aún está validando/hashing, el callback queda en 1 — el
+     * caller debe mostrar un estado de "Procesando" hasta que la promesa
+     * resuelva.
+     */
+    async uploadFile(
+        file: File,
+        parentId?: string,
+        onProgress?: (fraction: number) => void,
+    ): Promise<string> {
         const formData = new FormData();
-        // Still append to body just in case, but Query is primary for Multer
         if (parentId) {
             formData.append('parentId', parentId);
         }
         formData.append('file', file);
 
-        const url = parentId ? `${this.apiUrl}/upload?parentId=${encodeURIComponent(parentId)}` : `${this.apiUrl}/upload`;
-
+        const url = parentId
+            ? `${this.apiUrl}/upload?parentId=${encodeURIComponent(parentId)}`
+            : `${this.apiUrl}/upload`;
         const uploadUserId = this.getSessionUserId();
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'x-user-id': uploadUserId,
-            },
-            body: formData
+
+        return new Promise<string>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url);
+            xhr.setRequestHeader('x-user-id', uploadUserId);
+
+            if (onProgress && xhr.upload) {
+                xhr.upload.addEventListener('progress', (ev) => {
+                    if (ev.lengthComputable && ev.total > 0) {
+                        const frac = Math.min(1, ev.loaded / ev.total);
+                        onProgress(frac);
+                    }
+                });
+                // Cuando el último byte ya salió pero el servidor sigue
+                // procesando (validación binaria, hash, dedup, mover a
+                // destino final), avisamos 1.0 para que el UI cambie a
+                // "Procesando" en lugar de quedarse a 99 %.
+                xhr.upload.addEventListener('load', () => onProgress(1));
+            }
+
+            xhr.addEventListener('load', () => {
+                // xhr.status === 0 ocurre típicamente cuando el navegador
+                // aborta por bloqueo CORS, pérdida de red o tab cerrada
+                // mid-flight. Lo tratamos como error de red explícito.
+                if (xhr.status === 0) {
+                    reject(new Error('Network error: la subida fue interrumpida.'));
+                    return;
+                }
+                let data: { url?: string; error?: string } = {};
+                try {
+                    data = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+                } catch {
+                    // Servidor devolvió HTML de error (ej. 502 de nginx)
+                    // o JSON inválido. Conservamos el cuerpo para que el
+                    // mensaje al usuario sea informativo.
+                    data = { error: xhr.responseText || `HTTP ${xhr.status}` };
+                }
+                if (xhr.status >= 200 && xhr.status < 300 && data.url) {
+                    resolve(data.url);
+                } else {
+                    reject(new Error(data.error || `Upload failed (HTTP ${xhr.status})`));
+                }
+            });
+
+            xhr.addEventListener('error', () => {
+                reject(new Error('Network error durante la subida.'));
+            });
+            xhr.addEventListener('abort', () => {
+                reject(new Error('Subida cancelada.'));
+            });
+            xhr.addEventListener('timeout', () => {
+                reject(new Error('La subida superó el tiempo máximo de espera.'));
+            });
+
+            xhr.send(formData);
         });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || 'Upload failed');
-        }
-
-        const data = await response.json();
-        return data.url; // Returns /uploads/filename.ext
     }
 
     // W1: Best-effort orphan cleanup. Called from SubirContenido when metadata save fails
@@ -716,29 +851,44 @@ class DataService {
                 );
                 const canonicalColegio = matchedSchool ? matchedSchool.name : csvColegio;
 
-                const newUserObj = await this.createUser({
-                    nombre_completo: (u.nombre_completo || u.nombre || '').trim(),
-                    email: (u.email || '').trim().toLowerCase(),
-                    password: u.password || 'chibalete123', // Usa la password del CSV
-                    colegio: canonicalColegio,
-                    curso: (u.curso || '').trim(),
-                    roles,
-                    ...(mediatorKind ? { mediatorKind } : {}),
-                });
+                // Sprint 022 Fase B — flujo saneado del bulk import.
+                //
+                // ORDEN ANTERIOR:
+                //   1. createUser (sin groupIds) → backend depende del
+                //      fallback colegio→single-group; falla en escuelas
+                //      multi-grupo con AMBIGUOUS_GROUP antes del paso 2.
+                //   2. Buscar/crear targetGroup.
+                //   3. Mutar targetGroup.studentIds.push + memberIds = ...
+                //   4. await updateGroup(targetGroup, ...)
+                //   5. Mutar newUserObj.groupIds.push
+                //   6. await updateUser({ groupIds: ... })
+                //   → 5 operaciones de escritura por estudiante,
+                //     mutaciones locales pre-PUT, regla cliente
+                //     destructive-replace para mediatorIds, ventana
+                //     de inconsistencia entre PUTs.
+                //
+                // ORDEN ACTUAL:
+                //   1. Resolver/crear targetGroup (si CSV trae colegio+curso).
+                //   2. createUser con groupIds explícito (lectores) →
+                //      el backend hace addUserIdToGroup atómico bidireccional
+                //      en el mismo POST. Cero cascada cliente.
+                //   3. Solo para mediadores: updateGroup({mediatorIds: [...]})
+                //      → única vía sin endpoint /mediators dedicado;
+                //      es UN PUT atómico, sin cascada local.
+                //   → 1 escritura para lectores, 2 para mediadores.
 
-                // HOTFIX: Relación automática con Clases/Grupos para Aula Viva
-                if (newUserObj.colegio && newUserObj.curso) {
-                    const gradeName = newUserObj.curso.trim();
-                    const schoolName = newUserObj.colegio.trim();
-                    
-                    // 1. Buscar grupo existente
-                    let targetGroup = this.groups.find(g => 
-                        g.school && g.grade && 
-                        g.school.toLowerCase() === schoolName.toLowerCase() && 
+                const isTeacher = roles.includes('mediador') || roles.includes('administrador');
+
+                // 1. Resolver/crear targetGroup ANTES de createUser.
+                let targetGroup: Group | undefined;
+                const gradeName  = (u.curso || '').trim();
+                const schoolName = canonicalColegio.trim();
+                if (schoolName && gradeName) {
+                    targetGroup = this.groups.find(g =>
+                        g.school && g.grade &&
+                        g.school.toLowerCase() === schoolName.toLowerCase() &&
                         g.grade.toLowerCase() === gradeName.toLowerCase()
                     );
-
-                    // 2. Si no existe, crearlo
                     if (!targetGroup) {
                         try {
                             targetGroup = await this.createGroup({
@@ -747,41 +897,39 @@ class DataService {
                                 grade: gradeName,
                             });
                         } catch (err) {
-                            console.warn('Error al auto-crear grupo', err);
+                            console.warn('[BULK_IMPORT] Error al auto-crear grupo', err);
                         }
                     }
+                }
 
-                    // 3. Emparejamiento bidireccional
-                    if (targetGroup) {
-                        const isTeacher = isMediator(newUserObj) || isAdmin(newUserObj);
-                        let groupNeedsUpdate = false;
+                // 2. createUser con groupIds upfront para lectores.
+                //    Para mediadores NO se pasa groupIds: el backend
+                //    addUserIdToGroup pondría al mediador en
+                //    studentIds/memberIds — incorrecto. Los mediadores
+                //    se vinculan vía mediatorIds en el paso 3.
+                const newUserObj = await this.createUser({
+                    nombre_completo: (u.nombre_completo || u.nombre || '').trim(),
+                    email: (u.email || '').trim().toLowerCase(),
+                    password: u.password || 'chibalete123',
+                    colegio: canonicalColegio,
+                    curso: (u.curso || '').trim(),
+                    roles,
+                    ...(mediatorKind ? { mediatorKind } : {}),
+                    ...(targetGroup && !isTeacher ? { groupIds: [targetGroup.id] } : {}),
+                });
 
-                        if (isTeacher) {
-                            // Asignar al mediador — mediatorIds es el campo canónico
-                            if (!targetGroup.mediatorIds?.includes(newUserObj.id)) {
-                                targetGroup.mediatorIds = [newUserObj.id];
-                                groupNeedsUpdate = true;
-                            }
-                        } else {
-                            // Asignar al estudiante matriculado
-                            if (!targetGroup.studentIds) targetGroup.studentIds = [];
-                            if (!targetGroup.studentIds.includes(newUserObj.id)) {
-                                targetGroup.studentIds.push(newUserObj.id);
-                                targetGroup.memberIds = [...targetGroup.studentIds];
-                                groupNeedsUpdate = true;
-                            }
-                        }
-
-                        if (groupNeedsUpdate) {
-                            await this.updateGroup(targetGroup.id, targetGroup);
-                        }
-
-                        // Vincular GroupID dentro del perfil del Usuario
-                        if (!newUserObj.groupIds) newUserObj.groupIds = [];
-                        if (!newUserObj.groupIds.includes(targetGroup.id)) {
-                            newUserObj.groupIds.push(targetGroup.id);
-                            await this.updateUser(newUserObj.id, { groupIds: newUserObj.groupIds });
-                        }
+                // 3. Para mediadores con grupo: una sola llamada atómica
+                //    a updateGroup({mediatorIds}). El backend
+                //    applyGroupMembersChange escribe la bidireccional.
+                //    Preserva la semántica destructive-replace del bulk
+                //    import histórico (mediatorIds = [newUserObj.id]) —
+                //    cambiarla queda fuera del scope de este sprint.
+                if (isTeacher && targetGroup) {
+                    const currentMediators = Array.isArray(targetGroup.mediatorIds)
+                        ? targetGroup.mediatorIds
+                        : [];
+                    if (!currentMediators.includes(newUserObj.id)) {
+                        await this.updateGroup(targetGroup.id, { mediatorIds: [newUserObj.id] });
                     }
                 }
 
@@ -805,6 +953,12 @@ class DataService {
 
     // --- SINGLE USER MANAGEMENT ---
     async createUser(userData: Partial<User>): Promise<User> {
+        // Sprint 022 Fase B — propagar groupIds y mediatorKind al body POST.
+        // El backend POST /api/users ya hace bidireccional atómico cuando
+        // groupIds viene poblado: addUserIdToGroup para cada gid dentro del
+        // lock anidado (groupsLock outer, usersLock inner). Pasar groupIds
+        // explícito evita depender del fallback `colegio→single-group school`,
+        // que falla en escuelas multi-grupo con AMBIGUOUS_GROUP.
         const newUser: User = {
             id: userData.id || `user-${Date.now()}`,
             nombre_usuario: userData.nombre_usuario || userData.email?.split('@')[0] || 'usuario',
@@ -820,7 +974,13 @@ class DataService {
             seguidos: 0,
             nivel_lectura: userData.nivel_lectura || 'Novato',
             roles: userData.roles || ['lector'],
-            social_connections: { facebook: false, instagram: false, linkedin: false }
+            social_connections: { facebook: false, instagram: false, linkedin: false },
+            // groupIds/mediatorKind: solo se incluyen si el caller los aportó.
+            // Para back-compat con callers que no los pasan, NO se inventan
+            // arrays vacíos por default — eso podría disparar el guard
+            // GROUP_REQUIRED del backend para lectores sin colegio resoluble.
+            ...(userData.groupIds  !== undefined ? { groupIds:  userData.groupIds }  : {}),
+            ...(userData.mediatorKind         ? { mediatorKind: userData.mediatorKind } : {}),
         };
 
         // SYNC TO BACKEND FIRST
@@ -838,11 +998,17 @@ class DataService {
             throw new Error(error.error || 'Failed to create user on server');
         }
 
-        // Only update local state if successful
-        this.users.push(newUser);
+        // Server truth: el backend devuelve el user normalizado vía
+        // sanitizeUserForClient (sin password) + groupIds resueltos por el
+        // POST handler (incluye fallback colegio → single-group school si
+        // no se pasó groupIds explícito). Hidratar `this.users` desde la
+        // respuesta evita guardar una versión cliente con groupIds vacío
+        // cuando el backend efectivamente sí lo resolvió.
+        const savedUser: User = await response.json();
+        this.users.push(savedUser);
         this.saveState('users', this.users);
 
-        return newUser;
+        return savedUser;
     }
 
     async updateUser(id: string, updates: Partial<User>) {
@@ -880,6 +1046,22 @@ class DataService {
         if (idx > -1) {
             this.users.splice(idx, 1);
             this.saveState('users', this.users);
+        }
+
+        // Sprint 022 Fase 2A.1 — coherencia local en this.groups.
+        // El backend ejecuta `detachUserFromAllGroups(groups, id)` dentro de
+        // su lock anidado. Replicamos lo mismo en cliente con la primitiva
+        // pura `removeUserIdFromGroup` para que `this.groups[*].memberIds`
+        // y `this.groups[*].studentIds` no queden con IDs huérfanos
+        // apuntando al user borrado. Es el espejo exacto del backend, sin
+        // reglas nuevas.
+        let touched = 0;
+        for (const g of this.groups) {
+            if (removeUserIdFromGroup(g as any, id)) touched++;
+        }
+        if (touched > 0) {
+            this.saveState('groups', this.groups);
+            console.log(`[GROUPS_CACHE_REFRESH] op=deleteUser userId=${id} affectedGroups=${touched}`);
         }
     }
 
@@ -982,17 +1164,26 @@ class DataService {
     }
 
     getGroupMemberIds(group: Group): string[] {
-        // Backend es fuente de verdad; solo garantizar que devolvemos un array
+        // Devuelve el array CRUDO de memberIds del grupo. Intencionalmente
+        // narrow: usado por updateGroup() para calcular el diff exacto de
+        // cambios persistidos. Aplicar acá getGroupMembers (con fallback)
+        // inflaría el delta con miembros resueltos vía colegio que nunca
+        // estuvieron en el snapshot persistido.
+        // Para resolver "quién es miembro" de cara al usuario, usar
+        // getGroupStudents (que sí pasa por la fuente única de verdad).
         return Array.isArray(group.memberIds) ? group.memberIds : [];
     }
 
     getUserGroups(userId: string): Group[] {
-        // Fuente canónica: group.memberIds — el grupo declara quién pertenece
+        // Devuelve los grupos donde el user aparece en memberIds explícitos
+        // O donde user.groupIds apunta al grupo. NO aplica fallback colegio
+        // por la misma razón que getGroupMemberIds: este resultado se usa
+        // para flujos UI donde mostrar memberships fantasma sería confuso.
+        // Para calcular conteos pedagógicos canónicos usar getGroupStudents.
         const fromMembers = this.groups.filter(g =>
             Array.isArray(g.memberIds) && g.memberIds.includes(userId)
         );
         const canonicalIds = new Set(fromMembers.map(g => g.id));
-        // Fallback compat: user.groupIds puede tener grupos no reflejados aún en memberIds
         const user = this.getUsuarioById(userId);
         const extra = (user?.groupIds ?? [])
             .map(gid => this.groups.find(g => g.id === gid))
@@ -1067,42 +1258,46 @@ class DataService {
     }
 
     async updateGroup(id: string, updates: Partial<Group>) {
-        const group = this.groups.find(g => g.id === id);
-
         // mediatorIds es el campo canónico. Derivar teacherId para compat backend.
         if (updates.mediatorIds !== undefined) {
             updates.teacherId = updates.mediatorIds[0] ?? null;
         }
 
-        // Mantener studentIds sincronizado con memberIds (compat backend)
+        // Mantener studentIds sincronizado con memberIds (compat backend) —
+        // afecta SOLO al payload del PUT, no al cache local.
         if (updates.studentIds !== undefined && !updates.memberIds) {
             updates.memberIds = updates.studentIds;
         } else if (updates.memberIds !== undefined && updates.studentIds === undefined) {
             updates.studentIds = updates.memberIds;
         }
 
-        // --- PREPARAR DIFF PHASE 3A PARA CASCADA ---
-        let addedUsers: string[] = [];
-        let removedUsers: string[] = [];
-        
-        if (group) {
-            const prevMediators = this.getGroupMediatorIds(group);
-            const prevMembers = this.getGroupMemberIds(group);
-            
-            const nextGroupMerged = { ...group, ...updates };
-            const nextMediators = this.getGroupMediatorIds(nextGroupMerged);
-            const nextMembers = this.getGroupMemberIds(nextGroupMerged);
+        // Sprint 022 Fase 2A.1 — capturar el estado PREVIO del grupo en cache
+        // ANTES del PUT. Solo guardamos los campos que necesitamos para el
+        // diff (studentIds + memberIds) — no tocamos referencias.
+        const prevSnapshot = this.groups.find(g => g.id === id);
+        const prevMembers = prevSnapshot ? unionGroupMemberIds(prevSnapshot as any) : [];
 
-            const addedMed = nextMediators.filter(userId => !prevMediators.includes(userId));
-            const addedMem = nextMembers.filter(userId => !prevMembers.includes(userId));
-            
-            const removedMed = prevMediators.filter(userId => !nextMediators.includes(userId));
-            const removedMem = prevMembers.filter(userId => !nextMembers.includes(userId));
-
-            addedUsers = [...new Set([...addedMed, ...addedMem])];
-            removedUsers = [...new Set([...removedMed, ...removedMem])];
-        }
-        
+        // Sprint 022 Fase B — eliminada la cascada manual de membresías.
+        //
+        // Antes (Sprint 021 y previo): este método calculaba un diff
+        // addedUsers/removedUsers, hacía el PUT al grupo, y luego recorría
+        // ambos arrays disparando `updateUser({groupIds})` por cada user
+        // afectado. Esa cascada duplicaba exactamente lo que el backend
+        // ya hacía en `PUT /api/groups/:id` con `applyGroupMembersChange`
+        // dentro de su lock anidado atómico (groupsLock outer, usersLock
+        // inner). Resultado: N round trips redundantes + ventana entre el
+        // PUT del grupo (atómico) y los PUTs de users (no-atómicos entre
+        // sí) donde this.groups y this.users podían quedar inconsistentes
+        // con el backend si la red fallaba a mitad. Adicionalmente la
+        // cascada aplicaba una regla EXTRA en cliente (la condicional
+        // "solo remover si ya no es mediador ni miembro") que el backend
+        // NO conoce, abriendo una divergencia silenciosa de la fuente de
+        // verdad.
+        //
+        // Ahora: el PUT al backend es la única operación de escritura.
+        // El cache local de groups se refresca con `savedGroup` (server
+        // truth). El backend escribe atómicamente las dos capas — ya no
+        // hace falta hacerlo desde acá.
         const response = await fetch(`${this.apiUrl}/groups/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
@@ -1113,43 +1308,60 @@ class DataService {
             throw new Error('Failed to update group on server');
         }
 
-        // Fase Modelo Extendido: usar la respuesta ya merges y normalizada por el backend
+        // Server truth: backend ya aplicó el diff bidireccional vía
+        // `applyGroupMembersChange` y devuelve el grupo normalizado.
         const savedGroup = await response.json();
         const finalGroup = this.normalizeGroupFrontend(savedGroup);
 
         const idx = this.groups.findIndex(g => g.id === id);
         if (idx > -1) {
-            // Apply updates locally using the server truth
             this.groups[idx] = finalGroup;
-            this.saveState('groups', this.groups);
+        } else {
+            this.groups.push(finalGroup);
+        }
+        this.saveState('groups', this.groups);
 
-            // --- EJECUTAR CASCADA (Evitar accesos fantasma y orfandad) ---
-            const finalGroupState = this.groups[idx];
-            const finalMed = this.getGroupMediatorIds(finalGroupState);
-            const finalMem = this.getGroupMemberIds(finalGroupState);
+        // Sprint 022 Fase 2A.1 — coherencia local mínima de this.users.
+        //
+        // El backend `PUT /api/groups/:id` aplica internamente
+        // `applyGroupMembersChange(users, id, added, removed)` con added/removed
+        // calculados desde `unionGroupMemberIds(prev)` vs
+        // `unionGroupMemberIds(merged)`. Eso significa:
+        //   - El backend escribe `user.groupIds` SOLO para users en el diff
+        //     de studentIds+memberIds.
+        //   - El backend NO escribe `user.groupIds` cuando cambia mediatorIds
+        //     (unionGroupMemberIds NO incluye mediatorIds).
+        //
+        // Replicamos ese MISMO subconjunto en cliente, calculando el diff
+        // entre `prevSnapshot` (lo que teníamos) y `finalGroup` (lo que el
+        // backend efectivamente persistió, NO lo que enviamos en `updates`).
+        // Esto garantiza:
+        //   - Cero divergencia: aplicamos las MISMAS primitivas que el
+        //     backend aplicó, sobre los MISMOS IDs que el backend tocó.
+        //   - Cero invención de reglas: no decidimos membresías; reflejamos
+        //     server truth.
+        //   - Cero round trips extra.
+        //
+        // Si un uid del diff no existe en this.users (cache desactualizado
+        // por race con otra ventana), se omite silenciosamente — el next
+        // refresh global lo hidratará.
+        const newMembers = unionGroupMemberIds(finalGroup as any);
+        const { added, removed } = diffIds(prevMembers, newMembers);
 
-            addedUsers.forEach(userId => {
-                const u = this.getUsuarioById(userId);
-                if (u) {
-                    if (!u.groupIds) u.groupIds = [];
-                    if (!u.groupIds.includes(id)) {
-                        u.groupIds.push(id);
-                        this.updateUser(u.id, { groupIds: u.groupIds });
-                    }
-                }
-            });
-
-            removedUsers.forEach(userId => {
-                // Remoción segura extrema: solo si ya no existe ni como mediador ni como miembro
-                if (!finalMed.includes(userId) && !finalMem.includes(userId)) {
-                    const u = this.getUsuarioById(userId);
-                    if (u && u.groupIds) {
-                        u.groupIds = u.groupIds.filter(gid => gid !== id);
-                        this.updateUser(u.id, { groupIds: u.groupIds });
-                    }
-                }
-            });
-            // -------------------------------------------------------------
+        let touchedAdded = 0;
+        let touchedRemoved = 0;
+        for (const uid of added) {
+            const u = this.users.find(x => x.id === uid);
+            if (u && addGroupIdToUser(u as any, id)) touchedAdded++;
+        }
+        for (const uid of removed) {
+            const u = this.users.find(x => x.id === uid);
+            if (u && removeGroupIdFromUser(u as any, id)) touchedRemoved++;
+        }
+        const touched = touchedAdded + touchedRemoved;
+        if (touched > 0) {
+            this.saveState('users', this.users);
+            console.log(`[USERS_CACHE_REFRESH] op=updateGroup groupId=${id} added=${touchedAdded} removed=${touchedRemoved}`);
         }
     }
 
@@ -1168,47 +1380,91 @@ class DataService {
             this.groups.splice(idx, 1);
             this.saveState('groups', this.groups);
         }
+
+        // Sprint 022 Fase 2A.1 — coherencia local en this.users.
+        // El backend ejecuta `detachGroupFromAllUsers(users, id)` dentro de
+        // su lock anidado. Replicamos lo mismo en cliente con la primitiva
+        // pura `removeGroupIdFromUser` para que `this.users[*].groupIds`
+        // no quede con groupIds huérfanos apuntando al grupo borrado.
+        let touched = 0;
+        for (const u of this.users) {
+            if (removeGroupIdFromUser(u as any, id)) touched++;
+        }
+        if (touched > 0) {
+            this.saveState('users', this.users);
+            console.log(`[USERS_CACHE_REFRESH] op=deleteGroup groupId=${id} affectedUsers=${touched}`);
+        }
     }
 
-    assignTeacherToGroup(groupId: string, teacherId: string) {
+    /**
+     * Sprint 022 Fase B — wrapper delgado sobre `updateGroup({mediatorIds})`.
+     *
+     * Antes (Sprint 021 y previo):
+     *   1. mutaba `group.mediatorIds` y `group.teacherId` en cache local
+     *      antes del PUT,
+     *   2. llamaba `saveState('groups')` premature (persistía el cache
+     *      antes de que el backend confirmara),
+     *   3. disparaba un `updateUser({groupIds})` para vincular al nuevo
+     *      mediador (cascada redundante con backend),
+     *   4. evaluaba una condicional cliente-only `!isStillMediating &&
+     *      !isStudent` y disparaba otro `updateUser({groupIds})` para
+     *      desvincular al saliente (regla que el backend NO aplicaba —
+     *      divergencia silenciosa de la fuente de verdad),
+     *   5. y solo entonces llamaba al `updateGroup(groupId, {mediatorIds})`
+     *      que en realidad hacía toda la escritura atómica.
+     *
+     *   Pasos 1-4 duplicaban lo que `applyGroupMembersChange` ya hace en
+     *   el PUT con su diff bidireccional dentro del lock anidado.
+     *
+     * Ahora:
+     *   El único "trabajo" del método es construir el array canónico de
+     *   `mediatorIds` con `teacherId` como primary y delegar al
+     *   `updateGroup` ya saneado (Sprint 022 Fase B). El backend hace todo
+     *   lo demás atómicamente:
+     *     - aplica diff de mediatorIds,
+     *     - sincroniza `user.groupIds` para added/removed,
+     *     - normaliza `teacherId = mediatorIds[0]`,
+     *     - persiste ambos JSON en lock anidado.
+     *
+     * Compatibilidad: la firma pública es la misma (groupId, teacherId).
+     * El retorno cambia de `void` a `Promise<void>` — ningún caller
+     * existente await la promesa; JS no rompe.
+     *
+     * Riesgo residual MEDIATORS_CROSS_ACTOR_RISK:
+     *   Construimos `[teacherId, ...rest]` desde `this.groups` (cache
+     *   local). Si otro admin agregó/quitó mediadores adicionales en
+     *   paralelo, el cache puede estar stale y el bulk-replace pisaría
+     *   esos cambios. Es el mismo trade-off que cualquier `updateGroup`
+     *   con `mediatorIds`. mediatorIds suele tener cardinalidad baja
+     *   (1-3 mediadores típicos) y baja frecuencia de edición concurrente
+     *   — el riesgo se considera aceptable. Si surge problema real, el
+     *   siguiente sprint puede agregar endpoints
+     *   `POST/DELETE /api/groups/:id/mediators` análogos a `/members`.
+     */
+    async assignTeacherToGroup(groupId: string, teacherId: string): Promise<void> {
         const group = this.groups.find(g => g.id === groupId);
-        if (group) {
-            // mediatorIds-first: recalcular array canónico
-            const currentMediators = Array.isArray(group.mediatorIds) ? group.mediatorIds : [];
-            const oldPrimaryId = currentMediators[0] ?? null;
-            const rest = currentMediators.filter(mId => mId !== oldPrimaryId && mId !== teacherId);
-            group.mediatorIds = [teacherId, ...rest];
-            group.teacherId = group.mediatorIds[0]; // derivado, no input primario
+        if (!group) return;
 
-            this.saveState('groups', this.groups);
+        // Construcción del payload — única lógica legítima del método:
+        // promover `teacherId` a primary preservando el resto de mediadores.
+        const currentMediators = Array.isArray(group.mediatorIds) ? group.mediatorIds : [];
+        const rest = currentMediators.filter(mId => mId !== teacherId);
+        const nextMediatorIds = [teacherId, ...rest];
 
-            // 1. Vincular al mediador entrante
-            const newUser = this.getUsuarioById(teacherId);
-            if (newUser) {
-                if (!newUser.groupIds) newUser.groupIds = [];
-                if (!newUser.groupIds.includes(groupId)) {
-                    newUser.groupIds.push(groupId);
-                    this.updateUser(newUser.id, { groupIds: newUser.groupIds });
-                }
-            }
-
-            // 2. Desvincular al mediador saliente de manera segura
-            if (oldPrimaryId && oldPrimaryId !== teacherId) {
-                const isStillMediating = group.mediatorIds.includes(oldPrimaryId);
-                const isStudent = group.studentIds && group.studentIds.includes(oldPrimaryId);
-
-                if (!isStillMediating && !isStudent) {
-                    const oldUser = this.getUsuarioById(oldPrimaryId);
-                    if (oldUser && oldUser.groupIds) {
-                        oldUser.groupIds = oldUser.groupIds.filter(id => id !== groupId);
-                        this.updateUser(oldUser.id, { groupIds: oldUser.groupIds });
-                    }
-                }
-            }
-
-            // SYNC — solo mediatorIds como campo canónico (teacherId se deriva en updateGroup)
-            this.updateGroup(groupId, { mediatorIds: group.mediatorIds });
+        // Idempotente: si el primary ya es teacherId Y no hay nada que
+        // recolocar, evitamos un PUT inútil.
+        if (
+            currentMediators.length === nextMediatorIds.length &&
+            currentMediators.every((m, i) => m === nextMediatorIds[i])
+        ) {
+            return;
         }
+
+        // Única operación de escritura. updateGroup hace PUT atómico al
+        // backend, refresca `this.groups[idx]` con savedGroup, y delega la
+        // bidireccionalidad de membresía al backend (sin cascadas
+        // cliente-side).
+        await this.updateGroup(groupId, { mediatorIds: nextMediatorIds });
     }
 
     // --- Club Admin: especialización de mediador ---
@@ -1218,47 +1474,116 @@ class DataService {
         await this.updateUser(userId, { mediatorKind: kind });
     }
 
-    addStudentsToGroup(groupId: string, studentIds: string[]) {
-        const group = this.groups.find(g => g.id === groupId);
-        if (group) {
-            // Add only unique IDs not already in the group
-            const newIds = studentIds.filter(id => !group.studentIds.includes(id));
-            group.studentIds.push(...newIds);
-            group.memberIds = [...group.studentIds]; // SYNC FASE 2
+    /**
+     * Sprint 022 Fase B — consumidor puro del endpoint atómico
+     * `POST /api/groups/:groupId/members`.
+     *
+     * Antes (Sprint 021 y previo): este método mutaba `group.studentIds.push`
+     * en cliente, disparaba N `updateUser` por estudiante y cerraba con un
+     * `updateGroup({studentIds, memberIds})` que enviaba el array completo.
+     * Eso producía drift cross-actor: si dos admins editaban el mismo grupo
+     * en paralelo, el array completo del segundo pisaba los cambios del
+     * primero (last-write-wins por bulk-replace).
+     *
+     * Ahora: una sola llamada al endpoint atómico que aplica
+     * `addUserIdToGroup` + `addGroupIdToUser` solo para los IDs solicitados
+     * dentro del lock anidado (groupsLock outer, usersLock inner) — cero
+     * pisado cross-actor, idempotente, con failed[] explícito por user.
+     *
+     * Cache local: tras la respuesta exitosa, aplicamos las mismas
+     * primitivas que escribió el backend (las mismas funciones puras de
+     * utils/groupMembership.mjs) sobre `this.groups[idx]` y los users
+     * cacheados — frontend y backend convergen al mismo estado sin
+     * reimplementar lógica.
+     */
+    async addStudentsToGroup(groupId: string, studentIds: string[]): Promise<void> {
+        if (!Array.isArray(studentIds) || studentIds.length === 0) return;
+
+        const response = await fetch(`${this.apiUrl}/groups/${groupId}/members`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
+            body:    JSON.stringify({ userIds: studentIds }),
+        });
+
+        if (!response.ok) {
+            // No mutamos cache local en error — el backend no escribió.
+            const errBody = await response.json().catch(() => ({}));
+            throw new Error(errBody.error || errBody.message || `Failed to add students (HTTP ${response.status})`);
+        }
+
+        // Backend devuelve { groupId, assigned: [{userId, alreadyMember}], failed: [...] }.
+        // `assigned` cubre todo lo que efectivamente quedó en el grupo (incluso
+        // los idempotentes), `failed` reporta los userIds que el backend no
+        // pudo aplicar (típico: USER_NOT_FOUND).
+        const result: {
+            groupId: string;
+            assigned: Array<{ userId: string; alreadyMember: boolean }>;
+            failed:   Array<{ userId: string; reason: string }>;
+        } = await response.json();
+
+        // Refrescar cache local con las mismas primitivas que el backend usó.
+        // Sólo se aplican las membresías ASIGNADAS — los `failed` no fueron
+        // escritos por el backend y no deben aparecer en cache.
+        const idx = this.groups.findIndex(g => g.id === groupId);
+        if (idx > -1) {
+            for (const a of result.assigned) {
+                addUserIdToGroup(this.groups[idx] as any, a.userId);
+                const u = this.getUsuarioById(a.userId);
+                if (u) addGroupIdToUser(u as any, groupId);
+            }
             this.saveState('groups', this.groups);
+            this.saveState('users',  this.users);
+        }
 
-            // Also update the User objects to reflect this
-            studentIds.forEach(sid => {
-                const u = this.getUsuarioById(sid);
-                if (u) {
-                    if (!u.groupIds) u.groupIds = [];
-                    if (!u.groupIds.includes(groupId)) {
-                        u.groupIds.push(groupId);
-                        this.updateUser(u.id, { groupIds: u.groupIds }); // Will sync user
-                    }
-                }
-            });
-
-            // Trigger sync for group
-            this.updateGroup(groupId, { studentIds: group.studentIds, memberIds: group.memberIds });
+        if (result.failed.length > 0) {
+            console.warn('[ADD_STUDENTS] failed', result.failed);
         }
     }
 
-    removeStudentFromGroup(groupId: string, studentId: string) {
-        const group = this.groups.find(g => g.id === groupId);
-        if (group) {
-            group.studentIds = group.studentIds.filter(id => id !== studentId);
-            group.memberIds = [...group.studentIds]; // SYNC FASE 2
-            this.saveState('groups', this.groups);
+    /**
+     * Sprint 022 Fase B — consumidor puro del endpoint atómico
+     * `DELETE /api/groups/:groupId/members/:userId`.
+     *
+     * Antes: mutaba `group.studentIds.filter` localmente, disparaba
+     * `updateUser({groupIds})` y luego `updateGroup({studentIds, memberIds})`.
+     * Mismo problema cross-actor que addStudentsToGroup + 3 round trips.
+     *
+     * Ahora: una sola llamada DELETE atómica idempotente. El backend
+     * responde { removed: bool }; el cache local se refresca solo si el
+     * backend confirmó la remoción.
+     */
+    async removeStudentFromGroup(groupId: string, studentId: string): Promise<void> {
+        if (!studentId) return;
 
-            const u = this.getUsuarioById(studentId);
-            if (u && u.groupIds) {
-                u.groupIds = u.groupIds.filter(gid => gid !== groupId);
-                this.updateUser(u.id, { groupIds: u.groupIds }); // Will sync user
+        const response = await fetch(
+            `${this.apiUrl}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(studentId)}`,
+            {
+                method:  'DELETE',
+                headers: { ...this.adminWriteHeaders },
+            },
+        );
+
+        if (!response.ok) {
+            const errBody = await response.json().catch(() => ({}));
+            throw new Error(errBody.error || errBody.message || `Failed to remove student (HTTP ${response.status})`);
+        }
+
+        const result: { groupId: string; userId: string; removed: boolean } = await response.json();
+
+        // Refrescar cache local SOLO si el backend confirmó la remoción.
+        // Si removed=false, el user ya no era miembro — el cache podría
+        // estar stale pero no hay que mutar.
+        if (result.removed) {
+            const idx = this.groups.findIndex(g => g.id === groupId);
+            if (idx > -1) {
+                removeUserIdFromGroup(this.groups[idx] as any, studentId);
+                this.saveState('groups', this.groups);
             }
-
-            // Trigger sync for group
-            this.updateGroup(groupId, { studentIds: group.studentIds, memberIds: group.memberIds });
+            const u = this.getUsuarioById(studentId);
+            if (u) {
+                removeGroupIdFromUser(u as any, groupId);
+                this.saveState('users', this.users);
+            }
         }
     }
 
@@ -2526,11 +2851,65 @@ class DataService {
         });
     }
 
+    /**
+     * Sprint visibilidad — fetch al endpoint narrativo
+     * GET /api/groups/:id/diagnosis. La respuesta es interpretable y se
+     * muestra tal cual en Aula Viva — no la transformes ni la re-interpretes
+     * acá. Si el grupo no existe, el endpoint responde 404 con un payload
+     * que ya incluye healthStatus y summary; lo propagamos como excepción
+     * para que el caller decida.
+     */
+    async getGroupDiagnosis(groupId: string): Promise<GroupDiagnosis> {
+        const userId = this.getSessionUserId();
+        const r = await fetch(`${this.apiUrl}/groups/${encodeURIComponent(groupId)}/diagnosis`, {
+            headers: userId ? { 'x-user-id': userId } : {},
+        });
+        if (!r.ok) {
+            // Mantener el cuerpo del backend (ya viene con healthStatus + summary)
+            // para que el caller pueda mostrarlo si lo necesita.
+            const body = await r.json().catch(() => ({}));
+            const err  = new Error(body?.summary?.headline || body?.error || `diagnosis fetch failed: ${r.status}`);
+            (err as any).status = r.status;
+            (err as any).body   = body;
+            throw err;
+        }
+        return r.json();
+    }
+
+    /**
+     * Sprint Panel del estudiante — fetch al endpoint narrativo
+     * GET /api/students/:id/status. Igual que getGroupDiagnosis: la respuesta
+     * es interpretable y se renderiza tal cual; no transformes los textos.
+     * El backend siempre devuelve un payload con shape StudentStatus, incluso
+     * en errores 404/500 (el frontend nunca queda sin algo que mostrar).
+     */
+    async getStudentStatus(userId: string): Promise<StudentStatus> {
+        const requesterId = this.getSessionUserId();
+        const r = await fetch(`${this.apiUrl}/students/${encodeURIComponent(userId)}/status`, {
+            headers: requesterId ? { 'x-user-id': requesterId } : {},
+        });
+        // 404 y 500 traen un body con shape StudentStatus (state TECH_ISSUE) — lo retornamos.
+        // Solo lanzamos cuando el body no es JSON parseable (network/timeout reales).
+        const body = await r.json().catch(() => null);
+        if (!body) {
+            const err = new Error(`student status fetch failed: ${r.status}`);
+            (err as any).status = r.status;
+            throw err;
+        }
+        return body as StudentStatus;
+    }
+
     getGroupStudents(groupId: string): User[] {
+        // Sprint 021 Fase 2 — única fuente de verdad: getGroupMembers.
+        // Validación implícita de consistencia: estudiantes en studentIds que
+        // no aparezcan en users (huérfanos) se descartan al hacer el filter
+        // por id. Estudiantes en memberIds y user.groupIds se unen
+        // automáticamente en la helper compartida.
         const group = this.groups.find(g => g.id === groupId);
         if (!group) return [];
-        const memberIds = this.getGroupMemberIds(group); // FASE 2 COMPATIBILITY
-        return this.users.filter(u => memberIds.includes(u.id));
+        const memberIds = getGroupMembers(group, this.users, { allGroups: this.groups });
+        const userById = new Map(this.users.map(u => [u.id, u]));
+        return memberIds.map(id => userById.get(id)).filter((u): u is User => !!u);
     }
 
     getAssignmentsByGroup(groupId: string): Assignment[] {

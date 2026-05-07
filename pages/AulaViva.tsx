@@ -13,6 +13,10 @@ import { CompetencyBar } from '../components/aula-viva/CompetencyBar';
 import { DistributionChart } from '../components/aula-viva/DistributionChart';
 import { TrendChart } from '../components/aula-viva/TrendChart';
 import { StudentRow } from '../components/aula-viva/StudentRow';
+import { GroupDiagnosisPanel } from '../components/aula-viva/GroupDiagnosisPanel';
+import type { GroupDiagnosis } from '../utils/groupDiagnosis';
+import { StudentStatusPanel } from '../components/aula-viva/StudentStatusPanel';
+import type { StudentStatus } from '../utils/studentStatus';
 import ClubFormModal from '../components/ClubFormModal';
 
 // --- Components for Charts & Visuals ---
@@ -155,7 +159,19 @@ const AulaViva: React.FC = () => {
     const [groups, setGroups] = useState<Group[]>([]);
     const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
     const [students, setStudents] = useState<User[]>([]);
+    // Sprint visibilidad — capa narrativa del grupo seleccionado.
+    // Aula Viva nunca queda "vacía sin explicación": este panel siempre dice
+    // qué pasa con el grupo (sano, vacío, con advertencias o con incoherencias).
+    const [diagnosis,        setDiagnosis]        = useState<GroupDiagnosis | null>(null);
+    const [diagnosisLoading, setDiagnosisLoading] = useState(false);
+    const [diagnosisError,   setDiagnosisError]   = useState<string | null>(null);
     const [selectedStudent, setSelectedStudent] = useState<User | null>(null);
+    // Sprint Panel del estudiante — capa narrativa por lector. Se muestra
+    // SIEMPRE que hay un estudiante seleccionado, incluso cuando no hay stats
+    // técnicas (un estudiante sin login o sin grupo igual debe ser explicado).
+    const [studentStatus,        setStudentStatus]        = useState<StudentStatus | null>(null);
+    const [studentStatusLoading, setStudentStatusLoading] = useState(false);
+    const [studentStatusError,   setStudentStatusError]   = useState<string | null>(null);
     const [studentStats, setStudentStats] = useState<PedagogicalStats | undefined>(undefined);
     const [aiReport, setAiReport] = useState<string>('');
     const [loadingReport, setLoadingReport] = useState(false);
@@ -232,6 +248,34 @@ const AulaViva: React.FC = () => {
     const canManageClassroom = (isMediator(user) || checkIsAdmin(user)) && !isStudentViewMode;
     const isAdmin = checkIsAdmin(user);
 
+    // Sprint 022 Fase 2A.2 — mount-only refetch de users.
+    //
+    // Resuelve Caso CRÍTICO 1: un mediador que fue asignado a un grupo
+    // desde otra pestaña/admin tiene `user.groupIds` stale en su cache
+    // local (porque el backend NO actualiza user.groupIds cuando solo
+    // cambia mediatorIds del grupo, y porque cualquier cambio cross-tab
+    // tampoco se propaga). Al entrar al panel Aula Viva refrescamos una
+    // vez `this.users` desde server truth.
+    //
+    // Disparo: una sola vez por mount + cada vez que cambia user.id
+    // (login/logout). NO en cambio de selectedGroup, NO en cambio de
+    // selectedSchool, NO en cada render. Las deps son intencionalmente
+    // mínimas; los demás useEffect del panel se encargan del refresco
+    // por interacción.
+    useEffect(() => {
+        if (!user?.id) return;
+        let cancelled = false;
+        void (async () => {
+            try {
+                await dataService.reloadUsers();
+                if (!cancelled) console.log('[AULA_VIVA_CACHE_INVALIDATION] reason=mount');
+            } catch (e) {
+                if (!cancelled) console.warn('[AULA_VIVA_CACHE_INVALIDATION] failed', (e as Error).message);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [user?.id]);
+
     useEffect(() => {
         if (!user) return;
 
@@ -304,6 +348,28 @@ const AulaViva: React.FC = () => {
         }
     }, [selectedGroup, canManageClassroom]);
 
+    // Sprint visibilidad — fetch del diagnóstico narrativo del grupo.
+    // Se vuelve a pedir tras asignar/remover estudiantes vía refetchDiagnosis().
+    const refetchDiagnosis = React.useCallback(async (groupId: string | null) => {
+        if (!groupId) { setDiagnosis(null); setDiagnosisError(null); return; }
+        setDiagnosisLoading(true);
+        setDiagnosisError(null);
+        try {
+            const d = await dataService.getGroupDiagnosis(groupId);
+            setDiagnosis(d);
+        } catch (e: any) {
+            setDiagnosis(null);
+            setDiagnosisError(e?.message || 'Error inesperado al obtener el diagnóstico.');
+        } finally {
+            setDiagnosisLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (selectedGroup && canManageClassroom) refetchDiagnosis(selectedGroup);
+        else { setDiagnosis(null); setDiagnosisError(null); }
+    }, [selectedGroup, canManageClassroom, refetchDiagnosis]);
+
     // --- Stats & Reports ---
     useEffect(() => {
         if (selectedStudent) {
@@ -311,6 +377,29 @@ const AulaViva: React.FC = () => {
             setStudentStats(stats);
             setAiReport('');
         }
+    }, [selectedStudent]);
+
+    // Sprint Panel del estudiante — fetch del status narrativo cada vez que
+    // cambia la selección. Si la selección se limpia, también limpiamos el
+    // panel (sin stale data del estudiante anterior).
+    useEffect(() => {
+        if (!selectedStudent) {
+            setStudentStatus(null);
+            setStudentStatusError(null);
+            setStudentStatusLoading(false);
+            return;
+        }
+        let cancelled = false;
+        setStudentStatusLoading(true);
+        setStudentStatusError(null);
+        dataService.getStudentStatus(selectedStudent.id)
+            .then(s  => { if (!cancelled) setStudentStatus(s); })
+            .catch(e => { if (!cancelled) {
+                setStudentStatus(null);
+                setStudentStatusError(e?.message || 'Error inesperado al obtener el estado del estudiante.');
+            }})
+            .finally(() => { if (!cancelled) setStudentStatusLoading(false); });
+        return () => { cancelled = true; };
     }, [selectedStudent]);
 
     // Señales pedagógicas básicas derivadas de datos reales del estudiante seleccionado.
@@ -444,12 +533,16 @@ const AulaViva: React.FC = () => {
         if (!selectedGroup) return;
         dataService.addStudentsToGroup(selectedGroup, [studentId]);
         setStudents(dataService.getGroupStudents(selectedGroup));
+        // Sprint visibilidad — la membresía cambió; el panel debe reflejarlo.
+        refetchDiagnosis(selectedGroup);
     };
 
     const handleRemoveClubMember = (studentId: string) => {
         if (!selectedGroup) return;
         dataService.removeStudentFromGroup(selectedGroup, studentId);
         setStudents(dataService.getGroupStudents(selectedGroup));
+        // Sprint visibilidad — la membresía cambió; el panel debe reflejarlo.
+        refetchDiagnosis(selectedGroup);
     };
 
     // --- Club Content Management Handlers ---
@@ -1010,6 +1103,25 @@ const AulaViva: React.FC = () => {
                 </div>
             )}
 
+            {/* Course Analytics Entry — paridad con el botón "Ver analítica completa" del C3 club panel.
+                Sin esto los grupos tipo 'course' quedan sin punto de navegación a DashboardMediador,
+                y /api/metrics/course/* nunca se invoca. */}
+            {currentGroup && currentGroup.type !== 'club' && (
+                <div className="mb-8 flex items-center justify-between">
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 flex items-center gap-2">
+                        <BookMarked size={15} /> Analítica del curso
+                    </h3>
+                    <button
+                        type="button"
+                        onClick={() => navigate(`/dashboard/curso/${currentGroup.id}`)}
+                        aria-label={`Ver analítica completa del curso ${currentGroup.name}`}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30 hover:bg-indigo-100 dark:hover:bg-indigo-800/50 border border-indigo-200 dark:border-indigo-700 rounded-lg transition-colors"
+                    >
+                        <BarChart2 size={13} aria-hidden="true" /> Ver analítica completa <ExternalLink size={11} aria-hidden="true" />
+                    </button>
+                </div>
+            )}
+
             {/* C3 — Club Session Panel (only when a club is selected) */}
             {currentGroup?.type === 'club' && (() => {
                 const cg = currentGroup as typeof currentGroup & {
@@ -1442,6 +1554,21 @@ const AulaViva: React.FC = () => {
 
             {activeTab === 'analytics' && (
                 <>
+                    {/* Sprint visibilidad — panel narrativo SIEMPRE visible cuando hay
+                        grupo seleccionado. Aula Viva nunca queda "vacía sin explicación":
+                        si el grupo no tiene estudiantes, el panel lo dice y propone qué
+                        hacer. Si hay incoherencias o advertencias, las muestra antes que
+                        cualquier KPI con ceros que pueda confundir al mediador. */}
+                    {selectedGroup && (diagnosisLoading || diagnosis || diagnosisError) && (
+                        <div className="mb-8 animate-in fade-in">
+                            <GroupDiagnosisPanel
+                                diagnosis={diagnosis}
+                                loading={diagnosisLoading}
+                                error={diagnosisError}
+                            />
+                        </div>
+                    )}
+
                     {/* ADVANCED KPI ROW */}
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6 mb-8 animate-in fade-in">
                         {/* KPI 1 Interacción Chatbot */}
@@ -1490,7 +1617,16 @@ const AulaViva: React.FC = () => {
                         </div>
                     </div>
 
-                    <div className="grid lg:grid-cols-3 gap-8">
+                    {/* UX-3B — md:grid-cols-2 para tablet:
+                          mobile  → 1 columna (analytics + panel apilados)
+                          tablet  → 2 columnas (panel a la derecha del analytics)
+                          desktop → 3 columnas (analytics 2/3, panel 1/3)
+                        Antes: sólo grid-cols-1 → lg:grid-cols-3, así que en
+                        tablet el panel detalle del estudiante caía DESPUÉS
+                        de todos los charts — el mediador clickeaba un
+                        estudiante y tenía que scrollear más de un viewport
+                        para verlo. */}
+                    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
                         {/* Left Column: Charts and Analysis */}
                         <div className="lg:col-span-2 space-y-8">
 
@@ -1644,6 +1780,22 @@ const AulaViva: React.FC = () => {
 
                         {/* Right Column: Student Detail / Analytics Panel */}
                         <div className="lg:col-span-1" ref={detailPanelRef}>
+                            {/* Sprint Panel del estudiante — capa narrativa SIEMPRE visible
+                                cuando hay selección. Va ANTES del bloque de stats técnicas:
+                                un estudiante sin login o sin grupo no tiene stats, pero
+                                igual debe ser explicado por el sistema. La fila clickeada
+                                en la tabla actúa como "Ver detalle" implícito. */}
+                            {selectedStudent && (
+                                <div className="mb-6">
+                                    <StudentStatusPanel
+                                        status={studentStatus}
+                                        loading={studentStatusLoading}
+                                        error={studentStatusError}
+                                        onClose={() => setSelectedStudent(null)}
+                                    />
+                                </div>
+                            )}
+
                             {selectedStudent && studentStats ? (
                                 <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700 sticky top-24 animate-in slide-in-from-right-4">
                                     <div className="flex items-center justify-between mb-6">
