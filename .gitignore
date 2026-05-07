@@ -95,6 +95,17 @@ dummy_text.txt
 /data/sections.json
 /data/content.json
 
+# Sprint 022.10 freeze — SQLite progress + events DBs (local dev only).
+# Estos archivos los crea el backend al correr local; jamás deben
+# committearse (drift de fixtures + tamaño + datos sensibles).
+# El esquema vive en server.js / better-sqlite3 setup; no se versiona.
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+/data-critical/*.db
+/data-critical/*.db-shm
+/data-critical/*.db-wal
+
 # Lockfile-history snapshots
 /package-lock.json.pre-*.json
 
@@ -106,5 +117,26 @@ dummy_text.txt
 /_prod_snapshot_/
 /_api_snapshot_/
 
-# Ad-hoc scripts (whole directory ignored per sprint scope; legitimate scripts must be re-tracked explicitly)
-/scripts/
+# Ad-hoc scripts (whole directory ignored per sprint scope; legitimate scripts must be re-tracked explicitly).
+# Patrón `/scripts/*` (no trailing slash) permite negaciones; con `/scripts/`
+# git no descendía y bloqueaba re-incluir hijos.
+/scripts/*
+
+# Sprint 022 Fase 2B.5/2B.7/2B.8 — scripts operacionales canónicos.
+# Estos SÍ se versionan: son la autoridad operacional de backup, deploy
+# backend, smoke release y rollback drill. Cualquier cambio pasa por
+# commit + scp explícito al VPS.
+!/scripts/backup-vps.sh
+!/scripts/deploy-backend.sh
+!/scripts/deploy-smoke-release.sh
+!/scripts/rollback-drill.sh
+# Test mock-suite asociado a deploy-backend.sh
+!/scripts/__test__/
+!/scripts/__test__/deploy-backend-mocked.sh
+
+# Sprint 022 Fase 2B.7 — server/.deploy-info es generado por
+# scripts/deploy-backend.sh dentro del tarball que se transfiere al VPS.
+# Contiene release_tag, git_sha y deployed_at del último deploy.
+# JAMÁS debe quedar versionado: se regenera en cada deploy.
+# healthHandler.js lo lee si existe; si no, cae a env vars/package.json.
+server/.deploy-info
