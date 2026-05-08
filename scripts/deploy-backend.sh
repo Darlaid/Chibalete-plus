@@ -715,25 +715,56 @@ phase_b3() {
     fi
     log "  ✓ /var en VPS: ${free_remote}GB libres"
 
-    # 4. Validate endpoint OK (BLOQUEANTE) — vía edge, no requiere ssh-side secret
+    # 4. Validate endpoint pre-deploy — capturar baseline.
+    # Acepta 3 estados:
+    #   - HTTP 200 + ok=true        → baseline normal, capturar counts
+    #   - HTTP 404 / endpoint absent → BASELINE_ABSENT (primer deploy del
+    #     operational stack del Sprint 022; el endpoint /api/admin/membership/
+    #     /validate lo introduce el commit 941ee9d, NO existe aún en main)
+    #   - cualquier otro estado     → ABORT exit 4
+    # B8 post-deploy SÍ exige strict ok=true (handled abajo en phase_b8).
     log "  → validate vía edge (capturar baseline)"
-    local validate_resp http_code
+    local validate_resp validate_code _validate_out
     # Usamos --config - con secret por stdin via pipe (no por argv ni process
     # substitution; <(...) genera /dev/fd/N que curl no resuelve en
     # Git Bash/MSYS — el FD pertenece al subshell bash, curl es binario nativo).
-    validate_resp=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
+    # `-w '\nHTTP_CODE_=N'` añade el HTTP status en línea separada para parsear.
+    _validate_out=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
         | curl -sS --max-time 30 \
+            -w '\nHTTP_CODE_=%{http_code}' \
             --config - \
             "$PUBLIC_URL/api/admin/membership/validate" 2>&1) || \
-        fail "curl validate FAILED: $validate_resp" 4
+        fail "curl validate edge FAILED: $_validate_out" 4
+    validate_code=$(echo "$_validate_out" | grep -E '^HTTP_CODE_=' | tail -1 | sed 's/^HTTP_CODE_=//')
+    validate_resp=$(echo "$_validate_out" | sed '/^HTTP_CODE_=/d')
 
-    if ! json_ok_true "$validate_resp"; then
-        err "validate pre-deploy ok=false. ABORT — limpiar drift antes."
-        err "$(redact "$validate_resp")"
-        exit 4
-    fi
-    BASELINE_VALIDATE_RESP="$validate_resp"
-    log "  ✓ validate pre-deploy ok=true"
+    case "$validate_code" in
+        200)
+            if ! json_ok_true "$validate_resp"; then
+                err "validate pre-deploy HTTP 200 pero ok!=true. ABORT — limpiar drift antes."
+                err "$(redact "$validate_resp")"
+                exit 4
+            fi
+            BASELINE_VALIDATE_RESP="$validate_resp"
+            log "  ✓ validate pre-deploy ok=true (baseline capturado)"
+            ;;
+        404)
+            # Endpoint nuevo del Sprint 022: en producción actual (main viejo)
+            # no existe → 404 esperado para el PRIMER deploy del operational
+            # stack. Aceptar como BASELINE_ABSENT y proseguir; B8 post-deploy
+            # va a exigir ok=true.
+            warn "  ℹ validate endpoint absent pre-deploy (HTTP 404)"
+            warn "    Expected for FIRST Sprint 022 deploy: endpoint introduced by"
+            warn "    commit 941ee9d (membership integrity). Post-deploy enforces ok=true."
+            BASELINE_VALIDATE_RESP="BASELINE_ABSENT"
+            log "  ✓ validate pre-deploy: BASELINE_ABSENT (proseguir, B8 va a validar strict)"
+            ;;
+        *)
+            err "validate pre-deploy HTTP=$validate_code (inesperado). ABORT."
+            err "$(redact "$validate_resp")"
+            exit 4
+            ;;
+    esac
 
     # 5. Ejecutar backup vía script canónico
     log "  → ejecutando $REMOTE_BACKUP_SCRIPT"
@@ -1022,23 +1053,51 @@ phase_b8() {
     fi
     log "  ✓ health edge ok"
 
-    # 2. Validate vía edge — secret por stdin via pipe (portable Git Bash/MSYS)
-    resp=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
+    # 2. Validate vía edge — STRICT post-deploy. Acepta solo HTTP 200 + ok=true.
+    # 404 post-deploy = endpoint NUEVO no respondió a pesar del swap exitoso →
+    # FAIL (server.js no se cargó correctamente, módulo no importado, etc.).
+    # Cualquier otro estado o ok=false = decisión humana (exit 9).
+    local _post_validate_out post_validate_code
+    _post_validate_out=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
         | curl -sS --max-time 30 \
+            -w '\nHTTP_CODE_=%{http_code}' \
             --config - \
-            "$PUBLIC_URL/api/admin/membership/validate")
+            "$PUBLIC_URL/api/admin/membership/validate" 2>&1)
+    post_validate_code=$(echo "$_post_validate_out" | grep -E '^HTTP_CODE_=' | tail -1 | sed 's/^HTTP_CODE_=//')
+    resp=$(echo "$_post_validate_out" | sed '/^HTTP_CODE_=/d')
 
-    if ! json_ok_true "$resp"; then
-        err "validate post-deploy ok=false vía edge"
-        err "ESTADO DEGRADADO. NO se aplica rollback automático en B8."
-        err "Decisión humana: revisar issues, decidir rollback código solamente"
-        err "o restore data desde backup BACKUP_TS=$BACKUP_TS (último recurso, manual)."
-        exit 9
-    fi
-    log "  ✓ validate edge ok=true"
+    case "$post_validate_code" in
+        200)
+            if ! json_ok_true "$resp"; then
+                err "validate post-deploy HTTP 200 pero ok=false vía edge"
+                err "ESTADO DEGRADADO. NO se aplica rollback automático en B8."
+                err "Decisión humana: revisar issues, decidir rollback código solamente"
+                err "o restore data desde backup BACKUP_TS=$BACKUP_TS (último recurso, manual)."
+                exit 9
+            fi
+            log "  ✓ validate edge ok=true (HTTP 200)"
+            ;;
+        404)
+            err "validate post-deploy HTTP 404 vía edge"
+            err "El endpoint /api/admin/membership/validate NO responde a pesar del swap"
+            err "y restart staggered exitosos. Posible: server.js no se cargó, módulo"
+            err "membershipService no importado, ruta no registrada. NO rollback automático."
+            err "Decisión humana: investigar logs api_X y decidir rollback (rollback-drill.sh)"
+            err "o restore data desde backup BACKUP_TS=$BACKUP_TS (último recurso, manual)."
+            exit 9
+            ;;
+        *)
+            err "validate post-deploy HTTP=$post_validate_code (inesperado) vía edge"
+            err "$(redact "$resp")"
+            exit 9
+            ;;
+    esac
 
     # 3. Comparar counts
-    if command -v jq >/dev/null 2>&1; then
+    if [ "$BASELINE_VALIDATE_RESP" = "BASELINE_ABSENT" ]; then
+        log "  ℹ baseline pre-deploy ABSENT (primer deploy del operational stack);"
+        log "    saltando comparación counts. Post-deploy ok=true es suficiente."
+    elif command -v jq >/dev/null 2>&1; then
         local baseline_counts current_counts
         baseline_counts=$(echo "$BASELINE_VALIDATE_RESP" | jq -cS '.counts // {}' 2>/dev/null || echo "{}")
         current_counts=$(echo "$resp" | jq -cS '.counts // {}' 2>/dev/null || echo "{}")

@@ -441,6 +441,35 @@ echo "[CASO 12] curl --config sin process substitution (Git Bash/MSYS portable)"
 }
 
 # ────────────────────────────────────────────────────────────────────
+# CASO 13 — Validate baseline tolerante a 404 pre-deploy / strict post-deploy
+# El endpoint /api/admin/membership/validate es NUEVO en Sprint 022 (commit
+# 941ee9d). Pre-Sprint-022 la producción retorna HTTP 404. El primer deploy
+# del operational stack debe ACEPTAR ese 404 como BASELINE_ABSENT, no abortar.
+# Post-deploy DEBE exigir HTTP 200 + ok=true (strict).
+# ────────────────────────────────────────────────────────────────────
+echo ""
+echo "[CASO 13] B3 baseline tolera 404 / B8 post-deploy strict"
+{
+    # B3: case statement con handler 404 explícito
+    assert "B3 captura HTTP_CODE con curl -w" 'grep -qE "HTTP_CODE_=%\{http_code\}" "$DEPLOY_SCRIPT"'
+    assert "B3 parsea HTTP_CODE del output curl" 'grep -qE "validate_code=.*HTTP_CODE_=" "$DEPLOY_SCRIPT"'
+    assert "B3 case 200) verifica json_ok_true" 'grep -A30 "validate_code\" in" "$DEPLOY_SCRIPT" | grep -qE "200\\)"'
+    assert "B3 case 404) registra BASELINE_ABSENT" 'grep -qE "BASELINE_VALIDATE_RESP=\"BASELINE_ABSENT\"" "$DEPLOY_SCRIPT"'
+    assert "B3 case 404) NO usa exit 4" 'grep -B2 -A6 "validate endpoint absent" "$DEPLOY_SCRIPT" | grep -vE "exit 4" | grep -q "BASELINE_ABSENT"'
+    assert "B3 case * (catchall) sí aborta exit 4" 'grep -qE "validate pre-deploy HTTP=.*inesperado.*ABORT" "$DEPLOY_SCRIPT"'
+
+    # B8: post-deploy strict
+    assert "B8 captura HTTP_CODE post-deploy" 'grep -qE "post_validate_code=" "$DEPLOY_SCRIPT"'
+    assert "B8 case 200) requiere ok=true" 'grep -B12 -A2 "validate edge ok=true .HTTP 200" "$DEPLOY_SCRIPT" | grep -qE "json_ok_true"'
+    assert "B8 case 404) post-deploy aborta exit 9" 'grep -A6 "validate post-deploy HTTP 404" "$DEPLOY_SCRIPT" | grep -qE "exit 9"'
+    assert "B8 case * post-deploy aborta exit 9" 'grep -E "validate post-deploy HTTP=\\\$post_validate_code" "$DEPLOY_SCRIPT" >/dev/null'
+
+    # Comparación counts: skip si BASELINE_ABSENT
+    assert "comparación counts maneja BASELINE_ABSENT skip" 'grep -qE "BASELINE_VALIDATE_RESP\" = \"BASELINE_ABSENT\"" "$DEPLOY_SCRIPT"'
+    assert "skip msg referencia primer deploy operational stack" 'grep -qE "primer deploy del operational stack" "$DEPLOY_SCRIPT"'
+}
+
+# ────────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo " RESULTADO: pass=$PASS fail=$FAIL"
