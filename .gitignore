@@ -134,6 +134,11 @@ dummy_text.txt
 !/scripts/__test__/
 !/scripts/__test__/deploy-backend-mocked.sh
 
+# Audit / diagnostic scripts — READ-ONLY, sin escritura en producción.
+# Reusables vía stdin pipe (no requieren despliegue en el VPS). NO integrados
+# al pipeline de deploy ni a cron — se ejecutan manualmente cuando hace falta.
+!/scripts/audit-school-drift.mjs
+
 # Sprint 022 Fase 2B.7 — server/.deploy-info es generado por
 # scripts/deploy-backend.sh dentro del tarball que se transfiere al VPS.
 # Contiene release_tag, git_sha y deployed_at del último deploy.
