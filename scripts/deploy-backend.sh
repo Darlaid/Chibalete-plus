@@ -885,25 +885,38 @@ phase_b5() {
         fail "$REMOTE_BASE/server.old-$BACKUP_TS ya existe — estado residual, abortar" 6
     fi
 
-    # Swap: mv server → server.old-$TS, mv staging/server → server
-    # Ambos mv son atómicos a nivel kernel (mismo filesystem).
-    # Hacerlos en una sola sesión ssh para no introducir ventana entre ellos.
-    log "  → swap mv (server → server.old-$BACKUP_TS, staging/server → server)"
+    # Swap: server/ Y utils/ a la vez. Ambos directorios se promueven desde
+    # staging/ a la posición operativa, y los activos se preservan como
+    # server.old-$TS / utils.old-$TS para rollback. Ambos mv son atómicos
+    # a nivel kernel (mismo filesystem); ejecutados en una sola sesión SSH
+    # para minimizar la ventana entre operaciones.
+    #
+    # utils/ es opcional: solo se mueve si el staging lo trae (Sprint 022+
+    # introduce utils/groupDiagnosis.mjs y similares; pre-Sprint 022 utils/
+    # no existe en producción y server.js viejo no lo importa).
+    log "  → swap mv (server, utils → .old-$BACKUP_TS, staging/{server,utils} → live)"
     if ! ssh_run "
 set -e
 mv '$REMOTE_BASE/server' '$REMOTE_BASE/server.old-$BACKUP_TS'
+if [ -d '$REMOTE_BASE/utils' ]; then
+    mv '$REMOTE_BASE/utils' '$REMOTE_BASE/utils.old-$BACKUP_TS'
+fi
 mv '$STAGING/server' '$REMOTE_BASE/server'
+if [ -d '$STAGING/utils' ]; then
+    mv '$STAGING/utils' '$REMOTE_BASE/utils'
+fi
 test -s '$REMOTE_BASE/server/server.js'
 "; then
         err "🔴 SWAP ATÓMICO FALLÓ — estado incierto"
         err "Inspeccionar manualmente:"
         err "  ssh $VPS_HOST 'ls -la $REMOTE_BASE/'"
         err "Si server/ ausente: mv server.old-$BACKUP_TS server"
+        err "Si utils/ ausente: mv utils.old-$BACKUP_TS utils"
         exit 6
     fi
     DEPLOY_STATE="swapped"
-    log "  ✓ server/ NUEVO en disco — api_X siguen sirviendo VIEJO en RAM"
-    SUMMARY_LINES+=("B5 ✓  swap completo (server.old-$BACKUP_TS preservado)")
+    log "  ✓ server/ + utils/ NUEVOS en disco — api_X siguen sirviendo VIEJO en RAM"
+    SUMMARY_LINES+=("B5 ✓  swap completo (server.old-$BACKUP_TS, utils.old-$BACKUP_TS preservados)")
 }
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1195,6 +1208,14 @@ ls -1dt '$REMOTE_BASE'/server.old-* 2>/dev/null | tail -n +$((CLEANUP_KEEP_OLD +
 done
 " || warn "retention server.old-* tuvo issue (no crítico)"
 
+    # Cleanup retention: utils.old-* — paralela a server.old-* (Sprint 022+)
+    log "  → retention utils.old-* (keep $CLEANUP_KEEP_OLD)"
+    ssh_run "
+ls -1dt '$REMOTE_BASE'/utils.old-* 2>/dev/null | tail -n +$((CLEANUP_KEEP_OLD + 1)) | while read -r d; do
+    [ -d \"\$d\" ] && [ \"\$d\" != '$REMOTE_BASE/utils.old-$BACKUP_TS' ] && rm -rf \"\$d\" && echo \"  removed \$d\"
+done
+" || warn "retention utils.old-* tuvo issue (no crítico)"
+
     # Cleanup retention: server.staging-* residuales (de runs fallidos previos)
     log "  → retention server.staging-* residuales (keep $CLEANUP_KEEP_STAGING)"
     ssh_run "
@@ -1210,6 +1231,14 @@ ls -1dt '$REMOTE_BASE'/server.failed-* 2>/dev/null | tail -n +$((CLEANUP_KEEP_FA
     [ -d \"\$d\" ] && rm -rf \"\$d\" && echo \"  removed \$d\"
 done
 " || warn "retention server.failed-* tuvo issue (no crítico)"
+
+    # Cleanup retention: utils.failed-* — paralela a server.failed-* (Sprint 022+)
+    log "  → retention utils.failed-* (keep $CLEANUP_KEEP_FAILED)"
+    ssh_run "
+ls -1dt '$REMOTE_BASE'/utils.failed-* 2>/dev/null | tail -n +$((CLEANUP_KEEP_FAILED + 1)) | while read -r d; do
+    [ -d \"\$d\" ] && rm -rf \"\$d\" && echo \"  removed \$d\"
+done
+" || warn "retention utils.failed-* tuvo issue (no crítico)"
 
     SUMMARY_LINES+=("B10 ✓  cleanup completado")
 }
@@ -1227,10 +1256,14 @@ rollback_code() {
     err "  estado: DEPLOY_STATE=$DEPLOY_STATE"
     err "  backup: BACKUP_TS=$BACKUP_TS"
 
-    # Snapshot del server fallido para forensics
+    # Snapshot del server + utils fallidos para forensics
     if ssh_run "test -d '$REMOTE_BASE/server'"; then
         ssh_run "mv '$REMOTE_BASE/server' '$REMOTE_BASE/server.failed-$BACKUP_TS'" \
             || warn "no se pudo renombrar server fallido (continuar)"
+    fi
+    if ssh_run "test -d '$REMOTE_BASE/utils'"; then
+        ssh_run "mv '$REMOTE_BASE/utils' '$REMOTE_BASE/utils.failed-$BACKUP_TS' 2>/dev/null" \
+            || true
     fi
 
     # Restaurar server VIEJO (si existe)
@@ -1243,6 +1276,20 @@ rollback_code() {
             exit 99
         fi
         err "  ✓ server VIEJO restaurado desde server.old-$BACKUP_TS"
+
+        # Restaurar utils VIEJO si existe (Sprint 022+ con bind mount).
+        # Si no existe utils.old-$BACKUP_TS = pre-Sprint-022 (no había utils
+        # en la posición operativa); aceptable porque server viejo no lo usa.
+        if ssh_run "test -d '$REMOTE_BASE/utils.old-$BACKUP_TS'"; then
+            if ssh_run "mv '$REMOTE_BASE/utils.old-$BACKUP_TS' '$REMOTE_BASE/utils'"; then
+                err "  ✓ utils VIEJO restaurado desde utils.old-$BACKUP_TS"
+            else
+                warn "  ⚠ no se pudo restaurar utils.old-$BACKUP_TS (no crítico:"
+                warn "    server VIEJO no importa de utils/, utils nuevo queda swap-failed)"
+            fi
+        else
+            err "  ℹ utils.old-$BACKUP_TS no existe — pre-Sprint-022 baseline (OK)"
+        fi
     else
         err "🔴 server.old-$BACKUP_TS NO EXISTE — rollback imposible automático"
         err "ESCALAR INMEDIATAMENTE. Posibles caminos:"

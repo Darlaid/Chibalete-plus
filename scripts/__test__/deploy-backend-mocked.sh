@@ -470,6 +470,55 @@ echo "[CASO 13] B3 baseline tolera 404 / B8 post-deploy strict"
 }
 
 # ────────────────────────────────────────────────────────────────────
+# CASO 14 — Swap atómico incluye utils/ (Sprint 022 modules)
+# server.js nuevo importa de ../utils/groupDiagnosis.mjs y similares.
+# B5 swap debe mover server/ Y utils/ atómicamente. rollback debe
+# revertir ambos. cleanup retention debe abarcar utils.old-* y
+# utils.failed-*.
+# ────────────────────────────────────────────────────────────────────
+echo ""
+echo "[CASO 14] B5 swap + rollback + cleanup incluyen utils/ (Sprint 022)"
+{
+    # B5 swap: server Y utils. Usamos grep -F con strings fijos. Los $VAR
+    # del script se buscan literalmente — escape \$ para que el eval del
+    # assert NO los expanda como variables del shell del propio test.
+    assert "B5 swap mueve server → server.old-BACKUP_TS" \
+        'grep -qF "mv '"'"'\$REMOTE_BASE/server'"'"' '"'"'\$REMOTE_BASE/server.old-\$BACKUP_TS'"'"'" "$DEPLOY_SCRIPT"'
+    assert "B5 swap mueve utils → utils.old-BACKUP_TS (condicional)" \
+        'grep -qF "mv '"'"'\$REMOTE_BASE/utils'"'"' '"'"'\$REMOTE_BASE/utils.old-\$BACKUP_TS'"'"'" "$DEPLOY_SCRIPT"'
+    assert "B5 swap mueve staging/server → server" \
+        'grep -qF "mv '"'"'\$STAGING/server'"'"' '"'"'\$REMOTE_BASE/server'"'"'" "$DEPLOY_SCRIPT"'
+    assert "B5 swap mueve staging/utils → utils (condicional)" \
+        'grep -qF "mv '"'"'\$STAGING/utils'"'"' '"'"'\$REMOTE_BASE/utils'"'"'" "$DEPLOY_SCRIPT"'
+    assert "B5 swap usa guard [ -d ] para utils REMOTE_BASE" \
+        'grep -qF "[ -d '"'"'\$REMOTE_BASE/utils'"'"' ]" "$DEPLOY_SCRIPT"'
+    assert "B5 swap usa guard [ -d ] para utils STAGING" \
+        'grep -qF "[ -d '"'"'\$STAGING/utils'"'"' ]" "$DEPLOY_SCRIPT"'
+    assert "B5 SUMMARY menciona utils.old-BACKUP_TS preservado" \
+        'grep -qF "utils.old-\$BACKUP_TS preservados" "$DEPLOY_SCRIPT"'
+
+    # rollback_code: snapshot fallido + restore para ambos
+    assert "rollback snapshot utils → utils.failed-BACKUP_TS" \
+        'grep -qF "utils.failed-\$BACKUP_TS" "$DEPLOY_SCRIPT"'
+    assert "rollback restaura utils.old-BACKUP_TS → utils" \
+        'grep -qF "mv '"'"'\$REMOTE_BASE/utils.old-\$BACKUP_TS'"'"' '"'"'\$REMOTE_BASE/utils'"'"'" "$DEPLOY_SCRIPT"'
+    assert "rollback maneja pre-Sprint-022 (utils.old- ausente OK)" \
+        'grep -q "pre-Sprint-022" "$DEPLOY_SCRIPT"'
+
+    # B10 cleanup retention para utils
+    assert "B10 retention utils.old-* presente" \
+        'grep -q "retention utils.old-" "$DEPLOY_SCRIPT"'
+    assert "B10 retention utils.failed-* presente" \
+        'grep -q "retention utils.failed-" "$DEPLOY_SCRIPT"'
+    assert "B10 NO borra utils.old-BACKUP_TS recién creado" \
+        'grep -A6 "retention utils.old-" "$DEPLOY_SCRIPT" | grep -qF "utils.old-\$BACKUP_TS"'
+
+    # B1 ya empaquetaba server, utils, types — verificar que sigue intacto
+    assert "B1 sigue empaquetando server, utils, types" \
+        'grep -q "for d in server utils types" "$DEPLOY_SCRIPT"'
+}
+
+# ────────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo " RESULTADO: pass=$PASS fail=$FAIL"
