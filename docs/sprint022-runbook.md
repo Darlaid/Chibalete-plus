@@ -1,8 +1,16 @@
 # Sprint 022 — Runbook Operacional
 
-> Documento canónico de **validación operacional** del Sprint 022.
+> **Documento canónico** de **deploy y validación operacional del backend**
+> Chibalete+ (modelo bind-mount).
 > Si la realidad del VPS difiere de este runbook, se resuelve a favor
 > de la realidad y se actualiza este documento inmediatamente.
+
+> **Hermano operacional:** `docs/sprint022-frontend-deploy.md` (deploy
+> frontend image-based). Son **stacks paralelos y distintos** —
+> mecanismo, payload, rollback y tooling no se comparten. Ver
+> `docs/operational-architecture-summary.md` para el modelo completo.
+> No mezclar ambos procedimientos en la misma release window sin razón
+> documentada.
 
 ---
 
