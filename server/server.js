@@ -3319,11 +3319,12 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
 // no escala en colegios multi-grupo donde varios admins editan en paralelo
 // (last-write-wins) y no permite reportar fallos por usuario.
 //
-// Estos 4 endpoints exponen el flujo operativo correcto:
-//   GET    /api/groups/:groupId/candidates       → quiénes pueden entrar
-//   GET    /api/groups/:groupId/members          → quiénes ya son miembros
-//   POST   /api/groups/:groupId/members          → asignar N usuarios (atómico)
-//   DELETE /api/groups/:groupId/members/:userId  → quitar 1 usuario
+// Estos 5 endpoints exponen el flujo operativo correcto:
+//   GET    /api/groups/:groupId/candidates              → quiénes pueden entrar
+//   GET    /api/groups/:groupId/members                 → quiénes ya son miembros
+//   POST   /api/groups/:groupId/members                 → asignar N usuarios (atómico)
+//   POST   /api/groups/:toGroupId/members/move          → mover N usuarios entre grupos (atómico whole-batch)
+//   DELETE /api/groups/:groupId/members/:userId         → quitar 1 usuario
 //
 // Toda la lógica de membresía pasa por groupMembershipService → utils
 // (fuente única de verdad establecida en Sprint 021 Fases 1 y 2).
@@ -3594,6 +3595,172 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
 
     log(`DELETE /api/groups/${groupId}/members/${userId} removed=${groupChanged || userChanged}`, 'ACCESS');
     res.json({ groupId, userId, removed: groupChanged || userChanged });
+});
+
+// POST /api/groups/:toGroupId/members/move
+// Mueve N usuarios desde fromGroupId a toGroupId en una sola transacción.
+// Body: { userIds: string[], fromGroupId: string }.
+//
+// ── Por qué este endpoint en lugar de DELETE+POST cliente ───────────────────
+// Hacer move como dos requests independientes (DELETE de fromGroup + POST a
+// toGroup) introduce una ventana donde el user puede quedar huérfano si la
+// segunda llamada falla, o duplicado si la primera no completa pero el cliente
+// reintenta el batch entero. El move atómico cierra esa ventana operacional.
+//
+// ── Atomicidad whole-batch (rollback completo si CUALQUIER user falla) ──────
+// A diferencia de POST /members (que comitea las asignaciones válidas y
+// reporta failed[] aparte), move adopta semántica all-or-nothing:
+//   PHASE 1: pre-validación de TODOS los users sin mutar in-memory.
+//   PHASE 2: si failed.length > 0 → return 422 con moved=[], nada se escribe.
+//   PHASE 3: si todas pasaron → mutar in-memory + writeJSON ambos archivos.
+// Razón: un move parcialmente comiteado deja al admin con un panorama
+// confuso ("estos 3 se movieron pero estos 2 no"). Mejor fallar entero,
+// devolver razones, y dejar que el admin corrija el batch.
+//
+// ── Reúsa los helpers atómicos de utils/groupMembership.mjs ────────────────
+//   - removeUserIdFromGroup / removeGroupIdFromUser   → quitar de fromGroup
+//   - addUserIdToGroup       / addGroupIdToUser       → añadir a toGroup
+//   - normalizeGroup                                   → re-sincroniza studentIds === memberIds
+// Lock anidado idéntico a POST /members (groups outer, users inner) — orden
+// consistente cross-endpoint elimina el riesgo de deadlock entre handlers.
+//
+// ── Idempotencia ────────────────────────────────────────────────────────────
+// La SEGUNDA llamada con los mismos userIds devuelve 422 con todos en failed=
+// 'not_in_source_group' (ya no son miembros explícitos de fromGroup tras la
+// primera). Sin corrupción de datos, sin duplicados, sin huérfanos. Es la
+// definición operacional de idempotencia para esta operación.
+//
+// ── Fallback colegio (legacy) ───────────────────────────────────────────────
+// Un user que sólo es miembro de fromGroup vía fallback colegio (no aparece
+// en studentIds/memberIds ni en su user.groupIds) NO es un "miembro
+// explícito" — el endpoint lo rechaza con reason='not_in_source_group'. El
+// admin debe primero asignarlo explícitamente con POST /members, y luego
+// moverlo. Esto preserva la semántica del fallback (es lectura, no mutación).
+app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, res) => {
+    const { toGroupId } = req.params;
+    const body = req.body || {};
+
+    // ── Input validation (sin lock — falla rápido) ──────────────────────────
+    if (typeof body.fromGroupId !== 'string' || body.fromGroupId.length === 0) {
+        return res.status(400).json({ error: 'fromGroupId debe ser string no vacío' });
+    }
+    if (!Array.isArray(body.userIds)) {
+        return res.status(400).json({ error: 'userIds debe ser un array de strings' });
+    }
+    const { fromGroupId } = body;
+    if (fromGroupId === toGroupId) {
+        return res.status(400).json({ error: 'fromGroupId y toGroupId no pueden ser iguales' });
+    }
+    // Dedup + sanitización
+    const userIds = [...new Set(body.userIds.filter(x => typeof x === 'string' && x.length > 0))];
+    if (userIds.length === 0) {
+        return res.status(400).json({ error: 'userIds vacío' });
+    }
+    if (userIds.length > 500) {
+        return res.status(400).json({ error: 'max 500 userIds por request' });
+    }
+
+    let outcome  = null;
+    const moved  = [];
+    const failed = [];
+
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+
+            // Lookup ambos grupos en el MISMO lock — sin race con admin paralelo.
+            const fromIdx = groups.findIndex(g => g?.id === fromGroupId);
+            const toIdx   = groups.findIndex(g => g?.id === toGroupId);
+            if (fromIdx === -1) { outcome = { conflict: 'from_group_not_found' }; return; }
+            if (toIdx === -1)   { outcome = { conflict: 'to_group_not_found' };   return; }
+
+            const fromGroup = groups[fromIdx];
+            const toGroup   = groups[toIdx];
+
+            const userById    = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
+            const fromStudent = new Set(Array.isArray(fromGroup.studentIds) ? fromGroup.studentIds : []);
+            const fromMember  = new Set(Array.isArray(fromGroup.memberIds)  ? fromGroup.memberIds  : []);
+
+            // ── PHASE 1: pre-validación, sin mutar in-memory ─────────────────
+            // Acumula TODOS los failures antes de decidir commit/rollback.
+            const validUsers = [];
+            for (const uid of userIds) {
+                const u = userById.get(uid);
+                if (!u) {
+                    failed.push({ userId: uid, reason: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND });
+                    continue;
+                }
+                // "Miembro explícito" = en al menos uno de los 3 canales del
+                // grupo origen. Fallback colegio NO cuenta (ver doc arriba).
+                const isExplicitMember = fromStudent.has(uid)
+                    || fromMember.has(uid)
+                    || (Array.isArray(u.groupIds) && u.groupIds.includes(fromGroupId));
+                if (!isExplicitMember) {
+                    failed.push({ userId: uid, reason: 'not_in_source_group' });
+                    continue;
+                }
+                validUsers.push(u);
+            }
+
+            if (failed.length > 0) {
+                // Whole-batch rollback: no se mutó nada, sólo se llenó failed[].
+                outcome = { conflict: 'whole_batch_rollback' };
+                return;
+            }
+
+            // ── PHASE 2: mutación in-memory (todas las validaciones pasaron) ──
+            let groupsTouched = false;
+            let usersTouched  = false;
+
+            for (const u of validUsers) {
+                const uid = u.id;
+                // Remove explícito de fromGroup en los 3 canales bidireccionales.
+                const fromGroupChanged = removeUserIdFromGroup(fromGroup, uid);
+                const userRemoveChange = removeGroupIdFromUser(u, fromGroupId);
+                // Add explícito a toGroup en los 3 canales (idempotente).
+                const toGroupChanged   = addUserIdToGroup(toGroup, uid);
+                const userAddChange    = addGroupIdToUser(u, toGroupId);
+
+                if (fromGroupChanged || toGroupChanged) groupsTouched = true;
+                if (userRemoveChange || userAddChange)  usersTouched  = true;
+
+                moved.push({
+                    userId: uid,
+                    // True si el user ya estaba en toGroup en ambos canales
+                    // (group + user.groupIds) — informativo, no afecta éxito.
+                    alreadyInDestination: !toGroupChanged && !userAddChange,
+                });
+            }
+
+            // ── PHASE 3: re-normalize + commit ────────────────────────────────
+            // normalizeGroup re-sincroniza studentIds === memberIds en ambos.
+            groups[fromIdx] = normalizeGroup(fromGroup);
+            groups[toIdx]   = normalizeGroup(toGroup);
+            // Orden de escritura GROUPS_DB → USERS_DB (consistente con
+            // POST /members + DELETE /members/:userId).
+            if (groupsTouched) writeJSON(GROUPS_DB, groups);
+            if (usersTouched)  writeJSON(USERS_DB, users);
+        });
+    }, 'groupsLock');
+
+    if (outcome?.conflict === 'from_group_not_found') {
+        return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: `fromGroupId no encontrado: ${fromGroupId}` });
+    }
+    if (outcome?.conflict === 'to_group_not_found') {
+        return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: `toGroupId no encontrado: ${toGroupId}` });
+    }
+    if (outcome?.conflict === 'whole_batch_rollback') {
+        // 422 Unprocessable Entity — request sintácticamente válida pero
+        // semánticamente no atomicable. moved=[] siempre cuando hay rollback.
+        log(`POST /api/groups/${toGroupId}/members/move ROLLBACK from=${fromGroupId} failed=${failed.length}`, 'WARN');
+        return res.status(422).json({ moved: [], failed, rolledBack: true });
+    }
+
+    log(`POST /api/groups/${toGroupId}/members/move from=${fromGroupId} moved=${moved.length} failed=${failed.length}`, 'ACCESS');
+    res.json({ moved, failed });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
