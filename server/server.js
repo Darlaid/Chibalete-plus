@@ -3231,6 +3231,38 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
 
     log(`Group updated: ${id} (type=${merged.type}) members delta added=${memberDelta.added.length} removed=${memberDelta.removed.length}`, 'ACCESS');
     res.json(merged);
+
+    // Audit log — sólo si la mutación cambió memberships (PUT bulk-replace
+    // puede usarse sólo para metadata del grupo, ej. renombrar; en ese caso
+    // no genera audit). Cuando hay delta, registramos la lista combinada de
+    // affectedUserIds (added ∪ removed) en metadata.targetUserIds.
+    if (memberDelta.added.length > 0 || memberDelta.removed.length > 0) {
+        const affectedUserIds = [...new Set([...memberDelta.added, ...memberDelta.removed])];
+        writeAuditLog({
+            action:       'group.update',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details: {
+                groupId:        id,
+                added:          memberDelta.added.length,
+                removed:        memberDelta.removed.length,
+                bulkReplace:    true,
+            },
+            metadata: {
+                targetUserIds:  affectedUserIds,
+                fromGroupId:    null,
+                toGroupId:      id,
+                fromSchool:     null,
+                toSchool:       typeof merged?.school === 'string' ? merged.school : null,
+                groupType:      merged?.type === 'club' ? 'club' : 'course',
+                organizationId: typeof merged?.organizationId === 'string' && merged.organizationId.length > 0 ? merged.organizationId : null,
+                result:         'success',
+                assignedCount:  memberDelta.added.length,
+                failedCount:    memberDelta.removed.length,
+                failedReasons:  {},
+            },
+        });
+    }
 });
 
 app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
@@ -3240,6 +3272,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
     // quede con una referencia huérfana.
     let conflict = null;
     let detachedFromUserIds = [];
+    let groupMeta = null;     // capturado dentro del lock (antes de splice) para audit
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
@@ -3248,6 +3281,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             const users  = readJSON(USERS_DB);
             const index  = groups.findIndex(g => g.id === id);
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
+            groupMeta = _extractGroupMeta(groups[index]);
 
             detachedFromUserIds = detachGroupFromAllUsers(users, id);
             if (detachedFromUserIds.length > 0) writeJSON(USERS_DB, users);
@@ -3260,6 +3294,33 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
 
     log(`Group deleted: ${id} (detached from ${detachedFromUserIds.length} users)`, 'ACCESS');
     res.json({ success: true, detachedFromUserIds });
+
+    // Audit log — DELETE /group cascade es membership mutation crítica:
+    // borrar un grupo desconecta a TODOS sus members. Registramos affected
+    // userIds completos para reconstrucción forense (quién perdió membresía
+    // en este grupo) — incluso si el grupo ya no existe en groups_db.json.
+    writeAuditLog({
+        action:       'group.delete',
+        targetUserId: null,
+        actor:        req.headers['x-user-id'] || null,
+        details: {
+            groupId:       id,
+            detachedCount: detachedFromUserIds.length,
+        },
+        metadata: {
+            targetUserIds:  detachedFromUserIds,
+            fromGroupId:    id,
+            toGroupId:      null,
+            fromSchool:     groupMeta?.school || null,
+            toSchool:       null,
+            groupType:      groupMeta?.type || null,
+            organizationId: groupMeta?.organizationId || null,
+            result:         'success',
+            assignedCount:  0,
+            failedCount:    detachedFromUserIds.length,
+            failedReasons:  {},
+        },
+    });
 });
 
 // --- CLUBES EXTERNOS: JOIN ---
@@ -3366,6 +3427,33 @@ const _validateSameInstitution = (user, group) => {
         && user.organizationId === group.organizationId);
     if (sameOrg) return true;
     return _sameSchool(user.colegio, group.school);
+};
+
+// _extractGroupMeta — snapshot inmutable del grupo al momento de la mutación,
+// para incluir en audit log. Capturamos school/type/organizationId DENTRO del
+// lock body (antes de mutar) para que el log preserve la institución incluso
+// si el grupo se renombra/elimina después. Defensive: tolera null/undefined.
+const _extractGroupMeta = (group) => {
+    if (!group || typeof group !== 'object') return null;
+    return {
+        school:         typeof group.school === 'string' ? group.school : null,
+        type:           group.type === 'club' ? 'club' : 'course',
+        organizationId: typeof group.organizationId === 'string' && group.organizationId.length > 0
+            ? group.organizationId
+            : null,
+    };
+};
+
+// _tallyFailedReasons — cuenta failed[] por reason. Reduce write amplification
+// y PII (no expone userIds en el log, sólo distribución de causas).
+const _tallyFailedReasons = (failed) => {
+    if (!Array.isArray(failed)) return {};
+    const tally = {};
+    for (const f of failed) {
+        const reason = (f && typeof f.reason === 'string') ? f.reason : 'unknown';
+        tally[reason] = (tally[reason] || 0) + 1;
+    }
+    return tally;
 };
 
 // GET /api/groups/:groupId/candidates
@@ -3538,7 +3626,8 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         return res.status(400).json({ error: 'max 500 userIds por request' });
     }
 
-    let outcome  = null;
+    let outcome    = null;
+    let groupMeta  = null;       // capturado dentro del lock para audit log
     const assigned = [];
     const failed   = [];
 
@@ -3551,6 +3640,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
 
             const group = groups.find(g => g?.id === groupId);
             if (!group) { outcome = { conflict: 'group_not_found' }; return; }
+            groupMeta = _extractGroupMeta(group);
 
             const userById = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
             let groupsTouched = false;
@@ -3595,6 +3685,33 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
 
     log(`POST /api/groups/${groupId}/members assigned=${assigned.length} failed=${failed.length}`, 'ACCESS');
     res.json({ groupId, assigned, failed });
+
+    // Audit log — fire-and-forget, post-response. result discrimina el outcome:
+    //   success — todos los users válidos asignados (incluye alreadyMember idempotentes)
+    //   partial — algunos OK + algunos failed (cross_school_assignment / USER_NOT_FOUND)
+    //   failed  — todos en failed (típicamente 100% cross-school)
+    const auditResult = failed.length === 0
+        ? 'success'
+        : (assigned.length === 0 ? 'failed' : 'partial');
+    writeAuditLog({
+        action:       'membership.assign',
+        targetUserId: assigned.length === 1 && failed.length === 0 ? assigned[0].userId : null,
+        actor:        req.headers['x-user-id'] || null,
+        details:      { groupId, requested: userIds.length, assigned: assigned.length, failed: failed.length },
+        metadata: {
+            targetUserIds:  userIds,
+            fromGroupId:    null,
+            toGroupId:      groupId,
+            fromSchool:     null,
+            toSchool:       groupMeta?.school || null,
+            groupType:      groupMeta?.type || null,
+            organizationId: groupMeta?.organizationId || null,
+            result:         auditResult,
+            assignedCount:  assigned.length,
+            failedCount:    failed.length,
+            failedReasons:  _tallyFailedReasons(failed),
+        },
+    });
 });
 
 // DELETE /api/groups/:groupId/members/:userId
@@ -3606,6 +3723,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
     let outcome      = null;
     let groupChanged = false;
     let userChanged  = false;
+    let groupMeta    = null;     // capturado dentro del lock para audit log
 
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
@@ -3616,6 +3734,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
 
             const idx = groups.findIndex(g => g?.id === groupId);
             if (idx === -1) { outcome = { conflict: 'group_not_found' }; return; }
+            groupMeta = _extractGroupMeta(groups[idx]);
             const u = users.find(x => x?.id === userId);
             if (!u) { outcome = { conflict: 'user_not_found' }; return; }
             // Cross-school gate defensivo: prevenir DELETE accidental sobre
@@ -3643,6 +3762,27 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
     if (outcome?.conflict === 'user_not_found')  return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND,  message: 'Usuario no encontrado' });
     if (outcome?.conflict === 'cross_school_assignment') {
         log(`DELETE /api/groups/${groupId}/members/${userId} BLOCKED cross-school`, 'WARN');
+        // Audit: cross-school blocked es señal de seguridad/intent — se loggea
+        // antes del response 422 para preservar trazabilidad de attempts.
+        writeAuditLog({
+            action:       'membership.cross_school_blocked',
+            targetUserId: userId,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId, reason: 'cross_school_assignment', method: 'DELETE' },
+            metadata: {
+                targetUserIds:  [userId],
+                fromGroupId:    groupId,
+                toGroupId:      null,
+                fromSchool:     groupMeta?.school || null,
+                toSchool:       null,
+                groupType:      groupMeta?.type || null,
+                organizationId: groupMeta?.organizationId || null,
+                result:         'blocked',
+                assignedCount:  0,
+                failedCount:    1,
+                failedReasons:  { cross_school_assignment: 1 },
+            },
+        });
         return res.status(422).json({
             error:   'cross_school_assignment',
             message: `Usuario ${userId} no pertenece a la misma institución del grupo ${groupId}. Verificá groupId/userId antes de retry.`,
@@ -3651,6 +3791,30 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
 
     log(`DELETE /api/groups/${groupId}/members/${userId} removed=${groupChanged || userChanged}`, 'ACCESS');
     res.json({ groupId, userId, removed: groupChanged || userChanged });
+
+    // Audit log — sólo si la operación produjo cambio (idempotent no-op no
+    // genera entry, igual que log() ACCESS no agrega ruido en idempotentes).
+    if (groupChanged || userChanged) {
+        writeAuditLog({
+            action:       'membership.remove',
+            targetUserId: userId,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId, removed: true },
+            metadata: {
+                targetUserIds:  [userId],
+                fromGroupId:    groupId,
+                toGroupId:      null,
+                fromSchool:     groupMeta?.school || null,
+                toSchool:       null,
+                groupType:      groupMeta?.type || null,
+                organizationId: groupMeta?.organizationId || null,
+                result:         'success',
+                assignedCount:  0,
+                failedCount:    0,
+                failedReasons:  {},
+            },
+        });
+    }
 });
 
 // POST /api/groups/:toGroupId/members/move
@@ -3716,9 +3880,11 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         return res.status(400).json({ error: 'max 500 userIds por request' });
     }
 
-    let outcome  = null;
-    const moved  = [];
-    const failed = [];
+    let outcome       = null;
+    let fromGroupMeta = null;     // capturado dentro del lock para audit log
+    let toGroupMeta   = null;
+    const moved       = [];
+    const failed      = [];
 
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
@@ -3735,6 +3901,8 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
 
             const fromGroup = groups[fromIdx];
             const toGroup   = groups[toIdx];
+            fromGroupMeta = _extractGroupMeta(fromGroup);
+            toGroupMeta   = _extractGroupMeta(toGroup);
 
             const userById    = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
             const fromStudent = new Set(Array.isArray(fromGroup.studentIds) ? fromGroup.studentIds : []);
@@ -3820,11 +3988,56 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         // 422 Unprocessable Entity — request sintácticamente válida pero
         // semánticamente no atomicable. moved=[] siempre cuando hay rollback.
         log(`POST /api/groups/${toGroupId}/members/move ROLLBACK from=${fromGroupId} failed=${failed.length}`, 'WARN');
+        // Audit: rollback es señal operacional crítica (whole-batch). El
+        // metadata incluye el tally de razones para detectar patterns
+        // (cross-school recurrente, intentos sobre fallback-only, etc.).
+        writeAuditLog({
+            action:       'membership.move.rollback',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { fromGroupId, toGroupId, requested: userIds.length, failed: failed.length },
+            metadata: {
+                targetUserIds:  userIds,
+                fromGroupId,
+                toGroupId,
+                fromSchool:     fromGroupMeta?.school || null,
+                toSchool:       toGroupMeta?.school || null,
+                groupType:      toGroupMeta?.type || null,
+                organizationId: toGroupMeta?.organizationId || null,
+                result:         'rollback',
+                assignedCount:  0,
+                failedCount:    failed.length,
+                failedReasons:  _tallyFailedReasons(failed),
+            },
+        });
         return res.status(422).json({ moved: [], failed, rolledBack: true });
     }
 
     log(`POST /api/groups/${toGroupId}/members/move from=${fromGroupId} moved=${moved.length} failed=${failed.length}`, 'ACCESS');
     res.json({ moved, failed });
+
+    // Audit log — sólo si efectivamente se movió ≥1 user (idempotent no-op
+    // donde todos eran alreadyInDestination genera entry porque sigue siendo
+    // un acto admin con intent registrable).
+    writeAuditLog({
+        action:       'membership.move',
+        targetUserId: null,
+        actor:        req.headers['x-user-id'] || null,
+        details:      { fromGroupId, toGroupId, moved: moved.length },
+        metadata: {
+            targetUserIds:  userIds,
+            fromGroupId,
+            toGroupId,
+            fromSchool:     fromGroupMeta?.school || null,
+            toSchool:       toGroupMeta?.school || null,
+            groupType:      toGroupMeta?.type || null,
+            organizationId: toGroupMeta?.organizationId || null,
+            result:         'success',
+            assignedCount:  moved.length,
+            failedCount:    0,
+            failedReasons:  {},
+        },
+    });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
