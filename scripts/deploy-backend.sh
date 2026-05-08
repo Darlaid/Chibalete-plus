@@ -718,10 +718,13 @@ phase_b3() {
     # 4. Validate endpoint OK (BLOQUEANTE) — vía edge, no requiere ssh-side secret
     log "  → validate vía edge (capturar baseline)"
     local validate_resp http_code
-    # Usamos --config - para pasar header secret por stdin (no por argv)
-    validate_resp=$(curl -sS --max-time 30 \
-        --config <(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET") \
-        "$PUBLIC_URL/api/admin/membership/validate" 2>&1) || \
+    # Usamos --config - con secret por stdin via pipe (no por argv ni process
+    # substitution; <(...) genera /dev/fd/N que curl no resuelve en
+    # Git Bash/MSYS — el FD pertenece al subshell bash, curl es binario nativo).
+    validate_resp=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
+        | curl -sS --max-time 30 \
+            --config - \
+            "$PUBLIC_URL/api/admin/membership/validate" 2>&1) || \
         fail "curl validate FAILED: $validate_resp" 4
 
     if ! json_ok_true "$validate_resp"; then
@@ -1019,10 +1022,11 @@ phase_b8() {
     fi
     log "  ✓ health edge ok"
 
-    # 2. Validate vía edge (usar misma técnica de --config -)
-    resp=$(curl -sS --max-time 30 \
-        --config <(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET") \
-        "$PUBLIC_URL/api/admin/membership/validate")
+    # 2. Validate vía edge — secret por stdin via pipe (portable Git Bash/MSYS)
+    resp=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
+        | curl -sS --max-time 30 \
+            --config - \
+            "$PUBLIC_URL/api/admin/membership/validate")
 
     if ! json_ok_true "$resp"; then
         err "validate post-deploy ok=false vía edge"
@@ -1214,9 +1218,10 @@ rollback_code() {
 
     # Validate post-rollback (informativo, no bloqueante en este punto)
     local resp
-    resp=$(curl -sS --max-time 30 \
-        --config <(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET") \
-        "$PUBLIC_URL/api/admin/membership/validate" 2>/dev/null || echo "")
+    resp=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
+        | curl -sS --max-time 30 \
+            --config - \
+            "$PUBLIC_URL/api/admin/membership/validate" 2>/dev/null || echo "")
     if json_ok_true "$resp"; then
         err "  ✓ validate post-rollback ok=true — código antiguo restaurado limpio"
     else

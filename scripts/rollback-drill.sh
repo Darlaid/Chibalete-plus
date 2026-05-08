@@ -185,9 +185,11 @@ validate_edge() {
         return 0
     fi
     local resp
-    resp=$(curl -sS --max-time 30 \
-        --config <(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET") \
-        "$PUBLIC_URL/api/admin/membership/validate" 2>&1) || {
+    # Secret por stdin via pipe (no process substitution, portable Git Bash/MSYS)
+    resp=$(printf 'header = "x-admin-secret: %s"\n' "$ADMIN_SECRET" \
+        | curl -sS --max-time 30 \
+            --config - \
+            "$PUBLIC_URL/api/admin/membership/validate" 2>&1) || {
             err "  curl validate edge FALLÓ: $resp"
             return 1
         }

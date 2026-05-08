@@ -408,6 +408,39 @@ echo "[CASO 11] SSH ControlMaster deshabilitado (anti-race acquire_lock)"
 }
 
 # ────────────────────────────────────────────────────────────────────
+# CASO 12 — curl --config NO usa process substitution
+# Process subst <(printf...) genera /dev/fd/N que en Git Bash/MSYS no es
+# accesible al curl nativo Windows (pertenece al subshell bash). Fix:
+# pipe stdin a `curl --config -`. Portable bash/Git Bash/MSYS/macOS/Linux.
+# ────────────────────────────────────────────────────────────────────
+echo ""
+echo "[CASO 12] curl --config sin process substitution (Git Bash/MSYS portable)"
+{
+    ROLLBACK="$REPO_ROOT/scripts/rollback-drill.sh"
+
+    # NO debe haber `curl ... --config <(...)` en código activo (uncommented)
+    has_subst_dep=$( ( grep -nE '^[^#]*curl[^#]*--config[[:space:]]*<\(' "$DEPLOY_SCRIPT" \
+        | head -1 ) 2>/dev/null || true )
+    assert "deploy-backend.sh NO usa curl --config <(...)" '[ -z "$has_subst_dep" ]'
+
+    has_subst_rb=$( ( grep -nE '^[^#]*curl[^#]*--config[[:space:]]*<\(' "$ROLLBACK" \
+        | head -1 ) 2>/dev/null || true )
+    assert "rollback-drill.sh NO usa curl --config <(...)" '[ -z "$has_subst_rb" ]'
+
+    # DEBE haber el patrón nuevo: printf ADMIN_SECRET | curl ... --config -
+    # El patrón es multilínea (continuación con `\`); usamos grep -A para verificar.
+    count_printf_pipe_dep=$(grep -cE 'printf.*x-admin-secret.*ADMIN_SECRET' "$DEPLOY_SCRIPT" 2>/dev/null || echo 0)
+    assert "deploy-backend.sh tiene patrón printf|curl al menos 3 veces" '[ "$count_printf_pipe_dep" -ge 3 ]'
+
+    count_printf_pipe_rb=$(grep -cE 'printf.*x-admin-secret.*ADMIN_SECRET' "$ROLLBACK" 2>/dev/null || echo 0)
+    assert "rollback-drill.sh tiene patrón printf|curl al menos 1 vez" '[ "$count_printf_pipe_rb" -ge 1 ]'
+
+    # `--config -` (con guión = stdin) debe estar presente
+    count_config_stdin_dep=$(grep -cE '^[^#]*--config[[:space:]]+-' "$DEPLOY_SCRIPT" 2>/dev/null || echo 0)
+    assert "deploy-backend.sh usa --config - (stdin) al menos 3 veces" '[ "$count_config_stdin_dep" -ge 3 ]'
+}
+
+# ────────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo " RESULTADO: pass=$PASS fail=$FAIL"
