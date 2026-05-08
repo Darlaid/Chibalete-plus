@@ -3337,6 +3337,27 @@ const _sameSchool = (userColegio, groupSchool) => {
     return userColegio.trim().toLowerCase() === groupSchool.trim().toLowerCase();
 };
 
+// _validateSameInstitution — gate de seguridad cross-school para mutaciones de
+// membresía (POST/DELETE/move). Misma semántica que el filtro de candidates
+// (línea ~3376) — si cualquiera de los dos canales coincide, se considera
+// misma institución:
+//   1. organizationId match (preferente, definitivo cuando ambos lo tienen)
+//   2. fallback colegio normalizado (lowercase + trim) — soporte legacy
+//
+// NO bloquea fallback colegio legítimo: un user con colegio="Chibalete"
+// pasa la validación contra group.school="Chibalete" (con o sin acentos
+// normalizados por _sameSchool, sin diferenciar mayúsculas).
+//
+// Devuelve true si la asignación/mutación está permitida, false si es cross-
+// school. El caller decide la semántica de error (failed[], 422, etc.).
+const _validateSameInstitution = (user, group) => {
+    if (!user || !group) return false;
+    const sameOrg = !!(user.organizationId && group.organizationId
+        && user.organizationId === group.organizationId);
+    if (sameOrg) return true;
+    return _sameSchool(user.colegio, group.school);
+};
+
 // GET /api/groups/:groupId/candidates
 // Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
 // y admins (requireAuth). Filtra por misma institución y excluye a los que
@@ -3531,6 +3552,13 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
                     failed.push({ userId: uid, reason: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND });
                     continue;
                 }
+                // Cross-school gate: el user debe pertenecer a la misma
+                // institución del grupo (organizationId match o fallback colegio
+                // normalizado). Partial-fail semantic: el resto del batch sigue.
+                if (!_validateSameInstitution(u, group)) {
+                    failed.push({ userId: uid, reason: 'cross_school_assignment' });
+                    continue;
+                }
                 const groupChanged = addUserIdToGroup(group, uid);
                 const userChanged  = addGroupIdToUser(u, groupId);
                 if (groupChanged) groupsTouched = true;
@@ -3580,6 +3608,17 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
             if (idx === -1) { outcome = { conflict: 'group_not_found' }; return; }
             const u = users.find(x => x?.id === userId);
             if (!u) { outcome = { conflict: 'user_not_found' }; return; }
+            // Cross-school gate defensivo: prevenir DELETE accidental sobre
+            // grupo de otra institución (admin tipea wrong groupId). Si el
+            // user no pertenece a la misma institución del grupo, rechazar
+            // con 422 — admin debe verificar groupId/userId antes de retry.
+            // Nota: si la situación es data drift legítima (user en grupo
+            // equivocado por error histórico), la limpieza pasa por
+            // syncGroupMembership, NO por DELETE bypass.
+            if (!_validateSameInstitution(u, groups[idx])) {
+                outcome = { conflict: 'cross_school_assignment' };
+                return;
+            }
 
             groupChanged = removeUserIdFromGroup(groups[idx], userId);
             userChanged  = removeGroupIdFromUser(u, groupId);
@@ -3592,6 +3631,13 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
 
     if (outcome?.conflict === 'group_not_found') return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: 'Grupo no encontrado' });
     if (outcome?.conflict === 'user_not_found')  return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND,  message: 'Usuario no encontrado' });
+    if (outcome?.conflict === 'cross_school_assignment') {
+        log(`DELETE /api/groups/${groupId}/members/${userId} BLOCKED cross-school`, 'WARN');
+        return res.status(422).json({
+            error:   'cross_school_assignment',
+            message: `Usuario ${userId} no pertenece a la misma institución del grupo ${groupId}. Verificá groupId/userId antes de retry.`,
+        });
+    }
 
     log(`DELETE /api/groups/${groupId}/members/${userId} removed=${groupChanged || userChanged}`, 'ACCESS');
     res.json({ groupId, userId, removed: groupChanged || userChanged });
@@ -3700,6 +3746,14 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
                     || (Array.isArray(u.groupIds) && u.groupIds.includes(fromGroupId));
                 if (!isExplicitMember) {
                     failed.push({ userId: uid, reason: 'not_in_source_group' });
+                    continue;
+                }
+                // Cross-school gate: el user debe pertenecer a la misma
+                // institución que el grupo DESTINO. Bloquea move accidental
+                // entre instituciones distintas. Whole-batch rollback se
+                // dispara más abajo si CUALQUIER user falla esta validación.
+                if (!_validateSameInstitution(u, toGroup)) {
+                    failed.push({ userId: uid, reason: 'cross_school_assignment' });
                     continue;
                 }
                 validUsers.push(u);
