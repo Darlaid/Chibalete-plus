@@ -3332,9 +3332,19 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
 
 // Helper local para comparación normalizada de "misma institución".
 // Usa la misma convención (lowercase + trim) del fallback colegio del service.
+//
+// Hardening empty-string: si cualquiera de los strings queda vacío después
+// de trim, devolvemos false. Razón: "" === "" colapsaba a true, lo que
+// significaba que dos entries SIN institución especificada se trataban como
+// "misma institución" — un falso positivo silencioso. Sin esta guarda, un
+// user con colegio="" pasaba el cross-school check contra cualquier group
+// con school="" (data drift). Empty-vs-empty NO es match.
 const _sameSchool = (userColegio, groupSchool) => {
     if (typeof userColegio !== 'string' || typeof groupSchool !== 'string') return false;
-    return userColegio.trim().toLowerCase() === groupSchool.trim().toLowerCase();
+    const a = userColegio.trim().toLowerCase();
+    const b = groupSchool.trim().toLowerCase();
+    if (a.length === 0 || b.length === 0) return false;
+    return a === b;
 };
 
 // _validateSameInstitution — gate de seguridad cross-school para mutaciones de
