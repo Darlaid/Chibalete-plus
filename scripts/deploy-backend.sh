@@ -112,6 +112,7 @@ RELEASE_TAG=""
 ACTOR=""
 DRY_RUN=0
 ABORT_ON_WARN=0
+ACCEPT_LEGACY_VALIDATE=0
 RETRY_TAG=0
 SKIP_VERIFY=0
 
@@ -334,6 +335,14 @@ OPCIONES:
   --abort-on-warn         Trata warnings como errores (CI estricto)
   --retry-tag             Permite reusar tag git existente (post-rollback)
   --skip-verify           PROHIBIDO en master. Salta npm run verify (sólo dev)
+  --accept-legacy-validate
+                          OPT-IN: B6/B7/B8 aceptan validate ok=false como WARN
+                          en lugar de rollback. Pensado SOLO para el primer
+                          deploy del operational stack del Sprint 022, donde
+                          la data legacy (lectores sin grupo, etc.) genera
+                          ok=false legítimo. Imprime los counts en WARN.
+                          NO usar en deploys subsiguientes — debe pasar a
+                          strict una vez la data esté consistente.
   -h | --help             Muestra esta ayuda
 
 VARS DE ENTORNO:
@@ -353,6 +362,7 @@ parse_args() {
             --abort-on-warn)  ABORT_ON_WARN=1; shift ;;
             --retry-tag)      RETRY_TAG=1; shift ;;
             --skip-verify)    SKIP_VERIFY=1; shift ;;
+            --accept-legacy-validate) ACCEPT_LEGACY_VALIDATE=1; shift ;;
             -h|--help)        usage; exit 0 ;;
             *)                err "Argumento desconocido: $1"; usage; exit 1 ;;
         esac
@@ -979,11 +989,20 @@ phase_b6() {
     local resp
     resp=$(validate_in_container chibalete_api_1)
     if ! json_ok_true "$resp"; then
-        err "    api_1 validate ok=false"
-        rollback_code "api1_failed_validate"
-        exit 7
+        if [ "$ACCEPT_LEGACY_VALIDATE" = "1" ]; then
+            warn "  ⚠ api_1 validate ok=false ACEPTADO (--accept-legacy-validate)"
+            if command -v jq >/dev/null 2>&1; then
+                warn "    counts: $(echo "$resp" | jq -c '.counts // {}' 2>/dev/null || echo '{}')"
+            fi
+            warn "    Pensado SOLO para primer deploy Sprint 022 (data legacy esperada)."
+        else
+            err "    api_1 validate ok=false"
+            rollback_code "api1_failed_validate"
+            exit 7
+        fi
+    else
+        log "  ✓ api_1 validate ok=true"
     fi
-    log "  ✓ api_1 validate ok=true"
 
     # Verificar commit reportado por /api/health = nuestro GIT_SHA
     local health resp_commit
@@ -1030,11 +1049,20 @@ phase_b7() {
     local resp
     resp=$(validate_in_container chibalete_api_2)
     if ! json_ok_true "$resp"; then
-        err "    api_2 validate ok=false"
-        rollback_code "api2_failed_validate"
-        exit 8
+        if [ "$ACCEPT_LEGACY_VALIDATE" = "1" ]; then
+            warn "  ⚠ api_2 validate ok=false ACEPTADO (--accept-legacy-validate)"
+            if command -v jq >/dev/null 2>&1; then
+                warn "    counts: $(echo "$resp" | jq -c '.counts // {}' 2>/dev/null || echo '{}')"
+            fi
+            warn "    Pensado SOLO para primer deploy Sprint 022 (data legacy esperada)."
+        else
+            err "    api_2 validate ok=false"
+            rollback_code "api2_failed_validate"
+            exit 8
+        fi
+    else
+        log "  ✓ api_2 validate ok=true"
     fi
-    log "  ✓ api_2 validate ok=true"
 
     DEPLOY_STATE="api2_new"
     SUMMARY_LINES+=("B7 ✓  api_2 NUEVO healthy + validated")
@@ -1082,13 +1110,22 @@ phase_b8() {
     case "$post_validate_code" in
         200)
             if ! json_ok_true "$resp"; then
-                err "validate post-deploy HTTP 200 pero ok=false vía edge"
-                err "ESTADO DEGRADADO. NO se aplica rollback automático en B8."
-                err "Decisión humana: revisar issues, decidir rollback código solamente"
-                err "o restore data desde backup BACKUP_TS=$BACKUP_TS (último recurso, manual)."
-                exit 9
+                if [ "$ACCEPT_LEGACY_VALIDATE" = "1" ]; then
+                    warn "validate edge HTTP 200 ok=false ACEPTADO (--accept-legacy-validate)"
+                    if command -v jq >/dev/null 2>&1; then
+                        warn "    counts: $(echo "$resp" | jq -c '.counts // {}' 2>/dev/null || echo '{}')"
+                    fi
+                    warn "    Pensado SOLO para primer deploy Sprint 022 (data legacy esperada)."
+                else
+                    err "validate post-deploy HTTP 200 pero ok=false vía edge"
+                    err "ESTADO DEGRADADO. NO se aplica rollback automático en B8."
+                    err "Decisión humana: revisar issues, decidir rollback código solamente"
+                    err "o restore data desde backup BACKUP_TS=$BACKUP_TS (último recurso, manual)."
+                    exit 9
+                fi
+            else
+                log "  ✓ validate edge ok=true (HTTP 200)"
             fi
-            log "  ✓ validate edge ok=true (HTTP 200)"
             ;;
         404)
             err "validate post-deploy HTTP 404 vía edge"

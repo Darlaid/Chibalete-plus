@@ -460,7 +460,7 @@ echo "[CASO 13] B3 baseline tolera 404 / B8 post-deploy strict"
 
     # B8: post-deploy strict
     assert "B8 captura HTTP_CODE post-deploy" 'grep -qE "post_validate_code=" "$DEPLOY_SCRIPT"'
-    assert "B8 case 200) requiere ok=true" 'grep -B12 -A2 "validate edge ok=true .HTTP 200" "$DEPLOY_SCRIPT" | grep -qE "json_ok_true"'
+    assert "B8 case 200) requiere ok=true" 'grep -B25 -A2 "validate edge ok=true .HTTP 200" "$DEPLOY_SCRIPT" | grep -qE "json_ok_true"'
     assert "B8 case 404) post-deploy aborta exit 9" 'grep -A6 "validate post-deploy HTTP 404" "$DEPLOY_SCRIPT" | grep -qE "exit 9"'
     assert "B8 case * post-deploy aborta exit 9" 'grep -E "validate post-deploy HTTP=\\\$post_validate_code" "$DEPLOY_SCRIPT" >/dev/null'
 
@@ -516,6 +516,58 @@ echo "[CASO 14] B5 swap + rollback + cleanup incluyen utils/ (Sprint 022)"
     # B1 ya empaquetaba server, utils, types — verificar que sigue intacto
     assert "B1 sigue empaquetando server, utils, types" \
         'grep -q "for d in server utils types" "$DEPLOY_SCRIPT"'
+}
+
+# ────────────────────────────────────────────────────────────────────
+# CASO 15 — Flag opt-in --accept-legacy-validate
+# El primer deploy del operational stack del Sprint 022 encuentra data
+# legacy (lectores sin grupo, etc.) → endpoint validate retorna ok=false
+# legítimamente. Flag opt-in permite proseguir con WARN; sin flag,
+# comportamiento strict de antes (rollback).
+# ────────────────────────────────────────────────────────────────────
+echo ""
+echo "[CASO 15] Flag --accept-legacy-validate (opt-in B6/B7/B8)"
+{
+    # Variable definida en config con default seguro (0 = strict)
+    assert "ACCEPT_LEGACY_VALIDATE definida en config con default 0" \
+        'grep -q "^ACCEPT_LEGACY_VALIDATE=0$" "$DEPLOY_SCRIPT"'
+
+    # Flag parseado en parse_args
+    assert "parse_args reconoce --accept-legacy-validate" \
+        'grep -qE "[-][-]accept-legacy-validate.*ACCEPT_LEGACY_VALIDATE=1" "$DEPLOY_SCRIPT"'
+
+    # Documentado en --help
+    assert "--help documenta --accept-legacy-validate" \
+        'grep -qE "^[[:space:]]*--accept-legacy-validate" "$DEPLOY_SCRIPT"'
+    assert "--help advierte: SOLO primer deploy Sprint 022" \
+        'grep -q "primer deploy del operational stack" "$DEPLOY_SCRIPT"'
+
+    # B6 con guard ACCEPT_LEGACY_VALIDATE
+    assert "B6 phase chequea ACCEPT_LEGACY_VALIDATE antes de rollback" \
+        'awk "/^phase_b6/,/^phase_b7/" "$DEPLOY_SCRIPT" | grep -qE "ACCEPT_LEGACY_VALIDATE.*= .1."'
+    assert "B6 sin flag: rollback_code api1_failed_validate sigue presente" \
+        'awk "/^phase_b6/,/^phase_b7/" "$DEPLOY_SCRIPT" | grep -q "rollback_code .api1_failed_validate"'
+    assert "B6 con flag: imprime WARN counts" \
+        'awk "/^phase_b6/,/^phase_b7/" "$DEPLOY_SCRIPT" | grep -qE "validate ok=false ACEPTADO"'
+
+    # B7 con guard ACCEPT_LEGACY_VALIDATE
+    assert "B7 phase chequea ACCEPT_LEGACY_VALIDATE antes de rollback" \
+        'awk "/^phase_b7/,/^phase_b8/" "$DEPLOY_SCRIPT" | grep -qE "ACCEPT_LEGACY_VALIDATE.*= .1."'
+    assert "B7 sin flag: rollback_code api2_failed_validate sigue presente" \
+        'awk "/^phase_b7/,/^phase_b8/" "$DEPLOY_SCRIPT" | grep -q "rollback_code .api2_failed_validate"'
+
+    # B8 con guard ACCEPT_LEGACY_VALIDATE en case 200) ok=false branch
+    assert "B8 case 200) chequea ACCEPT_LEGACY_VALIDATE" \
+        'awk "/^phase_b8/,/^# ═════════════════════════════════════════════════════════════════════$/" "$DEPLOY_SCRIPT" | grep -qE "ACCEPT_LEGACY_VALIDATE.*= .1."'
+    assert "B8 sin flag: ESTADO DEGRADADO + exit 9 sigue presente" \
+        'grep -q "ESTADO DEGRADADO" "$DEPLOY_SCRIPT"'
+    assert "B8 case 404) NO chequea ACCEPT_LEGACY_VALIDATE (404 = bug real)" \
+        'grep -A8 "^        404)" "$DEPLOY_SCRIPT" | grep -q "exit 9"'
+
+    # Default behavior preservado: sin flag pasado, ACCEPT_LEGACY_VALIDATE = 0
+    # Test funcional: ejecutar --help y comprobar que mencionar el flag
+    out=$(run_in_script 'echo "default=$ACCEPT_LEGACY_VALIDATE"')
+    assert "default ACCEPT_LEGACY_VALIDATE=0 cuando no se pasa flag" '[ "$out" = "default=0" ]'
 }
 
 # ────────────────────────────────────────────────────────────────────
