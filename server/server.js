@@ -3319,8 +3319,9 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
 // no escala en colegios multi-grupo donde varios admins editan en paralelo
 // (last-write-wins) y no permite reportar fallos por usuario.
 //
-// Estos 3 endpoints exponen el flujo operativo correcto:
+// Estos 4 endpoints exponen el flujo operativo correcto:
 //   GET    /api/groups/:groupId/candidates       → quiénes pueden entrar
+//   GET    /api/groups/:groupId/members          → quiénes ya son miembros
 //   POST   /api/groups/:groupId/members          → asignar N usuarios (atómico)
 //   DELETE /api/groups/:groupId/members/:userId  → quitar 1 usuario
 //
@@ -3394,6 +3395,91 @@ app.get('/api/groups/:groupId/candidates', requireAuth, (req, res) => {
         });
     } catch (e) {
         log(`GET /api/groups/${req.params.groupId}/candidates error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// GET /api/groups/:groupId/members
+// Espejo lectura de POST/DELETE members. Hidrata datos para la UI del
+// Gestor de Membresías. Reutiliza getGroupMembers (incluye fallback colegio
+// cuando los canales explícitos están vacíos), asegurando coherencia con
+// /candidates y /diagnosis.
+//
+// healthState refleja la salud bidireccional de la membresía de cada user:
+//   'ok'           → studentIds + memberIds + user.groupIds en sincronía
+//   'incomplete'   → bidireccional roto en uno de los 3 canales (legacy parcial)
+//   'inconsistent' → sólo aparece vía fallback colegio (legacy puro a reparar)
+//
+// groupType: 'course' | 'club' — type === undefined → 'course' legacy
+// (modelo unificado: clubs y cursos son la misma entidad group).
+app.get('/api/groups/:groupId/members', requireAuth, (req, res) => {
+    try {
+        const { groupId } = req.params;
+        const groups = readJSON(GROUPS_DB) || [];
+        const users  = readJSON(USERS_DB)  || [];
+
+        const group = groups.find(g => g?.id === groupId);
+        if (!group) return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: 'Grupo no encontrado' });
+
+        // Fuente única — incluye fallback colegio cuando los canales explícitos
+        // están vacíos. Mismo helper que candidates/diagnosis.
+        const currentMemberIds = new Set(getGroupMembers(group, users, { allGroups: groups, warnFn: () => {} }));
+
+        // Index para `currentGroups` y `currentGroupsByType` por user, evitando
+        // re-resolver getGroupMembers por cada miembro.
+        const groupsByUser = new Map(); // userId → Array<{ id, type }>
+        for (const g of groups) {
+            const ids = getGroupMembers(g, users, { allGroups: groups, warnFn: () => {} });
+            const groupType = g?.type === 'club' ? 'club' : 'course';
+            for (const uid of ids) {
+                if (!groupsByUser.has(uid)) groupsByUser.set(uid, []);
+                groupsByUser.get(uid).push({ id: g.id, type: groupType });
+            }
+        }
+
+        // Canales explícitos del grupo objetivo — para healthState por miembro
+        // sin volver a tocar disco.
+        const studentSet = new Set(Array.isArray(group.studentIds) ? group.studentIds : []);
+        const memberSet  = new Set(Array.isArray(group.memberIds)  ? group.memberIds  : []);
+
+        const members = [];
+        for (const u of users) {
+            if (!u?.id || !currentMemberIds.has(u.id)) continue;
+
+            const inStudent      = studentSet.has(u.id);
+            const inMember       = memberSet.has(u.id);
+            const inUserGroupIds = Array.isArray(u.groupIds) && u.groupIds.includes(groupId);
+
+            let healthState;
+            if (inStudent && inMember && inUserGroupIds)      healthState = 'ok';
+            else if (inStudent || inMember || inUserGroupIds) healthState = 'incomplete';
+            else                                              healthState = 'inconsistent';
+
+            const userGroupsAll = groupsByUser.get(u.id) || [];
+
+            members.push({
+                userId:        u.id,
+                name:          u.nombre_completo || u.nombre_usuario || u.email || u.id,
+                email:         u.email || null,
+                colegio:       u.colegio || null,
+                currentGroups: userGroupsAll.map(x => x.id),
+                currentGroupsByType: {
+                    course: userGroupsAll.filter(x => x.type === 'course').map(x => x.id),
+                    club:   userGroupsAll.filter(x => x.type === 'club').map(x => x.id),
+                },
+                healthState,
+            });
+        }
+
+        res.json({
+            groupId,
+            groupType: group.type === 'club' ? 'club' : 'course',
+            school:    group.school || null,
+            members,
+            count:     members.length,
+        });
+    } catch (e) {
+        log(`GET /api/groups/${req.params.groupId}/members error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
