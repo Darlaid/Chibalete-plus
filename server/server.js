@@ -3191,12 +3191,15 @@ app.post('/api/groups', requireAdminAccess, async (req, res) => {
 app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
+    const overrideFallbackExtinction = _readFallbackOverride(req);
     // Sprint 021 — drift bidireccional cerrado.
     // normalizeGroup ya sincroniza studentIds = memberIds; comparamos union vs union
     // y sincronizamos user.groupIds para los deltas (added/removed).
-    let merged     = null;
-    let conflict   = null;
-    let memberDelta = { added: [], removed: [], missingUserIds: [] };
+    let merged       = null;
+    let conflict     = null;
+    let memberDelta  = { added: [], removed: [], missingUserIds: [] };
+    let fallbackRisk = null;     // sobre el grupo PRE-mutation (Commit 5)
+    let mergedMeta   = null;     // capturado para audit log
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
@@ -3208,11 +3211,26 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
 
             const oldMembers = unionGroupMemberIds(groups[index]);
             merged = normalizeGroup({ ...groups[index], ...updates });
+            mergedMeta = _extractGroupMeta(merged);
             const newMembers = unionGroupMemberIds(merged);
 
             const { added, removed } = diffIds(oldMembers, newMembers);
+            memberDelta = { added, removed, missingUserIds: [] };
+
+            // ── Fallback extinction guard (Commit 5) ──────────────────────────
+            // PUT bulk-replace puede setear studentIds/memberIds desde 0 → N.
+            // Si el grupo PRE-mutation era fallback-dependent y la nueva config
+            // añade users, la mutación extingue fallback. Bloquear sin override.
+            fallbackRisk = _assessFallbackExtinctionRisk(groups[index], groups, users, {
+                addingCount: added.length,
+            });
+            if (fallbackRisk.atRisk && !overrideFallbackExtinction) {
+                conflict = { conflict: 'fallback_extinction_blocked', risk: fallbackRisk };
+                return;
+            }
+
             const applied = applyGroupMembersChange(users, id, added, removed);
-            memberDelta = { added, removed, missingUserIds: applied.missingUserIds };
+            memberDelta.missingUserIds = applied.missingUserIds;
 
             // Si el caller intentó añadir userIds inexistentes al grupo, rechazamos
             // antes de persistir — evita orphan_studentId/memberId.
@@ -3228,9 +3246,71 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
     }, 'groupsLock');
     if (conflict?.conflict === 'not_found')   return res.status(404).json({ error: 'Grupo no encontrado' });
     if (conflict?.conflict === 'orphan_user') return res.status(400).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND, message: `userIds inexistentes: ${conflict.userIds.join(', ')}` });
+    if (conflict?.conflict === 'fallback_extinction_blocked') {
+        log(`PUT /api/groups/${id} BLOCKED fallback_extinction visible=${fallbackRisk?.fallbackVisibleBefore} adding=${memberDelta.added.length}`, 'WARN');
+        writeAuditLog({
+            action:       'membership.fallback_guard_blocked',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId: id, adding: memberDelta.added.length, reason: fallbackRisk?.reason || 'fallback_extinction', method: 'PUT' },
+            metadata: {
+                targetUserIds:                 memberDelta.added,
+                fromGroupId:                   null,
+                toGroupId:                     id,
+                fromSchool:                    null,
+                toSchool:                      mergedMeta?.school || null,
+                groupType:                     mergedMeta?.type || null,
+                organizationId:                mergedMeta?.organizationId || null,
+                result:                        'blocked',
+                assignedCount:                 0,
+                failedCount:                   memberDelta.added.length,
+                failedReasons:                 { fallback_extinction_blocked: memberDelta.added.length },
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+                fallbackOverrideUsed:          false,
+            },
+        });
+        return res.status(422).json({
+            error:                  'fallback_extinction_guard',
+            message:                'PUT bulk-replace extinguiría el fallback colegio del grupo. Materializar todos los lectores juntos o usar override explícito.',
+            visibleFallbackUsers:   fallbackRisk?.fallbackVisibleBefore ?? null,
+            explicitMembers:        0,
+            requestedExplicitAdds:  memberDelta.added.length,
+            recommendation:         'materialize_fallback_first',
+            overrideHeader:         'X-Allow-Fallback-Extinction: true',
+        });
+    }
 
     log(`Group updated: ${id} (type=${merged.type}) members delta added=${memberDelta.added.length} removed=${memberDelta.removed.length}`, 'ACCESS');
     res.json(merged);
+
+    const fallbackOverrideApplied = !!(fallbackRisk?.atRisk && overrideFallbackExtinction && memberDelta.added.length > 0);
+    if (fallbackOverrideApplied) {
+        writeAuditLog({
+            action:       'membership.fallback_extinction_allowed',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId: id, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'PUT' },
+            metadata: {
+                targetUserIds:                 memberDelta.added,
+                fromGroupId:                   null,
+                toGroupId:                     id,
+                fromSchool:                    null,
+                toSchool:                      mergedMeta?.school || null,
+                groupType:                     mergedMeta?.type || null,
+                organizationId:                mergedMeta?.organizationId || null,
+                result:                        'success',
+                assignedCount:                 memberDelta.added.length,
+                failedCount:                   0,
+                failedReasons:                 {},
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
+                fallbackOverrideUsed:          true,
+            },
+        });
+    }
 
     // Audit log — sólo si la mutación cambió memberships (PUT bulk-replace
     // puede usarse sólo para metadata del grupo, ej. renombrar; en ese caso
@@ -3249,17 +3329,21 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 bulkReplace:    true,
             },
             metadata: {
-                targetUserIds:  affectedUserIds,
-                fromGroupId:    null,
-                toGroupId:      id,
-                fromSchool:     null,
-                toSchool:       typeof merged?.school === 'string' ? merged.school : null,
-                groupType:      merged?.type === 'club' ? 'club' : 'course',
-                organizationId: typeof merged?.organizationId === 'string' && merged.organizationId.length > 0 ? merged.organizationId : null,
-                result:         'success',
-                assignedCount:  memberDelta.added.length,
-                failedCount:    memberDelta.removed.length,
-                failedReasons:  {},
+                targetUserIds:                 affectedUserIds,
+                fromGroupId:                   null,
+                toGroupId:                     id,
+                fromSchool:                    null,
+                toSchool:                      mergedMeta?.school || null,
+                groupType:                     mergedMeta?.type || null,
+                organizationId:                mergedMeta?.organizationId || null,
+                result:                        'success',
+                assignedCount:                 memberDelta.added.length,
+                failedCount:                   memberDelta.removed.length,
+                failedReasons:                 {},
+                fallbackAffected:              !!fallbackRisk?.fallbackDependent,
+                fallbackExtinguishedAttempted: fallbackOverrideApplied,
+                fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+                fallbackOverrideUsed:          fallbackOverrideApplied,
             },
         });
     }
@@ -3267,12 +3351,14 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
 
 app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
     const { id } = req.params;
+    const overrideFallbackExtinction = _readFallbackOverride(req);
     // Sprint 021 — borrado atómico bidireccional. Antes de quitar el grupo,
     // limpiamos su id de user.groupIds en todos los users para que ninguno
     // quede con una referencia huérfana.
-    let conflict = null;
+    let conflict     = null;
     let detachedFromUserIds = [];
-    let groupMeta = null;     // capturado dentro del lock (antes de splice) para audit
+    let groupMeta    = null;     // capturado dentro del lock (antes de splice) para audit
+    let fallbackRisk = null;     // sobre el grupo a eliminar (Commit 5)
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
@@ -3283,6 +3369,18 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
             groupMeta = _extractGroupMeta(groups[index]);
 
+            // ── Fallback extinction guard (Commit 5) ──────────────────────────
+            // Eliminar un grupo fallback-dependent con lectores visibles los
+            // deja sin el contenedor que les daba visibilidad en Aula Viva.
+            // Bloquear sin override.
+            fallbackRisk = _assessFallbackExtinctionRisk(groups[index], groups, users, {
+                deletingGroup: true,
+            });
+            if (fallbackRisk.atRisk && !overrideFallbackExtinction) {
+                conflict = { conflict: 'fallback_extinction_blocked', risk: fallbackRisk };
+                return;
+            }
+
             detachedFromUserIds = detachGroupFromAllUsers(users, id);
             if (detachedFromUserIds.length > 0) writeJSON(USERS_DB, users);
 
@@ -3291,9 +3389,69 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
         });
     }, 'groupsLock');
     if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Grupo no encontrado' });
+    if (conflict?.conflict === 'fallback_extinction_blocked') {
+        log(`DELETE /api/groups/${id} BLOCKED fallback_extinction visible=${fallbackRisk?.fallbackVisibleBefore}`, 'WARN');
+        writeAuditLog({
+            action:       'membership.fallback_guard_blocked',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId: id, reason: fallbackRisk?.reason || 'group_deletion_extinguishes_fallback', method: 'DELETE_group' },
+            metadata: {
+                targetUserIds:                 [],
+                fromGroupId:                   id,
+                toGroupId:                     null,
+                fromSchool:                    groupMeta?.school || null,
+                toSchool:                      null,
+                groupType:                     groupMeta?.type || null,
+                organizationId:                groupMeta?.organizationId || null,
+                result:                        'blocked',
+                assignedCount:                 0,
+                failedCount:                   fallbackRisk?.fallbackVisibleBefore ?? 0,
+                failedReasons:                 { fallback_extinction_blocked: 1 },
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+                fallbackOverrideUsed:          false,
+            },
+        });
+        return res.status(422).json({
+            error:                  'fallback_extinction_guard',
+            message:                'Eliminar este grupo dejaría a sus lectores fallback sin visibilidad en Aula Viva. Materializar primero o usar override explícito.',
+            visibleFallbackUsers:   fallbackRisk?.fallbackVisibleBefore ?? null,
+            recommendation:         'materialize_fallback_first',
+            overrideHeader:         'X-Allow-Fallback-Extinction: true',
+        });
+    }
 
     log(`Group deleted: ${id} (detached from ${detachedFromUserIds.length} users)`, 'ACCESS');
     res.json({ success: true, detachedFromUserIds });
+
+    const fallbackOverrideApplied = !!(fallbackRisk?.atRisk && overrideFallbackExtinction);
+    if (fallbackOverrideApplied) {
+        writeAuditLog({
+            action:       'membership.fallback_extinction_allowed',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId: id, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'DELETE_group' },
+            metadata: {
+                targetUserIds:                 detachedFromUserIds,
+                fromGroupId:                   id,
+                toGroupId:                     null,
+                fromSchool:                    groupMeta?.school || null,
+                toSchool:                      null,
+                groupType:                     groupMeta?.type || null,
+                organizationId:                groupMeta?.organizationId || null,
+                result:                        'success',
+                assignedCount:                 0,
+                failedCount:                   fallbackRisk.fallbackVisibleBefore,
+                failedReasons:                 {},
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
+                fallbackOverrideUsed:          true,
+            },
+        });
+    }
 
     // Audit log — DELETE /group cascade es membership mutation crítica:
     // borrar un grupo desconecta a TODOS sus members. Registramos affected
@@ -3308,17 +3466,21 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             detachedCount: detachedFromUserIds.length,
         },
         metadata: {
-            targetUserIds:  detachedFromUserIds,
-            fromGroupId:    id,
-            toGroupId:      null,
-            fromSchool:     groupMeta?.school || null,
-            toSchool:       null,
-            groupType:      groupMeta?.type || null,
-            organizationId: groupMeta?.organizationId || null,
-            result:         'success',
-            assignedCount:  0,
-            failedCount:    detachedFromUserIds.length,
-            failedReasons:  {},
+            targetUserIds:                 detachedFromUserIds,
+            fromGroupId:                   id,
+            toGroupId:                     null,
+            fromSchool:                    groupMeta?.school || null,
+            toSchool:                      null,
+            groupType:                     groupMeta?.type || null,
+            organizationId:                groupMeta?.organizationId || null,
+            result:                        'success',
+            assignedCount:                 0,
+            failedCount:                   detachedFromUserIds.length,
+            failedReasons:                 {},
+            fallbackAffected:              !!fallbackRisk?.fallbackDependent,
+            fallbackExtinguishedAttempted: fallbackOverrideApplied,
+            fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+            fallbackOverrideUsed:          fallbackOverrideApplied,
         },
     });
 });
@@ -3454,6 +3616,118 @@ const _tallyFailedReasons = (failed) => {
         tally[reason] = (tally[reason] || 0) + 1;
     }
     return tally;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FALLBACK EXTINCTION GUARD — Commit 5
+//
+// Defensa estructural contra extinción accidental del fallback colegio legacy.
+// Los 467 lectores de Nuevo Bosque + Villas de Aranjuez aparecen en Aula Viva
+// vía single-school fallback. La primera asignación explícita a esos grupos
+// extingue el fallback como side effect → los demás lectores vanish.
+//
+// Estos helpers detectan el riesgo. La acción defensiva (bloqueo o pase con
+// override) se aplica inline en cada endpoint, siguiendo el patrón establecido
+// por _validateSameInstitution (precedente Commit 3).
+//
+// Helpers podrían moverse a utils/groupMembership.mjs si otros consumers los
+// necesitan. Por ahora viven aquí para minimizar blast radius del Commit 5.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// _isFallbackDependent — true si el grupo está en estado fallback-dependent
+// EN ESTE MOMENTO. Tres condiciones (ver doc Commit 5):
+//   1. studentIds y memberIds vacíos
+//   2. school string no-vacía (post normalización)
+//   3. school única en allGroups (single-school fallback condition)
+const _isFallbackDependent = (group, allGroups) => {
+    if (!group || typeof group !== 'object') return false;
+    const studentIds = Array.isArray(group.studentIds) ? group.studentIds : [];
+    const memberIds  = Array.isArray(group.memberIds)  ? group.memberIds  : [];
+    if (studentIds.length > 0 || memberIds.length > 0) return false;
+    if (typeof group.school !== 'string') return false;
+    const targetSchool = group.school.trim().toLowerCase();
+    if (targetSchool.length === 0) return false;
+    let count = 0;
+    for (const g of (allGroups || [])) {
+        if (typeof g?.school !== 'string') continue;
+        if (g.school.trim().toLowerCase() === targetSchool) count++;
+        if (count > 1) return false; // early exit: school no es única
+    }
+    return count === 1;
+};
+
+// _countFallbackVisibleLectors — número de lectores que aparecerían vía
+// fallback colegio para este grupo. Caller debe verificar que el grupo es
+// fallback-dependent antes de invocar (este helper no re-valida).
+const _countFallbackVisibleLectors = (group, allUsers) => {
+    if (!group || typeof group?.school !== 'string') return 0;
+    const targetSchool = group.school.trim().toLowerCase();
+    if (targetSchool.length === 0) return 0;
+    let count = 0;
+    for (const u of (allUsers || [])) {
+        if (!u || !Array.isArray(u.roles) || !u.roles.includes('lector')) continue;
+        if (typeof u.colegio !== 'string') continue;
+        if (u.colegio.trim().toLowerCase() === targetSchool) count++;
+    }
+    return count;
+};
+
+// _assessFallbackExtinctionRisk — evaluación atómica del riesgo. Devuelve un
+// objeto con la información completa para tomar decisión de bloquear/permitir
+// y para llenar audit metadata.
+//
+// mutation: { addingCount: number, deletingGroup: bool }
+//   addingCount > 0  → operación que añade users a studentIds/memberIds
+//   deletingGroup    → operación que elimina el grupo entero
+//
+// Resultado:
+//   atRisk:                bool — true si la mutación extinguiría fallback
+//                                 con users observables (≥1 lector visible)
+//   fallbackDependent:     bool — true si el grupo es fallback-dependent ahora
+//   fallbackVisibleBefore: number — lectores visibles vía fallback pre-mutation
+//   reason:                string|null — clave humana de la causa de bloqueo
+const _assessFallbackExtinctionRisk = (group, allGroups, allUsers, mutation) => {
+    const dependent = _isFallbackDependent(group, allGroups);
+    if (!dependent) {
+        return {
+            atRisk:                false,
+            fallbackDependent:     false,
+            fallbackVisibleBefore: 0,
+            reason:                null,
+        };
+    }
+    const visible = _countFallbackVisibleLectors(group, allUsers);
+    if (mutation?.deletingGroup) {
+        return {
+            atRisk:                visible > 0,
+            fallbackDependent:     true,
+            fallbackVisibleBefore: visible,
+            reason:                visible > 0 ? 'group_deletion_extinguishes_fallback' : null,
+        };
+    }
+    if (mutation?.addingCount > 0) {
+        return {
+            atRisk:                true,  // cualquier add a fallback-dependent extingue
+            fallbackDependent:     true,
+            fallbackVisibleBefore: visible,
+            reason:                visible > 0 ? 'partial_explicitification' : 'fallback_dependent_empty_school',
+        };
+    }
+    return {
+        atRisk:                false,
+        fallbackDependent:     true,
+        fallbackVisibleBefore: visible,
+        reason:                null,
+    };
+};
+
+// _readFallbackOverride — lee el header X-Allow-Fallback-Extinction de forma
+// estricta. Sólo el literal 'true' habilita el override. Cualquier otro valor
+// (incluido 'TRUE', '1', 'yes') NO override. Reduce risk de override accidental
+// por sloppy-typing.
+const _readFallbackOverride = (req) => {
+    const h = req?.headers?.['x-allow-fallback-extinction'];
+    return h === 'true';
 };
 
 // GET /api/groups/:groupId/candidates
@@ -3626,10 +3900,12 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         return res.status(400).json({ error: 'max 500 userIds por request' });
     }
 
-    let outcome    = null;
-    let groupMeta  = null;       // capturado dentro del lock para audit log
-    const assigned = [];
-    const failed   = [];
+    const overrideFallbackExtinction = _readFallbackOverride(req);
+    let outcome     = null;
+    let groupMeta   = null;     // capturado dentro del lock para audit log
+    let fallbackRisk = null;    // capturado dentro del lock para audit metadata
+    const assigned  = [];
+    const failed    = [];
 
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
@@ -3643,28 +3919,49 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
             groupMeta = _extractGroupMeta(group);
 
             const userById = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
-            let groupsTouched = false;
-            let usersTouched  = false;
 
+            // ── PHASE 1: per-user pre-validation (sin mutar) ──────────────────
+            // Acumula failed[] por user inexistente y cross-school.
+            const validUsers = [];
             for (const uid of userIds) {
                 const u = userById.get(uid);
                 if (!u) {
                     failed.push({ userId: uid, reason: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND });
                     continue;
                 }
-                // Cross-school gate: el user debe pertenecer a la misma
-                // institución del grupo (organizationId match o fallback colegio
-                // normalizado). Partial-fail semantic: el resto del batch sigue.
                 if (!_validateSameInstitution(u, group)) {
                     failed.push({ userId: uid, reason: 'cross_school_assignment' });
                     continue;
                 }
-                const groupChanged = addUserIdToGroup(group, uid);
+                validUsers.push(u);
+            }
+
+            // ── PHASE 2: fallback extinction guard ────────────────────────────
+            // Evalúa SI el grupo destino es fallback-dependent y el batch
+            // efectivamente extinguiría el fallback. Si sí + sin override,
+            // bloquea TODOS los validUsers (los pasa a failed con reason
+            // 'fallback_extinction_blocked'). El audit log refleja el bloqueo.
+            fallbackRisk = _assessFallbackExtinctionRisk(group, groups, users, {
+                addingCount: validUsers.length,
+            });
+            if (fallbackRisk.atRisk && !overrideFallbackExtinction && validUsers.length > 0) {
+                for (const u of validUsers) {
+                    failed.push({ userId: u.id, reason: 'fallback_extinction_blocked' });
+                }
+                outcome = { conflict: 'fallback_extinction_blocked', risk: fallbackRisk };
+                return; // sin mutación, sin writeJSON
+            }
+
+            // ── PHASE 3: mutación in-memory (validados + guard pasado/override) ─
+            let groupsTouched = false;
+            let usersTouched  = false;
+            for (const u of validUsers) {
+                const groupChanged = addUserIdToGroup(group, u.id);
                 const userChanged  = addGroupIdToUser(u, groupId);
                 if (groupChanged) groupsTouched = true;
                 if (userChanged)  usersTouched  = true;
                 assigned.push({
-                    userId:        uid,
+                    userId:        u.id,
                     alreadyMember: !groupChanged && !userChanged,
                 });
             }
@@ -3683,6 +3980,44 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: 'Grupo no encontrado' });
     }
 
+    if (outcome?.conflict === 'fallback_extinction_blocked') {
+        log(`POST /api/groups/${groupId}/members BLOCKED fallback_extinction visible=${fallbackRisk?.fallbackVisibleBefore} requested=${userIds.length}`, 'WARN');
+        // Audit del bloqueo — mismo shape que las otras ops, action específica
+        writeAuditLog({
+            action:       'membership.fallback_guard_blocked',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId, requested: userIds.length, reason: fallbackRisk?.reason || 'fallback_extinction' },
+            metadata: {
+                targetUserIds:                 userIds,
+                fromGroupId:                   null,
+                toGroupId:                     groupId,
+                fromSchool:                    null,
+                toSchool:                      groupMeta?.school || null,
+                groupType:                     groupMeta?.type || null,
+                organizationId:                groupMeta?.organizationId || null,
+                result:                        'blocked',
+                assignedCount:                 0,
+                failedCount:                   userIds.length,
+                failedReasons:                 _tallyFailedReasons(failed),
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+                fallbackOverrideUsed:          false,
+            },
+        });
+        return res.status(422).json({
+            error:                  'fallback_extinction_guard',
+            message:                'Esta asignación extinguiría el fallback colegio del grupo, dejando estudiantes sin visibilidad. Materializar todos los lectores del colegio juntos o usar override explícito.',
+            visibleFallbackUsers:   fallbackRisk?.fallbackVisibleBefore ?? null,
+            explicitMembers:        0,
+            requestedExplicitAdds:  userIds.length,
+            recommendation:         'materialize_fallback_first',
+            overrideHeader:         'X-Allow-Fallback-Extinction: true',
+            failed,
+        });
+    }
+
     log(`POST /api/groups/${groupId}/members assigned=${assigned.length} failed=${failed.length}`, 'ACCESS');
     res.json({ groupId, assigned, failed });
 
@@ -3693,23 +4028,57 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
     const auditResult = failed.length === 0
         ? 'success'
         : (assigned.length === 0 ? 'failed' : 'partial');
+    const fallbackOverrideApplied = !!(fallbackRisk?.atRisk && overrideFallbackExtinction && assigned.length > 0);
+
+    // Si el override fue usado para PASAR un guard que habría bloqueado,
+    // emitir audit dedicado ANTES del evento principal (señal de seguridad).
+    if (fallbackOverrideApplied) {
+        writeAuditLog({
+            action:       'membership.fallback_extinction_allowed',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { groupId, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore },
+            metadata: {
+                targetUserIds:                 userIds,
+                fromGroupId:                   null,
+                toGroupId:                     groupId,
+                fromSchool:                    null,
+                toSchool:                      groupMeta?.school || null,
+                groupType:                     groupMeta?.type || null,
+                organizationId:                groupMeta?.organizationId || null,
+                result:                        'success',
+                assignedCount:                 assigned.length,
+                failedCount:                   failed.length,
+                failedReasons:                 _tallyFailedReasons(failed),
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
+                fallbackOverrideUsed:          true,
+            },
+        });
+    }
+
     writeAuditLog({
         action:       'membership.assign',
         targetUserId: assigned.length === 1 && failed.length === 0 ? assigned[0].userId : null,
         actor:        req.headers['x-user-id'] || null,
         details:      { groupId, requested: userIds.length, assigned: assigned.length, failed: failed.length },
         metadata: {
-            targetUserIds:  userIds,
-            fromGroupId:    null,
-            toGroupId:      groupId,
-            fromSchool:     null,
-            toSchool:       groupMeta?.school || null,
-            groupType:      groupMeta?.type || null,
-            organizationId: groupMeta?.organizationId || null,
-            result:         auditResult,
-            assignedCount:  assigned.length,
-            failedCount:    failed.length,
-            failedReasons:  _tallyFailedReasons(failed),
+            targetUserIds:                 userIds,
+            fromGroupId:                   null,
+            toGroupId:                     groupId,
+            fromSchool:                    null,
+            toSchool:                      groupMeta?.school || null,
+            groupType:                     groupMeta?.type || null,
+            organizationId:                groupMeta?.organizationId || null,
+            result:                        auditResult,
+            assignedCount:                 assigned.length,
+            failedCount:                   failed.length,
+            failedReasons:                 _tallyFailedReasons(failed),
+            fallbackAffected:              !!fallbackRisk?.fallbackDependent,
+            fallbackExtinguishedAttempted: fallbackOverrideApplied,
+            fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+            fallbackOverrideUsed:          fallbackOverrideApplied,
         },
     });
 });
@@ -3801,17 +4170,23 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId, removed: true },
             metadata: {
-                targetUserIds:  [userId],
-                fromGroupId:    groupId,
-                toGroupId:      null,
-                fromSchool:     groupMeta?.school || null,
-                toSchool:       null,
-                groupType:      groupMeta?.type || null,
-                organizationId: groupMeta?.organizationId || null,
-                result:         'success',
-                assignedCount:  0,
-                failedCount:    0,
-                failedReasons:  {},
+                targetUserIds:                 [userId],
+                fromGroupId:                   groupId,
+                toGroupId:                     null,
+                fromSchool:                    groupMeta?.school || null,
+                toSchool:                      null,
+                groupType:                     groupMeta?.type || null,
+                organizationId:                groupMeta?.organizationId || null,
+                result:                        'success',
+                assignedCount:                 0,
+                failedCount:                   0,
+                failedReasons:                 {},
+                // DELETE no extingue fallback (sólo puede activarlo). Marcamos
+                // explícito para que queries sobre fallbackAffected sean honestas.
+                fallbackAffected:              false,
+                fallbackExtinguishedAttempted: false,
+                fallbackVisibleBefore:         null,
+                fallbackOverrideUsed:          false,
             },
         });
     }
@@ -3880,11 +4255,13 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         return res.status(400).json({ error: 'max 500 userIds por request' });
     }
 
-    let outcome       = null;
-    let fromGroupMeta = null;     // capturado dentro del lock para audit log
-    let toGroupMeta   = null;
-    const moved       = [];
-    const failed      = [];
+    const overrideFallbackExtinction = _readFallbackOverride(req);
+    let outcome           = null;
+    let fromGroupMeta     = null;   // capturado dentro del lock para audit log
+    let toGroupMeta       = null;
+    let fallbackRisk      = null;   // sobre toGroup (destino del move)
+    const moved           = [];
+    const failed          = [];
 
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
@@ -3943,6 +4320,22 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
                 return;
             }
 
+            // ── PHASE 1.5: fallback extinction guard sobre toGroup ────────────
+            // Move a un grupo destino fallback-dependent extingue su fallback
+            // exactamente como POST /members. Whole-batch rollback se mantiene:
+            // si el guard bloquea, todos los validUsers se reportan como
+            // failed con reason 'fallback_extinction_blocked' y nada se muta.
+            fallbackRisk = _assessFallbackExtinctionRisk(toGroup, groups, users, {
+                addingCount: validUsers.length,
+            });
+            if (fallbackRisk.atRisk && !overrideFallbackExtinction) {
+                for (const u of validUsers) {
+                    failed.push({ userId: u.id, reason: 'fallback_extinction_blocked' });
+                }
+                outcome = { conflict: 'fallback_extinction_blocked', risk: fallbackRisk };
+                return;
+            }
+
             // ── PHASE 2: mutación in-memory (todas las validaciones pasaron) ──
             let groupsTouched = false;
             let usersTouched  = false;
@@ -3984,6 +4377,45 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
     if (outcome?.conflict === 'to_group_not_found') {
         return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: `toGroupId no encontrado: ${toGroupId}` });
     }
+    if (outcome?.conflict === 'fallback_extinction_blocked') {
+        log(`POST /api/groups/${toGroupId}/members/move BLOCKED fallback_extinction visible=${fallbackRisk?.fallbackVisibleBefore} requested=${userIds.length}`, 'WARN');
+        writeAuditLog({
+            action:       'membership.fallback_guard_blocked',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { fromGroupId, toGroupId, requested: userIds.length, reason: fallbackRisk?.reason || 'fallback_extinction', method: 'move' },
+            metadata: {
+                targetUserIds:                 userIds,
+                fromGroupId,
+                toGroupId,
+                fromSchool:                    fromGroupMeta?.school || null,
+                toSchool:                      toGroupMeta?.school || null,
+                groupType:                     toGroupMeta?.type || null,
+                organizationId:                toGroupMeta?.organizationId || null,
+                result:                        'blocked',
+                assignedCount:                 0,
+                failedCount:                   userIds.length,
+                failedReasons:                 _tallyFailedReasons(failed),
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+                fallbackOverrideUsed:          false,
+            },
+        });
+        return res.status(422).json({
+            error:                  'fallback_extinction_guard',
+            message:                'El move extinguiría el fallback colegio del grupo destino. Materializar todos los lectores juntos o usar override explícito.',
+            visibleFallbackUsers:   fallbackRisk?.fallbackVisibleBefore ?? null,
+            explicitMembers:        0,
+            requestedExplicitAdds:  userIds.length,
+            recommendation:         'materialize_fallback_first',
+            overrideHeader:         'X-Allow-Fallback-Extinction: true',
+            moved:                  [],
+            failed,
+            rolledBack:             true,
+        });
+    }
+
     if (outcome?.conflict === 'whole_batch_rollback') {
         // 422 Unprocessable Entity — request sintácticamente válida pero
         // semánticamente no atomicable. moved=[] siempre cuando hay rollback.
@@ -3997,17 +4429,21 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             actor:        req.headers['x-user-id'] || null,
             details:      { fromGroupId, toGroupId, requested: userIds.length, failed: failed.length },
             metadata: {
-                targetUserIds:  userIds,
+                targetUserIds:                 userIds,
                 fromGroupId,
                 toGroupId,
-                fromSchool:     fromGroupMeta?.school || null,
-                toSchool:       toGroupMeta?.school || null,
-                groupType:      toGroupMeta?.type || null,
-                organizationId: toGroupMeta?.organizationId || null,
-                result:         'rollback',
-                assignedCount:  0,
-                failedCount:    failed.length,
-                failedReasons:  _tallyFailedReasons(failed),
+                fromSchool:                    fromGroupMeta?.school || null,
+                toSchool:                      toGroupMeta?.school || null,
+                groupType:                     toGroupMeta?.type || null,
+                organizationId:                toGroupMeta?.organizationId || null,
+                result:                        'rollback',
+                assignedCount:                 0,
+                failedCount:                   failed.length,
+                failedReasons:                 _tallyFailedReasons(failed),
+                fallbackAffected:              !!fallbackRisk?.fallbackDependent,
+                fallbackExtinguishedAttempted: false,
+                fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+                fallbackOverrideUsed:          false,
             },
         });
         return res.status(422).json({ moved: [], failed, rolledBack: true });
@@ -4015,6 +4451,33 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
 
     log(`POST /api/groups/${toGroupId}/members/move from=${fromGroupId} moved=${moved.length} failed=${failed.length}`, 'ACCESS');
     res.json({ moved, failed });
+
+    const fallbackOverrideApplied = !!(fallbackRisk?.atRisk && overrideFallbackExtinction && moved.length > 0);
+    if (fallbackOverrideApplied) {
+        writeAuditLog({
+            action:       'membership.fallback_extinction_allowed',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details:      { fromGroupId, toGroupId, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'move' },
+            metadata: {
+                targetUserIds:                 userIds,
+                fromGroupId,
+                toGroupId,
+                fromSchool:                    fromGroupMeta?.school || null,
+                toSchool:                      toGroupMeta?.school || null,
+                groupType:                     toGroupMeta?.type || null,
+                organizationId:                toGroupMeta?.organizationId || null,
+                result:                        'success',
+                assignedCount:                 moved.length,
+                failedCount:                   0,
+                failedReasons:                 {},
+                fallbackAffected:              true,
+                fallbackExtinguishedAttempted: true,
+                fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
+                fallbackOverrideUsed:          true,
+            },
+        });
+    }
 
     // Audit log — sólo si efectivamente se movió ≥1 user (idempotent no-op
     // donde todos eran alreadyInDestination genera entry porque sigue siendo
@@ -4025,17 +4488,21 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         actor:        req.headers['x-user-id'] || null,
         details:      { fromGroupId, toGroupId, moved: moved.length },
         metadata: {
-            targetUserIds:  userIds,
+            targetUserIds:                 userIds,
             fromGroupId,
             toGroupId,
-            fromSchool:     fromGroupMeta?.school || null,
-            toSchool:       toGroupMeta?.school || null,
-            groupType:      toGroupMeta?.type || null,
-            organizationId: toGroupMeta?.organizationId || null,
-            result:         'success',
-            assignedCount:  moved.length,
-            failedCount:    0,
-            failedReasons:  {},
+            fromSchool:                    fromGroupMeta?.school || null,
+            toSchool:                      toGroupMeta?.school || null,
+            groupType:                     toGroupMeta?.type || null,
+            organizationId:                toGroupMeta?.organizationId || null,
+            result:                        'success',
+            assignedCount:                 moved.length,
+            failedCount:                   0,
+            failedReasons:                 {},
+            fallbackAffected:              !!fallbackRisk?.fallbackDependent,
+            fallbackExtinguishedAttempted: fallbackOverrideApplied,
+            fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
+            fallbackOverrideUsed:          fallbackOverrideApplied,
         },
     });
 });
