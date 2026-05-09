@@ -1956,14 +1956,19 @@ app.post('/api/content', async (req, res) => {
  */
 const writeAuditLog = (entry) => {
     // Sync signature preservada. Write corre async+lock (fire-and-forget).
-    // Commit 5.5: auditReferenceId (ULID) inyectado en raíz de cada entry —
-    // identidad operacional primaria para cross-correlación forensic futura
-    // (e.g., correlacionar con object storage de payloads completos cuando
-    // la cardinalidad excede AUDIT_USER_IDS_SAMPLE_LIMIT).
+    //
+    // Commit 5.5: auditReferenceId (ULID) — identidad operacional primaria
+    // para cross-correlación forensic futura.
+    //
+    // Commit 5.5a (override-proof): spread del entry PRIMERO, luego asigna
+    // auditReferenceId y timestamp. Este orden garantiza que el server es
+    // dueño absoluto de ambos campos — si un caller pasa
+    // `auditReferenceId: 'fake'` en su entry, queda overrideado por el ulid()
+    // generado server-side. Mismo principio para timestamp.
     const enriched = {
-        auditReferenceId: ulid(),
         ...entry,
-        timestamp: new Date().toISOString(),
+        auditReferenceId: ulid(),
+        timestamp:        new Date().toISOString(),
     };
     (async () => {
         try {
@@ -3317,7 +3322,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
-                fallbackStateTransition:       { from: 'implicit', to: 'explicit' },
+                fallbackStateTransition:       _createFallbackTransition('implicit', 'explicit'),
             },
         });
     }
@@ -3355,7 +3360,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          fallbackOverrideApplied,
                 ...(fallbackOverrideApplied
-                    ? { fallbackStateTransition: { from: 'implicit', to: 'explicit' } }
+                    ? { fallbackStateTransition: _createFallbackTransition('implicit', 'explicit') }
                     : {}),
             },
         });
@@ -3463,7 +3468,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
-                fallbackStateTransition:       { from: 'implicit', to: 'extinct' },
+                fallbackStateTransition:       _createFallbackTransition('implicit', 'extinct'),
             },
         });
     }
@@ -3497,7 +3502,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
             fallbackOverrideUsed:          fallbackOverrideApplied,
             ...(fallbackOverrideApplied
-                ? { fallbackStateTransition: { from: 'implicit', to: 'extinct' } }
+                ? { fallbackStateTransition: _createFallbackTransition('implicit', 'extinct') }
                 : {}),
         },
     });
@@ -3661,10 +3666,25 @@ const _tallyFailedReasons = (failed) => {
 
 const AUDIT_USER_IDS_SAMPLE_LIMIT = 10;
 
-// _truncateUserIdsForAudit — devuelve los 3 fields normalizados de membership
-// metadata para cualquier callsite que históricamente persistía targetUserIds.
-// Uso: spread directo dentro del bloque metadata:
-//   metadata: { ..._truncateUserIdsForAudit(userIds), fromGroupId, ... }
+// _truncateUserIdsForAudit — Commit 5.5a: deterministic spread sampling.
+//
+// Anti-pattern previo: slice(0, LIMIT) producía sesgo estructural — siempre
+// capturaba el principio del batch (users importados primero, IDs antiguos),
+// dejando la cola jamás visible en sample. Forensic ciega para anomalías
+// al final del batch.
+//
+// Strategy 3+4+3 deterministic:
+//   total ≤ LIMIT (10) → todos los IDs (no truncation)
+//   total > LIMIT:
+//     - primeros 3:  índices 0, 1, 2
+//     - 4 middle equidistantes: 3 + round(i × (total-6) / 5) para i ∈ {1,2,3,4}
+//     - últimos 3:   índices total-3, total-2, total-1
+//
+// Propiedades:
+//   - Determinístico: mismo input → mismo output (sólo Math.round, Set, sort)
+//   - Bounded: output siempre ≤ LIMIT
+//   - Reproducibilidad forensic: misma audit query produce mismo result
+//   - Cobertura del batch: principio + middle + cola, no sólo principio
 const _truncateUserIdsForAudit = (userIds) => {
     if (!Array.isArray(userIds)) {
         return {
@@ -3681,11 +3701,54 @@ const _truncateUserIdsForAudit = (userIds) => {
             targetUserIdsTruncated: false,
         };
     }
+    // total > LIMIT: spread sampling 3+4+3 = 10
+    const indices = new Set();
+    // Primeros 3
+    indices.add(0); indices.add(1); indices.add(2);
+    // 4 equidistantes en middle range [3, total-4]
+    for (let i = 1; i <= 4; i++) {
+        const idx = 3 + Math.round(i * (total - 6) / 5);
+        indices.add(idx);
+    }
+    // Últimos 3
+    indices.add(total - 3); indices.add(total - 2); indices.add(total - 1);
+    // Sort ascending y proyectar a userIds
+    const sorted = [...indices].sort((a, b) => a - b);
     return {
-        targetUserIdsSample:    userIds.slice(0, AUDIT_USER_IDS_SAMPLE_LIMIT),
+        targetUserIdsSample:    sorted.map(i => userIds[i]),
         targetUserIdsTotal:     total,
         targetUserIdsTruncated: true,
     };
+};
+
+// ─── FALLBACK TRANSITION MODEL — Commit 5.5a ─────────────────────────────────
+//
+// Centralización del modelo de transición fallback. Anti-pattern previo:
+// literales `{ from: 'implicit', to: 'explicit' }` regados en 8 callsites
+// inline → drift potential alto cuando se introduzcan:
+//   - resurrection (explicit → implicit) — deuda diferida documentada
+//   - hybrid states (partial materialization)
+//   - organization migration transitions
+//   - club-specific transitions
+//
+// El helper centraliza:
+//   - whitelist de estados válidos (FALLBACK_TRANSITION_STATES)
+//   - validación defensiva (no-op transitions retornan null, callers spread
+//     condicionalmente para omitir el field si hay error)
+//   - punto único para evolucionar el modelo cuando los estados crezcan
+
+const FALLBACK_TRANSITION_STATES = Object.freeze(['implicit', 'explicit', 'extinct']);
+
+const _createFallbackTransition = (from, to) => {
+    if (!FALLBACK_TRANSITION_STATES.includes(from) || !FALLBACK_TRANSITION_STATES.includes(to)) {
+        log(`[AUDIT] Invalid fallbackTransition: from=${from} to=${to} — emitiendo null`, 'WARN');
+        return null;
+    }
+    if (from === to) {
+        log(`[AUDIT] Trivial fallbackTransition (from===to: ${from}) — emitiendo null`, 'WARN');
+        return null;
+    }
+    return Object.freeze({ from, to });
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4129,7 +4192,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
-                fallbackStateTransition:       { from: 'implicit', to: 'explicit' },
+                fallbackStateTransition:       _createFallbackTransition('implicit', 'explicit'),
             },
         });
     }
@@ -4156,7 +4219,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
             fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
             fallbackOverrideUsed:          fallbackOverrideApplied,
             ...(fallbackOverrideApplied
-                ? { fallbackStateTransition: { from: 'implicit', to: 'explicit' } }
+                ? { fallbackStateTransition: _createFallbackTransition('implicit', 'explicit') }
                 : {}),
         },
     });
@@ -4562,7 +4625,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
-                fallbackStateTransition:       { from: 'implicit', to: 'explicit' },
+                fallbackStateTransition:       _createFallbackTransition('implicit', 'explicit'),
             },
         });
     }
@@ -4592,7 +4655,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
             fallbackOverrideUsed:          fallbackOverrideApplied,
             ...(fallbackOverrideApplied
-                ? { fallbackStateTransition: { from: 'implicit', to: 'explicit' } }
+                ? { fallbackStateTransition: _createFallbackTransition('implicit', 'explicit') }
                 : {}),
         },
     });
