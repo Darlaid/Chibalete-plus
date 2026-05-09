@@ -1956,7 +1956,15 @@ app.post('/api/content', async (req, res) => {
  */
 const writeAuditLog = (entry) => {
     // Sync signature preservada. Write corre async+lock (fire-and-forget).
-    const enriched = { ...entry, timestamp: new Date().toISOString() };
+    // Commit 5.5: auditReferenceId (ULID) inyectado en raíz de cada entry —
+    // identidad operacional primaria para cross-correlación forensic futura
+    // (e.g., correlacionar con object storage de payloads completos cuando
+    // la cardinalidad excede AUDIT_USER_IDS_SAMPLE_LIMIT).
+    const enriched = {
+        auditReferenceId: ulid(),
+        ...entry,
+        timestamp: new Date().toISOString(),
+    };
     (async () => {
         try {
             await mutateUserAudit((entries) => {
@@ -3254,7 +3262,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId: id, adding: memberDelta.added.length, reason: fallbackRisk?.reason || 'fallback_extinction', method: 'PUT' },
             metadata: {
-                targetUserIds:                 memberDelta.added,
+                ..._truncateUserIdsForAudit(memberDelta.added),
                 fromGroupId:                   null,
                 toGroupId:                     id,
                 fromSchool:                    null,
@@ -3269,6 +3277,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          false,
+                // (sin fallbackStateTransition — blocked, no hubo transición real)
             },
         });
         return res.status(422).json({
@@ -3293,7 +3302,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId: id, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'PUT' },
             metadata: {
-                targetUserIds:                 memberDelta.added,
+                ..._truncateUserIdsForAudit(memberDelta.added),
                 fromGroupId:                   null,
                 toGroupId:                     id,
                 fromSchool:                    null,
@@ -3308,6 +3317,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
+                fallbackStateTransition:       { from: 'implicit', to: 'explicit' },
             },
         });
     }
@@ -3329,7 +3339,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 bulkReplace:    true,
             },
             metadata: {
-                targetUserIds:                 affectedUserIds,
+                ..._truncateUserIdsForAudit(affectedUserIds),
                 fromGroupId:                   null,
                 toGroupId:                     id,
                 fromSchool:                    null,
@@ -3344,6 +3354,9 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: fallbackOverrideApplied,
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          fallbackOverrideApplied,
+                ...(fallbackOverrideApplied
+                    ? { fallbackStateTransition: { from: 'implicit', to: 'explicit' } }
+                    : {}),
             },
         });
     }
@@ -3397,7 +3410,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId: id, reason: fallbackRisk?.reason || 'group_deletion_extinguishes_fallback', method: 'DELETE_group' },
             metadata: {
-                targetUserIds:                 [],
+                ..._truncateUserIdsForAudit([]),
                 fromGroupId:                   id,
                 toGroupId:                     null,
                 fromSchool:                    groupMeta?.school || null,
@@ -3412,6 +3425,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          false,
+                // (sin fallbackStateTransition — blocked, no hubo transición real)
             },
         });
         return res.status(422).json({
@@ -3434,7 +3448,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId: id, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'DELETE_group' },
             metadata: {
-                targetUserIds:                 detachedFromUserIds,
+                ..._truncateUserIdsForAudit(detachedFromUserIds),
                 fromGroupId:                   id,
                 toGroupId:                     null,
                 fromSchool:                    groupMeta?.school || null,
@@ -3449,6 +3463,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
+                fallbackStateTransition:       { from: 'implicit', to: 'extinct' },
             },
         });
     }
@@ -3466,7 +3481,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             detachedCount: detachedFromUserIds.length,
         },
         metadata: {
-            targetUserIds:                 detachedFromUserIds,
+            ..._truncateUserIdsForAudit(detachedFromUserIds),
             fromGroupId:                   id,
             toGroupId:                     null,
             fromSchool:                    groupMeta?.school || null,
@@ -3481,6 +3496,9 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
             fallbackExtinguishedAttempted: fallbackOverrideApplied,
             fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
             fallbackOverrideUsed:          fallbackOverrideApplied,
+            ...(fallbackOverrideApplied
+                ? { fallbackStateTransition: { from: 'implicit', to: 'extinct' } }
+                : {}),
         },
     });
 });
@@ -3616,6 +3634,58 @@ const _tallyFailedReasons = (failed) => {
         tally[reason] = (tally[reason] || 0) + 1;
     }
     return tally;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOUNDED AUDIT CARDINALITY — Commit 5.5
+//
+// Invariant del sistema (Commit 5.5):
+//   "Ningún audit event puede persistir payloads de cardinalidad no acotada."
+//
+// Razón: user_audit_log.json es JSON append-only que se rewrite completo en
+// cada write (mutateUserAudit). Persistir arrays de cientos de userIds
+// produce write amplification cuadrática y degrada el archivo a velocidades
+// inviables (~6.5 KB por entry de 235 IDs).
+//
+// Strategy: cada entry guarda un sample bounded + total count + flag de
+// truncation. Para forensic completo, el ULID auditReferenceId del entry
+// permitirá correlación con un futuro snapshot store si se construye.
+//
+// FUTURE INVARIANT ASYMMETRY: extinction (implicit → explicit) hoy es
+// observable vía fallbackStateTransition. Resurrection (explicit → implicit,
+// cuando un DELETE deja al grupo con canales vacíos y reactiva fallback)
+// NO se detecta en este commit. Es deuda explícitamente documentada como
+// asimetría del modelo observacional. Commit dedicado futuro debe cerrar
+// el ciclo cuando la operación se vuelva analíticamente relevante.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AUDIT_USER_IDS_SAMPLE_LIMIT = 10;
+
+// _truncateUserIdsForAudit — devuelve los 3 fields normalizados de membership
+// metadata para cualquier callsite que históricamente persistía targetUserIds.
+// Uso: spread directo dentro del bloque metadata:
+//   metadata: { ..._truncateUserIdsForAudit(userIds), fromGroupId, ... }
+const _truncateUserIdsForAudit = (userIds) => {
+    if (!Array.isArray(userIds)) {
+        return {
+            targetUserIdsSample:    [],
+            targetUserIdsTotal:     0,
+            targetUserIdsTruncated: false,
+        };
+    }
+    const total = userIds.length;
+    if (total <= AUDIT_USER_IDS_SAMPLE_LIMIT) {
+        return {
+            targetUserIdsSample:    [...userIds],
+            targetUserIdsTotal:     total,
+            targetUserIdsTruncated: false,
+        };
+    }
+    return {
+        targetUserIdsSample:    userIds.slice(0, AUDIT_USER_IDS_SAMPLE_LIMIT),
+        targetUserIdsTotal:     total,
+        targetUserIdsTruncated: true,
+    };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3993,7 +4063,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId, requested: userIds.length, reason: fallbackRisk?.reason || 'fallback_extinction' },
             metadata: {
-                targetUserIds:                 userIds,
+                ..._truncateUserIdsForAudit(userIds),
                 fromGroupId:                   null,
                 toGroupId:                     groupId,
                 fromSchool:                    null,
@@ -4008,6 +4078,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          false,
+                // (sin fallbackStateTransition — blocked, no hubo transición real)
             },
         });
         return res.status(422).json({
@@ -4043,7 +4114,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore },
             metadata: {
-                targetUserIds:                 userIds,
+                ..._truncateUserIdsForAudit(userIds),
                 fromGroupId:                   null,
                 toGroupId:                     groupId,
                 fromSchool:                    null,
@@ -4058,6 +4129,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
+                fallbackStateTransition:       { from: 'implicit', to: 'explicit' },
             },
         });
     }
@@ -4068,7 +4140,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         actor:        req.headers['x-user-id'] || null,
         details:      { groupId, requested: userIds.length, assigned: assigned.length, failed: failed.length },
         metadata: {
-            targetUserIds:                 userIds,
+            ..._truncateUserIdsForAudit(userIds),
             fromGroupId:                   null,
             toGroupId:                     groupId,
             fromSchool:                    null,
@@ -4083,6 +4155,9 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
             fallbackExtinguishedAttempted: fallbackOverrideApplied,
             fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
             fallbackOverrideUsed:          fallbackOverrideApplied,
+            ...(fallbackOverrideApplied
+                ? { fallbackStateTransition: { from: 'implicit', to: 'explicit' } }
+                : {}),
         },
     });
 });
@@ -4143,7 +4218,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId, reason: 'cross_school_assignment', method: 'DELETE' },
             metadata: {
-                targetUserIds:  [userId],
+                ..._truncateUserIdsForAudit([userId]),
                 fromGroupId:    groupId,
                 toGroupId:      null,
                 fromSchool:     groupMeta?.school || null,
@@ -4154,6 +4229,11 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
                 assignedCount:  0,
                 failedCount:    1,
                 failedReasons:  { cross_school_assignment: 1 },
+                // DELETE no extingue fallback. Campos uniformes para shape consistency.
+                fallbackAffected:              false,
+                fallbackExtinguishedAttempted: false,
+                fallbackVisibleBefore:         null,
+                fallbackOverrideUsed:          false,
             },
         });
         return res.status(422).json({
@@ -4174,7 +4254,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
             actor:        req.headers['x-user-id'] || null,
             details:      { groupId, removed: true },
             metadata: {
-                targetUserIds:                 [userId],
+                ..._truncateUserIdsForAudit([userId]),
                 fromGroupId:                   groupId,
                 toGroupId:                     null,
                 fromSchool:                    groupMeta?.school || null,
@@ -4185,8 +4265,9 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
                 assignedCount:                 0,
                 failedCount:                   0,
                 failedReasons:                 {},
-                // DELETE no extingue fallback (sólo puede activarlo). Marcamos
-                // explícito para que queries sobre fallbackAffected sean honestas.
+                // DELETE no extingue fallback (sólo puede activarlo — resurrection).
+                // Resurrection no se detecta en este commit (asimetría documentada
+                // como future invariant en el comment del helper).
                 fallbackAffected:              false,
                 fallbackExtinguishedAttempted: false,
                 fallbackVisibleBefore:         null,
@@ -4389,7 +4470,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             actor:        req.headers['x-user-id'] || null,
             details:      { fromGroupId, toGroupId, requested: userIds.length, reason: fallbackRisk?.reason || 'fallback_extinction', method: 'move' },
             metadata: {
-                targetUserIds:                 userIds,
+                ..._truncateUserIdsForAudit(userIds),
                 fromGroupId,
                 toGroupId,
                 fromSchool:                    fromGroupMeta?.school || null,
@@ -4404,6 +4485,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          false,
+                // (sin fallbackStateTransition — blocked, no hubo transición real)
             },
         });
         return res.status(422).json({
@@ -4433,7 +4515,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             actor:        req.headers['x-user-id'] || null,
             details:      { fromGroupId, toGroupId, requested: userIds.length, failed: failed.length },
             metadata: {
-                targetUserIds:                 userIds,
+                ..._truncateUserIdsForAudit(userIds),
                 fromGroupId,
                 toGroupId,
                 fromSchool:                    fromGroupMeta?.school || null,
@@ -4448,6 +4530,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
                 fallbackExtinguishedAttempted: false,
                 fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
                 fallbackOverrideUsed:          false,
+                // (sin fallbackStateTransition — rollback, no hubo transición real)
             },
         });
         return res.status(422).json({ moved: [], failed, rolledBack: true });
@@ -4464,7 +4547,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             actor:        req.headers['x-user-id'] || null,
             details:      { fromGroupId, toGroupId, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'move' },
             metadata: {
-                targetUserIds:                 userIds,
+                ..._truncateUserIdsForAudit(userIds),
                 fromGroupId,
                 toGroupId,
                 fromSchool:                    fromGroupMeta?.school || null,
@@ -4479,6 +4562,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
                 fallbackExtinguishedAttempted: true,
                 fallbackVisibleBefore:         fallbackRisk.fallbackVisibleBefore,
                 fallbackOverrideUsed:          true,
+                fallbackStateTransition:       { from: 'implicit', to: 'explicit' },
             },
         });
     }
@@ -4492,7 +4576,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         actor:        req.headers['x-user-id'] || null,
         details:      { fromGroupId, toGroupId, moved: moved.length },
         metadata: {
-            targetUserIds:                 userIds,
+            ..._truncateUserIdsForAudit(userIds),
             fromGroupId,
             toGroupId,
             fromSchool:                    fromGroupMeta?.school || null,
@@ -4507,6 +4591,9 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             fallbackExtinguishedAttempted: fallbackOverrideApplied,
             fallbackVisibleBefore:         fallbackRisk?.fallbackVisibleBefore ?? null,
             fallbackOverrideUsed:          fallbackOverrideApplied,
+            ...(fallbackOverrideApplied
+                ? { fallbackStateTransition: { from: 'implicit', to: 'explicit' } }
+                : {}),
         },
     });
 });
