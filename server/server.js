@@ -3706,11 +3706,15 @@ const _assessFallbackExtinctionRisk = (group, allGroups, allUsers, mutation) => 
         };
     }
     if (mutation?.addingCount > 0) {
+        // El guard protege contra DESAPARICIÓN de usuarios visibles, no contra
+        // pureza conceptual del estado fallback-dependent. Si visible === 0,
+        // no hay blast radius real (nadie aparecía vía fallback que pueda
+        // perderse) — la operación es inocua y debe permitirse.
         return {
-            atRisk:                true,  // cualquier add a fallback-dependent extingue
+            atRisk:                visible > 0,
             fallbackDependent:     true,
             fallbackVisibleBefore: visible,
-            reason:                visible > 0 ? 'partial_explicitification' : 'fallback_dependent_empty_school',
+            reason:                visible > 0 ? 'partial_explicitification' : null,
         };
     }
     return {
