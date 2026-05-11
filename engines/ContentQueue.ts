@@ -3,6 +3,16 @@
  *
  * Pure functions. Zero React. Zero side effects at import time.
  *
+ * ⚠️ INVARIANTE 12 — ContentQueue NO gobierna reproducción.
+ * `getNextContent` es una sugerencia para UI (banner "Próximo →"). NO debe
+ * llamar navigate, NO debe mutar playback, NO debe tocar route ni storage
+ * del browser. Cualquier transición real entre libros requiere acción manual
+ * del usuario canalizada por `assertManualNavigation` con reason whitelisted.
+ *
+ * El test engines/__tests__/contentQueue.test.js falla si alguien introduce
+ * un side effect (navigate, fetch fuera de preloadContentText, hooks de React,
+ * timers, storage, audio writes). Ver docs/immersive-mode-invariants.md.
+ *
  * Selection priority for the next immersive read:
  *   1. Next sibling in same collection (same parentId, alphabetical by id)
  *   2. Highest tag-overlap with current content

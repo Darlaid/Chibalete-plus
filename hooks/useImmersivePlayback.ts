@@ -29,6 +29,10 @@
 
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { usePlaybackAnalytics } from './usePlaybackAnalytics';
+// INVARIANTE 7/8/9 — helpers puros compartidos (testeados unitariamente en
+// utils/__tests__/immersiveTiming.test.js). Cualquier cambio aquí debe ir
+// acompañado de cambios en los tests; pre-build gate `npm run test:immersive`.
+import { estimateMinSentenceMs, validateAudioDuration } from '../utils/immersiveTiming.js';
 
 // ── Tipos exportados ────────────────────────────────────────────────────────
 
@@ -60,6 +64,7 @@ export type PlaybackEvent =
     | 'sentence_skipped'
     | 'sentence_floor_applied'  // PB_TIMING audit: el piso mínimo retrasó el avance
     | 'audio_metadata'           // PB_TIMING audit: audio.duration / readyState al arrancar play
+    | 'audio_cache_invalidated'  // INV-9: blob cacheado descartado por duración inválida
     | 'playback_paused'
     | 'session_completed'
     | 'load_cancelled'
@@ -94,6 +99,10 @@ export interface PlaybackContext {
     /** contentId del libro activo — para correlación en analytics de ritmo */
     contentIdRef:      React.MutableRefObject<string>;
 }
+
+// Tag para PlaybackEvent — añadimos audio_cache_invalidated cuando INV-9 detecta
+// un blob cacheado con duración sospechosa para wordCount visible.
+type _ExtraEvents = 'audio_cache_invalidated';
 
 export interface ImmersivePlayback {
     audioRefA:    React.RefObject<HTMLAudioElement | null>;
@@ -161,36 +170,8 @@ function computeNarrativeDelay(meta: SentenceMeta): number {
     return Math.min(base + mod, 120);
 }
 
-/**
- * Piso mínimo de duración para una oración visible. Defensa contra audio TTS
- * truncado, blob cacheado defectuoso (network glitch en la primera fetch) u
- * onEnded prematuro del audio element — los tres modos producían avance a la
- * siguiente oración en <300ms para frases con texto visible mucho mayor.
- *
- * Reglas (a 1x speed):
- *   - 1 palabra:       900 ms
- *   - 2-4 palabras:   1400 ms
- *   - 5-8 palabras:   2000 ms
- *   - >8 palabras:    max(2000, words*250) ms
- *   - Puntuación fuerte final (). ! ? ¿ ¡ " ' ` cierra paréntesis): +250 ms
- *
- * A velocidades > 1x el piso se escala inversamente, con un absoluto irreductible
- * de 450 ms para evitar avances visualmente imposibles incluso a 2x.
- */
-function estimateMinSentenceMs(sentence: string, speed: number = 1): number {
-    const text = (sentence ?? '').trim();
-    if (text.length === 0) return 600;
-    const words = text.split(/\s+/).filter(Boolean).length;
-    let base: number;
-    if (words <= 1) base = 900;
-    else if (words <= 4) base = 1400;
-    else if (words <= 8) base = 2000;
-    else base = Math.max(2000, words * 250);
-    // Strong punctuation/closing quote/paren at end → pausa extra para respiro
-    if (/[).!?¿¡"”'']$/u.test(text)) base += 250;
-    const adjustedForSpeed = speed > 1 ? Math.round(base / speed) : base;
-    return Math.max(450, adjustedForSpeed);
-}
+// estimateMinSentenceMs vive en utils/immersiveTiming.js (importado arriba).
+// Esta función está testeada unitariamente — ver utils/__tests__/immersiveTiming.test.js
 
 /**
  * Ventana de prefetch adaptada a la velocidad de red.
@@ -215,7 +196,7 @@ function getAdaptivePrefetchWindow(): number {
 function pbLog(event: PlaybackEvent, data?: Record<string, unknown>): void {
     const payload = { event, ts: Date.now(), ...data };
     // eventos frecuentes — nivel 'debug', nunca van al backend
-    if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused' || event === 'sentence_floor_applied' || event === 'audio_metadata') {
+    if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused' || event === 'sentence_floor_applied' || event === 'audio_metadata' || event === 'audio_cache_invalidated') {
         console.debug('[PB]', payload);
     } else if (event === 'session_completed') {
         console.info('[PB]', payload);
@@ -519,18 +500,42 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     // Confirmacion. Status ya es 'playing'; solo loggeamos.
                     const wasCached = audioCache.current.has(toChunkKey(index));
                     log('play_start', { index, cached: wasCached });
-                    // PB_TIMING audit: emitir duración real del audio para diagnosticar
-                    // si onEnded prematuros vienen de un blob cacheado defectuoso o de
-                    // un audio element con readyState inconsistente. duration puede ser
-                    // NaN/Infinity si los metadatos aún no se decodificaron — capturamos
-                    // ambos casos como null para no romper el log.
+                    const liveDuration = Number.isFinite(pActive.duration) ? pActive.duration : null;
                     log('audio_metadata', {
                         index,
                         cached: wasCached,
-                        duration: Number.isFinite(pActive.duration) ? pActive.duration : null,
+                        duration: liveDuration,
                         readyState: pActive.readyState,
                         textLen: ctx.sentencesRef.current[index]?.length ?? 0,
                     });
+                    // INVARIANTE 9 — validar duración del audio contra texto visible.
+                    // Si la cache trae un blob con duración imposible (incidente Dinah:
+                    // 0.18s para frase de 4 palabras), evictamos para que el siguiente
+                    // intento haga re-fetch del TTS. NO interrumpe esta reproducción;
+                    // el piso de handleEnded protege la duración visual del usuario.
+                    if (wasCached) {
+                        const audit = validateAudioDuration({
+                            displayText: ctx.sentencesRef.current[index] ?? '',
+                            spokenText:  ctx.audioSentencesRef.current[index] ?? '',
+                            duration:    liveDuration,
+                            cached:      true,
+                            speed:       ctx.speedRef.current,
+                        });
+                        if (audit.status === 'invalid') {
+                            const key = toChunkKey(index);
+                            const blobUrl = audioCache.current.get(key);
+                            if (blobUrl) {
+                                URL.revokeObjectURL(blobUrl);
+                                audioCache.current.delete(key);
+                                log('audio_cache_invalidated', {
+                                    index, key, duration: liveDuration,
+                                    minExpectedMs: audit.minExpectedMs,
+                                    wordCount: audit.wordCount,
+                                    reason: audit.reason,
+                                });
+                            }
+                        }
+                    }
                 })
                 .catch((e: DOMException) => {
                     if (token !== loadToken.current || ctx.unmountedRef.current) return;
@@ -647,6 +652,21 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     }, [skip]);
 
     // ── HANDLE ENDED — transición gapless entre fragmentos ───────────────────
+    //
+    // ⚠️ INVARIANTES 2, 7, 9 — protecciones que NO se pueden remover:
+    //   - INV-2: este callback NUNCA debe navegar a otro contentId. Sólo
+    //     debe llamar onSessionEnd() cuando termina la última frase; el
+    //     visor decide la UX (pantalla "Lectura Completada", sin navigate).
+    //   - INV-7: el avance al next sentence se posterga por `floorRemaining`
+    //     calculado vía estimateMinSentenceMs — ninguna frase visible avanza
+    //     en <900ms a 1x sin un guard explícito.
+    //   - INV-9: si el blob cacheado tenía duración inválida vs wordCount,
+    //     se invalida en `load.then(validateAudioDuration)` para que el
+    //     siguiente acceso haga re-fetch real al /api/tts.
+    //
+    // Ver docs/immersive-mode-invariants.md y los tests:
+    //   utils/__tests__/immersiveTiming.test.js     (INV-7, 9)
+    //   utils/__tests__/immersiveNavigation.test.js (INV-2)
     const handleEnded = useCallback(async (endedPlayer: 'A' | 'B'): Promise<void> => {
         // [RS-DEBUG]
         if (ctx.unmountedRef.current) return;

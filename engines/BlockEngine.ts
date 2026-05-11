@@ -169,6 +169,13 @@ export class BlockEngine {
   /**
    * Force-complete the current block.
    * Emits 'complete'. Idempotent.
+   *
+   * ⚠️ INVARIANTE 2 — NO REINTRODUCIR navegación automática entre libros.
+   * El subscriber de este evento en VisorInmersivo debe limitarse a mostrar
+   * la pantalla "Lectura Completada"; NO debe llamar navigate ni cambiar de
+   * contentId. El contentId de la ruta gobierna la sesión inmersiva.
+   * Ver docs/immersive-mode-invariants.md (INVARIANTE 2) y la suite
+   * utils/__tests__/immersiveNavigation.test.js que falla si esto se rompe.
    */
   complete(): void {
     if (this.state.status === 'completed') return;

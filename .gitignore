@@ -139,6 +139,12 @@ dummy_text.txt
 # al pipeline de deploy ni a cron — se ejecutan manualmente cuando hace falta.
 !/scripts/audit-school-drift.mjs
 
+# Sprint hardening modo inmersivo (2026-05-11) — pre-build/pre-deploy gate.
+# Verifica INV 2/3/4/10/12 sobre el codebase frontend (auto-navegación, storage
+# keys no namespaced, setTimeout sin guard, catch que muta playback, engines
+# que importan router). npm run lint:immersive-guards.
+!/scripts/lint-immersive-guards.mjs
+
 # Sprint 022 Fase 2B.7 — server/.deploy-info es generado por
 # scripts/deploy-backend.sh dentro del tarball que se transfiere al VPS.
 # Contiene release_tag, git_sha y deployed_at del último deploy.

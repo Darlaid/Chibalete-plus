@@ -11,9 +11,12 @@
     "a11y:test": "node scripts/a11y-baseline.mjs",
     "a11y:ci": "node scripts/a11y-baseline.mjs --strict",
     "test:memberships": "node server/__test__/groupMembershipService.test.js && node server/__test__/endpointsMembership.test.js && node server/__test__/endpointsBidirectional.test.js && node server/__test__/endpointValidate.test.js && node server/__test__/healthEndpoint.test.js",
+    "test:immersive": "node utils/__tests__/immersiveTiming.test.js && node utils/__tests__/immersiveSession.test.js && node utils/__tests__/immersiveNavigation.test.js && node engines/__tests__/contentQueue.test.js",
+    "lint:immersive-guards": "node scripts/lint-immersive-guards.mjs",
+    "verify:immersive": "npm run test:immersive && npm run lint:immersive-guards",
     "typecheck:baseline": "node scripts/typecheck-baseline.mjs",
     "audit:parser-corpus": "node scripts/audit-parser-corpus.mjs --strict",
-    "verify": "npm run test:memberships && npm run typecheck:baseline && npm run audit:parser-corpus",
+    "verify": "npm run test:memberships && npm run verify:immersive && npm run typecheck:baseline && npm run audit:parser-corpus",
     "validate:local": "node scripts/validate-local.mjs",
     "validate:remote": "node scripts/validate-remote.mjs"
   },

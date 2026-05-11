@@ -209,7 +209,13 @@ export class StartupEngine {
       }
     }
 
-    // Fallback: parse raw text with sentence-boundary regex
+    // Fallback: parse raw text with sentence-boundary regex.
+    //
+    // ⚠️ INVARIANTE 6 — Fallback NUNCA cambia de libro.
+    // El fallback opera EXCLUSIVAMENTE sobre this.textUrl, que es el texto
+    // plano del contentId activo (pasado al constructor). NO consulta
+    // ContentQueue, NO busca "primer contenido disponible", NO usa caché
+    // de otro contentId. Ver docs/immersive-mode-invariants.md.
     if (splits.length === 0 && rawText) {
       console.log(`[RAW_FALLBACK] contentId=${this.contentId} rawLen=${rawText.length}`);
       const clean = rawText.replace(/\r\n/g, ' ').replace(/\s+/g, ' ');

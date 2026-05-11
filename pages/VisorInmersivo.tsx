@@ -28,6 +28,10 @@ import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
 // Logger estructurado para auditoría del flujo inmersivo. OFF en prod por default;
 // activable runtime con localStorage.setItem('immersive_debug', '1').
 import { immersiveLog } from '../utils/immersiveLogger';
+// INVARIANTE 2 — bloqueo central de auto-navegación entre libros.
+// Todo navigate('/leer/inmersivo/<id>') DEBE pasar por assertManualNavigation
+// con reason whitelisted (user_click_next, user_click_book_card, user_explicit_navigation).
+import { assertManualNavigation } from '../utils/immersiveNavigation.js';
 
 // --- CONFIGURATION ---
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2.0];
@@ -278,12 +282,16 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         }),
     });
 
-    // Always-fresh trigger: called at session end to start the next content.
-    // Stored as a ref so closures with [] deps (block engine subscriber) always
-    // call the latest version without needing to re-subscribe.
-    const triggerTransitionRef = useRef<() => void>(() => {});
-    // Updated on every render — captures latest navigate, refs, and setters.
-    triggerTransitionRef.current = () => {
+    // Always-fresh trigger: ÚNICA puerta de salida hacia navegación cross-content.
+    // INVARIANTE 2: exige un `reason` whitelisted (user_click_next | user_click_book_card |
+    // user_explicit_navigation). Cualquier caller automático (BlockEngine.complete,
+    // onSessionEnd, ContentQueue, fallback, etc.) que invoque esta función sin reason
+    // manual es bloqueado por assertManualNavigation y loguea fatal en dev.
+    //
+    // NO REINTRODUCIR navegación automática entre libros. El contentId de la ruta
+    // gobierna la sesión inmersiva. Ver docs/immersive-mode-invariants.md.
+    const triggerTransitionRef = useRef<(reason?: string, source?: string) => void>(() => {});
+    triggerTransitionRef.current = (reason?: string, source?: string) => {
         if (transitionFiredRef.current) return;
         const next = nextContentRef.current;
         if (!next) {
@@ -303,6 +311,27 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             analyticsService.flush();
             setSessionComplete(true);
             pb.pause();
+            return;
+        }
+
+        // INVARIANTE 2 — guard de navegación manual. Si reason no está en la
+        // whitelist (user_click_next | user_click_book_card | user_explicit_navigation),
+        // bloquear y loguear fatal. En dev/test lanza para detectar regresión.
+        const navGuard = assertManualNavigation({
+            fromContentId: content.id,
+            toContentId:   next.id,
+            reason:        reason ?? 'unspecified',
+            source:        source ?? 'triggerTransitionRef',
+            isDev:         import.meta.env.DEV === true,
+        });
+        if (!navGuard.ok) {
+            immersiveLog('FATAL_MISMATCH', {
+                kind: 'autonav_blocked',
+                fromContentId: content.id,
+                toContentId: next.id,
+                reason: navGuard.reason,
+                source: source ?? 'triggerTransitionRef',
+            });
             return;
         }
 
@@ -348,7 +377,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             // Without this check, the navigate() call would override the user's choice.
             if (unmounted.current) return;
             setIsTransitioning(true);
-            // Replace the current history entry so back-button returns to the library.
+            // IMMERSIVE_NAV_OK: gateado por assertManualNavigation arriba en esta misma
+            // función. La única ruta que llega aquí pasó por la whitelist de reasons.
             navigate(`/leer/inmersivo/${encodeURIComponent(next.id)}`, { replace: true });
         }, transitionDelayMs);
     };
@@ -1585,7 +1615,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                     <span className="text-xs text-white/40">Próximo:</span>
                     <span className="text-xs text-white/60 max-w-[160px] truncate">{nextContentRef.current.titulo}</span>
                     <button
-                        onClick={() => triggerTransitionRef.current()}
+                        onClick={() => triggerTransitionRef.current('user_click_next', 'banner_proximo_button')}
                         className="text-xs text-indigo-400/60 hover:text-indigo-300 ml-1 transition-colors"
                     >→</button>
                 </div>
