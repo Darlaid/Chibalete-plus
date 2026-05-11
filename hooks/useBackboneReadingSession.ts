@@ -150,7 +150,15 @@ export function useBackboneReadingSession(
     const bufferRef            = useRef<BackboneEvent[]>([]);
 
     // ── flush ────────────────────────────────────────────────────────────────
-    const flush = useCallback((useBeacon: boolean): void => {
+    // NOTA: sendBeacon eliminado intencionalmente. /api/v1/events exige header
+    // x-user-id y sendBeacon NO permite headers personalizados, causando 401
+    // sostenidos en cada session_end / visibilitychange. fetch + keepalive es el
+    // único path válido, soportado en todos los UAs modernos (hasta 64KB en
+    // beforeunload). Trade-off: en Safari iOS background el keepalive puede no
+    // completar; mitigado por heartbeats cada 15s que cubren analíticamente la
+    // pérdida del session_end final. El parámetro `_useBeacon` queda como dead
+    // arg para minimizar diff en los call sites.
+    const flush = useCallback((_useBeacon: boolean): void => {
         const buf = bufferRef.current;
         if (buf.length === 0) return;
         const uid = userIdRef.current;
@@ -162,27 +170,11 @@ export function useBackboneReadingSession(
         const body  = JSON.stringify({ events: batch });
 
         try {
-            if (useBeacon
-                && typeof navigator !== 'undefined'
-                && typeof navigator.sendBeacon === 'function'
-            ) {
-                // sendBeacon NO permite headers personalizados. /api/v1/events exige
-                // x-user-id; si la cola del UA descarta el beacon, caemos a fetch keepalive.
-                const blob = new Blob([body], { type: 'application/json' });
-                const sent = navigator.sendBeacon(ENDPOINT, blob);
-                if (!sent) {
-                    fetch(ENDPOINT, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-user-id': uid },
-                        body, keepalive: true,
-                    }).catch(() => { /* fail silencioso */ });
-                }
-                return;
-            }
             fetch(ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-user-id': uid },
-                body, keepalive: true,
+                body,
+                keepalive: true,
             }).catch(() => { /* fail silencioso */ });
         } catch {
             // Nunca propagar errores de telemetría.

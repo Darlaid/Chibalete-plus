@@ -56,10 +56,12 @@ export class StartupEngine {
   private readonly listeners: Set<Listener> = new Set();
   private readonly contentId: string;
   private readonly textUrl: string | undefined;
+  private readonly signal: AbortSignal | undefined;
 
-  constructor(contentId: string, textUrl?: string) {
+  constructor(contentId: string, textUrl?: string, signal?: AbortSignal) {
     this.contentId = contentId;
     this.textUrl = textUrl;
+    this.signal = signal;
   }
 
   /**
@@ -108,6 +110,14 @@ export class StartupEngine {
       this.fetchText(),
     ]);
 
+    // Guard: si el caller abortó (cambio de contentId, unmount), NO mutar state.
+    // Sin esto, fetches in-flight del libro anterior podrían emitir 'ready' contra
+    // la sesión actual del nuevo libro tras un switch rápido.
+    if (this.signal?.aborted) {
+      console.log(`[StartupEngine] aborted ${this.contentId}`);
+      return;
+    }
+
     const { splits, sentenceToChunk } = this.buildSentences(manifestData, rawText);
     const anchorsMap = this.parseAnchors(anchorsData);
 
@@ -126,22 +136,28 @@ export class StartupEngine {
 
   private async fetchManifest(): Promise<any> {
     try {
-      const res = await fetch(`/uploads/audio/${this.contentId}/manifest.json`);
+      const res = await fetch(`/uploads/audio/${this.contentId}/manifest.json`, { signal: this.signal });
       return res.ok ? await res.json() : null;
     } catch { return null; }
   }
 
   private async fetchAnchors(): Promise<any> {
     try {
-      const res = await fetch(`/uploads/audio/${this.contentId}/anchors.json`);
-      return res.ok ? await res.json() : null;
+      const res = await fetch(`/uploads/audio/${this.contentId}/anchors.json`, { signal: this.signal });
+      if (!res.ok) {
+        if (res.status === 404) {
+          console.log(`[ANCHORS_404] contentId=${this.contentId}`);
+        }
+        return null;
+      }
+      return await res.json();
     } catch { return null; }
   }
 
   private async fetchText(): Promise<string | null> {
     if (!this.textUrl) return null;
     try {
-      const res = await fetch(this.textUrl);
+      const res = await fetch(this.textUrl, { signal: this.signal });
       return res.ok ? await res.text() : null;
     } catch { return null; }
   }
@@ -195,7 +211,7 @@ export class StartupEngine {
 
     // Fallback: parse raw text with sentence-boundary regex
     if (splits.length === 0 && rawText) {
-      console.log('[StartupEngine] Fallback: raw text parse');
+      console.log(`[RAW_FALLBACK] contentId=${this.contentId} rawLen=${rawText.length}`);
       const clean = rawText.replace(/\r\n/g, ' ').replace(/\s+/g, ' ');
       splits =
         clean.match(/[^.!?]+[.!?]+[\s]*/g)

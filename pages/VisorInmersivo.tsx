@@ -25,6 +25,9 @@ import { getResumeToast } from '../utils/canonicalProgress';
 // Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
 // Convive con analyticsService.track / usePlaybackAnalytics / pbLog. NO los reemplaza.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
+// Logger estructurado para auditoría del flujo inmersivo. OFF en prod por default;
+// activable runtime con localStorage.setItem('immersive_debug', '1').
+import { immersiveLog } from '../utils/immersiveLogger';
 
 // --- CONFIGURATION ---
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2.0];
@@ -58,6 +61,20 @@ const ANCHOR_TYPE_PRIORITY: Record<LeoSessionMemory['difficultyLevel'], string[]
     medio:    ['vocabulary', 'insight', 'reflexion'],
     avanzado: ['reflexion', 'insight', 'vocabulary'],
 };
+
+/**
+ * Construye la clave de sessionStorage para la memoria de Leo, namespaced por
+ * userId + contentId. Sin esto, dos usuarios que comparten browser mezclaban
+ * estado pedagógico de Leo (anchors recientes, difficultyLevel, behavior).
+ *
+ * Fallbacks 'guest' / 'unknown' garantizan que la key sea siempre escribible
+ * incluso si user o content aún no están hidratados. La migración silenciosa
+ * (ver effect dentro del componente) traslada la key antigua `leo_session_<cid>`
+ * al nuevo formato una sola vez.
+ */
+function leoSessionKey(uid: string | undefined, cid: string | undefined): string {
+    return `leo_session_${uid ?? 'guest'}_${cid ?? 'unknown'}`;
+}
 
 function selectBestAnchor(
     candidates: ContextualAnchor[],
@@ -182,6 +199,10 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         // Mostrar pantalla "Lectura Completada" (sessionComplete) — el usuario decide
         // continuar (+5 min) o salir. El path manual al siguiente libro vive solo en el
         // botón → del banner "Próximo" (a >=93% de progreso).
+        immersiveLog('SESSION_END_FROM_AUDIO', {
+            contentId: analyticsContentIdRef.current,
+            userId: analyticsUserIdRef.current,
+        });
         sessionCompletingRef.current = true;
         setSessionComplete(true);
         // Audio ya está en estado 'paused' (esta callback viene de handleEnded en el hook),
@@ -351,7 +372,10 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     // --- PHASE 5.3: LEO SESSION MEMORY ---
     const [leoMemory, setLeoMemory] = useState<LeoSessionMemory>(() => {
         try {
-            const stored = sessionStorage.getItem(`leo_session_${content?.id}`);
+            // Sin user en el initializer (AuthContext puede no estar hidratado aún),
+            // leemos solo la key namespaced del 'guest'. La migración silenciosa más
+            // abajo trae la key antigua o la promueve a la del user real al hidratar.
+            const stored = sessionStorage.getItem(leoSessionKey(undefined, content?.id));
             if (stored) return JSON.parse(stored);
         } catch { /* sessionStorage unavailable */ }
         const seedDifficulty = user?.id
@@ -402,11 +426,32 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         return () => { isMounted = false; };
     }, [user?.id, content?.id]);
 
+    // Migración silenciosa one-shot de las keys de Leo: traslada
+    //   leo_session_<contentId>          (legacy, sin userId)
+    //   leo_session_guest_<contentId>    (initializer pre-hidratación)
+    // a la key namespaced del user real, una sola vez por par (userId, contentId).
+    useEffect(() => {
+        if (!user?.id || !content?.id) return;
+        const newKey = leoSessionKey(user.id, content.id);
+        try {
+            if (sessionStorage.getItem(newKey)) return; // ya migrado
+            const legacyKey = `leo_session_${content.id}`;
+            const guestKey  = leoSessionKey(undefined, content.id);
+            const src = sessionStorage.getItem(legacyKey) ?? sessionStorage.getItem(guestKey);
+            if (src) {
+                sessionStorage.setItem(newKey, src);
+                sessionStorage.removeItem(legacyKey);
+                sessionStorage.removeItem(guestKey);
+                immersiveLog('LEO_MEMORY_MIGRATED', { userId: user.id, contentId: content.id });
+            }
+        } catch { /* sessionStorage unavailable */ }
+    }, [user?.id, content?.id]);
+
     // Persist Leo memory changes
     const memorySaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     useEffect(() => {
         if (!isMemoryLoaded || !user) return;
-        sessionStorage.setItem(`leo_session_${content.id}`, JSON.stringify(leoMemory));
+        sessionStorage.setItem(leoSessionKey(user.id, content.id), JSON.stringify(leoMemory));
         if (memorySaveTimeoutRef.current) clearTimeout(memorySaveTimeoutRef.current);
         memorySaveTimeoutRef.current = setTimeout(() => {
             dataService.updateLeoMemory(user.id, content.id, leoMemory);
@@ -707,6 +752,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                     // "Lectura Completada" — el usuario decide (+5 min recarga el bloque,
                     // Salir vuelve atrás). El path manual al siguiente libro vive solo en
                     // el botón → del banner "Próximo" (a >=93% de progreso).
+                    immersiveLog('BLOCK_COMPLETE_END_SESSION', {
+                        contentId: analyticsContentIdRef.current,
+                        userId: analyticsUserIdRef.current,
+                        elapsed: event.elapsed,
+                        duration: event.duration,
+                    });
                     sessionCompletingRef.current = true;
                     setSessionComplete(true);
                     pb.pause();
@@ -851,11 +902,29 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     // content and, on transitions (not the initial mount), resets all content-
     // specific state while keeping engines (Block/Reward/Trance) alive.
     useEffect(() => {
-        const engine = new StartupEngine(content.id, content.texto_plano_url);
+        // AbortController: corta fetches in-flight del engine anterior al cambiar
+        // contentId. Sin esto, un fetch lento del libro A podría resolver y mutar
+        // state cuando el componente ya está en libro B (race condition).
+        const ac = new AbortController();
+        const engine = new StartupEngine(content.id, content.texto_plano_url, ac.signal);
         engineRef.current = engine;
+        immersiveLog('IMMERSIVE_INIT',  { contentId: content.id, userId: user?.id });
+        immersiveLog('ENGINE_START',    { contentId: content.id, hasTextUrl: !!content.texto_plano_url });
 
         const unsubscribe = engine.subscribe((state) => {
+            // Guard anti-stale: si entretanto se creó un nuevo engine (cambio de
+            // contentId), este subscriber no debe mutar el state del componente.
+            if (engine !== engineRef.current) {
+                immersiveLog('GUARD_STALE_ENGINE', { contentId: content.id });
+                return;
+            }
             if (state.status !== 'ready') return;
+            immersiveLog('CONTENT_LOADED', {
+                contentId: content.id,
+                sentences: state.sentences.length,
+                hasManifest: !!state.manifest,
+                anchors: Object.keys(state.anchorsMap).length,
+            });
             sentenceToChunk.current = state.sentenceToChunk;
             manifest.current = state.manifest;
             if (state.sentences.length > 0) {
@@ -898,7 +967,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
 
             // Reset Leo memory for the new content
             try {
-                const stored = sessionStorage.getItem(`leo_session_${content.id}`);
+                const stored = sessionStorage.getItem(leoSessionKey(user?.id, content.id));
                 if (stored) {
                     setLeoMemory(JSON.parse(stored));
                 } else {
@@ -924,12 +993,28 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         // so this usually resolves before post-hydration fires (sentence build takes ~200-500ms).
         // If it loses the race, post-hydration falls back to local progress — no harm done.
         if (user) {
+            // Guard anti-stale: si el contentId cambió mientras esperamos la red,
+            // no mutar fromRemoteProgressRef del nuevo contenido con datos del viejo.
+            const reqContentId = content.id;
             dataService.fetchAndMergeRemoteProgress(user.id, content.id)
-                .then(fromRemote => { fromRemoteProgressRef.current = fromRemote; })
+                .then(fromRemote => {
+                    if (reqContentId !== analyticsContentIdRef.current) {
+                        immersiveLog('GUARD_STALE_PROGRESS', {
+                            reqContentId,
+                            current: analyticsContentIdRef.current,
+                        });
+                        return;
+                    }
+                    fromRemoteProgressRef.current = fromRemote;
+                })
                 .catch(() => {});
         }
 
-        return () => { unsubscribe(); };
+        return () => {
+            ac.abort();
+            unsubscribe();
+            immersiveLog('CLEANUP', { contentId: content.id });
+        };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [content.id]);
 
@@ -947,6 +1032,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         // On manual opens, resume from saved progress.
         if (!isAutoTransition && user) {
             const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
+            let restoreSource: 'anchor' | 'sentence' | 'percentage' | 'none' = 'none';
             if (prog) {
                 const anchor = prog.canonicalProgress?.anchor;
                 const exactSentence = prog.canonicalProgress?.sentenceIndex;
@@ -961,13 +1047,22 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 // 3. globalPercentage fallback — cross-mode, cross-device
                 if (anchor?.type === 'sentence' && anchor.value > 0) {
                     targetIndex = Math.min(anchor.value, sentences.length - 1);
+                    restoreSource = 'anchor';
                 } else if (hasExactSentence && isLastImmersive) {
                     targetIndex = Math.min(exactSentence as number, sentences.length - 1);
+                    restoreSource = 'sentence';
                 } else if (prog.porcentaje > 0) {
                     const resumeIdx = Math.floor((prog.porcentaje / 100) * sentences.length);
                     targetIndex = Math.min(resumeIdx, sentences.length - 1);
+                    restoreSource = 'percentage';
                 }
             }
+            immersiveLog('PROGRESS_RESTORE', {
+                contentId: content.id,
+                userId: user.id,
+                source: restoreSource,
+                targetIndex,
+            });
             dataService.recordReaderOpen(user.id, content.id, 'inmersivo');
             sessionStartRef.current = Date.now();
         }
@@ -1001,6 +1096,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             }
         }
 
+        immersiveLog('PLAY', {
+            contentId: content.id,
+            userId: user?.id,
+            targetIndex,
+            isAutoTransition,
+        });
         // forcePlay=true on transitions keeps the session uninterrupted
         pb.load(targetIndex, isAutoTransition);
 
@@ -1028,6 +1129,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             const nowElapsed = Date.now() - sessionStartRef.current;
             const deltaMs = Math.max(0, nowElapsed - lastElapsedSentRef.current);
             lastElapsedSentRef.current = nowElapsed;
+            immersiveLog('PROGRESS_SAVE', {
+                contentId: content.id,
+                userId: user.id,
+                currentIndex,
+                deltaMs,
+            });
             // E: anchor type='sentence' stores the exact sentence index for same-mode precision.
             dataService.updateProgreso(
                 user.id, content.id,
