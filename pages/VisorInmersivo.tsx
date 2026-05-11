@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
@@ -1155,6 +1155,20 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = setTimeout(() => {
             saveTimeoutRef.current = null;
+            // INV-14: bloquear save si hay un avance pendiente. Sin esto, podríamos
+            // grabar un índice "futuro" cuyo audio aún no se confirmó. El guard
+            // se evalúa en el momento del save (no del schedule), así que captura
+            // edges donde un advance se agendó durante la ventana de debounce.
+            if (pb.isPendingAdvance()) {
+                immersiveLog('PROGRESS_SAVE', {
+                    contentId: content.id,
+                    userId: user.id,
+                    currentIndex,
+                    blocked: true,
+                    reason: 'pending_advance_in_flight',
+                });
+                return;
+            }
             // QW-3: delta incremental (no absoluto desde session start).
             const nowElapsed = Date.now() - sessionStartRef.current;
             const deltaMs = Math.max(0, nowElapsed - lastElapsedSentRef.current);
@@ -1215,6 +1229,27 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         if (pb.audioRefA.current) pb.audioRefA.current.playbackRate = playbackSpeed;
         if (pb.audioRefB.current) pb.audioRefB.current.playbackRate = playbackSpeed;
     }, [playbackSpeed]);
+
+    // INV-13/17: visual_commit_ack — useLayoutEffect dispara SÍNCRONAMENTE post-render
+    // antes de pintar. Confirma que React reconciliated y el nuevo currentIndex está
+    // en el DOM. Es el último eslabón observacional entre setIdx (logical commit) y
+    // el píxel visible. Si el visor "duda" entre dos índices, este log revela exactamente
+    // cuándo se completa cada paso visual.
+    const lastAckedVisualIndexRef = useRef(-1);
+    useLayoutEffect(() => {
+        if (currentIndex !== lastAckedVisualIndexRef.current && sentences.length > 1) {
+            const from = lastAckedVisualIndexRef.current;
+            lastAckedVisualIndexRef.current = currentIndex;
+            immersiveLog('CONTENT_LOADED', {
+                kind: 'visual_commit_ack',
+                contentId: content.id,
+                userId: user?.id,
+                from,
+                visualIndex: currentIndex,
+                committedAt: Date.now(),
+            });
+        }
+    }, [currentIndex, sentences.length, content.id, user?.id]);
 
     // --- VISUAL ENGINE ---
     const [translateY, setTranslateY] = useState(0);

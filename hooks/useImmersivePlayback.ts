@@ -140,6 +140,12 @@ export interface ImmersivePlayback {
     runGC:       () => void;
     /** Limpia todo el estado de audio. Llamar en transiciones de contenido. */
     reset:       () => void;
+    /**
+     * INV-14: ¿hay un timer/listener de advance pendiente?
+     * El visor lo usa para BLOQUEAR PROGRESS_SAVE de índices "futuros" que
+     * todavía no fueron commiteados. No-side-effect; sólo lee refs internos.
+     */
+    isPendingAdvance: () => boolean;
 }
 
 // ── Constantes ───────────────────────────────────────────────────────────────
@@ -1054,6 +1060,14 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         setStatus('idle');
     }, []);
 
+    // INV-14: getter para que el visor pueda bloquear PROGRESS_SAVE cuando hay
+    // un avance pendiente. No agrega hooks al árbol — solo lee refs existentes.
+    const isPendingAdvance = (): boolean => (
+        pendingAdvanceTimerRef.current !== null ||
+        pendingFallbackTimerRef.current !== null ||
+        pendingCanplaythroughCleanupRef.current !== null
+    );
+
     return {
         audioRefA,
         audioRefB,
@@ -1071,5 +1085,6 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         prefetch,
         runGC,
         reset,
+        isPendingAdvance,
     };
 }
