@@ -41,6 +41,9 @@ import {
     detachGroupFromAllUsers,
     unionGroupMemberIds,
     getGroupMembers,
+    getExplicitGroupMembers,
+    applyLegacyColegioFallback,
+    userIsLectorLike,
     validateMembershipIntegrity,
     ERR as GROUP_MEMBERSHIP_ERR,
 } from './groupMembershipService.js';
@@ -3867,6 +3870,183 @@ const _readFallbackOverride = (req) => {
     return h === 'true';
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MATERIALIZATION RESOLVER — Commit 6 — single source of truth
+//
+// _resolveMaterializableUsers — UNICO punto de cálculo del conjunto materializable.
+// Classifier, dryRun preview, execute path, audit metadata, y cualquier
+// caller futuro (resurrection, reconciliation, scripts, UI) DEBEN reusar
+// este helper. Prohibido reimplementar la lógica inline.
+//
+// Fórmula formal:
+//   materializable = applyLegacyColegioFallback(g).matched ∖ getExplicitGroupMembers(g)
+//
+// Determinismo: orden lexicográfico vía sort(). Mismo input → mismo output
+// cross-replica, cross-replay, cross-version. Crítico para reproducibilidad
+// forensic del audit sampling.
+//
+// PURO. No toca disco, no toca locks.
+// ─────────────────────────────────────────────────────────────────────────────
+const _resolveMaterializableUsers = (group, users, allGroups) => {
+    const matched = applyLegacyColegioFallback(group, users, allGroups).matched;
+    const explicit = getExplicitGroupMembers(group, users);
+    return [...matched]
+        .filter(uid => !explicit.has(uid))
+        .sort();
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MATERIALIZATION STATE MACHINE — Commit 6
+//
+// _detectGroupMaterializationState — classifier centralizado para el endpoint
+// POST /api/groups/:groupId/members/materialize-fallback.
+//
+// Estados terminales (cuatro):
+//   - 'fallback_dependent'   → operación target (PROCEED)
+//   - 'fully_explicit'       → noOp legítimo (todos los lectores ya explícitos)
+//   - 'empty_inert'          → noOp (no hay fallback semánticamente activable)
+//   - 'mixed_legacy_state'   → 422 (coexistencia ambigua, requiere intervención)
+//
+// reasonCode (taxonomía oficial Commit 6):
+//   fallback_dependent:  'single_school_implicit'
+//   fully_explicit:      'no_remaining_fallback_visibility'
+//   empty_inert:         'no_school' | 'multi_school' | 'no_lectores'
+//   mixed_legacy_state:  'partial_explicitification' | 'cross_school_corruption'
+//
+// mixedSeverity (sólo para mixed_legacy_state):
+//   'recoverable' → todos los explícitos pasan _validateSameInstitution con g
+//   'corrupted'   → ≥1 explícito viola same-institution (cross-school drift)
+//
+// Orphan IDs (explicit channel apunta a userId no resoluble) NO se cuentan
+// como corrupción — son issue separada (syncGroupMembership los limpia).
+//
+// PURO. No toca disco, no toca locks. Caller provee userById Map pre-computado
+// para evitar O(N) lookups.
+// ─────────────────────────────────────────────────────────────────────────────
+const _detectGroupMaterializationState = (group, users, allGroups, userById) => {
+    // 0) Defensa contra group sin school válido
+    if (!group?.school || typeof group.school !== 'string' || group.school.trim().length === 0) {
+        return {
+            state:                       'empty_inert',
+            reasonCode:                  'no_school',
+            explicitCount:               0,
+            fallbackEligibleNotExplicit: 0,
+            crossSchoolExplicitCount:    0,
+            mixedSeverity:               null,
+            isSingleSchool:              false,
+        };
+    }
+
+    // 1) Single-school check (peers.length === 1)
+    const targetSchool = group.school.trim().toLowerCase();
+    let peers = 0;
+    for (const g of (allGroups || [])) {
+        if (typeof g?.school !== 'string') continue;
+        if (g.school.trim().toLowerCase() === targetSchool) peers++;
+        if (peers > 1) break;
+    }
+    const isSingleSchool = peers === 1;
+
+    // 2) Explicit members snapshot
+    const explicit = getExplicitGroupMembers(group, users);
+    const explicitCount = explicit.size;
+
+    // 3) fallbackEligibleNotExplicit — derivado del resolver canónico (SoT).
+    //    applyLegacyColegioFallback YA gate-a sobre single-school: bajo multi-
+    //    school devuelve matched vacío. Reusar el resolver garantiza que el
+    //    classifier NUNCA diverja del execute path (anti-drift architectural).
+    const materializableFromResolver = _resolveMaterializableUsers(group, users, allGroups);
+    const fallbackEligibleNotExplicit = materializableFromResolver.length;
+
+    // 4) Cross-school explicit count (informativo + driver de mixedSeverity)
+    let crossSchoolExplicitCount = 0;
+    if (explicitCount > 0) {
+        for (const uid of explicit) {
+            const u = userById?.get(uid);
+            if (!u) continue;  // orphan ID — fuera del scope del classifier
+            if (!_validateSameInstitution(u, group)) crossSchoolExplicitCount++;
+        }
+    }
+
+    // 5) State resolution
+    //
+    // Matriz definitiva:
+    //                       │ single-school │ multi-school │
+    // ─────────────────────────────────────────────────────
+    // explicit=0, elig=0    │ empty_inert   │ empty_inert  │
+    //                       │  no_lectores  │ multi_school │
+    // explicit=0, elig>0    │ fallback_dep  │ (imposible)  │
+    //                       │  single_impl. │              │
+    // explicit>0, elig=0    │ fully_explicit│ fully_explicit│
+    //                       │  no_remaining │ no_remaining │
+    // explicit>0, elig>0    │ mixed_legacy  │ (imposible)  │
+    //                       │  partial_expl │              │
+    //                       │  cross_school │              │
+    //
+    // (elig>0 implica single-school por contrato de applyLegacyColegioFallback —
+    //  el contador anterior sólo se incrementa bajo isSingleSchool.)
+
+    if (explicitCount === 0) {
+        if (!isSingleSchool) {
+            return {
+                state:                       'empty_inert',
+                reasonCode:                  'multi_school',
+                explicitCount:               0,
+                fallbackEligibleNotExplicit: 0,
+                crossSchoolExplicitCount:    0,
+                mixedSeverity:               null,
+                isSingleSchool:              false,
+            };
+        }
+        if (fallbackEligibleNotExplicit === 0) {
+            return {
+                state:                       'empty_inert',
+                reasonCode:                  'no_lectores',
+                explicitCount:               0,
+                fallbackEligibleNotExplicit: 0,
+                crossSchoolExplicitCount:    0,
+                mixedSeverity:               null,
+                isSingleSchool:              true,
+            };
+        }
+        return {
+            state:                       'fallback_dependent',
+            reasonCode:                  'single_school_implicit',
+            explicitCount:               0,
+            fallbackEligibleNotExplicit,
+            crossSchoolExplicitCount:    0,
+            mixedSeverity:               null,
+            isSingleSchool:              true,
+        };
+    }
+
+    // explicitCount > 0
+    if (fallbackEligibleNotExplicit === 0) {
+        return {
+            state:                       'fully_explicit',
+            reasonCode:                  'no_remaining_fallback_visibility',
+            explicitCount,
+            fallbackEligibleNotExplicit: 0,
+            crossSchoolExplicitCount,    // informativo
+            mixedSeverity:               null,
+            isSingleSchool,
+        };
+    }
+
+    // explicitCount > 0 && fallbackEligibleNotExplicit > 0 → mixed
+    // (sólo posible bajo isSingleSchool por construcción)
+    const corrupted = crossSchoolExplicitCount > 0;
+    return {
+        state:                       'mixed_legacy_state',
+        reasonCode:                  corrupted ? 'cross_school_corruption' : 'partial_explicitification',
+        explicitCount,
+        fallbackEligibleNotExplicit,
+        crossSchoolExplicitCount,
+        mixedSeverity:               corrupted ? 'corrupted' : 'recoverable',
+        isSingleSchool:              true,
+    };
+};
+
 // GET /api/groups/:groupId/candidates
 // Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
 // y admins (requireAuth). Filtra por misma institución y excluye a los que
@@ -4657,6 +4837,566 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
             ...(fallbackOverrideApplied
                 ? { fallbackStateTransition: _createFallbackTransition('implicit', 'explicit') }
                 : {}),
+        },
+    });
+});
+
+// POST /api/groups/:groupId/members/materialize-fallback
+// ============================================================================
+// Vía oficial, explícita, auditable y atómica para convertir el fallback colegio
+// legacy implícito → memberships explícitas persistentes. Primera transición
+// formal del modo legacy implícito → modelo explícito gobernado.
+//
+// NO es bulk-add. Es transition system: opera SÓLO sobre grupos fallback-
+// dependent (studentIds + memberIds vacíos, school única, ≥1 lector con colegio
+// matching). El conjunto materializable se computa por set difference formal:
+//   materializable = applyLegacyColegioFallback(g).matched ∖ getExplicitGroupMembers(g)
+//
+// Aula Viva visibility queda PRESERVADA: los N lectores que aparecían vía
+// fallback siguen siendo los MISMOS N visibles vía explicit channels. Conjunto
+// idéntico, source diferente. Cero blast radius observable para el usuario.
+//
+// ── State machine (clasificador _detectGroupMaterializationState) ──────────
+//   S1 fallback_dependent   → ejecuta materialization
+//   S2 fully_explicit       → 200 noOp (sin audit)
+//   S3 empty_inert          → 200 noOp (sin audit)
+//   S4 mixed_legacy_state   → 422 (sin audit, requiere resolución manual)
+//   404 si grupo no existe
+//
+// ── Optimistic concurrency ─────────────────────────────────────────────────
+// expectedCount opcional. Si provisto y difiere del materializable real,
+// 409 expected_count_mismatch — preview stale, no muta.
+//
+// ── DryRun ──────────────────────────────────────────────────────────────────
+// Mismo lock path + mismo snapshot + misma resolución. Devuelve auditPreview
+// con auditReferenceId:null + auditReferenceGeneratedOnExecute:true (contract
+// explícito — no fake ULIDs).
+//
+// ── Hard runtime invariant ─────────────────────────────────────────────────
+// PHASE 7.5 verifica: explicitMembersAfter === explicitMembersBefore + attempted.
+// Si rompe → 409 materialization_invariant_breach (NO 500) + audit dedicado
+// membership.fallback_materialization_invariant_breach. State NO se persiste.
+//
+// ── Lock & persistencia ────────────────────────────────────────────────────
+// Lock ordering groups → users (idéntico cross-endpoint). Persistencia
+// INVERTIDA vs assign/move: USERS_DB primero, GROUPS_DB después. Si GROUPS
+// falla, group sigue fallback-dependent → Aula Viva mantiene visibility vía
+// fallback (graceful degradation). Razón completa en comment in-body.
+//
+// ── Bypass legítimo del extinction guard ───────────────────────────────────
+// _assessFallbackExtinctionRisk NO se invoca como gate. fallbackVisibleBefore
+// se captura sólo informacionalmente (audit metadata). El guard existe para
+// PARCIAL explicitification; materialization es FULL explicitification (mismo
+// conjunto, source diferente) — blast radius zero, bypass documentado.
+//
+// ── Idempotencia conceptual ────────────────────────────────────────────────
+// Primera ejecución: materializa N, transition implicit → explicit.
+// Segunda ejecución inmediata: classifier devuelve fully_explicit → noOp.
+// Cero duplicados, cero drift, cero double memberships.
+//
+// ── Audit ───────────────────────────────────────────────────────────────────
+// Action: membership.fallback_materialized (success)
+//         membership.fallback_materialization_invariant_breach (breach)
+// Metadata: shape uniforme Commit 5.5 + campos Commit 6:
+//   preMutationState, preMutationReasonCode,
+//   explicitMembersBefore, explicitMembersAfter,
+//   materializationAttempted (intent), materializationObservedDelta (observed),
+//   materializationDelta (=== attempted, semantic intent),
+//   invariantSatisfied.
+//
+// Auth: requireAdminAccess (operación con alcance institucional irreversible).
+// ============================================================================
+app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess, async (req, res) => {
+    const { groupId } = req.params;
+    const body = req.body || {};
+
+    // ── PHASE 0 — Input validation (sin lock) ──────────────────────────────
+    const dryRun = body.dryRun === true;
+    let expectedCount = null;
+    if (body.expectedCount !== undefined) {
+        if (typeof body.expectedCount !== 'number'
+            || !Number.isInteger(body.expectedCount)
+            || body.expectedCount < 0) {
+            return res.status(400).json({ error: 'expectedCount debe ser un entero ≥ 0' });
+        }
+        expectedCount = body.expectedCount;
+    }
+
+    let outcome                = null;
+    let groupMeta              = null;
+    let classification         = null;
+    let materializableUserIds  = [];
+    let explicitMembersBefore  = 0;
+    let explicitMembersAfter   = 0;
+    let fallbackVisibleBefore  = 0;
+
+    await withFileLock(GROUPS_DB, async () => {
+        _jsonCache.delete(GROUPS_DB);
+        await withUsersLock(USERS_DB, () => {
+            _jsonCache.delete(USERS_DB);
+            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readJSON(USERS_DB);
+            const userById = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
+
+            // ── PHASE 2 — Group resolution ─────────────────────────────────
+            const idx = groups.findIndex(g => g?.id === groupId);
+            if (idx === -1) { outcome = { conflict: 'group_not_found' }; return; }
+            const group = groups[idx];
+            groupMeta = _extractGroupMeta(group);
+
+            // fallbackEligibleCount — total de lectores con colegio matching
+            // (independiente de si fallback es la visibility path actual).
+            // _countFallbackVisibleLectors está mal nombrado por Commit 5: cuenta
+            // eligibles, NO sólo visibles. Lo dejamos sin renombrar por backward
+            // compat con audit fields existentes. El endpoint distingue:
+            //   - fallbackEligibleCount: total histórico de matching colegio
+            //   - fallbackVisibleNow:    cuenta SÓLO si fallback es active path
+            //
+            // Materialization bypassa el extinction guard por construcción (full
+            // explicitification, no parcial) — fallbackEligibleCount se captura
+            // informacionalmente para audit + response shapes.
+            fallbackVisibleBefore = _countFallbackVisibleLectors(group, users);
+
+            // ── PHASE 3 — State classification ─────────────────────────────
+            classification = _detectGroupMaterializationState(group, users, groups, userById);
+
+            if (classification.state === 'mixed_legacy_state') {
+                outcome = { conflict: 'mixed_legacy_state' };
+                return;
+            }
+            if (classification.state === 'fully_explicit') {
+                outcome = { noOp: true, sub: 'fully_explicit' };
+                return;
+            }
+            if (classification.state === 'empty_inert') {
+                outcome = { noOp: true, sub: 'empty_inert' };
+                return;
+            }
+            // classification.state === 'fallback_dependent' → proceed
+
+            // ── PHASE 4 — Materializable resolution (single source of truth) ─
+            // _resolveMaterializableUsers es el ÚNICO authority. El classifier
+            // ya lo invocó internamente — esta segunda invocación es defensive
+            // (mismo snapshot por el lock, garantizamos consistencia).
+            materializableUserIds = _resolveMaterializableUsers(group, users, groups);
+
+            if (materializableUserIds.length === 0) {
+                // CLASSIFIER EXECUTION DIVERGENCE — invariant violation conceptual.
+                // El classifier indicó 'fallback_dependent' (que implica eligibles>0
+                // por construcción), pero el resolver devuelve 0. Esto NO es un noOp
+                // legítimo: significa que helpers (applyLegacyColegioFallback,
+                // getExplicitGroupMembers, userIsLectorLike) divergieron entre la
+                // ruta del classifier y la ruta del resolver.
+                //
+                // Bajo el SoT del resolver post-Commit 6 esto es literalmente
+                // unreachable (mismo helper, mismo snapshot). Defendemos por:
+                //   - refactor futuro que rompa el contract
+                //   - corruption de datos in-memory
+                //   - bug en applyLegacyColegioFallback bajo conditions edge
+                outcome = {
+                    conflict: 'classifier_execution_divergence',
+                    classifierState: classification.state,
+                    classifierEligibles: classification.fallbackEligibleNotExplicit,
+                    resolverCount: 0,
+                };
+                return;
+            }
+
+            // ── PHASE 5 — expectedCount gate ───────────────────────────────
+            if (expectedCount !== null && expectedCount !== materializableUserIds.length) {
+                outcome = {
+                    conflict:    'expected_count_mismatch',
+                    expectedCount,
+                    actualCount: materializableUserIds.length,
+                };
+                return;
+            }
+
+            // ── PHASE 6 — DryRun branch ────────────────────────────────────
+            if (dryRun) {
+                outcome = { dryRun: true };
+                return;
+            }
+
+            // ── PHASE 7 — Execute mutation ─────────────────────────────────
+            // Pre-mutation explicit count: por construcción del state machine,
+            // en 'fallback_dependent' === 0 (classifier no llega aquí de otra
+            // forma). Lectura defensive para evitar dependencia implícita
+            // del scope previo del resolver.
+            explicitMembersBefore = getExplicitGroupMembers(group, users).size;
+            for (const uid of materializableUserIds) {
+                addUserIdToGroup(group, uid);
+                const u = userById.get(uid);
+                if (u) addGroupIdToUser(u, groupId);
+            }
+            groups[idx] = normalizeGroup(group);
+            // normalizeGroup — contract estrecho para materialization:
+            //
+            // DEPENDENCIA ÚNICA Y EXCLUSIVA:
+            //   re-confirma studentIds === memberIds (invariante crítica que
+            //   alimenta el invariant gate de PHASE 7.5).
+            //
+            // LEGACY TOLERATED SIDE EFFECTS (NO requeridos por materialization,
+            // tolerados por convención con assign/move pre-existentes):
+            //   - type default ('course' si missing/invalid)
+            //   - mediatorIds ↔ teacherId sync bidireccional
+            //   - organizationId lookup desde SCHOOLS_DB (sin lock — read-only)
+            //   - gradeLevel/section derivation desde grade string legacy
+            //
+            // Estos son helper-legacy parcialmente peligrosos pero tolerados.
+            // NO interpretar como "normalización segura universal". Cualquier
+            // cambio futuro a normalizeGroup DEBE verificarse específicamente
+            // contra materialization (no asumir blast radius cero).
+            //
+            // Migration target: extraer la garantía pura studentIds === memberIds
+            // a un helper dedicado (_reconcileGroupMemberInvariant) e invocarlo
+            // aquí en lugar de normalizeGroup. Deuda explícita para sprint
+            // posterior — no se aborda en Commit 6 para minimizar blast radius.
+
+            // ── PHASE 7.5 — HARD INVARIANT GATE ────────────────────────────
+            explicitMembersAfter = getExplicitGroupMembers(groups[idx], users).size;
+            const expected = explicitMembersBefore + materializableUserIds.length;
+            if (explicitMembersAfter !== expected) {
+                outcome = {
+                    conflict:              'invariant_breach',
+                    explicitMembersBefore,
+                    explicitMembersAfter,
+                    expected,
+                    attempted:             materializableUserIds.length,
+                };
+                return;  // exit sin writeJSON — in-memory NO se persiste
+            }
+
+            // ── PHASE 7.7 — Persist (USERS first, GROUPS last) ─────────────
+            //
+            // ⚠️ ATOMICITY DISCLOSURE — Commit 6 NO provee atomicidad cross-file.
+            // ─────────────────────────────────────────────────────────────────
+            // Existe ventana lógica observable entre los dos writeJSON:
+            //   USERS_DB persisted ✓
+            //   GROUPS_DB write fails (disk full / process kill / I/O error)
+            // → estado bidireccional inconsistente.
+            //
+            // writeJSON usa tmp+rename (atómico OS-level POR ARCHIVO), pero la
+            // operación cross-archivo es secuencial. No hay 2PC, no hay WAL
+            // cross-file, no hay rollback automático.
+            //
+            // Mitigaciones aplicadas (NO reemplazan atomicidad real):
+            //   - Orden USERS → GROUPS minimiza blast radius observable
+            //     (graceful degradation — ver explicación abajo)
+            //   - lock anidado garantiza serialización vs otros endpoints
+            //   - syncGroupMembership puede reconstruir desde la dirección
+            //     que sobreviva al fallo
+            //
+            // Migration target FUTURO: persistence layer transaccional
+            // (SQLite WAL, PostgreSQL, o equivalente). Deuda explícita
+            // documentada — no se resuelve en Commit 6.
+            //
+            // ── ORDEN INVERTIDO vs assign/move (decisión Commit 6) ──────────
+            //
+            // Si USERS write OK + GROUPS write fails:
+            //   - user.groupIds tiene ref → reconciliable trivialmente
+            //   - group sigue fallback-dependent → Aula Viva mantiene
+            //     visibility VIA FALLBACK durante ventana inconsistente
+            //   - syncGroupMembership reconstruye desde user.groupIds
+            //
+            // Si invirtiéramos (GROUPS first), group "miente" sobre membresía
+            // persistida — Aula Viva visibility cambia a explicit channel sin
+            // espejo bidireccional. Degradación hard, no graceful.
+            //
+            // Esta es la PRIMERA mutación bulk del sistema (potencialmente
+            // 235+ user records). Para mutaciones 1-N (assign/move) la
+            // convención local sigue siendo GROUPS → USERS — no se propaga.
+            writeJSON(USERS_DB, users);
+            writeJSON(GROUPS_DB, groups);
+
+            outcome = { success: true };
+        });
+    }, 'groupsLock');
+
+    // ── PHASE 8 — Response dispatch ────────────────────────────────────────
+
+    if (outcome?.conflict === 'group_not_found') {
+        return res.status(404).json({
+            error:   GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND,
+            message: 'Grupo no encontrado',
+        });
+    }
+
+    if (outcome?.conflict === 'mixed_legacy_state') {
+        log(`POST /api/groups/${groupId}/members/materialize-fallback BLOCKED mixed_legacy_state severity=${classification.mixedSeverity} reason=${classification.reasonCode}`, 'WARN');
+        // En mixed_legacy_state, fallback NO es active path (explicit > 0 lo
+        // disqualifica), así que fallbackVisibleUsers === 0. Pero los eligibles
+        // existen históricamente — fallbackEligibleUsers === fallbackVisibleBefore.
+        return res.status(422).json({
+            error:                       'mixed_legacy_state',
+            mixedSeverity:               classification.mixedSeverity,
+            reasonCode:                  classification.reasonCode,
+            message:                     classification.mixedSeverity === 'corrupted'
+                ? 'El grupo contiene miembros explícitos de instituciones distintas + fallback eligible lectores. Estado corrupto — requiere intervención manual antes de materializar.'
+                : 'El grupo coexiste con fallback eligible lectores. Los miembros explícitos son del mismo colegio — el estado es reconciliable, pero requiere decisión operacional explícita.',
+            groupId,
+            state:                       'mixed_legacy_state',
+            explicitMembers:             classification.explicitCount,
+            fallbackEligibleNotExplicit: classification.fallbackEligibleNotExplicit,
+            fallbackVisibleUsers:        0,
+            fallbackEligibleUsers:       fallbackVisibleBefore,
+            crossSchoolExplicitCount:    classification.crossSchoolExplicitCount,
+            recommendation:              'manual_resolution_required',
+        });
+    }
+
+    if (outcome?.conflict === 'classifier_execution_divergence') {
+        log(`POST /api/groups/${groupId}/members/materialize-fallback CLASSIFIER_DIVERGENCE classifierState=${outcome.classifierState} classifierEligibles=${outcome.classifierEligibles} resolverCount=${outcome.resolverCount}`, 'ERROR');
+        // Audit dedicado del divergence — forensic P0. Indica drift entre
+        // helpers usados por classifier vs resolver. State NO se persistió.
+        writeAuditLog({
+            action:       'membership.fallback_materialization_classifier_divergence',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details: {
+                groupId,
+                classifierState:     outcome.classifierState,
+                classifierEligibles: outcome.classifierEligibles,
+                resolverCount:       outcome.resolverCount,
+            },
+            metadata: {
+                ..._truncateUserIdsForAudit([]),
+                preMutationState:               outcome.classifierState,
+                preMutationReasonCode:          'classifier_execution_divergence',
+                fromGroupId:                    null,
+                toGroupId:                      groupId,
+                fromSchool:                     null,
+                toSchool:                       groupMeta?.school || null,
+                groupType:                      groupMeta?.type || null,
+                organizationId:                 groupMeta?.organizationId || null,
+                result:                         'classifier_execution_divergence',
+                assignedCount:                  0,
+                failedCount:                    0,
+                failedReasons:                  { classifier_execution_divergence: 1 },
+                fallbackAffected:               true,
+                fallbackExtinguishedAttempted:  false,
+                fallbackExtinguished:           false,
+                fallbackVisibleBefore,
+                fallbackEligibleBefore:         fallbackVisibleBefore,
+                fallbackOverrideUsed:           false,
+                explicitMembersBefore:          classification?.explicitCount ?? 0,
+                explicitMembersAfter:           classification?.explicitCount ?? 0,
+                materializationAttempted:       0,
+                materializationObservedDelta:   0,
+                materializationDelta:           0,
+                invariantSatisfied:             false,
+                classifierExecutionDivergence:  true,
+            },
+        });
+        return res.status(409).json({
+            error:               'classifier_execution_divergence',
+            message:             'Inconsistencia interna: el classifier indicó que el grupo era materializable, pero el resolver no encontró users. Esto NO es estado válido — reportar a plataforma. State NO persistido.',
+            classifierState:     outcome.classifierState,
+            classifierEligibles: outcome.classifierEligibles,
+            resolverCount:       outcome.resolverCount,
+        });
+    }
+
+    if (outcome?.conflict === 'expected_count_mismatch') {
+        log(`POST /api/groups/${groupId}/members/materialize-fallback 409 expected=${outcome.expectedCount} actual=${outcome.actualCount}`, 'WARN');
+        return res.status(409).json({
+            error:             'expected_count_mismatch',
+            message:           'El conteo materializable real difiere del expectedCount provisto. Preview stale — re-ejecutar dryRun.',
+            expectedCount:     outcome.expectedCount,
+            actualCount:       outcome.actualCount,
+            currentState:      classification.state,
+            currentReasonCode: classification.reasonCode,
+            recommendation:    'rerun_dryrun_and_confirm_preview',
+        });
+    }
+
+    if (outcome?.conflict === 'invariant_breach') {
+        log(`POST /api/groups/${groupId}/members/materialize-fallback INVARIANT_BREACH expected=${outcome.expected} actual=${outcome.explicitMembersAfter} attempted=${outcome.attempted}`, 'ERROR');
+        // Audit dedicado del breach — forensic P0. NO emite fallbackStateTransition
+        // (la transición fue abortada, no persistió). Captura attempted vs observed
+        // para diagnosis posterior.
+        writeAuditLog({
+            action:       'membership.fallback_materialization_invariant_breach',
+            targetUserId: null,
+            actor:        req.headers['x-user-id'] || null,
+            details: {
+                groupId,
+                explicitMembersBefore: outcome.explicitMembersBefore,
+                explicitMembersAfter:  outcome.explicitMembersAfter,
+                expected:              outcome.expected,
+                attempted:             outcome.attempted,
+                delta:                 outcome.explicitMembersAfter - outcome.explicitMembersBefore,
+            },
+            metadata: {
+                ..._truncateUserIdsForAudit(materializableUserIds),
+                preMutationState:               'fallback_dependent',
+                preMutationReasonCode:          'single_school_implicit',
+                fromGroupId:                    null,
+                toGroupId:                      groupId,
+                fromSchool:                     null,
+                toSchool:                       groupMeta?.school || null,
+                groupType:                      groupMeta?.type || null,
+                organizationId:                 groupMeta?.organizationId || null,
+                result:                         'invariant_breach',
+                assignedCount:                  0,
+                failedCount:                    outcome.attempted,
+                failedReasons:                  { invariant_breach: outcome.attempted },
+                fallbackAffected:               true,
+                fallbackExtinguishedAttempted:  true,
+                fallbackExtinguished:           false,                              // REAL outcome
+                fallbackVisibleBefore,
+                fallbackEligibleBefore:         fallbackVisibleBefore,              // semantic clarity
+                fallbackOverrideUsed:           false,
+                // sin fallbackStateTransition — abortada, no persistió
+                explicitMembersBefore:          outcome.explicitMembersBefore,
+                explicitMembersAfter:           outcome.explicitMembersAfter,
+                materializationAttempted:       outcome.attempted,
+                materializationObservedDelta:   outcome.explicitMembersAfter - outcome.explicitMembersBefore,
+                materializationDelta:           outcome.attempted,                  // semantic intent
+                invariantSatisfied:             false,
+                invariantBreach:                true,
+            },
+        });
+        return res.status(409).json({
+            error:     'materialization_invariant_breach',
+            invariant: 'explicit_after_equals_before_plus_attempted',
+            message:   'La transición de membresía fue abortada antes de persistir: el estado post-mutation no satisface la invariante de integridad. Sin corrupción de datos. Re-ejecutar implica diagnosticar drift en helpers (addUserIdToGroup / addGroupIdToUser / normalizeGroup) o mutación concurrente.',
+            expected:  outcome.expected,
+            actual:    outcome.explicitMembersAfter,
+            attempted: outcome.attempted,
+        });
+    }
+
+    if (outcome?.noOp === true) {
+        log(`POST /api/groups/${groupId}/members/materialize-fallback NOOP sub=${outcome.sub} state=${classification.state} reason=${classification.reasonCode}`, 'ACCESS');
+        // Semantic distinction Commit 6 obs.1:
+        //   fallbackVisibleUsers  = currently visible VIA fallback path
+        //                           (0 cuando state !== 'fallback_dependent')
+        //   fallbackEligibleUsers = total lectores con colegio matching
+        //                           (histórico, independiente del path activo)
+        const fallbackVisibleUsersNow = classification.state === 'fallback_dependent'
+            ? fallbackVisibleBefore
+            : 0;
+        return res.json({
+            groupId,
+            noOp:                   true,
+            state:                  classification.state,
+            reasonCode:             classification.reasonCode,
+            explicitMembersBefore:  classification.explicitCount,
+            fallbackVisibleUsers:   fallbackVisibleUsersNow,
+            fallbackEligibleUsers:  fallbackVisibleBefore,
+            materialized:           { count: 0, sampleUserIds: [], truncated: false },
+        });
+    }
+
+    if (outcome?.dryRun === true) {
+        const sample = _truncateUserIdsForAudit(materializableUserIds);
+        log(`POST /api/groups/${groupId}/members/materialize-fallback DRYRUN count=${materializableUserIds.length}`, 'ACCESS');
+        // dryRun siempre opera sobre state='fallback_dependent' por construcción
+        // (las demás ramas no llegan a este branch). fallbackVisibleUsers ===
+        // fallbackEligibleUsers en este path porque fallback ES el active path
+        // pre-mutation.
+        return res.json({
+            groupId,
+            dryRun:                          true,
+            noOp:                            false,
+            state:                           classification.state,
+            reasonCode:                      classification.reasonCode,
+            fallbackVisibleUsers:            fallbackVisibleBefore,
+            fallbackEligibleUsers:           fallbackVisibleBefore,
+            explicitMembersBefore:           classification.explicitCount,
+            explicitMembersAfterIfExecuted:  classification.explicitCount + materializableUserIds.length,
+            materializable: {
+                count:         materializableUserIds.length,
+                sampleUserIds: sample.targetUserIdsSample,
+                truncated:     sample.targetUserIdsTruncated,
+            },
+            groupMeta: {
+                school:         groupMeta?.school || null,
+                type:           groupMeta?.type || null,
+                organizationId: groupMeta?.organizationId || null,
+            },
+            auditPreview: {
+                action:                            'membership.fallback_materialized',
+                fallbackStateTransition:           _createFallbackTransition('implicit', 'explicit'),
+                materializationAttempted:          materializableUserIds.length,
+                materializationDelta:              materializableUserIds.length,  // === attempted
+                explicitMembersBefore:             classification.explicitCount,
+                explicitMembersAfter:              classification.explicitCount + materializableUserIds.length,
+                auditReferenceId:                  null,
+                auditReferenceGeneratedOnExecute:  true,
+            },
+        });
+    }
+
+    // outcome.success === true
+    const sample = _truncateUserIdsForAudit(materializableUserIds);
+    log(`POST /api/groups/${groupId}/members/materialize-fallback SUCCESS materialized=${materializableUserIds.length} before=${explicitMembersBefore} after=${explicitMembersAfter}`, 'ACCESS');
+    // Pre-mutation state era 'fallback_dependent', donde fallback ERA active path.
+    // Post-mutation, fallback ya no es active path (group ahora explicit).
+    // fallbackVisibleUsers refleja el pre-mutation visibility (cuántos eran
+    // visibles VIA fallback antes del cambio).
+    res.json({
+        groupId,
+        dryRun:                false,
+        noOp:                  false,
+        state:                 'fallback_dependent',
+        reasonCode:            'single_school_implicit',
+        fallbackVisibleUsers:  fallbackVisibleBefore,
+        fallbackEligibleUsers: fallbackVisibleBefore,
+        explicitMembersBefore,
+        explicitMembersAfter,
+        materialized: {
+            count:         materializableUserIds.length,
+            sampleUserIds: sample.targetUserIdsSample,
+            truncated:     sample.targetUserIdsTruncated,
+        },
+        fallbackStateTransition: _createFallbackTransition('implicit', 'explicit'),
+    });
+
+    // ── PHASE 9 — Audit (post-response, fire-and-forget) ───────────────────
+    //
+    // fallbackExtinguished (Commit 6 obs.6):
+    //   - true: state realmente transitó implicit → explicit (success path)
+    //   - false: intento fallado (invariant_breach, classifier_divergence)
+    // Distinto de fallbackExtinguishedAttempted (intent), captura REAL outcome.
+    writeAuditLog({
+        action:       'membership.fallback_materialized',
+        targetUserId: materializableUserIds.length === 1 ? materializableUserIds[0] : null,
+        actor:        req.headers['x-user-id'] || null,
+        details: {
+            groupId,
+            materializedCount:     materializableUserIds.length,
+            explicitMembersBefore,
+            explicitMembersAfter,
+        },
+        metadata: {
+            ..._truncateUserIdsForAudit(materializableUserIds),
+            preMutationState:               'fallback_dependent',
+            preMutationReasonCode:          'single_school_implicit',
+            fromGroupId:                    null,
+            toGroupId:                      groupId,
+            fromSchool:                     null,
+            toSchool:                       groupMeta?.school || null,
+            groupType:                      groupMeta?.type || null,
+            organizationId:                 groupMeta?.organizationId || null,
+            result:                         'success',
+            assignedCount:                  materializableUserIds.length,
+            failedCount:                    0,
+            failedReasons:                  {},
+            fallbackAffected:               true,
+            fallbackExtinguishedAttempted:  true,
+            fallbackExtinguished:           true,                              // REAL outcome
+            fallbackVisibleBefore,
+            fallbackEligibleBefore:         fallbackVisibleBefore,             // semantic clarity
+            fallbackOverrideUsed:           false,
+            fallbackStateTransition:        _createFallbackTransition('implicit', 'explicit'),
+            explicitMembersBefore,
+            explicitMembersAfter,
+            materializationAttempted:       materializableUserIds.length,
+            materializationObservedDelta:   explicitMembersAfter - explicitMembersBefore,
+            materializationDelta:           materializableUserIds.length,      // semantic intent
+            invariantSatisfied:             true,
         },
     });
 });
