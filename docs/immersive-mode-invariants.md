@@ -233,6 +233,66 @@ GUARD_STALE_PROGRESS` y se descarta.
 
 **Materializado en:** `pages/VisorInmersivo.tsx` (useEffect de content.id)
 
+### INV-13 — visualIndex y playbackIndex no divergen sin estado pending explícito
+
+`setIdx(nextIdx)` y `log('sentence_advanced')` viven **dentro** de `doAdvance` (el
+callback del setTimeout/canplaythrough), NO en el cuerpo síncrono de `handleEnded`.
+Mientras el timer corre, el visual permanece en `currentIdx`. Cuando `doAdvance`
+ejecuta y pasa los guards (`capturedToken`, `unmountedRef`, `statusRef`), commitea.
+
+**Materializado en:** `hooks/useImmersivePlayback.ts::handleEnded::doAdvance/goLoad`
+**Test:** `hooks/__tests__/playbackStateMachine.test.js`
+
+### INV-14 — Progreso sólo se guarda tras commit visual
+
+`PROGRESS_SAVE` se dispara desde el `useEffect([currentIndex, ...])` de
+`VisorInmersivo`. Como `setIdx(nextIdx)` ahora vive dentro de `doAdvance`,
+`currentIndex` sólo se actualiza tras el commit — el efecto del progreso
+nunca ve un índice "futuro pendiente".
+
+**Materializado en:** `pages/VisorInmersivo.tsx` (useEffect de save)
+
+### INV-15 — Block complete / pause / skip cancelan avances pendientes
+
+Los setTimeout y listeners canplaythrough se asignan a refs explícitos
+(`pendingAdvanceTimerRef`, `pendingFallbackTimerRef`,
+`pendingCanplaythroughCleanupRef`). `cancelPendingAdvance(reason)` los limpia
+y emite `[PB] pending_advance_cancelled`. Se invoca en:
+
+- `pause()` → reason `'pause'`
+- `load()` (que llama `skip()`) → `'skip_or_load'`
+- `reset()` (cambio de contenido) → `'content_reset'`
+- cleanup useEffect del unmount → `'unmount'`
+- inicio de `handleEnded` (defensa anti double-fire) → `'new_handleEnded'`
+- `BlockEngine.complete` subscriber del visor → llama `pb.pause()` que cancela transitivamente
+
+**Materializado en:** `hooks/useImmersivePlayback.ts::cancelPendingAdvance`
+**Test:** `hooks/__tests__/playbackStateMachine.test.js`
+
+### INV-16 — Skip manual hace hard resync
+
+`skip(target)` → `load(target, true)`. `load` cancela pending, incrementa
+`loadToken`, pausa ambos players, resetea `sentenceStartTimeRef` (al entrar
+en `play().then`), llama `setIdx(target)` y arranca audio de `target`. El
+índice de progreso se actualiza vía el effect de currentIndex.
+
+**Materializado en:** `hooks/useImmersivePlayback.ts::skip` → `::load`
+
+### INV-17 — Logs separan "scheduled" de "committed"
+
+| Evento | Cuándo | Significado |
+|---|---|---|
+| `sentence_time` | onEnded fires | duración real reproducida |
+| `sentence_floor_applied` | floorRemaining > 0 | piso retrasará el avance |
+| `sentence_rhythm` | scheduling | rhythm calc para el avance |
+| `index_scheduled` | scheduling | doAdvance agendado con reason/finalDelay |
+| `pending_advance_cancelled` | cancelPendingAdvance | timer pendiente cancelado |
+| `index_commit` | dentro de doAdvance | setIdx ya ejecutó |
+| `sentence_advanced` | dentro de doAdvance | commit del avance |
+| `play_start` | play() resuelve | audio empezó |
+
+**Test:** `hooks/__tests__/playbackStateMachine.test.js`
+
 ### INV-12 — ContentQueue no gobierna reproducción
 
 `getNextContent` y `preloadContentText` son funciones puras. NO pueden:

@@ -65,6 +65,9 @@ export type PlaybackEvent =
     | 'sentence_floor_applied'  // PB_TIMING audit: el piso mínimo retrasó el avance
     | 'audio_metadata'           // PB_TIMING audit: audio.duration / readyState al arrancar play
     | 'audio_cache_invalidated'  // INV-9: blob cacheado descartado por duración inválida
+    | 'index_scheduled'          // INV-13/17: avance fue agendado (NO confundir con commit)
+    | 'index_commit'             // INV-13/17: setIdx(nextIdx) acaba de ejecutarse
+    | 'pending_advance_cancelled' // INV-15: timer pendiente cancelado por pause/skip/block/etc.
     | 'playback_paused'
     | 'session_completed'
     | 'load_cancelled'
@@ -196,7 +199,7 @@ function getAdaptivePrefetchWindow(): number {
 function pbLog(event: PlaybackEvent, data?: Record<string, unknown>): void {
     const payload = { event, ts: Date.now(), ...data };
     // eventos frecuentes — nivel 'debug', nunca van al backend
-    if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused' || event === 'sentence_floor_applied' || event === 'audio_metadata' || event === 'audio_cache_invalidated') {
+    if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused' || event === 'sentence_floor_applied' || event === 'audio_metadata' || event === 'audio_cache_invalidated' || event === 'index_scheduled' || event === 'index_commit' || event === 'pending_advance_cancelled') {
         console.debug('[PB]', payload);
     } else if (event === 'session_completed') {
         console.info('[PB]', payload);
@@ -257,6 +260,23 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // durationMs en handleEnded = tiempo real que el usuario escuchó esa oración.
     const sentenceStartTimeRef = useRef(0);
 
+    // ── INV-13/15: timers pendientes del avance de frase ─────────────────────
+    // Antes vivían dentro de setTimeout/listener anónimos. Ahora se trackean
+    // explícitamente para que pause/skip/block_complete/cleanup puedan
+    // cancelarlos. Sin esta cancelación, un setTimeout(doAdvance, 1339ms)
+    // pendiente seguía corriendo después de un pause y disparaba el callback
+    // que early-returneaba silenciosamente — pero el LOG sentence_advanced
+    // ya se había emitido, descuadrando observabilidad y dejando el visor
+    // en estado "dudando" entre el índice viejo y el nuevo.
+    const pendingAdvanceTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingFallbackTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingCanplaythroughCleanupRef = useRef<(() => void) | null>(null);
+
+    // Track de keys ya re-invalidadas en handleEnded para evitar invalidaciones
+    // repetidas (cada handleEnded inspecciona la misma key — si el cache ya
+    // fue invalidado, no hay que loguear de nuevo).
+    const cacheInvalidatedKeysRef = useRef(new Set<number>());
+
     const setStatus = (s: PlaybackStatus) => {
         statusRef.current = s;
         setStatusState(s);
@@ -270,9 +290,50 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         ctx.onIndexChange.current(idx);
     };
 
+    // ── INV-15: cancelación centralizada de avance pendiente ─────────────────
+    // Cancela el setTimeout de doAdvance, el fallback de 80ms y el listener
+    // canplaythrough — los tres caminos por los que un avance pendiente puede
+    // dispararse. Idempotente: si no hay nada pendiente, no loguea ni rompe.
+    //
+    // DEBE invocarse en:
+    //   - pause()                        (usuario pausa explícitamente)
+    //   - load()/skip()                  (resync duro a otro índice)
+    //   - reset()                        (cambio de contenido)
+    //   - cleanup useEffect              (unmount)
+    //   - BlockEngine.complete (vía pb.pause en VisorInmersivo)
+    //   - inicio de handleEnded          (defensa: nuevo onEnded → cancelar pendiente previo)
+    const cancelPendingAdvance = (reason: 'pause' | 'skip_or_load' | 'content_reset' | 'unmount' | 'new_handleEnded'): void => {
+        let cancelled = false;
+        if (pendingAdvanceTimerRef.current !== null) {
+            clearTimeout(pendingAdvanceTimerRef.current);
+            pendingAdvanceTimerRef.current = null;
+            cancelled = true;
+        }
+        if (pendingFallbackTimerRef.current !== null) {
+            clearTimeout(pendingFallbackTimerRef.current);
+            pendingFallbackTimerRef.current = null;
+            cancelled = true;
+        }
+        if (pendingCanplaythroughCleanupRef.current !== null) {
+            pendingCanplaythroughCleanupRef.current();
+            pendingCanplaythroughCleanupRef.current = null;
+            cancelled = true;
+        }
+        if (cancelled) {
+            // pbLog directo (no `log`) porque `log` aún no está definido aquí.
+            // El payload incluye userIdRef capturado al call time.
+            pbLog('pending_advance_cancelled', {
+                reason,
+                userId: ctx.userIdRef.current,
+                index: currentIdxRef.current,
+            });
+        }
+    };
+
     // ── Cleanup al desmontar ─────────────────────────────────────────────────
     useEffect(() => {
         return () => {
+            cancelPendingAdvance('unmount');
             loadToken.current++;
             standbyGenRef.current++;  // invalida cualquier listener canplaythrough pendiente
             audioCache.current.forEach(url => URL.revokeObjectURL(url));
@@ -281,6 +342,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             abortCtrls.current.clear();
             inFlight.current.clear();
         };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // ── Analytics de ritmo — buffer + batch hacia /api/playback-events ──────
@@ -453,6 +515,12 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             return;
         }
 
+        // INV-15/16: load() es invocado por skip() y por load directo del visor.
+        // Cualquier avance pendiente del ciclo anterior debe cancelarse ANTES
+        // de cambiar tokens — si no, el setTimeout del ciclo viejo dispararía
+        // doAdvance que early-returnea por token, pero ya emitió el log.
+        cancelPendingAdvance('skip_or_load');
+
         const token = ++loadToken.current;
         setStatus('loading');
 
@@ -582,6 +650,13 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
     // ── PAUSE ─────────────────────────────────────────────────────────────────
     const pause = useCallback((): void => {
+        // INV-15: cancelar cualquier setTimeout(doAdvance) pendiente del último
+        // handleEnded. Sin esto, un avance agendado por floor seguiría corriendo
+        // 1.4s después del pause y dispararía el callback que early-returnea
+        // por statusRef !== 'playing' — pero ya emitió sentence_advanced log,
+        // creando observabilidad confusa. Además fuente del drift visual cuando
+        // BlockEngine.complete invocaba pb.pause con un advance ya agendado.
+        cancelPendingAdvance('pause');
         const p = activePlayer.current === 'A' ? audioRefA.current : audioRefB.current;
         p?.pause();
         setStatus('paused');
@@ -653,24 +728,33 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
     // ── HANDLE ENDED — transición gapless entre fragmentos ───────────────────
     //
-    // ⚠️ INVARIANTES 2, 7, 9 — protecciones que NO se pueden remover:
-    //   - INV-2: este callback NUNCA debe navegar a otro contentId. Sólo
-    //     debe llamar onSessionEnd() cuando termina la última frase; el
-    //     visor decide la UX (pantalla "Lectura Completada", sin navigate).
-    //   - INV-7: el avance al next sentence se posterga por `floorRemaining`
-    //     calculado vía estimateMinSentenceMs — ninguna frase visible avanza
-    //     en <900ms a 1x sin un guard explícito.
-    //   - INV-9: si el blob cacheado tenía duración inválida vs wordCount,
-    //     se invalida en `load.then(validateAudioDuration)` para que el
-    //     siguiente acceso haga re-fetch real al /api/tts.
+    // ⚠️ INVARIANTES 2, 7, 9, 13, 14, 15, 17 — protecciones críticas:
+    //   - INV-2: este callback NUNCA debe navegar a otro contentId.
+    //   - INV-7: el avance al next sentence se posterga por `floorRemaining`.
+    //   - INV-9: blob cacheado con duración imposible se invalida (cache+gapless).
+    //   - INV-13/14: setIdx(nextIdx) y log sentence_advanced viven DENTRO de
+    //     doAdvance — visual/progress no se commitean hasta que se cumple el
+    //     piso y los guards (token, status, unmount). Antes el log se emitía
+    //     prematuramente, dando observabilidad confusa.
+    //   - INV-15: el setTimeout y listener canplaythrough se trackean en refs
+    //     (pendingAdvanceTimerRef, etc.) para que pause/skip/block_complete
+    //     puedan cancelarlos.
+    //   - INV-17: dos eventos distintos: 'index_scheduled' (se agendó avance)
+    //     vs 'index_commit' (setIdx ejecutado).
     //
     // Ver docs/immersive-mode-invariants.md y los tests:
     //   utils/__tests__/immersiveTiming.test.js     (INV-7, 9)
     //   utils/__tests__/immersiveNavigation.test.js (INV-2)
+    //   hooks/__tests__/playbackStateMachine.test.js (INV-13/14/15/17 estructural)
     const handleEnded = useCallback(async (endedPlayer: 'A' | 'B'): Promise<void> => {
         // [RS-DEBUG]
         if (ctx.unmountedRef.current) return;
         if (statusRef.current !== 'playing') return;
+
+        // INV-15: si llegó un nuevo onEnded mientras había un advance previo
+        // pendiente (caso raro pero posible si el audio se hace 0ms o hay
+        // double-fire del element), descartar lo viejo.
+        cancelPendingAdvance('new_handleEnded');
 
         const sentences  = ctx.sentencesRef.current;
         const currentIdx = currentIdxRef.current;
@@ -708,39 +792,65 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         const wordCount    = currentText.trim().split(/\s+/).filter(Boolean).length;
         const wasCached    = audioCache.current.has(toChunkKey(currentIdx));
 
+        // ── INV-9 en path gapless: si el blob cacheado actual dio durationMs
+        // sospechosamente corto para wordCount, evictarlo para que el próximo
+        // acceso (skip back, reload, nueva sesión) haga re-fetch fresco. La
+        // validación en `load.then(audio_metadata)` solo cubría el primer play;
+        // en transiciones gapless el blob defectuoso quedaba cacheado forever.
+        if (wasCached && wordCount >= 3 && durationMs < 300) {
+            const key = toChunkKey(currentIdx);
+            if (!cacheInvalidatedKeysRef.current.has(key)) {
+                cacheInvalidatedKeysRef.current.add(key);
+                const url = audioCache.current.get(key);
+                if (url) {
+                    URL.revokeObjectURL(url);
+                    audioCache.current.delete(key);
+                }
+                log('audio_cache_invalidated', {
+                    index: currentIdx,
+                    key,
+                    durationMs,
+                    wordCount,
+                    text: currentText,
+                    reason: 'short_duration_on_gapless_end',
+                });
+            }
+        }
+
         if (nextEl?.src) {
             // B4: durationMs solo es válido si sentenceStartTimeRef fue seteado por play().
-            // Si es 0 (inicio de sesión sin play confirmado previo), omitir el campo para
-            // evitar registrar un número gigante (~timestamp actual) como duración real.
             const durationMsLogged = sentenceStartTimeRef.current > 0 ? durationMs : null;
             log('sentence_time', { index: currentIdx, durationMs: durationMsLogged, gapless: standbyReadyRef.current, speed: ctx.speedRef.current });
-            log('sentence_advanced', { from: currentIdx, to: nextIdx });
+            // INV-17: NO emitir 'sentence_advanced' aquí — esto es scheduling.
+            // El evento de commit se emite dentro de doAdvance (post setIdx).
 
             nextEl.playbackRate = ctx.speedRef.current;
 
-            // B2+B3: doAdvance encapsula setIdx + play() con tres guardas:
-            //   - capturedToken: aborta si llegó un skip() mientras esperábamos el buffer.
-            //   - unmountedRef: aborta si el componente se desmontó.
-            //   - statusRef: aborta si el usuario pausó durante la espera (R1).
-            // Sprint Floor: setIdx ahora vive DENTRO de doAdvance — el visual NO avanza
-            // hasta que el piso mínimo se cumpla. Esto fixea el bug "Dinah" → next-sentence
-            // en 182ms (cuando audio termina prematuro).
+            // doAdvance — único punto de commit del avance. Hace setIdx, log
+            // sentence_advanced/index_commit, reset de sentenceStartTime y play.
+            // Guards: capturedToken, unmounted, statusRef. Si cualquiera falla,
+            // NO commitea nada — visual, progreso y log quedan en currentIdx.
             const doAdvance = () => {
+                // Consumir el timer ref que disparó este callback (no quedar nulo
+                // si pause/skip llegaron primero — cancelPendingAdvance ya lo limpió).
+                pendingAdvanceTimerRef.current = null;
                 if (capturedToken !== loadToken.current) return;
                 if (ctx.unmountedRef.current) return;
                 if (statusRef.current !== 'playing') return;
 
+                // ── COMMIT visual + log ────────────────────────────────────
                 setIdx(nextIdx);
+                log('sentence_advanced', { from: currentIdx, to: nextIdx });
+                log('index_commit', { from: currentIdx, to: nextIdx, committedAt: 'doAdvance' });
+
                 // B4: timestamp de inicio real — después de delay y justo antes de play().
                 sentenceStartTimeRef.current = Date.now();
                 nextEl.play()
                     .then(() => {
                         if (capturedToken !== loadToken.current) return;
-                        // status sigue siendo 'playing' — sin transición visible.
                     })
                     .catch((e: DOMException) => {
                         if (capturedToken !== loadToken.current) return;
-                        // R2: AbortError ocurre cuando pause() interrumpe play() antes de que resuelva.
                         if (e.name === 'AbortError') return;
                         if (e.name === 'NotAllowedError') {
                             setStatus('blocked');
@@ -780,20 +890,48 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             }
             log('sentence_rhythm', { from: currentIdx, to: nextIdx, rawDelay, delayApplied: finalDelay, type: meta.type, tone: meta.tone, speed, floorMs: floorRemaining });
 
-            // ── Schedule advance ──────────────────────────────────────────
-            // Si floor > 80ms o standby ya listo: setTimeout con finalDelay.
-            // Si floor pequeño y standby NO listo: carrera canplaythrough vs fallback 80ms,
-            // luego respetar finalDelay como mínimo (no romper el rhythm original a 1x).
+            // INV-17: log de "scheduled" — NO confundir con commit. El commit
+            // sucede dentro de doAdvance si pasa los guards.
+            log('index_scheduled', {
+                from:           currentIdx,
+                to:             nextIdx,
+                reason:         floorRemaining > 0 ? 'floor' : (standbyReadyRef.current ? 'rhythm' : 'canplaythrough'),
+                floorRemaining,
+                rhythmMs,
+                finalDelay,
+            });
+
+            // ── INV-15: agendar avance con refs cancelables ───────────────
             if (standbyReadyRef.current || finalDelay > 80) {
-                setTimeout(doAdvance, finalDelay);
+                pendingAdvanceTimerRef.current = setTimeout(doAdvance, finalDelay);
             } else {
                 let triggered = false;
-                const fallback = setTimeout(() => {
-                    if (!triggered) { triggered = true; doAdvance(); }
+                pendingFallbackTimerRef.current = setTimeout(() => {
+                    if (!triggered) {
+                        triggered = true;
+                        pendingFallbackTimerRef.current = null;
+                        if (pendingCanplaythroughCleanupRef.current) {
+                            pendingCanplaythroughCleanupRef.current();
+                            pendingCanplaythroughCleanupRef.current = null;
+                        }
+                        doAdvance();
+                    }
                 }, Math.max(80, finalDelay));
-                nextEl.addEventListener('canplaythrough', () => {
-                    if (!triggered) { triggered = true; clearTimeout(fallback); doAdvance(); }
-                }, { once: true });
+                const cpListener = () => {
+                    if (!triggered) {
+                        triggered = true;
+                        if (pendingFallbackTimerRef.current !== null) {
+                            clearTimeout(pendingFallbackTimerRef.current);
+                            pendingFallbackTimerRef.current = null;
+                        }
+                        pendingCanplaythroughCleanupRef.current = null;
+                        doAdvance();
+                    }
+                };
+                nextEl.addEventListener('canplaythrough', cpListener, { once: true });
+                pendingCanplaythroughCleanupRef.current = () => {
+                    nextEl.removeEventListener('canplaythrough', cpListener);
+                };
             }
 
             // Recargar el player liberado con el siguiente-siguiente (async, no bloquea play)
@@ -816,12 +954,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             // Player en espera no tenía audio — fallback a load completo. Aplicar piso aquí también.
             const durationMsLogged = sentenceStartTimeRef.current > 0 ? durationMs : null;
             log('sentence_time', { index: currentIdx, durationMs: durationMsLogged, gapless: false, speed: ctx.speedRef.current });
-            log('sentence_advanced', { from: currentIdx, to: nextIdx });
+            // INV-17: NO logueamos sentence_advanced aquí. load(nextIdx) eventualmente
+            // llamará setIdx(nextIdx) y el commit log saldrá desde ahí.
 
             const goLoad = () => {
+                pendingAdvanceTimerRef.current = null;
                 if (capturedToken !== loadToken.current) return;
                 if (ctx.unmountedRef.current) return;
                 if (statusRef.current !== 'playing') return;
+                // load() llama internamente a setIdx — visual + progress se commitean ahí.
+                log('sentence_advanced', { from: currentIdx, to: nextIdx });
+                log('index_commit', { from: currentIdx, to: nextIdx, committedAt: 'fallback_load' });
                 load(nextIdx, true);
             };
 
@@ -838,7 +981,15 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     cached:          wasCached,
                     via:             'fallback_load',
                 });
-                setTimeout(goLoad, floorRemaining);
+                log('index_scheduled', {
+                    from:           currentIdx,
+                    to:             nextIdx,
+                    reason:         'floor_fallback_load',
+                    floorRemaining,
+                    rhythmMs:       0,
+                    finalDelay:     floorRemaining,
+                });
+                pendingAdvanceTimerRef.current = setTimeout(goLoad, floorRemaining);
             } else {
                 goLoad();
             }
@@ -876,6 +1027,8 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
     // ── RESET — borra todo el estado de audio (para transiciones de contenido) ─
     const reset = useCallback((): void => {
+        cancelPendingAdvance('content_reset');
+        cacheInvalidatedKeysRef.current.clear();
         loadToken.current++;
 
         audioCache.current.forEach(url => URL.revokeObjectURL(url));
