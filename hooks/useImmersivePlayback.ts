@@ -58,6 +58,8 @@ export type PlaybackEvent =
     | 'sentence_time'
     | 'sentence_rhythm'
     | 'sentence_skipped'
+    | 'sentence_floor_applied'  // PB_TIMING audit: el piso mínimo retrasó el avance
+    | 'audio_metadata'           // PB_TIMING audit: audio.duration / readyState al arrancar play
     | 'playback_paused'
     | 'session_completed'
     | 'load_cancelled'
@@ -160,6 +162,37 @@ function computeNarrativeDelay(meta: SentenceMeta): number {
 }
 
 /**
+ * Piso mínimo de duración para una oración visible. Defensa contra audio TTS
+ * truncado, blob cacheado defectuoso (network glitch en la primera fetch) u
+ * onEnded prematuro del audio element — los tres modos producían avance a la
+ * siguiente oración en <300ms para frases con texto visible mucho mayor.
+ *
+ * Reglas (a 1x speed):
+ *   - 1 palabra:       900 ms
+ *   - 2-4 palabras:   1400 ms
+ *   - 5-8 palabras:   2000 ms
+ *   - >8 palabras:    max(2000, words*250) ms
+ *   - Puntuación fuerte final (). ! ? ¿ ¡ " ' ` cierra paréntesis): +250 ms
+ *
+ * A velocidades > 1x el piso se escala inversamente, con un absoluto irreductible
+ * de 450 ms para evitar avances visualmente imposibles incluso a 2x.
+ */
+function estimateMinSentenceMs(sentence: string, speed: number = 1): number {
+    const text = (sentence ?? '').trim();
+    if (text.length === 0) return 600;
+    const words = text.split(/\s+/).filter(Boolean).length;
+    let base: number;
+    if (words <= 1) base = 900;
+    else if (words <= 4) base = 1400;
+    else if (words <= 8) base = 2000;
+    else base = Math.max(2000, words * 250);
+    // Strong punctuation/closing quote/paren at end → pausa extra para respiro
+    if (/[).!?¿¡"”'']$/u.test(text)) base += 250;
+    const adjustedForSpeed = speed > 1 ? Math.round(base / speed) : base;
+    return Math.max(450, adjustedForSpeed);
+}
+
+/**
  * Ventana de prefetch adaptada a la velocidad de red.
  * Usa la Network Information API (Chrome/Android) cuando está disponible.
  * Safari e iOS no implementan navigator.connection — el cast `as any` silencia
@@ -182,7 +215,7 @@ function getAdaptivePrefetchWindow(): number {
 function pbLog(event: PlaybackEvent, data?: Record<string, unknown>): void {
     const payload = { event, ts: Date.now(), ...data };
     // eventos frecuentes — nivel 'debug', nunca van al backend
-    if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused') {
+    if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused' || event === 'sentence_floor_applied' || event === 'audio_metadata') {
         console.debug('[PB]', payload);
     } else if (event === 'session_completed') {
         console.info('[PB]', payload);
@@ -484,7 +517,20 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             pActive.play()
                 .then(() => {
                     // Confirmacion. Status ya es 'playing'; solo loggeamos.
-                    log('play_start', { index, cached: audioCache.current.has(toChunkKey(index)) });
+                    const wasCached = audioCache.current.has(toChunkKey(index));
+                    log('play_start', { index, cached: wasCached });
+                    // PB_TIMING audit: emitir duración real del audio para diagnosticar
+                    // si onEnded prematuros vienen de un blob cacheado defectuoso o de
+                    // un audio element con readyState inconsistente. duration puede ser
+                    // NaN/Infinity si los metadatos aún no se decodificaron — capturamos
+                    // ambos casos como null para no romper el log.
+                    log('audio_metadata', {
+                        index,
+                        cached: wasCached,
+                        duration: Number.isFinite(pActive.duration) ? pActive.duration : null,
+                        readyState: pActive.readyState,
+                        textLen: ctx.sentencesRef.current[index]?.length ?? 0,
+                    });
                 })
                 .catch((e: DOMException) => {
                     if (token !== loadToken.current || ctx.unmountedRef.current) return;
@@ -631,6 +677,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         const nextEl   = nextSlot   === 'A' ? audioRefA.current : audioRefB.current;
         const freedEl  = endedPlayer === 'A' ? audioRefA.current : audioRefB.current;
 
+        // ── PB_TIMING: piso mínimo de duración visible ──────────────────────
+        // Defensa contra avance prematuro cuando audio.onended fire <300ms para una
+        // oración con muchas palabras. Si rawDuration < min, postergamos TODO el
+        // avance (visual + audio) hasta cumplir el piso. Sin esto, el visor saltaba
+        // de "Dinah era su gata" en 182ms (síntoma reportado por usuario).
+        const currentText  = ctx.sentencesRef.current[currentIdx] ?? '';
+        const minMs        = estimateMinSentenceMs(currentText, ctx.speedRef.current);
+        const floorRemaining = Math.max(0, minMs - durationMs);
+        const wordCount    = currentText.trim().split(/\s+/).filter(Boolean).length;
+        const wasCached    = audioCache.current.has(toChunkKey(currentIdx));
+
         if (nextEl?.src) {
             // B4: durationMs solo es válido si sentenceStartTimeRef fue seteado por play().
             // Si es 0 (inicio de sesión sin play confirmado previo), omitir el campo para
@@ -639,33 +696,31 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             log('sentence_time', { index: currentIdx, durationMs: durationMsLogged, gapless: standbyReadyRef.current, speed: ctx.speedRef.current });
             log('sentence_advanced', { from: currentIdx, to: nextIdx });
 
-            setIdx(nextIdx);
             nextEl.playbackRate = ctx.speedRef.current;
 
-            // B2+B3: doPlay encapsula la llamada a play() con tres guardas:
+            // B2+B3: doAdvance encapsula setIdx + play() con tres guardas:
             //   - capturedToken: aborta si llegó un skip() mientras esperábamos el buffer.
             //   - unmountedRef: aborta si el componente se desmontó.
-            //   - statusRef: aborta si el usuario pausó durante la espera del buffer (R1).
-            const doPlay = () => {
+            //   - statusRef: aborta si el usuario pausó durante la espera (R1).
+            // Sprint Floor: setIdx ahora vive DENTRO de doAdvance — el visual NO avanza
+            // hasta que el piso mínimo se cumpla. Esto fixea el bug "Dinah" → next-sentence
+            // en 182ms (cuando audio termina prematuro).
+            const doAdvance = () => {
                 if (capturedToken !== loadToken.current) return;
                 if (ctx.unmountedRef.current) return;
-                // R1: El usuario puede llamar pause() durante los 80ms de espera del fallback.
-                // Sin este check, doPlay reproduciría audio que el usuario quiso pausar.
                 if (statusRef.current !== 'playing') return;
 
-                // B4: timestamp de inicio real — después del delay narrativo y justo antes de play().
-                // Mover aquí (en lugar de junto a setIdx) evita que el delay infle durationMs.
+                setIdx(nextIdx);
+                // B4: timestamp de inicio real — después de delay y justo antes de play().
                 sentenceStartTimeRef.current = Date.now();
                 nextEl.play()
                     .then(() => {
                         if (capturedToken !== loadToken.current) return;
-                        // status sigue siendo 'playing' — sin transición visible para el usuario.
+                        // status sigue siendo 'playing' — sin transición visible.
                     })
                     .catch((e: DOMException) => {
                         if (capturedToken !== loadToken.current) return;
                         // R2: AbortError ocurre cuando pause() interrumpe play() antes de que resuelva.
-                        // Chrome emite esto cuando se llama pause() mientras play() está pendiente.
-                        // No es un error de playback — el usuario pausó intencionalmente. Salir limpio.
                         if (e.name === 'AbortError') return;
                         if (e.name === 'NotAllowedError') {
                             setStatus('blocked');
@@ -677,36 +732,47 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                         ctx.onPlayChange.current(false);
                     });
 
-                standbyReadyRef.current = false; // B2: consumido — resetear para el siguiente ciclo
+                standbyReadyRef.current = false;
             };
 
-            // B2: Si el standby ya alcanzó canplaythrough → delay narrativo controlado → play.
-            // Si no → esperar hasta 80ms sin delay adicional (sistema bajo carga → no acumular).
-            // El delay es cancelable por token (skip/load), statusRef (pause) y unmountedRef.
-            if (standbyReadyRef.current) {
-                const meta     = classifySentence(ctx.sentencesRef.current[currentIdx] ?? '');
-                const rawDelay = computeNarrativeDelay(meta);
-                // FT-4: bajar el umbral de anulación de 1.5 → 1.25 (el salto a "ágil" llega antes).
-                // En (1, 1.25): escalar inversamente con piso de 15ms (alineado al nuevo rango 20–120).
-                // En <= 1: delay crudo sin acelerar silencio.
-                const speed    = ctx.speedRef.current;
-                const delayMs  = speed >= 1.25 ? 0
-                               : speed > 1    ? Math.max(15, Math.round(rawDelay / speed))
-                               : rawDelay;
-                log('sentence_rhythm', { from: currentIdx, to: nextIdx, rawDelay, delayApplied: delayMs, type: meta.type, tone: meta.tone, speed });
-                setTimeout(() => {
-                    if (capturedToken !== loadToken.current) return;
-                    if (ctx.unmountedRef.current) return;
-                    if (statusRef.current !== 'playing') return;
-                    doPlay();
-                }, delayMs);
+            // ── Combinar rhythm + floor — el delay efectivo es el max de ambos ──
+            const meta     = classifySentence(currentText);
+            const rawDelay = computeNarrativeDelay(meta);
+            const speed    = ctx.speedRef.current;
+            const rhythmMs = speed >= 1.25 ? 0
+                           : speed > 1    ? Math.max(15, Math.round(rawDelay / speed))
+                           : rawDelay;
+            const finalDelay = Math.max(rhythmMs, floorRemaining);
+
+            if (floorRemaining > 0) {
+                log('sentence_floor_applied', {
+                    index:           currentIdx,
+                    text:            currentText,
+                    wordCount,
+                    charCount:       currentText.length,
+                    rawDurationMs:   durationMs,
+                    minMs,
+                    floorRemaining,
+                    finalDelay,
+                    cached:          wasCached,
+                    via:             'gapless',
+                });
+            }
+            log('sentence_rhythm', { from: currentIdx, to: nextIdx, rawDelay, delayApplied: finalDelay, type: meta.type, tone: meta.tone, speed, floorMs: floorRemaining });
+
+            // ── Schedule advance ──────────────────────────────────────────
+            // Si floor > 80ms o standby ya listo: setTimeout con finalDelay.
+            // Si floor pequeño y standby NO listo: carrera canplaythrough vs fallback 80ms,
+            // luego respetar finalDelay como mínimo (no romper el rhythm original a 1x).
+            if (standbyReadyRef.current || finalDelay > 80) {
+                setTimeout(doAdvance, finalDelay);
             } else {
-                let played = false;
+                let triggered = false;
                 const fallback = setTimeout(() => {
-                    if (!played) { played = true; doPlay(); }
-                }, 80);
+                    if (!triggered) { triggered = true; doAdvance(); }
+                }, Math.max(80, finalDelay));
                 nextEl.addEventListener('canplaythrough', () => {
-                    if (!played) { played = true; clearTimeout(fallback); doPlay(); }
+                    if (!triggered) { triggered = true; clearTimeout(fallback); doAdvance(); }
                 }, { once: true });
             }
 
@@ -727,11 +793,35 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             }
             prefetch(nextNextIdx + 1);
         } else {
-            // Player en espera no tenía audio — fallback a load completo.
+            // Player en espera no tenía audio — fallback a load completo. Aplicar piso aquí también.
             const durationMsLogged = sentenceStartTimeRef.current > 0 ? durationMs : null;
             log('sentence_time', { index: currentIdx, durationMs: durationMsLogged, gapless: false, speed: ctx.speedRef.current });
             log('sentence_advanced', { from: currentIdx, to: nextIdx });
-            load(nextIdx, true);
+
+            const goLoad = () => {
+                if (capturedToken !== loadToken.current) return;
+                if (ctx.unmountedRef.current) return;
+                if (statusRef.current !== 'playing') return;
+                load(nextIdx, true);
+            };
+
+            if (floorRemaining > 0) {
+                log('sentence_floor_applied', {
+                    index:           currentIdx,
+                    text:            currentText,
+                    wordCount,
+                    charCount:       currentText.length,
+                    rawDurationMs:   durationMs,
+                    minMs,
+                    floorRemaining,
+                    finalDelay:      floorRemaining,
+                    cached:          wasCached,
+                    via:             'fallback_load',
+                });
+                setTimeout(goLoad, floorRemaining);
+            } else {
+                goLoad();
+            }
         }
     }, [getAudioUrl, load, prefetch]);
 
