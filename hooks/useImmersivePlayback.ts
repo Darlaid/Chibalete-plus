@@ -838,10 +838,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 if (ctx.unmountedRef.current) return;
                 if (statusRef.current !== 'playing') return;
 
-                // ── COMMIT visual + log ────────────────────────────────────
+                // ── COMMIT visual + log (INV-17: index_commit ANTES de sentence_advanced) ──
                 setIdx(nextIdx);
-                log('sentence_advanced', { from: currentIdx, to: nextIdx });
                 log('index_commit', { from: currentIdx, to: nextIdx, committedAt: 'doAdvance' });
+                log('sentence_advanced', { from: currentIdx, to: nextIdx });
 
                 // B4: timestamp de inicio real — después de delay y justo antes de play().
                 sentenceStartTimeRef.current = Date.now();
@@ -963,8 +963,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 if (ctx.unmountedRef.current) return;
                 if (statusRef.current !== 'playing') return;
                 // load() llama internamente a setIdx — visual + progress se commitean ahí.
-                log('sentence_advanced', { from: currentIdx, to: nextIdx });
+                // INV-17: index_commit ANTES de sentence_advanced.
                 log('index_commit', { from: currentIdx, to: nextIdx, committedAt: 'fallback_load' });
+                log('sentence_advanced', { from: currentIdx, to: nextIdx });
                 load(nextIdx, true);
             };
 

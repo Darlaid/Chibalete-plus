@@ -79,6 +79,24 @@ ok('REGRESION GUARD: NO existe el patrón "log(sentence_advanced) ... nextEl.pla
    !cuerpoAntiguo,
    'el patrón antiguo emitía advanced ANTES del commit');
 
+// REGRESION GUARD: en ambos paths de commit (doAdvance y goLoad), index_commit
+// debe aparecer ANTES de sentence_advanced. El usuario reportó el orden inverso
+// como bug en smoke browser de commit b9385c3.
+const commitBlocks = src.match(/(setIdx\(nextIdx\)|load\(nextIdx,)[\s\S]{0,400}?(sentence_advanced|index_commit)[\s\S]{0,300}?(sentence_advanced|index_commit)/g) ?? [];
+let allOrdersOk = commitBlocks.length > 0;
+for (const block of commitBlocks) {
+    const iCommit   = block.indexOf("'index_commit'");
+    const iAdvanced = block.indexOf("'sentence_advanced'");
+    if (iCommit < 0 || iAdvanced < 0) continue;
+    if (iCommit > iAdvanced) {
+        allOrdersOk = false;
+        break;
+    }
+}
+ok('REGRESION GUARD: index_commit precede a sentence_advanced en TODOS los commit paths',
+   allOrdersOk,
+   'algún path emite sentence_advanced antes de index_commit');
+
 // ───────────────────────────────────────────────────────────────────────────
 // INV-15 — timer refs explícitos para cancellation
 // ───────────────────────────────────────────────────────────────────────────
