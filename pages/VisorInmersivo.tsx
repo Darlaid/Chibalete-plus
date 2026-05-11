@@ -143,6 +143,10 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const autoPlayAfterTransitionRef = useRef(false);
     // Guards the content-change reset from running on the initial mount.
     const isFirstContentRenderRef = useRef(true);
+    // Suprime el incremento de behavior.pauses en Leo memory cuando el pause viene del
+    // fin de sesión (BlockEngine.complete o onSessionEnd del audio), no de una acción
+    // del usuario. Lo setea cada path de fin-de-sesión antes de pb.pause / setSessionComplete.
+    const sessionCompletingRef = useRef(false);
 
     // Analytics — render-time refs stay fresh inside any closure ([] dep effects, callbacks).
     const analyticsUserIdRef = useRef(user?.id ?? 'guest');
@@ -174,7 +178,14 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         // lo que dispara un re-render y actualiza el alias `const currentIndex` abajo.
     };
     onSessionEndRef.current = () => {
-        triggerTransitionRef.current();
+        // Fin de sesión por audio: el último fragmento terminó. NO navegar a otro libro.
+        // Mostrar pantalla "Lectura Completada" (sessionComplete) — el usuario decide
+        // continuar (+5 min) o salir. El path manual al siguiente libro vive solo en el
+        // botón → del banner "Próximo" (a >=93% de progreso).
+        sessionCompletingRef.current = true;
+        setSessionComplete(true);
+        // Audio ya está en estado 'paused' (esta callback viene de handleEnded en el hook),
+        // por lo que NO se necesita pb.pause() aquí.
     };
     onPlayChangeRef.current = (playing: boolean) => {
         const engine = blockEngineRef.current!;
@@ -444,6 +455,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     useEffect(() => {
         const wasPrevPlaying = prevIsPlayingRef.current;
         prevIsPlayingRef.current = pb.isPlaying;
+        // Si el pause viene de fin-de-sesión (BlockEngine.complete o onSessionEnd),
+        // no es una pausa del usuario — no inflar behavior.pauses. Consumir el flag.
+        if (sessionCompletingRef.current) {
+            sessionCompletingRef.current = false;
+            return;
+        }
         if (!pb.isPlaying && wasPrevPlaying && !isTransitioningRef.current && !sessionComplete) {
             setLeoMemory(prev => ({
                 ...prev,
@@ -686,7 +703,13 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                     setTimeLeft(Math.ceil(event.remaining / 1000));
                     break;
                 case 'complete':
-                    triggerTransitionRef.current();
+                    // Block timer completó: NO navegar a otro libro. Mostrar pantalla
+                    // "Lectura Completada" — el usuario decide (+5 min recarga el bloque,
+                    // Salir vuelve atrás). El path manual al siguiente libro vive solo en
+                    // el botón → del banner "Próximo" (a >=93% de progreso).
+                    sessionCompletingRef.current = true;
+                    setSessionComplete(true);
+                    pb.pause();
                     break;
                 case 'pause':
                 case 'resume':
