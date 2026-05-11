@@ -1230,26 +1230,126 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         if (pb.audioRefB.current) pb.audioRefB.current.playbackRate = playbackSpeed;
     }, [playbackSpeed]);
 
-    // INV-13/17: visual_commit_ack — useLayoutEffect dispara SÍNCRONAMENTE post-render
-    // antes de pintar. Confirma que React reconciliated y el nuevo currentIndex está
-    // en el DOM. Es el último eslabón observacional entre setIdx (logical commit) y
-    // el píxel visible. Si el visor "duda" entre dos índices, este log revela exactamente
-    // cuándo se completa cada paso visual.
+    // INV-18 — ACTIVE SENTENCE CONTRACT (validador DOM real).
+    //
+    // Regla madre: durante playback debe existir EXACTAMENTE UNA frase con
+    // [data-active-sentence="true"] y su data-sentence-index DEBE coincidir
+    // con currentIndex. Si falla, el sistema está en drift — loguea y
+    // recomienda hardResync.
+    //
+    // useLayoutEffect dispara síncronamente post-render, antes del paint.
+    // No solo confirma que React reconcilió (visual_commit_ack del commit
+    // anterior), sino que el DOM realmente tiene la frase destacada.
     const lastAckedVisualIndexRef = useRef(-1);
     useLayoutEffect(() => {
-        if (currentIndex !== lastAckedVisualIndexRef.current && sentences.length > 1) {
+        if (sentences.length <= 1) return;
+        if (typeof document === 'undefined') return;
+
+        const activeEls = document.querySelectorAll('[data-active-sentence="true"]');
+        const count = activeEls.length;
+
+        // INV-18 contract checks
+        if (count === 0) {
+            immersiveLog('FATAL_MISMATCH', {
+                kind: 'active_sentence_missing',
+                contentId: content.id,
+                userId: user?.id,
+                currentIndex,
+                domCount: 0,
+            });
+            return;
+        }
+        if (count > 1) {
+            immersiveLog('FATAL_MISMATCH', {
+                kind: 'active_sentence_duplicate',
+                contentId: content.id,
+                userId: user?.id,
+                currentIndex,
+                domCount: count,
+            });
+            return;
+        }
+
+        const activeEl = activeEls[0] as HTMLElement;
+        const domIdxStr = activeEl.getAttribute('data-sentence-index');
+        const domIdx    = domIdxStr !== null ? parseInt(domIdxStr, 10) : NaN;
+
+        if (Number.isNaN(domIdx) || domIdx !== currentIndex) {
+            immersiveLog('FATAL_MISMATCH', {
+                kind: 'active_sentence_index_mismatch',
+                contentId: content.id,
+                userId: user?.id,
+                currentIndex,
+                domIdx,
+            });
+            return;
+        }
+
+        // Contract cumplido. Emitir visual_highlight_ack (DOM verificado) si el
+        // índice cambió desde el último ack — evita spam en re-renders.
+        if (currentIndex !== lastAckedVisualIndexRef.current) {
             const from = lastAckedVisualIndexRef.current;
             lastAckedVisualIndexRef.current = currentIndex;
             immersiveLog('CONTENT_LOADED', {
-                kind: 'visual_commit_ack',
+                kind: 'visual_highlight_ack',
                 contentId: content.id,
                 userId: user?.id,
                 from,
                 visualIndex: currentIndex,
                 committedAt: Date.now(),
+                domVerified: true,
             });
         }
     }, [currentIndex, sentences.length, content.id, user?.id]);
+
+    // INV-18 drift detector — corre cada 250ms durante playback. Si por alguna
+    // razón el DOM contract se rompe DESPUÉS del render (ej: removeEventListener
+    // mal manejado, terceros que tocan el DOM, race con HMR), detecta y loguea.
+    // En el spec del usuario: si falla 2 veces o dura más de 500ms, hardResync.
+    const driftStrikesRef = useRef(0);
+    useEffect(() => {
+        if (!pb.isPlaying || sentences.length <= 1) {
+            driftStrikesRef.current = 0;
+            return;
+        }
+        const id = setInterval(() => {
+            if (typeof document === 'undefined') return;
+            const activeEls = document.querySelectorAll('[data-active-sentence="true"]');
+            const count = activeEls.length;
+            const domIdx = count === 1
+                ? parseInt((activeEls[0] as HTMLElement).getAttribute('data-sentence-index') ?? '-1', 10)
+                : -1;
+            const isInDrift = count !== 1 || domIdx !== currentIndex;
+            if (isInDrift) {
+                driftStrikesRef.current++;
+                immersiveLog('FATAL_MISMATCH', {
+                    kind: 'drift_detected',
+                    contentId: content.id,
+                    userId: user?.id,
+                    currentIndex,
+                    domCount: count,
+                    domIdx,
+                    strikes: driftStrikesRef.current,
+                });
+                if (driftStrikesRef.current >= 2) {
+                    immersiveLog('FATAL_MISMATCH', {
+                        kind: 'drift_recovery_hard_resync',
+                        contentId: content.id,
+                        userId: user?.id,
+                        currentIndex,
+                    });
+                    // hardResync formal: skip al currentIndex re-carga audio fresh
+                    // y reset sentenceStartTime. Cancela timers pendientes vía cancelPendingAdvance.
+                    pb.skip(currentIndex);
+                    driftStrikesRef.current = 0;
+                }
+            } else if (driftStrikesRef.current > 0) {
+                driftStrikesRef.current = 0;
+            }
+        }, 250);
+        return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pb.isPlaying, sentences.length, currentIndex, content.id, user?.id]);
 
     // --- VISUAL ENGINE ---
     const [translateY, setTranslateY] = useState(0);

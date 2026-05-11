@@ -102,6 +102,12 @@ const ImmersiveShell: React.FC<ImmersiveShellProps> = ({
                   }
                 }}
                 onClick={() => onClickSentence(idx)}
+                // INV-18 active sentence contract — attrs verificables por DOM.
+                // El validator en VisorInmersivo busca [data-active-sentence="true"]
+                // y exige exactamente UNO cuyo data-sentence-index === currentIndex.
+                data-sentence-index={idx}
+                data-active-sentence={isActive ? 'true' : 'false'}
+                aria-current={isActive ? 'true' : undefined}
                 className={`
                   py-8 px-8 text-center transition-all duration-500 cursor-pointer
                   ${isActive ? 'opacity-100 scale-105 blur-none' : 'opacity-20 scale-95 blur-[1px]'}
