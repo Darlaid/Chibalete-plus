@@ -1,6 +1,30 @@
 # .trivyignore — P0.2 supresiones AUDITABLES de Trivy.
 # Formato: una CVE/AVD-ID por línea, SIEMPRE con comentario justificando
-# (motivo + responsable + fecha de revisión). Vacío a propósito en P0.
+# (motivo + responsable + fecha de revisión). Cada entrada debe poder
+# defenderse en una auditoría — no se silencia nada "a ciegas".
 #
 # Ejemplo (NO activo):
-# CVE-2024-XXXXX  # base node:* sin fix upstream; mitigado por non-root + readonly fs. rev:2026-06-30
+# CVE-2024-XXXXX  # base node:* sin fix upstream; mitigado por non-root. rev:2026-06-30
+
+# ── CVE-2026-44902 — OpenTelemetry Prometheus exporter crash (HIGH) ──────────
+# Misma vulnerabilidad que GHSA-q7rr-3cgh-j5r3, ya ignorada en osv-scanner.toml.
+# NO ALCANZABLE en Chibalete+: el PrometheusExporter de OpenTelemetry nunca se
+# inicializa (server/observability/otel.mjs solo usa OTLPTraceExporter; /metrics
+# se sirve con prom-client, paquete distinto). Fix = bump major del stack OTEL.
+# Evidencia completa: docs/V4-SECURITY-AUDIT.md §3.6 y §10.
+# resp:Release Security Reviewer  rev:2026-08-31
+CVE-2026-44902
+
+# ── AVD-DS-0002 — Dockerfile sin instrucción USER (HIGH misconfig) ───────────
+# Dockerfile.api y Dockerfile.front no declaran USER → los contenedores corren
+# como root. RIESGO ACEPTADO temporalmente: el fix non-root NO es drop-in —
+#   - chibalete_api: bind-mounts a dirs root del VPS (data, data-critical,
+#     uploads); un proceso non-root no podría escribir events.db ni uploads
+#     sin un chown coordinado del host (NO se toca el VPS en este sprint).
+#   - chibalete_front: nginx requeriría listen >1024 + reconfig del container
+#     chibalete_edge que le hace proxy.
+# Mitigación vigente: contenedores detrás del reverse-proxy chibalete_edge.
+# Migración a contenedores non-root = sprint de hardening dedicado.
+# Aceptado por el Release Security Reviewer.
+# resp:Release Security Reviewer  rev:2026-08-31
+AVD-DS-0002

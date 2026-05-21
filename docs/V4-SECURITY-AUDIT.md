@@ -233,6 +233,24 @@ Todos los inputs usados (`scan-type`, `scan-ref`, `image-ref`, `scanners`,
 `severity`, `ignore-unfixed`, `exit-code`, `trivyignores`) existen en
 `v0.36.0` — sin cambio de scope del scan.
 
+**Hallazgos del scan tras resolver la versión:** con la action ya resoluble,
+el primer run reveló que el step `Trivy filesystem` fallaba por findings
+reales (no por config de la action):
+
+| Finding | Severidad | Tratamiento |
+|---|---|---|
+| `CVE-2026-44902` ×3 — OTEL `auto-instrumentations-node` / `exporter-prometheus` / `sdk-node` | HIGH | Ignore en `.trivyignore`. Es el alias CVE de `GHSA-q7rr-3cgh-j5r3` — misma vuln no alcanzable ya ignorada en `osv-scanner.toml` (§10.3). |
+| `AVD-DS-0002` ×2 — `Dockerfile.api`, `Dockerfile.front` sin instrucción `USER` | HIGH (misconfig) | Riesgo aceptado documentado en `.trivyignore` + ticket de hardening (§10.7). |
+
+`.trivyignore` (antes vacío) ahora lleva esas 2 IDs con `motivo + responsable +
+rev:2026-08-31`. Verificado local con `Trivy v0.70.0`: `trivy fs` y
+`trivy config` → exit 0.
+
+> **No verificable localmente:** los steps `Trivy image` (api/front) construyen
+> y escanean las imágenes Docker; el Docker daemon de la workstation está caído
+> y no se toca el VPS. Corren con `ignore-unfixed: true` (CVEs de imagen base
+> sin fix no bloquean). Su resultado se confirma en el run de CI.
+
 ### 10.3 OSV-Scanner — 12 HIGH: 7 corregidas, 5 ignoradas con evidencia
 
 OSV-Scanner (DB propia, más amplia que `npm audit`) reportó **12 HIGH** que
@@ -299,11 +317,28 @@ ya allowlistea `docs/*.md` (la mención redactada de §9 no es un secreto vivo).
 
 | Job | Estado esperado | Bloqueante |
 |---|---|---|
-| `gitleaks-head` | 🟢 verde (HEAD limpio) | Sí |
+| `gitleaks-head` | 🟢 verde (HEAD limpio) — verificado local | Sí |
 | `gitleaks-history` | 🟡 reporta secreto histórico | No (`continue-on-error`) |
-| `osv-scanner` | 🟢 verde (7 fixed + 5 ignore auditado) | Sí |
-| `trivy` | 🟢 verde (action resoluble; depende de Docker build en runner) | Sí |
+| `osv-scanner` | 🟢 verde (7 fixed + 5 ignore auditado) — verificado local | Sí |
+| `trivy` | 🟢 `fs` + `config` verdes (verificado local); `image` api/front pendiente de confirmar en CI | Sí |
 
 → Workflow **verde** con un único warning no bloqueante y justificado
 (`gitleaks-history`). El cambio de `multer` afecta el artefacto congelado:
 se **propone `v4.0.2`** — no se crea sin autorización explícita.
+
+### 10.7 Ticket pendiente — contenedores non-root (`AVD-DS-0002`)
+
+`Dockerfile.api` y `Dockerfile.front` corren como `root`. El fix correcto
+(contenedores non-root) NO es drop-in y queda como **sprint de hardening
+dedicado**:
+
+- **`chibalete_api`:** un proceso non-root no puede escribir los bind-mounts
+  root del VPS (`data`, `data-critical`, `public/uploads`). Requiere un `chown`
+  coordinado del host — fuera del alcance de este sprint (no se toca el VPS).
+- **`chibalete_front`:** nginx non-root requiere `listen` >1024 + ajuste de
+  rutas pid/temp + reconfig del container `chibalete_edge` que le hace proxy.
+
+Mitigación vigente: ambos contenedores están detrás del reverse-proxy
+`chibalete_edge`. Riesgo aceptado y time-boxed (`rev:2026-08-31` en
+`.trivyignore`) por el Release Security Reviewer. Reabrir el finding al
+caducar la fecha de revisión.
