@@ -6,9 +6,16 @@ const http = require('http');
 // Configuration
 const HOST = 'localhost';
 const PORT = 3001;
-const ADMIN_SECRET = 'chibalete-secure-upload-2025';
+// ADMIN_SECRET must be provided via environment — never hardcode it here.
+// Run with:  ADMIN_SECRET=<value> node verify_pipeline.cjs
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
 
 const log = (msg) => console.log(`[VERIFY] ${msg}`);
+
+if (!ADMIN_SECRET) {
+    log('FAILURE: ADMIN_SECRET env var is required — run as: ADMIN_SECRET=<value> node verify_pipeline.cjs');
+    process.exit(1);
+}
 
 function request(method, path, body = null, isMultipart = false, boundary = null) {
     return new Promise((resolve, reject) => {

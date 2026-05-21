@@ -167,3 +167,44 @@ El operador SRE puede proceder con `V4-DEPLOY-RUNBOOK.md` sin restricciones de s
 - Lockfile regenerado tras este fix.
 - Tests post-fix verdes (ver §8 abajo).
 - Build post-fix OK.
+
+## 9. Hallazgo adicional — `ADMIN_SECRET` hardcodeado (freeze v4.0.1)
+
+Durante la auditoría de seguridad previa al freeze oficial v4 se detectó un
+secreto hardcodeado **fuera** del alcance de `npm audit`:
+
+| Campo | Valor |
+|---|---|
+| Archivo | `verify_pipeline.cjs:9` |
+| Patrón | `const ADMIN_SECRET = 'chibalete-secure-upload-2025';` |
+| Naturaleza | Harness de verificación **local** (`localhost:3001`), no se empaqueta a producción (los deploys solo envían `server/`, `utils/`, `package.json`, `package-lock.json`). |
+| ¿Es el secreto productivo actual? | **No** — el literal no coincide con ningún `.env`. Pudo haberlo sido en el pasado. |
+| Estado en historial | El literal aparece en commits previos del repo. |
+
+### 9.1 Remediación aplicada (commit del freeze v4.0.1)
+
+`verify_pipeline.cjs` ahora lee el secreto de `process.env.ADMIN_SECRET`
+con fail-fast si la variable no está presente. Sin literal en código.
+
+```js
+const ADMIN_SECRET = process.env.ADMIN_SECRET; // sin valor hardcodeado
+```
+
+Uso: `ADMIN_SECRET=<value> node verify_pipeline.cjs`.
+
+### 9.2 Acción obligatoria pendiente (operador / VPS)
+
+Como no se puede descartar que `chibalete-secure-upload-2025` haya sido un
+`ADMIN_SECRET` productivo, **debe rotarse el `ADMIN_SECRET` en el `.env` de
+producción del VPS**. La remediación del archivo elimina el literal del
+código a futuro, pero **no invalida** el valor ya expuesto en el historial
+git: solo la rotación lo hace inerte.
+
+- [ ] Rotar `ADMIN_SECRET` en `/var/www/chibalete/.env` (o equivalente) del VPS.
+- [ ] Reiniciar `chibalete_api_1` / `chibalete_api_2` para tomar el nuevo valor.
+- [ ] (Opcional, decisión separada) Evaluar scrub del historial git — implica
+      reescritura de commits + force-push; no se ejecuta en este freeze.
+
+El freeze v4.0.1 **no** queda bloqueado por la rotación: el código ya no
+contiene el secreto. La rotación es una tarea operacional independiente y
+de alta prioridad.
