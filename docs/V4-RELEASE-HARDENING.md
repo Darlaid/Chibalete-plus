@@ -176,6 +176,28 @@ Detalle completo en `docs/V4-SECURITY-AUDIT.md`. Resumen:
 - Seed local admin NO introduce bypass (auth global rechaza WRONG_PASSWORD — verificado en sprint anterior).
 - Audit emitter (Fase 3B) NO acepta texto libre del mediador → cero PII en events.db (verificado por test §7 con 30 asserts).
 
+### CI security pipeline (`security.yml`) — post-freeze v4.0.1
+
+El workflow GitHub Actions de seguridad falló tras el freeze. Remediado en
+commit `ci(security)` (sin reescritura de historia, sin force-push):
+
+- **Trivy:** `aquasecurity/trivy-action@0.28.0` → `@v0.36.0` (el repo retageó
+  a esquema `vX.Y.Z`; `0.28.0` dejó de existir).
+- **OSV-Scanner:** detectó **7 HIGH en `multer@1.4.5-lts.2`** (EOL) que
+  `npm audit` NO surfaceaba. `multer` es alcanzable (`/api/upload`,
+  `/api/leo/ingest`) → **upgrade real `multer` → `^2.1.1`** (drop-in, cero
+  cambios de código). Las 5 HIGH restantes (OTEL ×3 + uuid ×2) son no
+  alcanzables → ignore auditable en `osv-scanner.toml` con `ignoreUntil`.
+- **Gitleaks:** separado en `gitleaks-head` (bloqueante, árbol de trabajo) y
+  `gitleaks-history` (`continue-on-error`, reporta el `ADMIN_SECRET`
+  histórico ya removido de HEAD).
+
+Detalle completo: `docs/V4-SECURITY-AUDIT.md §10`.
+
+> ⚠️ El upgrade de `multer` cambia `package.json` + `package-lock.json` →
+> altera el artefacto congelado v4.0.1. Se **propone tag `v4.0.2`** y rebuild
+> de la imagen API. NO se crea el tag sin autorización explícita.
+
 ## 5. SQLite / WAL status
 
 | DB | Path | WAL | busy_timeout |

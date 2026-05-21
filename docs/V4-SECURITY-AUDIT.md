@@ -176,7 +176,7 @@ secreto hardcodeado **fuera** del alcance de `npm audit`:
 | Campo | Valor |
 |---|---|
 | Archivo | `verify_pipeline.cjs:9` |
-| Patrón | `const ADMIN_SECRET = 'chibalete-secure-upload-2025';` |
+| Patrón | Asignación de `ADMIN_SECRET` a un literal hardcodeado en el código (valor redactado: `chibalete-secure-upload-****`) |
 | Naturaleza | Harness de verificación **local** (`localhost:3001`), no se empaqueta a producción (los deploys solo envían `server/`, `utils/`, `package.json`, `package-lock.json`). |
 | ¿Es el secreto productivo actual? | **No** — el literal no coincide con ningún `.env`. Pudo haberlo sido en el pasado. |
 | Estado en historial | El literal aparece en commits previos del repo. |
@@ -194,9 +194,9 @@ Uso: `ADMIN_SECRET=<value> node verify_pipeline.cjs`.
 
 ### 9.2 Acción obligatoria pendiente (operador / VPS)
 
-Como no se puede descartar que `chibalete-secure-upload-2025` haya sido un
-`ADMIN_SECRET` productivo, **debe rotarse el `ADMIN_SECRET` en el `.env` de
-producción del VPS**. La remediación del archivo elimina el literal del
+Como no se puede descartar que ese literal (redactado `chibalete-secure-upload-****`)
+haya sido un `ADMIN_SECRET` productivo, **debe rotarse el `ADMIN_SECRET` en el
+`.env` de producción del VPS**. La remediación del archivo elimina el literal del
 código a futuro, pero **no invalida** el valor ya expuesto en el historial
 git: solo la rotación lo hace inerte.
 
@@ -208,3 +208,102 @@ git: solo la rotación lo hace inerte.
 El freeze v4.0.1 **no** queda bloqueado por la rotación: el código ya no
 contiene el secreto. La rotación es una tarea operacional independiente y
 de alta prioridad.
+
+## 10. CI Security Pipeline (`security.yml`) — falla y remediación
+
+Tras el freeze v4.0.1, el workflow `.github/workflows/security.yml` falló en
+sus 3 jobs. Análisis y corrección (commit `ci(security)` sobre
+`sprint-022/operational-stack`, sin reescritura de historia ni force-push):
+
+### 10.1 Qué fallaba
+
+| Job | Causa raíz | Tipo |
+|---|---|---|
+| `trivy` | `aquasecurity/trivy-action@0.28.0` no resoluble | Configuración (versión) |
+| `osv-scanner` | 12 vulnerabilidades HIGH reales en `package-lock.json`; `osv-scanner.toml` sin ignores | Vulnerabilidad real + config |
+| `gitleaks` | Secreto histórico (`ADMIN_SECRET`) en commits previos detectado por el scan de historial | Hallazgo histórico real |
+
+### 10.2 Trivy — fix de versión
+
+`aquasecurity/trivy-action` migró su esquema de tags de `0.X.0` a `v0.X.0`
+(retag masivo, 2026-03-20). El tag `0.28.0` dejó de existir. Releases válidas
+actuales: `v0.29.0`…`v0.36.0`. Fix: las 4 referencias pasan a
+`aquasecurity/trivy-action@v0.36.0` (última estable verificada, 2026-04-22).
+Todos los inputs usados (`scan-type`, `scan-ref`, `image-ref`, `scanners`,
+`severity`, `ignore-unfixed`, `exit-code`, `trivyignores`) existen en
+`v0.36.0` — sin cambio de scope del scan.
+
+### 10.3 OSV-Scanner — 12 HIGH: 7 corregidas, 5 ignoradas con evidencia
+
+OSV-Scanner (DB propia, más amplia que `npm audit`) reportó **12 HIGH** que
+`npm audit` no surfaceaba — argumento a favor de mantener ambos en el pipeline.
+
+**multer — fix REAL (no ignore):**
+
+`multer@1.4.5-lts.2` (EOL) acumulaba **7 advisories HIGH**:
+`GHSA-44fp-w29j-9vj5`, `GHSA-4pg4-qvpc-4q3h`, `GHSA-5528-5vmv-3xc2`,
+`GHSA-fjgf-rc76-4x9p`, `GHSA-g5hg-p3ph-g8qg`, `GHSA-v52c-386h-88mc`,
+`GHSA-xf7r-hgr6-v32p` (DoS / crash de proceso por multipart malformado).
+
+- **Alcanzable:** sí — `multer` parsea uploads en `/api/upload` (admin-gated)
+  y en `/api/leo/ingest` (`requireAuth` — cualquier usuario autenticado,
+  incluido un `lector`). DoS autenticado real.
+- **Decisión:** **upgrade `multer ^1.4.5-lts.1` → `^2.1.1`.** El uso es API
+  100 % estándar (`diskStorage`, `fileFilter`, `.single('file')`,
+  `MulterError.code`) → migración drop-in, **cero cambios de código**.
+- **Resultado:** las 7 HIGH eliminadas. `multer@2.1.1` + `busboy@1.6.0`.
+- **Impacto release:** cambia `package.json` + `package-lock.json` → requiere
+  rebuild de la imagen API y propone tag **`v4.0.2`** (ver §10.6).
+
+**OTEL + uuid — ignores AUDITABLES (no alcanzables):**
+
+Las 5 HIGH restantes se ignoran en `osv-scanner.toml` con `reason` +
+`ignoreUntil = 2026-08-31` (el ignore **auto-caduca** y vuelve a fallar el CI
+si no se resolvió):
+
+| Advisory | Paquetes | Por qué no alcanzable |
+|---|---|---|
+| `GHSA-q7rr-3cgh-j5r3` (×3) | `@opentelemetry/{auto-instrumentations-node,exporter-prometheus,sdk-node}` | `PrometheusExporter` de OTEL nunca se inicializa; `/metrics` usa `prom-client`. Ver §3.6. Fix = bump major OTEL → sprint dedicado. |
+| `GHSA-w5hq-g745-h8pq` (×2) | `uuid` 9.0.1 (transitiva vía gaxios/OTEL-gcp) + 8.3.2 (dev) | Cero imports directos de `uuid` en Chibalete+; el sink vulnerable (v3/v5/v6 con `buf`) no se invoca. Override a `uuid@11` rompería gaxios. |
+
+Verificado local con `osv-scanner v2.3.8`: **`No issues found`, exit 0.**
+
+### 10.4 Gitleaks — política HEAD bloqueante / historial reporte
+
+El job único se separa en dos, con política balanceada (no se desactiva
+gitleaks; el historial NO se reescribe en este sprint):
+
+- **`gitleaks-head`** — `gitleaks dir .` sobre el árbol de trabajo.
+  **BLOQUEANTE.** Garantiza que HEAD nunca contiene un secreto activo.
+- **`gitleaks-history`** — `gitleaks detect` sobre el historial completo.
+  `continue-on-error: true` → **reporta** el hallazgo histórico sin bloquear
+  el release.
+
+Esto es correcto porque el secreto (`ADMIN_SECRET`, ver §9) **ya no está en
+HEAD** (`verify_pipeline.cjs` lee `process.env` desde v4.0.1) y `.gitleaks.toml`
+ya allowlistea `docs/*.md` (la mención redactada de §9 no es un secreto vivo).
+
+### 10.5 ADMIN_SECRET — estado del historial
+
+- **HEAD:** limpio. El literal fue removido en v4.0.1 (§9.1).
+- **Historial:** el literal persiste en commits previos (`f7f0c5c`,
+  `2a2da85`, `967a4be`, `e75100d`, …). `gitleaks-history` lo reporta.
+- **Rotación VPS:** **PENDIENTE** — acción operacional obligatoria (§9.2).
+  La rotación, no el borrado de evidencia, es lo que neutraliza el riesgo.
+- **History scrub:** queda como **sprint futuro dedicado** (`git filter-repo`
+  + force-push coordinado). NO se ejecuta aquí: v4.0.1 ya está congelada y
+  reescribir historia es operación mayor que rompe la reproducibilidad del
+  tag. Prioridad: `rotación > scrub`.
+
+### 10.6 Estado final del pipeline
+
+| Job | Estado esperado | Bloqueante |
+|---|---|---|
+| `gitleaks-head` | 🟢 verde (HEAD limpio) | Sí |
+| `gitleaks-history` | 🟡 reporta secreto histórico | No (`continue-on-error`) |
+| `osv-scanner` | 🟢 verde (7 fixed + 5 ignore auditado) | Sí |
+| `trivy` | 🟢 verde (action resoluble; depende de Docker build en runner) | Sí |
+
+→ Workflow **verde** con un único warning no bloqueante y justificado
+(`gitleaks-history`). El cambio de `multer` afecta el artefacto congelado:
+se **propone `v4.0.2`** — no se crea sin autorización explícita.

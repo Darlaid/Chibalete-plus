@@ -1,11 +1,37 @@
 # osv-scanner.toml — P0.2 ignores AUDITABLES (no silenciar a ciegas).
-# Cada [[IgnoredVulns]] DEBE tener: id real, reason justificada y reviewDate.
-# Vacío a propósito: el objetivo P0 es que protobufjs/firebase/vite caigan
-# en FAIL hasta resolverlos (override de npm o bump). NO agregar ignores
-# sin causa documentada y fecha de revisión.
+# Cada [[IgnoredVulns]] DEBE tener: id real, reason justificada e ignoreUntil.
+# `ignoreUntil` es una fecha TOML: pasada esa fecha osv-scanner DEJA de honrar
+# el ignore y la vuln vuelve a FALLAR el CI — el ignore caduca solo y fuerza
+# revisión. No es un silenciado permanente.
+#
+# DISCIPLINA: solo se ignora lo NO ALCANZABLE en producción o lo transitivo
+# sin path de explotación, con evidencia. Una vulnerabilidad real y alcanzable
+# NUNCA se ignora — se corrige. Ejemplos de fix real, no ignore:
+#   - protobufjs CRITICAL (objetivo P0 original) → resuelto por overrides npm
+#     (docs/V4-SECURITY-AUDIT.md §2).
+#   - multer 1.4.5-lts.2 (7 HIGH, alcanzable vía /api/upload y /api/leo/ingest)
+#     → upgrade a multer 2.1.1 (docs/V4-SECURITY-AUDIT.md §10).
 
-# Ejemplo de formato (NO activo):
-# [[IgnoredVulns]]
-# id = "GHSA-xxxx-xxxx-xxxx"
-# reason = "No alcanzable: el sink vulnerable no se invoca desde Chibalete+. Mitigado por X."
-# reviewDate = "2026-06-30T00:00:00Z"
+# ── GHSA-q7rr-3cgh-j5r3 — OpenTelemetry Prometheus exporter crash (HIGH 7.5) ─
+# Afecta @opentelemetry/{auto-instrumentations-node,exporter-prometheus,sdk-node}.
+# NO ALCANZABLE: Chibalete+ sirve /metrics con prom-client (paquete distinto),
+# y server/observability/otel.mjs solo inicializa OTLPTraceExporter — el
+# PrometheusExporter de OpenTelemetry nunca se carga ni se instancia.
+# Fix requiere bump MAJOR del stack OTEL (0.57 → 0.21x) → sprint dedicado.
+# Evidencia completa: docs/V4-SECURITY-AUDIT.md §3.6.
+[[IgnoredVulns]]
+id = "GHSA-q7rr-3cgh-j5r3"
+reason = "No alcanzable: el PrometheusExporter de OpenTelemetry nunca se inicializa (otel.mjs solo usa OTLPTraceExporter; /metrics se sirve con prom-client, paquete distinto). Fix = bump major del stack OTEL, pendiente sprint dedicado. Evidencia: docs/V4-SECURITY-AUDIT.md §3.6."
+ignoreUntil = 2026-08-31
+
+# ── GHSA-w5hq-g745-h8pq — uuid: buffer bounds check en v3/v5/v6 (HIGH 7.5) ───
+# uuid NO es dependencia directa de Chibalete+ (cero imports en server/ y
+# services/). Llega transitiva: uuid@9.0.1 vía gaxios → @opentelemetry/
+# resource-detector-gcp, y uuid@8.3.2 solo en cadena dev. El sink vulnerable
+# es uuid.v3/v5/v6 invocado con argumento `buf` — Chibalete+ no llama uuid en
+# absoluto, así que ese path no se ejecuta. Override a uuid@11 rompería gaxios
+# (uuid 11 es ESM-only, major). Revisar cuando OTEL/gaxios actualicen uuid.
+[[IgnoredVulns]]
+id = "GHSA-w5hq-g745-h8pq"
+reason = "No alcanzable: uuid es dependencia transitiva (gaxios/OTEL-gcp en prod, cadena dev), con cero imports directos en Chibalete+; el path vulnerable (v3/v5/v6 con buf) no se invoca. Forzar uuid@11 por override rompería gaxios (ESM major). Revisar cuando OTEL/gaxios bumpen uuid."
+ignoreUntil = 2026-08-31

@@ -27,6 +27,14 @@ id = "chibalete-admin-secret"
 description = "ADMIN_SECRET asignado a un literal en código/config"
 regex = '''(?i)ADMIN_SECRET\s*[:=]\s*['"][^'"\n]{8,}['"]'''
 keywords = ["ADMIN_SECRET"]
+# Falso positivo SCOPED a esta regla: scripts de deploy que LEEN ADMIN_SECRET
+# de .env en runtime con el idioma `grep -E '^ADMIN_SECRET=' .env | sed ...`.
+# No es un secreto hardcodeado — es extracción de variable de entorno.
+# Afecta scripts/deploy-backend.sh y scripts/rollback-drill.sh.
+[rules.allowlist]
+description = "FP: idioma grep/sed que extrae ADMIN_SECRET de .env (no es hardcode)"
+regexTarget = "line"
+regexes = ['''grep -E .\^ADMIN_SECRET=''']
 
 # ── Allowlist RAZONADA (cada entrada justificada; sin comodines amplios) ─────
 [allowlist]
