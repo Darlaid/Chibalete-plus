@@ -19,8 +19,13 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --prefer-offline
 
-# Strip build tools after install to reduce image size
-RUN apk del python3 make g++
+# Strip build tooling after install: build deps + el CLI de npm.
+# El contenedor corre `node server/server.js` y NUNCA invoca npm en runtime
+# (verificado: sin spawn de npm en server/). Eliminar el npm bundled saca sus
+# dependencias vulnerables (cross-spawn / glob / minimatch / tar) del
+# filesystem de la imagen y reduce la superficie de ataque.
+RUN apk del python3 make g++ && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Copy backend source and migration scripts
 COPY server/ ./server/

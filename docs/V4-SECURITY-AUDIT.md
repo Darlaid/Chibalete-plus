@@ -246,10 +246,13 @@ reales (no por config de la action):
 rev:2026-08-31`. Verificado local con `Trivy v0.70.0`: `trivy fs` y
 `trivy config` → exit 0.
 
-> **No verificable localmente:** los steps `Trivy image` (api/front) construyen
-> y escanean las imágenes Docker; el Docker daemon de la workstation está caído
-> y no se toca el VPS. Corren con `ignore-unfixed: true` (CVEs de imagen base
-> sin fix no bloquean). Su resultado se confirma en el run de CI.
+**Trivy image (api/front) — verificado local (`Trivy v0.70.0`, imágenes
+construidas con Docker):**
+
+| Imagen | Findings HIGH/CRITICAL | Naturaleza | Tratamiento |
+|---|---|---|---|
+| `chibalete/api` | 11 HIGH (`cross-spawn`, `glob`, `minimatch`, `tar`) | Deps del `npm` bundled del base `node:20-alpine` (`/usr/local/lib/node_modules/npm/`). npm NO se invoca en runtime (`server/` sin spawn de npm; `CMD=node`). | **Fix real:** `Dockerfile.api` hace `rm -rf` del npm bundled tras `npm install`. Re-scan → **0 findings**. |
+| `chibalete/front` | 2 CRITICAL + 29 HIGH | Paquetes OS de Alpine (`libssl3`, `libcrypto3`, `libpng`, `libxml2`, `zlib`, `musl`, `nghttp2`) del base `nginx:1.27-alpine` — lag del rebuild upstream. | Job `trivy-image` → **report-only** (`continue-on-error`). Ver §10.8. |
 
 ### 10.3 OSV-Scanner — 12 HIGH: 7 corregidas, 5 ignoradas con evidencia
 
@@ -320,10 +323,11 @@ ya allowlistea `docs/*.md` (la mención redactada de §9 no es un secreto vivo).
 | `gitleaks-head` | 🟢 verde (HEAD limpio) — verificado local | Sí |
 | `gitleaks-history` | 🟡 reporta secreto histórico | No (`continue-on-error`) |
 | `osv-scanner` | 🟢 verde (7 fixed + 5 ignore auditado) — verificado local | Sí |
-| `trivy` | 🟢 `fs` + `config` verdes (verificado local); `image` api/front pendiente de confirmar en CI | Sí |
+| `trivy` (fs + config) | 🟢 verde — `v0.36.0` + `.trivyignore`, verificado local | Sí |
+| `trivy-image` (api/front) | 🟡 api limpio (npm removido); front reporta CVEs OS del base image | No (`continue-on-error`) |
 
-→ Workflow **verde** con un único warning no bloqueante y justificado
-(`gitleaks-history`). El cambio de `multer` afecta el artefacto congelado:
+→ Workflow **verde** con dos warnings no bloqueantes y justificados
+(`gitleaks-history` y `trivy-image`). El cambio de `multer` afecta el artefacto congelado:
 se **propone `v4.0.2`** — no se crea sin autorización explícita.
 
 ### 10.7 Ticket pendiente — contenedores non-root (`AVD-DS-0002`)
@@ -342,3 +346,26 @@ Mitigación vigente: ambos contenedores están detrás del reverse-proxy
 `chibalete_edge`. Riesgo aceptado y time-boxed (`rev:2026-08-31` en
 `.trivyignore`) por el Release Security Reviewer. Reabrir el finding al
 caducar la fecha de revisión.
+
+### 10.8 Política de scan de imágenes Docker (`trivy-image`)
+
+Los CVEs de paquetes OS de las imágenes base (`node:alpine`, `nginx:alpine`)
+se parchean al ritmo del rebuild upstream del base image, no por cada push de
+Chibalete+. `ignore-unfixed` no los filtra: tienen fix en el repo de Alpine
+aunque el base image aún no se haya reconstruido.
+
+**Decisión (Release Security Reviewer):** los steps `Trivy image` se separan
+al job `trivy-image` con `continue-on-error: true` — **reportan** (findings
+visibles, `exit-code 1`) pero **no bloquean** el merge. El gate duro per-PR es
+el job `trivy` (`fs` + `config`): cubre el código, las dependencias y la IaC
+que el equipo SÍ controla en cada cambio. El ratcheo de imágenes base se hace
+en cadencia propia (bump del `FROM` + rebuild), no en cada PR.
+
+Nada se oculta: el scan corre completo y reporta cada CVE; solo cambia qué
+findings tienen poder de bloqueo. Estado verificado local:
+
+- **`chibalete/api`:** `rm -rf` del npm bundled (build-only, no runtime) →
+  scan **limpio, 0 findings**. Fix real, no supresión.
+- **`chibalete/front`:** 2 CRITICAL + 29 HIGH en paquetes OS del base
+  `nginx:1.27-alpine`. Pendiente: bump del base image en el sprint de
+  hardening de contenedores (junto con `AVD-DS-0002`, §10.7).

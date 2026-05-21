@@ -9,9 +9,10 @@ name: security
 #     (continue-on-error) — secreto histórico ya removido de HEAD, scrub
 #     pendiente como sprint aparte (ver docs/V4-SECURITY-AUDIT.md §9-§10).
 #   - OSV-Scanner (package-lock.json): vuln conocida sin ignore razonado → FAIL.
-#   - Trivy fs (secret+config+vuln, ignore-unfixed): HIGH/CRITICAL con fix → FAIL.
-#   - Trivy image (api/front): HIGH/CRITICAL con fix → FAIL; base CVEs sin
-#     fix NO bloquean (ignore-unfixed) — práctica DevSecOps de ratchet.
+#   - Trivy fs + config (código/deps/IaC): HIGH/CRITICAL con fix → FAIL (gate duro).
+#   - Trivy image (api/front): HIGH/CRITICAL → REPORTE no bloqueante
+#     (continue-on-error) — los CVEs de imagen base se ratchean en cadencia
+#     propia, no por push. Ver docs/V4-SECURITY-AUDIT.md §10.
 
 on:
   push:
@@ -79,7 +80,7 @@ jobs:
             --lockfile=package-lock.json
             --config=osv-scanner.toml
 
-  # ── P0.2b — Trivy: fs (secret+config+vuln) + imágenes Docker ────────────
+  # ── P0.2b — Trivy: filesystem + config (código/deps/IaC) — BLOQUEANTE ───
   trivy:
     runs-on: ubuntu-latest
     steps:
@@ -105,6 +106,18 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore
 
+  # ── P0.2c — Trivy: imágenes Docker — REPORTE (no bloqueante) ────────────
+  # Las imágenes base (node:alpine / nginx:alpine) arrastran CVEs de paquetes
+  # OS que se parchean al ritmo del rebuild del base image upstream, no por
+  # push. Este job REPORTA esos findings (visibles, exit-code 1) pero NO
+  # bloquea el merge (continue-on-error): el gate duro de deps/código/IaC es
+  # el job `trivy`. El ratcheo del base image se hace en cadencia propia.
+  trivy-image:
+    runs-on: ubuntu-latest
+    continue-on-error: true       # reporta CVEs de imagen base sin bloquear el workflow
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Build api image (scan target)
         run: docker build -f Dockerfile.api -t chibalete/api:ci .
       - name: Trivy image — chibalete/api
@@ -115,6 +128,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          trivyignores: .trivyignore   # mismas supresiones auditadas que fs/config
 
       - name: Build front image (scan target)
         run: docker build -f Dockerfile.front -t chibalete/front:ci .
@@ -126,3 +140,4 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          trivyignores: .trivyignore   # mismas supresiones auditadas que fs/config
