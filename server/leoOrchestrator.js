@@ -28,6 +28,17 @@ import { resolveLeoState, recordInteraction } from './leoMemoryService.js';
 import { getLeoICDLISnapshot, resolveLeoPedagogicalAdjustment } from './leoICDLIBridge.js';
 import { buildLeoEvidenceEntry, persistLeoEvidence } from './leoEvidenceService.js';
 import { resolveSequenceContext, commitSequenceState, buildSequencePromptSection } from './leoSequenceService.js';
+// Fase 2A LEC — emisor de eventos longitudinales Leo → events.db.
+// Gated por LEO_EVENTS_BACKBONE_ENABLED (default OFF). Cada función es
+// fire-and-forget defensiva: nunca throw, nunca bloquea, costo cero con
+// flag OFF. Sin cambios sobre el flujo Leo actual hasta activar el flag.
+import {
+    emitInteractionStarted,
+    emitInteractionCompleted,
+    emitEvidenceRecorded,
+    emitMemoryUpdated,
+} from './leoBackboneEmitter.mjs';
+import { ulid } from './ulid.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -282,6 +293,22 @@ export async function dispatchInteraction(req) {
     });
     enrichedReq.sequenceContext = sequenceContext;
 
+    // Fase 2A LEC — interactionId estable correlaciona started/completed/evidence
+    // y queda como sessionId de los 4 events emitidos. Si el emisor está OFF
+    // (default), el ULID se genera igual pero ningún call llega a events.db.
+    const interactionId = ulid();
+    const interactionStartedAt = Date.now();
+
+    // Emit leo_interaction_started (fire-and-forget, defensivo, no-op si flag OFF).
+    try {
+        emitInteractionStarted({
+            userId:    req.userId,
+            sessionId: interactionId,
+            surface:   req.surface,
+            contentId: req.contentId,
+        });
+    } catch { /* nunca bloquea Leo */ }
+
     try {
         let result;
         switch (enrichedReq.surface) {
@@ -311,6 +338,19 @@ export async function dispatchInteraction(req) {
             chunkIndex:      req.chunkIndex ?? null,
         });
 
+        // Fase 2A LEC — emit leo_memory_updated. Las keys que recordInteraction
+        // toca son estables (interactionCount, lastInteractionTs, lastSurface,
+        // lastInteractionType); replicarlas en events.db permite a PASO 3/6
+        // detectar trayectorias de uso sin leer leo_memory_db.json.
+        try {
+            emitMemoryUpdated({
+                userId:    req.userId,
+                sessionId: interactionId,
+                contentId: req.contentId,
+                keys:      ['interactionCount', 'lastInteractionTs', 'lastSurface', 'lastInteractionType'],
+            });
+        } catch { /* nunca bloquea Leo */ }
+
         _log(`success   surface=${meta.surface} type=${meta.interactionType} userId=${meta.userId} contentId=${meta.contentId}`);
 
         // D4: Build and persist structured pedagogical evidence.
@@ -319,9 +359,38 @@ export async function dispatchInteraction(req) {
         try {
             const evidenceEntry = buildLeoEvidenceEntry(enrichedReq, result);
             persistLeoEvidence(evidenceEntry);
+            // Fase 2A LEC — evidencia confirmada en el sink existente. Emitimos
+            // marker al events.db (sin replicar contenido — el sink original
+            // sigue siendo autoridad de la evidencia detallada).
+            //
+            // Fase 2B — incluimos pedagogicalObjective (ya clasificado por
+            // classifyPedagogicalObjective dentro de buildLeoEvidenceEntry).
+            // Los signal extractors lo usan para derivar evidencia_inferencial /
+            // metacognitiva / emocional sin tener que leer leo_evidence_db.json.
+            try {
+                emitEvidenceRecorded({
+                    userId:                req.userId,
+                    interactionType:       req.interactionType,
+                    pedagogicalObjective:  evidenceEntry?.pedagogicalObjective,
+                    sessionId:             interactionId,
+                    contentId:             req.contentId,
+                });
+            } catch { /* nunca bloquea Leo */ }
         } catch (evidenceError) {
             _log(`evidence hook failed: ${evidenceError.message}`, 'WARN');
         }
+
+        // Fase 2A LEC — leo_interaction_completed cierra el lifecycle. durationMs
+        // mide tiempo total del handler (LLM + memory + evidence + sequence).
+        try {
+            emitInteractionCompleted({
+                userId:     req.userId,
+                sessionId:  interactionId,
+                surface:    req.surface,
+                contentId:  req.contentId,
+                durationMs: Date.now() - interactionStartedAt,
+            });
+        } catch { /* nunca bloquea Leo */ }
 
         return result;
     } catch (error) {

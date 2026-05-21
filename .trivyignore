@@ -1,0 +1,6 @@
+# .trivyignore — P0.2 supresiones AUDITABLES de Trivy.
+# Formato: una CVE/AVD-ID por línea, SIEMPRE con comentario justificando
+# (motivo + responsable + fecha de revisión). Vacío a propósito en P0.
+#
+# Ejemplo (NO activo):
+# CVE-2024-XXXXX  # base node:* sin fix upstream; mitigado por non-root + readonly fs. rev:2026-06-30

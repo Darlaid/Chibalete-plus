@@ -1,0 +1,50 @@
+# .gitleaks.toml — P0.1 Chibalete+ secret scanning
+# Uso:
+#   gitleaks detect  --source . --redact -v            # historial completo (purga futura)
+#   gitleaks protect  --staged --source . --redact -v   # pre-commit (solo staged)
+#   gitleaks dir      . --redact -v                      # árbol de trabajo (sin git)
+#
+# Extiende el ruleset por defecto (no lo reemplaza) para conservar la
+# cobertura de claves AWS/GCP/Stripe/JWT/etc. y añadir las de Chibalete+.
+[extend]
+useDefault = true
+
+# ── Reglas específicas Chibalete+ ───────────────────────────────────────────
+[[rules]]
+id = "chibalete-gemini-key"
+description = "Google Gemini / Generative Language API key"
+regex = '''AIza[0-9A-Za-z\-_]{35}'''
+keywords = ["AIza", "GEMINI_API_KEY"]
+
+[[rules]]
+id = "chibalete-openai-key"
+description = "OpenAI API key"
+regex = '''sk-(proj-)?[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-", "OPENAI_API_KEY"]
+
+[[rules]]
+id = "chibalete-admin-secret"
+description = "ADMIN_SECRET asignado a un literal en código/config"
+regex = '''(?i)ADMIN_SECRET\s*[:=]\s*['"][^'"\n]{8,}['"]'''
+keywords = ["ADMIN_SECRET"]
+
+# ── Allowlist RAZONADA (cada entrada justificada; sin comodines amplios) ─────
+[allowlist]
+description = "Falsos positivos conocidos y artefactos de build/tests"
+# Rutas que NO contienen secretos reales: bundles minificados, snapshots de
+# producción, node_modules, paquetes de deploy y fixtures de test.
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+  '''(^|/)chibaleteplus/''',          # snapshot de build minificado
+  '''(^|/)_prod_snapshot_/''',
+  '''(^|/)deployment_package/''',
+  '''(^|/)\.gitleaks\.toml$''',        # este propio archivo (contiene regex, no secretos)
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)docs/.*\.md$''',             # docs operacionales: ejemplos enmascarados
+]
+# Placeholders/ejemplos explícitos usados en documentación y .env.example.
+regexes = [
+  '''(?i)(your[_-]?api[_-]?key|changeme|example|placeholder|xxxx+|<[a-z_]+>)''',
+  '''AIza0{35}''',                     # clave de ejemplo todo-ceros usada en docs
+]

@@ -1,0 +1,11 @@
+# osv-scanner.toml — P0.2 ignores AUDITABLES (no silenciar a ciegas).
+# Cada [[IgnoredVulns]] DEBE tener: id real, reason justificada y reviewDate.
+# Vacío a propósito: el objetivo P0 es que protobufjs/firebase/vite caigan
+# en FAIL hasta resolverlos (override de npm o bump). NO agregar ignores
+# sin causa documentada y fecha de revisión.
+
+# Ejemplo de formato (NO activo):
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# reason = "No alcanzable: el sink vulnerable no se invoca desde Chibalete+. Mitigado por X."
+# reviewDate = "2026-06-30T00:00:00Z"

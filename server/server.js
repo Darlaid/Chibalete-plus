@@ -8,6 +8,21 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+// P0.4 — validación estructural centralizada (zod). Aditivo.
+import { validate } from './middleware/validate.js';
+import { loginSchema, resetRequestSchema, resetConfirmSchema } from './schemas/auth.schema.js';
+// P0.6 — access-log estructurado con request-id + redaction (capa incremental).
+import { httpLogger } from './lib/logger.js';
+// P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
+import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
+import { readinessHandler } from './observability/health.js';
+import { analyticsHealthHandler } from './observability/analyticsHealth.js';
+import { registerRumRoute } from './observability/rum.js';
+import { initErrorTracking } from './observability/errorTracking.js';
+// P3-E — dual-write shadow real (gated IDENTITY_DUAL_WRITE; default OFF).
+import { makeIdentityWriteHook, bootstrapIdentityDb } from './db/identityWriteHook.js';
+// P4-A — cutover de LECTURA gated + fallback-safe (default IDENTITY_READ=json).
+import { tryIdentitySqliteRead, markJsonRead, warmupReadFacade } from './db/identityReadFacade.js';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -48,6 +63,36 @@ import {
     ERR as GROUP_MEMBERSHIP_ERR,
 } from './groupMembershipService.js';
 import { buildGroupDiagnosis } from '../utils/groupDiagnosis.mjs';
+// Sprint MGL Fase 1 / M1 — state machine pura extraída de server.js a un
+// módulo ESM compartido. server.js sigue exponiendo los nombres con `_` para
+// no tocar los handlers de mutación existentes. Cambio cero-funcional.
+import {
+    sameSchool                       as _sameSchool,
+    validateSameInstitution          as _validateSameInstitution,
+    countFallbackVisibleLectors      as _countFallbackVisibleLectors,
+    resolveMaterializableUsers       as _resolveMaterializableUsers,
+    detectGroupMaterializationState  as _detectGroupMaterializationState,
+} from '../utils/membershipGovernance.mjs';
+
+// MGL-M2 — el endpoint de governance snapshot usa nombres modernos sin `_`
+// (ajuste 5 del user: governance ya es dominio explícito, no helpers
+// internos). Imports separados para hacer la distinción legible.
+import {
+    normalizeSchoolKey,
+    detectGroupMaterializationState,
+    buildGovernanceIndexes,
+    countFallbackVisibleLectors,
+    deriveOperationalRisk,
+    deriveGovernanceStatus,
+    deriveTransitionCapabilities,
+    deriveMaterializationReadiness,
+    deriveFallbackExtinguished,
+    computeExplicitCoverage,
+    comparePriority,
+    SNAPSHOT_VERSION,
+} from '../utils/membershipGovernance.mjs';
+// NOTE: applyLegacyColegioFallback ya importado arriba desde groupMembershipService.js
+// (que lo re-exporta literal desde utils/groupMembership.mjs). No duplicar aquí.
 import { buildStudentStatus } from '../utils/studentStatus.mjs';
 import {
     getProgressItem,
@@ -133,6 +178,15 @@ const log = (msg, type = 'INFO') => {
 
 log(`Starting server in ${IS_PROD ? 'PRODUCTION' : 'DEVELOPMENT'} mode`);
 
+// P2-D — init error tracking (noop sin DSN; jamás rompe el arranque).
+try { initErrorTracking(); } catch (e) { log(`[error-tracking] ${e.message}`, 'WARN'); }
+// P3-E — bootstrap identity.db (inerte si IDENTITY_SQLITE_ENABLED!=1; jamás
+// rompe el arranque del API).
+bootstrapIdentityDb(log)
+  .then(() => warmupReadFacade())   // P4-A: precarga ESM si cutover habilitado
+  .then(w => { if (w) log('[identity-read] facade warmed (cutover armable)'); })
+  .catch(e => log(`[identity-db] ${e.message}`, 'WARN'));
+
 // --- SECURITY MIDDLEWARE ---
 app.use(helmet({
     contentSecurityPolicy: false,
@@ -153,6 +207,13 @@ app.use(cors({
     credentials: true
 }));
 app.use(express.json());
+
+// P0.6 — access-log estructurado (request-id + redaction). DESPUÉS de
+// json() para no interferir el parseo; ANTES de las rutas para cubrir todo.
+// Incremental: el log() legacy sigue intacto. Rollback = borrar esta línea.
+app.use(httpLogger);
+// P2-B — latencia/errores por ruta (overhead ~0 si METRICS_ENABLED off).
+app.use(metricsMiddleware);
 
 // Key by userId for authenticated requests — prevents shared school NAT IPs from
 // exhausting a single bucket for all students. Falls back to IP for anonymous traffic.
@@ -283,10 +344,45 @@ setInterval(async () => {
  * requireAdminAccess — Acepta DOS formas de autenticación para operaciones de escritura:
  * A) x-admin-secret (backward compat, para scripts o llamadas server-to-server)
  * B) x-user-id con rol 'administrador' (frontend autenticado — forma recomendada)
- * GETs pasan sin auth (datos no sensibles, ya filtrados por rol en UI).
  */
+
+/**
+ * P0 SECURITY FIX (auditoría 2026-05, hallazgo S1 CRÍTICO):
+ * Cierra el GET-bypass ANÓNIMO. Antes, `if (req.method === 'GET') return next()`
+ * dejaba pasar TODO GET sin credencial alguna → exfiltración no autenticada de
+ * PII (usuarios, miembros de grupo, status de estudiante, historial Leo).
+ *
+ * Política nueva (mínima y localizada):
+ *  - Los GET ya NO son anónimos: exigen admin-secret O una sesión x-user-id activa.
+ *  - Los GET siguen SIN exigir ROL admin: se conserva el modelo de acceso sano
+ *    y el frontend autenticado (incl. el preflight GET /api/content/:id/access
+ *    que todo visor usa) sigue funcionando sin cambios.
+ *
+ * RESIDUAL CONOCIDO (fuera de este fix quirúrgico, ver
+ * docs/AUDITORIA-ESTRUCTURAL-2026-05.md FASE 6): el IDOR de lectura entre
+ * usuarios autenticados (un lector leyendo datos de otro vía estos GET) sigue
+ * abierto y requiere un endurecimiento de rol posterior (P-follow-up).
+ */
+const getRequestHasValidPrincipal = (req) => {
+    const SECRET = process.env.ADMIN_SECRET;
+    if (SECRET && req.headers['x-admin-secret'] === SECRET) return true;
+    const userId = req.headers['x-user-id'];
+    if (!userId) return false;
+    try {
+        const users = readJSON(USERS_DB);
+        const user = users.find(u => u.id === userId);
+        return !!(user && isUserActive(user));
+    } catch (_) { return false; }
+};
+
+const allowAuthenticatedGetOrReject = (req, res, next) => {
+    if (getRequestHasValidPrincipal(req)) return next();
+    log(`[GET_AUTH_REJECT] path=${req.path} ip=${req.ip} userId=${req.headers['x-user-id'] || 'none'}`, 'WARN');
+    return res.status(401).json({ error: 'No autorizado: se requiere sesión activa' });
+};
+
 const requireAdminAccess = (req, res, next) => {
-    if (req.method === 'GET') return next();
+    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
 
     const SECRET = process.env.ADMIN_SECRET;
     if (!SECRET) {
@@ -313,7 +409,7 @@ const requireAdminAccess = (req, res, next) => {
 };
 
 const requireAuth = (req, res, next) => {
-    if (req.method === 'GET') return next();
+    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
     const authHeader = req.headers['x-admin-secret'];
     const SECRET = process.env.ADMIN_SECRET;
 
@@ -382,7 +478,7 @@ const requireProgressOwner = (req, res, next) => {
  * GET requests pass through (read-only ops don't require upload rights).
  */
 const requireAdminRole = (req, res, next) => {
-    if (req.method === 'GET') return next();
+    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
 
     const userId = req.headers['x-user-id'];
     if (!userId) {
@@ -609,6 +705,15 @@ const _setCachedJSON = (file, data) => {
 const readJSON = (file) => {
     const cached = _getCachedJSON(file);
     if (cached !== null) return cached;
+    // P4-A — cutover de lectura: SOLO si IDENTITY_READ=sqlite + dominio
+    // habilitado + shadow ok. Cualquier duda → null → cae a JSON (abajo).
+    // NUNCA lanza. Default (json) ⇒ overhead ~0 (un check de env).
+    {
+        const _sql = tryIdentitySqliteRead(file,
+            { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB }, log);
+        if (_sql) { _setCachedJSON(file, _sql); return _sql; }
+        markJsonRead(file, { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB });
+    }
     try {
         if (!fs.existsSync(file)) {
             return file === PROGRESS_DB ? { progressMap: {} } : [];
@@ -638,6 +743,8 @@ const writeJSON = (file, data) => {
         fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
         fs.renameSync(tempFile, file); // Atomic move
         _jsonCache.delete(file); // invalidate cache immediately after write
+        // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
+        try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, log })(file, data); } catch { /* shadow nunca rompe el write */ }
     } catch (e) {
         log(`Error writing ${file}: ${e.message}`, 'ERROR');
         throw e; // Relanza error para permitir rollback transaccional
@@ -649,6 +756,8 @@ const writeJSONAsync = async (file, data) => {
     await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
     await fs.promises.rename(tmp, file);
     _jsonCache.delete(file);
+    // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
+    try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, log })(file, data); } catch { /* shadow nunca rompe el write */ }
 };
 
 async function mutateUsers(fn) {
@@ -899,6 +1008,50 @@ app.get('/api/server-time', (_req, res) => {
 // contrato de cualquier monitor previo.
 const _healthDefaults = getHealthDefaults();
 app.get('/api/health', (_req, res) => res.json(buildHealthPayload(_healthDefaults)));
+
+// ── P2 observabilidad — rutas ADITIVAS (liveness /api/health intacto) ──────
+// /api/health/ready : readiness multi-capa (503 degraded ≠ liveness).
+// /metrics          : Prometheus (404 si METRICS_ENABLED off; NO exponer
+//                     vía nginx edge — Prometheus scrapea el api en la red
+//                     interna docker). Sin auth para permitir scrape interno.
+// /api/rum          : ingest acotado del runtime inmersivo (204 si off).
+app.get('/api/health/ready', readinessHandler);
+// P5 — health analítico (events.db + shadow consistency + throughput).
+app.get('/api/health/analytics', analyticsHealthHandler);
+app.get('/metrics', metricsHandler);
+registerRumRoute(app);
+
+// ── PASO 5 Aula Viva — operational router + scheduler ─────────────────────
+// Aditivo, sin tocar handlers existentes. El router lleva su propia auth
+// (inyectada). El scheduler queda OFF salvo AULA_VIVA_SCHEDULER_ENABLED=1.
+try {
+    const { createOperationalRouter } = await import('./aulaViva/operationalRouter.mjs');
+    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth }));
+    log('[PASO5] /api/aula-viva router mounted', 'INFO');
+} catch (e) {
+    log(`[PASO5] aula-viva router mount failed: ${e.message}`, 'WARN');
+}
+// PASO 7 — institutional router (paralelo a operational; paths bajo
+// /institutional/* no solapan con PASO 5).
+try {
+    const { createInstitutionalRouter } = await import('./aulaViva/institutionalRouter.mjs');
+    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth }));
+    log('[PASO7] /api/aula-viva/institutional/* router mounted', 'INFO');
+} catch (e) {
+    log(`[PASO7] institutional router mount failed: ${e.message}`, 'WARN');
+}
+// Scheduler init diferido al ready event para no bloquear boot.
+if (process.env.AULA_VIVA_SCHEDULER_ENABLED === '1') {
+    setImmediate(async () => {
+        try {
+            const sched = await import('./aulaViva/scheduler.mjs');
+            const r = await sched.start({ log: (m) => log(m, 'INFO') });
+            log(`[PASO5] scheduler.start → ${JSON.stringify(r)}`, 'INFO');
+        } catch (e) {
+            log(`[PASO5] scheduler.start failed: ${e.message}`, 'ERROR');
+        }
+    });
+}
 
 // --- SYSTEM METRICS (Phase 1 observability) ---
 app.get('/api/system/metrics', requireAdminAccess, (req, res) => {
@@ -2423,7 +2576,7 @@ app.get('/api/users', requireAuth, (req, res) => {
 });
 
 // LOGIN
-app.post('/api/auth/login', loginLimiter, async (req, res) => {
+app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async (req, res) => {
     const { email, password } = req.body;
     const normalizedEmail = normalizeEmail(email);
 
@@ -2759,8 +2912,8 @@ const handleResetRequest = async (req, res) => {
         message: 'Si el email está registrado, recibirás instrucciones.',
     });
 };
-app.post('/api/request-password-reset', resetRequestLimiter, handleResetRequest);
-app.post('/api/auth/reset-request',     resetRequestLimiter, handleResetRequest);
+app.post('/api/request-password-reset', resetRequestLimiter, validate({ body: resetRequestSchema }), handleResetRequest);
+app.post('/api/auth/reset-request',     resetRequestLimiter, validate({ body: resetRequestSchema }), handleResetRequest);
 
 // CONFIRM PASSWORD RESET
 // POST /api/confirm-password-reset  (legacy path)
@@ -2817,8 +2970,8 @@ const handleResetConfirm = async (req, res) => {
         user:    sanitizeUserForClient(updated),
     });
 };
-app.post('/api/confirm-password-reset', resetConfirmLimiter, handleResetConfirm);
-app.post('/api/auth/reset-confirm',     resetConfirmLimiter, handleResetConfirm);
+app.post('/api/confirm-password-reset', resetConfirmLimiter, validate({ body: resetConfirmSchema }), handleResetConfirm);
+app.post('/api/auth/reset-confirm',     resetConfirmLimiter, validate({ body: resetConfirmSchema }), handleResetConfirm);
 
 // CREATE USER
 app.post('/api/users', requireAdminAccess, async (req, res) => {
@@ -3582,40 +3735,10 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
 // Helper local para comparación normalizada de "misma institución".
 // Usa la misma convención (lowercase + trim) del fallback colegio del service.
 //
-// Hardening empty-string: si cualquiera de los strings queda vacío después
-// de trim, devolvemos false. Razón: "" === "" colapsaba a true, lo que
-// significaba que dos entries SIN institución especificada se trataban como
-// "misma institución" — un falso positivo silencioso. Sin esta guarda, un
-// user con colegio="" pasaba el cross-school check contra cualquier group
-// con school="" (data drift). Empty-vs-empty NO es match.
-const _sameSchool = (userColegio, groupSchool) => {
-    if (typeof userColegio !== 'string' || typeof groupSchool !== 'string') return false;
-    const a = userColegio.trim().toLowerCase();
-    const b = groupSchool.trim().toLowerCase();
-    if (a.length === 0 || b.length === 0) return false;
-    return a === b;
-};
-
-// _validateSameInstitution — gate de seguridad cross-school para mutaciones de
-// membresía (POST/DELETE/move). Misma semántica que el filtro de candidates
-// (línea ~3376) — si cualquiera de los dos canales coincide, se considera
-// misma institución:
-//   1. organizationId match (preferente, definitivo cuando ambos lo tienen)
-//   2. fallback colegio normalizado (lowercase + trim) — soporte legacy
-//
-// NO bloquea fallback colegio legítimo: un user con colegio="Chibalete"
-// pasa la validación contra group.school="Chibalete" (con o sin acentos
-// normalizados por _sameSchool, sin diferenciar mayúsculas).
-//
-// Devuelve true si la asignación/mutación está permitida, false si es cross-
-// school. El caller decide la semántica de error (failed[], 422, etc.).
-const _validateSameInstitution = (user, group) => {
-    if (!user || !group) return false;
-    const sameOrg = !!(user.organizationId && group.organizationId
-        && user.organizationId === group.organizationId);
-    if (sameOrg) return true;
-    return _sameSchool(user.colegio, group.school);
-};
+// MGL-M1: `_sameSchool` y `_validateSameInstitution` extraídos a
+// utils/membershipGovernance.mjs (importados arriba con alias `_`).
+// Hardening empty-string, semántica orgId-then-colegio y comentarios
+// históricos se preservan en el módulo. Cero cambio funcional aquí.
 
 // _extractGroupMeta — snapshot inmutable del grupo al momento de la mutación,
 // para incluir en audit log. Capturamos school/type/organizationId DENTRO del
@@ -3792,21 +3915,9 @@ const _isFallbackDependent = (group, allGroups) => {
     return count === 1;
 };
 
-// _countFallbackVisibleLectors — número de lectores que aparecerían vía
-// fallback colegio para este grupo. Caller debe verificar que el grupo es
-// fallback-dependent antes de invocar (este helper no re-valida).
-const _countFallbackVisibleLectors = (group, allUsers) => {
-    if (!group || typeof group?.school !== 'string') return 0;
-    const targetSchool = group.school.trim().toLowerCase();
-    if (targetSchool.length === 0) return 0;
-    let count = 0;
-    for (const u of (allUsers || [])) {
-        if (!u || !Array.isArray(u.roles) || !u.roles.includes('lector')) continue;
-        if (typeof u.colegio !== 'string') continue;
-        if (u.colegio.trim().toLowerCase() === targetSchool) count++;
-    }
-    return count;
-};
+// MGL-M1: `_countFallbackVisibleLectors` extraído a
+// utils/membershipGovernance.mjs (importado arriba con alias `_`).
+// Cero cambio funcional aquí.
 
 // _assessFallbackExtinctionRisk — evaluación atómica del riesgo. Devuelve un
 // objeto con la información completa para tomar decisión de bloquear/permitir
@@ -3870,182 +3981,22 @@ const _readFallbackOverride = (req) => {
     return h === 'true';
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MATERIALIZATION RESOLVER — Commit 6 — single source of truth
-//
-// _resolveMaterializableUsers — UNICO punto de cálculo del conjunto materializable.
-// Classifier, dryRun preview, execute path, audit metadata, y cualquier
-// caller futuro (resurrection, reconciliation, scripts, UI) DEBEN reusar
-// este helper. Prohibido reimplementar la lógica inline.
-//
-// Fórmula formal:
-//   materializable = applyLegacyColegioFallback(g).matched ∖ getExplicitGroupMembers(g)
-//
-// Determinismo: orden lexicográfico vía sort(). Mismo input → mismo output
-// cross-replica, cross-replay, cross-version. Crítico para reproducibilidad
-// forensic del audit sampling.
-//
-// PURO. No toca disco, no toca locks.
-// ─────────────────────────────────────────────────────────────────────────────
-const _resolveMaterializableUsers = (group, users, allGroups) => {
-    const matched = applyLegacyColegioFallback(group, users, allGroups).matched;
-    const explicit = getExplicitGroupMembers(group, users);
-    return [...matched]
-        .filter(uid => !explicit.has(uid))
-        .sort();
-};
+// MGL-M1: `_resolveMaterializableUsers` extraído a
+// utils/membershipGovernance.mjs (importado arriba con alias `_`).
+// Sigue siendo la single source of truth del conjunto materializable —
+// classifier, dryRun, execute path y audit metadata lo reusan vía import.
+// Cero cambio funcional aquí.
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MATERIALIZATION STATE MACHINE — Commit 6
+// MGL-M1: `_detectGroupMaterializationState` extraído a
+// utils/membershipGovernance.mjs (importado arriba con alias `_`).
+// La taxonomía oficial, las 4 ramas de estado, mixedSeverity y la matriz
+// completa se preservan literalmente en el módulo. Cero cambio funcional aquí.
 //
-// _detectGroupMaterializationState — classifier centralizado para el endpoint
-// POST /api/groups/:groupId/members/materialize-fallback.
-//
-// Estados terminales (cuatro):
-//   - 'fallback_dependent'   → operación target (PROCEED)
-//   - 'fully_explicit'       → noOp legítimo (todos los lectores ya explícitos)
-//   - 'empty_inert'          → noOp (no hay fallback semánticamente activable)
-//   - 'mixed_legacy_state'   → 422 (coexistencia ambigua, requiere intervención)
-//
-// reasonCode (taxonomía oficial Commit 6):
-//   fallback_dependent:  'single_school_implicit'
-//   fully_explicit:      'no_remaining_fallback_visibility'
-//   empty_inert:         'no_school' | 'multi_school' | 'no_lectores'
-//   mixed_legacy_state:  'partial_explicitification' | 'cross_school_corruption'
-//
-// mixedSeverity (sólo para mixed_legacy_state):
-//   'recoverable' → todos los explícitos pasan _validateSameInstitution con g
-//   'corrupted'   → ≥1 explícito viola same-institution (cross-school drift)
-//
-// Orphan IDs (explicit channel apunta a userId no resoluble) NO se cuentan
-// como corrupción — son issue separada (syncGroupMembership los limpia).
-//
-// PURO. No toca disco, no toca locks. Caller provee userById Map pre-computado
-// para evitar O(N) lookups.
-// ─────────────────────────────────────────────────────────────────────────────
-const _detectGroupMaterializationState = (group, users, allGroups, userById) => {
-    // 0) Defensa contra group sin school válido
-    if (!group?.school || typeof group.school !== 'string' || group.school.trim().length === 0) {
-        return {
-            state:                       'empty_inert',
-            reasonCode:                  'no_school',
-            explicitCount:               0,
-            fallbackEligibleNotExplicit: 0,
-            crossSchoolExplicitCount:    0,
-            mixedSeverity:               null,
-            isSingleSchool:              false,
-        };
-    }
-
-    // 1) Single-school check (peers.length === 1)
-    const targetSchool = group.school.trim().toLowerCase();
-    let peers = 0;
-    for (const g of (allGroups || [])) {
-        if (typeof g?.school !== 'string') continue;
-        if (g.school.trim().toLowerCase() === targetSchool) peers++;
-        if (peers > 1) break;
-    }
-    const isSingleSchool = peers === 1;
-
-    // 2) Explicit members snapshot
-    const explicit = getExplicitGroupMembers(group, users);
-    const explicitCount = explicit.size;
-
-    // 3) fallbackEligibleNotExplicit — derivado del resolver canónico (SoT).
-    //    applyLegacyColegioFallback YA gate-a sobre single-school: bajo multi-
-    //    school devuelve matched vacío. Reusar el resolver garantiza que el
-    //    classifier NUNCA diverja del execute path (anti-drift architectural).
-    const materializableFromResolver = _resolveMaterializableUsers(group, users, allGroups);
-    const fallbackEligibleNotExplicit = materializableFromResolver.length;
-
-    // 4) Cross-school explicit count (informativo + driver de mixedSeverity)
-    let crossSchoolExplicitCount = 0;
-    if (explicitCount > 0) {
-        for (const uid of explicit) {
-            const u = userById?.get(uid);
-            if (!u) continue;  // orphan ID — fuera del scope del classifier
-            if (!_validateSameInstitution(u, group)) crossSchoolExplicitCount++;
-        }
-    }
-
-    // 5) State resolution
-    //
-    // Matriz definitiva:
-    //                       │ single-school │ multi-school │
-    // ─────────────────────────────────────────────────────
-    // explicit=0, elig=0    │ empty_inert   │ empty_inert  │
-    //                       │  no_lectores  │ multi_school │
-    // explicit=0, elig>0    │ fallback_dep  │ (imposible)  │
-    //                       │  single_impl. │              │
-    // explicit>0, elig=0    │ fully_explicit│ fully_explicit│
-    //                       │  no_remaining │ no_remaining │
-    // explicit>0, elig>0    │ mixed_legacy  │ (imposible)  │
-    //                       │  partial_expl │              │
-    //                       │  cross_school │              │
-    //
-    // (elig>0 implica single-school por contrato de applyLegacyColegioFallback —
-    //  el contador anterior sólo se incrementa bajo isSingleSchool.)
-
-    if (explicitCount === 0) {
-        if (!isSingleSchool) {
-            return {
-                state:                       'empty_inert',
-                reasonCode:                  'multi_school',
-                explicitCount:               0,
-                fallbackEligibleNotExplicit: 0,
-                crossSchoolExplicitCount:    0,
-                mixedSeverity:               null,
-                isSingleSchool:              false,
-            };
-        }
-        if (fallbackEligibleNotExplicit === 0) {
-            return {
-                state:                       'empty_inert',
-                reasonCode:                  'no_lectores',
-                explicitCount:               0,
-                fallbackEligibleNotExplicit: 0,
-                crossSchoolExplicitCount:    0,
-                mixedSeverity:               null,
-                isSingleSchool:              true,
-            };
-        }
-        return {
-            state:                       'fallback_dependent',
-            reasonCode:                  'single_school_implicit',
-            explicitCount:               0,
-            fallbackEligibleNotExplicit,
-            crossSchoolExplicitCount:    0,
-            mixedSeverity:               null,
-            isSingleSchool:              true,
-        };
-    }
-
-    // explicitCount > 0
-    if (fallbackEligibleNotExplicit === 0) {
-        return {
-            state:                       'fully_explicit',
-            reasonCode:                  'no_remaining_fallback_visibility',
-            explicitCount,
-            fallbackEligibleNotExplicit: 0,
-            crossSchoolExplicitCount,    // informativo
-            mixedSeverity:               null,
-            isSingleSchool,
-        };
-    }
-
-    // explicitCount > 0 && fallbackEligibleNotExplicit > 0 → mixed
-    // (sólo posible bajo isSingleSchool por construcción)
-    const corrupted = crossSchoolExplicitCount > 0;
-    return {
-        state:                       'mixed_legacy_state',
-        reasonCode:                  corrupted ? 'cross_school_corruption' : 'partial_explicitification',
-        explicitCount,
-        fallbackEligibleNotExplicit,
-        crossSchoolExplicitCount,
-        mixedSeverity:               corrupted ? 'corrupted' : 'recoverable',
-        isSingleSchool:              true,
-    };
-};
+// La definición eliminada de este lugar se conserva como bloque diff-only —
+// el comportamiento del endpoint POST /materialize-fallback es idéntico.
+// (Cuerpo legacy del classifier removido — vive ahora en
+//  utils/membershipGovernance.mjs como detectGroupMaterializationState.
+//  Cualquier referencia futura debe importarlo, no reimplementarlo.)
 
 // GET /api/groups/:groupId/candidates
 // Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
@@ -5445,6 +5396,241 @@ app.get('/api/admin/membership/validate', requireAdminAccess, (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// parseTsRobust — defensive timestamp parser para audit ordering.
+//
+// Sprint MGL M2.1a — antes el endpoint MGL comparaba timestamps via
+// string compare (`a > b`). Eso funciona para ISO 8601 canónico, pero
+// rompe ante formatos legacy / milisegundos inconsistentes / malformed.
+// Devolvemos -Infinity para malformed → se descartan en max selection.
+// ─────────────────────────────────────────────────────────────────────────────
+function parseTsRobust(value) {
+    if (typeof value !== 'string' || value.length === 0) return -Infinity;
+    const t = Date.parse(value);
+    return Number.isFinite(t) ? t : -Infinity;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint MGL Fase 1 / M2 — Membership Governance Snapshot
+//
+// GET /api/membership-governance/groups
+//
+// Snapshot operacional read-only del estado de memberships de Chibalete+.
+// NO muta nada. NO repara nada. NO materializa nada. Solo observa y clasifica.
+//
+// Auth: requireAdminAccess (operación con alcance institucional).
+//
+// Query params:
+//   ?school=<name>           — filtra al subset de esa escuela (normalizado)
+//   ?state=<csv>             — filtra por state(s); CSV con valores oficiales
+//   ?includeAudit=true       — hidrata lastAuditEvent por grupo (LAZY: si no
+//                              es 'true' literal, NO se lee USER_AUDIT_DB)
+//
+// Response shape (M2):
+//   {
+//     snapshotVersion: 1,
+//     generatedAt: ISO 8601,
+//     totalGroups: number,                       — pre-filter (universo total)
+//     counts: { fully_explicit, fallback_dependent, mixed_legacy_state, empty_inert },
+//     groups: [{
+//       id, name, type, school, organizationId,
+//       state, reasonCode, mixedSeverity, isSingleSchool,
+//       operationalRisk, governanceStatus,
+//       explicitMembers, fallbackVisibleUsers, fallbackEligibleUsers,
+//       fallbackEligibleNotExplicit, crossSchoolExplicitCount, totalVisibleUsers,
+//       explicitCoverage,                        — float preciso, NO redondeado
+//       fallbackExtinguished,
+//       materializationReadiness: { ready, blocked, blockedReason },
+//       transitionCapabilities: { canMaterialize, canRepairAutomatically, requiresManualResolution },
+//       diagnosisSummary: { healthStatus, inconsistenciesCount, warningsCount },
+//       lastAuditEvent: null | { ts, action, actor, auditReferenceId },
+//     }]
+//   }
+//
+// Sort: corrupted → recoverable → fallback_dependent → fully_explicit → empty_inert,
+// alfabético dentro de cada bucket.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/membership-governance/groups', requireAdminAccess, (req, res) => {
+    const actor = req.headers['x-user-id'] || 'unknown';
+    log(`[MGL_SNAPSHOT_REQUEST] actor=${actor} school=${req.query.school || ''} state=${req.query.state || ''} includeAudit=${req.query.includeAudit || ''}`, 'INFO');
+
+    try {
+        const users  = readJSON(USERS_DB)  || [];
+        const groups = readJSON(GROUPS_DB) || [];
+
+        // Indexes precomputados — userById se reusa por TODOS los classifier calls.
+        const indexes = buildGovernanceIndexes(users, groups);
+
+        // ── PARSE FILTERS ──────────────────────────────────────────────────────
+        const schoolFilter = typeof req.query.school === 'string'
+            ? normalizeSchoolKey(req.query.school)
+            : null;
+        const stateFilterRaw = typeof req.query.state === 'string' ? req.query.state.trim() : '';
+        const stateFilter = stateFilterRaw.length > 0
+            ? new Set(stateFilterRaw.split(',').map(s => s.trim()).filter(Boolean))
+            : null;
+        const includeAudit = req.query.includeAudit === 'true';   // LAZY: estricto
+
+        // ── LAZY AUDIT HYDRATION ───────────────────────────────────────────────
+        // Solo leer USER_AUDIT_DB si includeAudit === true literal.
+        // Index audit por groupId con timestamp más reciente.
+        //
+        // Sprint MGL M2.1a — comparación de timestamps via Date.parse(),
+        // NO string compare. Razones:
+        //   - ISO 8601 lexicográfico funciona en el camino feliz, pero rompe
+        //     ante: milisegundos faltantes ('Z' vs '.000Z'), timezones legacy
+        //     ('+00:00' vs 'Z'), formatos pre-ISO en logs antiguos, o
+        //     malformed timestamps (string vacío, garbage).
+        //   - Date.parse devuelve NaN para malformed → tratamos como -Infinity
+        //     y se descartan en el max selection; nunca corruptan ordering.
+        //   - El parsed timestamp se cachea junto con el entry para evitar
+        //     re-parsear M veces durante el max-selection loop.
+        let auditByGroupId = null;
+        if (includeAudit) {
+            try {
+                const auditEntries = readJSON(USER_AUDIT_DB) || [];
+                auditByGroupId = new Map();   // gid → { entry, tsNum }
+                for (const e of auditEntries) {
+                    const gid = e?.details?.groupId;
+                    if (typeof gid !== 'string' || gid.length === 0) continue;
+                    const tsNum = parseTsRobust(e?.timestamp);
+                    if (tsNum === -Infinity) continue;   // malformed: skip
+                    const prev = auditByGroupId.get(gid);
+                    if (!prev || tsNum > prev.tsNum) {
+                        auditByGroupId.set(gid, { entry: e, tsNum });
+                    }
+                }
+            } catch (e) {
+                // Audit ilegible NO debe romper el snapshot. Loguear y continuar.
+                log(`[MGL_AUDIT_READ_FAIL] error=${e.message}`, 'WARN');
+                auditByGroupId = new Map();
+            }
+        }
+
+        // ── PRE-FILTER por school ──────────────────────────────────────────────
+        const groupsToClassify = schoolFilter
+            ? groups.filter(g => normalizeSchoolKey(g?.school) === schoolFilter)
+            : groups;
+
+        // ── BUILD ROWS ─────────────────────────────────────────────────────────
+        // Counts globales: sobre TODOS los groups (no afectados por filter).
+        const counts = {
+            fully_explicit:     0,
+            fallback_dependent: 0,
+            mixed_legacy_state: 0,
+            empty_inert:        0,
+        };
+
+        // Primero clasificamos TODOS los grupos (para counts globales correctos).
+        // Luego filtramos por state si aplica.
+        const classifiedAll = groups.map(g => {
+            const c = detectGroupMaterializationState(g, users, groups, indexes.userById);
+            counts[c.state] = (counts[c.state] || 0) + 1;
+            return { group: g, classification: c };
+        });
+
+        // Subset que entra al response (post school filter + state filter).
+        const groupSet = schoolFilter
+            ? new Set(groupsToClassify.map(g => g.id))
+            : null;
+
+        const rows = [];
+        for (const { group, classification } of classifiedAll) {
+            if (groupSet && !groupSet.has(group.id)) continue;
+            if (stateFilter && !stateFilter.has(classification.state)) continue;
+
+            const {
+                state, reasonCode, mixedSeverity, isSingleSchool,
+                explicitCount, fallbackEligibleNotExplicit, crossSchoolExplicitCount,
+            } = classification;
+
+            // fallbackEligibleUsers — universo total fallback-matched (no excluye explicit).
+            // Ya lo computa applyLegacyColegioFallback en su `matched`.
+            const fbAll = applyLegacyColegioFallback(group, users, groups);
+            const fallbackEligibleUsers = fbAll.matched.size;
+
+            // fallbackVisibleUsers — active path: sólo si state habilita fallback como path.
+            //   - fallback_dependent: sí; fallback es el active path.
+            //   - mixed_legacy_state: NO; explicit > 0 disqualifica fallback como path.
+            //   - fully_explicit, empty_inert: NO.
+            const fallbackVisibleUsers = state === 'fallback_dependent'
+                ? countFallbackVisibleLectors(group, users)
+                : 0;
+
+            const totalVisibleUsers = explicitCount + fallbackVisibleUsers;
+
+            const explicitCoverage = computeExplicitCoverage(explicitCount, fallbackEligibleNotExplicit);
+
+            const diagnosis = buildGroupDiagnosis(group, users, groups);
+
+            const auditEntry = (includeAudit && auditByGroupId.has(group.id))
+                ? auditByGroupId.get(group.id).entry
+                : null;
+
+            rows.push({
+                id:             group.id,
+                name:           typeof group.name === 'string' ? group.name : group.id,
+                type:           group.type === 'club' ? 'club' : 'course',
+                school:         typeof group.school === 'string' ? group.school : null,
+                organizationId: typeof group.organizationId === 'string' ? group.organizationId : null,
+
+                state,
+                reasonCode,
+                mixedSeverity,
+                isSingleSchool,
+
+                operationalRisk:    deriveOperationalRisk(state, mixedSeverity),
+                governanceStatus:   deriveGovernanceStatus(state, mixedSeverity),
+
+                explicitMembers:             explicitCount,
+                fallbackVisibleUsers,
+                fallbackEligibleUsers,
+                fallbackEligibleNotExplicit,
+                crossSchoolExplicitCount,
+                totalVisibleUsers,
+
+                explicitCoverage,
+                fallbackExtinguished:    deriveFallbackExtinguished(state),
+
+                materializationReadiness: deriveMaterializationReadiness(state, reasonCode),
+                transitionCapabilities:   deriveTransitionCapabilities(state, mixedSeverity),
+
+                diagnosisSummary: {
+                    healthStatus:        diagnosis.healthStatus,
+                    inconsistenciesCount: Array.isArray(diagnosis.inconsistencies) ? diagnosis.inconsistencies.length : 0,
+                    warningsCount:        Array.isArray(diagnosis.warnings) ? diagnosis.warnings.length : 0,
+                },
+
+                lastAuditEvent: auditEntry ? {
+                    ts:                auditEntry.timestamp,
+                    action:            auditEntry.action,
+                    actor:             auditEntry.actor || null,
+                    auditReferenceId:  auditEntry.auditReferenceId || null,
+                } : null,
+            });
+        }
+
+        // ── SORT operacional risk-first, alfabético dentro de bucket ───────────
+        rows.sort(comparePriority);
+
+        log(`[MGL_SNAPSHOT_OK] actor=${actor} totalGroups=${groups.length} returned=${rows.length} counts=${JSON.stringify(counts)}`, 'ACCESS');
+
+        res.json({
+            snapshotVersion: SNAPSHOT_VERSION,
+            generatedAt:     new Date().toISOString(),
+            totalGroups:     groups.length,
+            counts,
+            groups:          rows,
+        });
+    } catch (e) {
+        log(`[MGL_SNAPSHOT_ERROR] actor=${actor} error=${e.message}`, 'ERROR');
+        res.status(500).json({
+            error:   'Internal Server Error',
+            message: 'No se pudo generar el snapshot de governance.',
+        });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Sprint visibilidad — capa narrativa: el sistema explicándose a sí mismo.
 //
 // GET /api/groups/:id/diagnosis
@@ -5824,8 +6010,15 @@ app.post('/api/tts', requireUserAuth, ttsUserLimiter, async (req, res) => {
         const result = await runHybridTask('tts', { text: trimmed, voice: 'alloy' });
         recordTtsUsage(userId, trimmed.length, 'tts');
 
-        // result.data es un Buffer MP3 (OpenAI) o MP3 desde Gemini
-        res.set('Content-Type', 'audio/mpeg');
+        // M-4.3.2 — usar el mimeType honesto que devolvió el engine:
+        //   OpenAI → 'audio/mpeg' (MP3 real)
+        //   Gemini → 'audio/wav'  (PCM L16 wrappeado en RIFF por aiEngine)
+        //   mock   → 'audio/wav'  (silent WAV)
+        // Default 'audio/mpeg' por backward compat si el engine no declara.
+        const audioMime = (typeof result.mimeType === 'string' && result.mimeType.length > 0)
+            ? result.mimeType
+            : 'audio/mpeg';
+        res.set('Content-Type', audioMime);
         res.set('Cache-Control', 'public, max-age=3600'); // 1h — mismo texto = mismo audio
         res.set('X-Audio-Provider', result.provider);    // 'openai' | 'gemini' — para normalización de volumen en frontend
         res.send(result.data);

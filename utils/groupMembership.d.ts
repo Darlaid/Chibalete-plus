@@ -35,6 +35,24 @@ export interface MembershipGroup {
 
 export function userIsLectorLike(user: MembershipUser | null | undefined): boolean;
 
+/**
+ * Sprint MGL M2.1a — Single Source of Truth de "lector operacionalmente
+ * visible" (excluye soft-deleted, malformed roles, missing id).
+ */
+export function isOperationallyEligibleLector(
+  user: MembershipUser | null | undefined,
+): boolean;
+
+/**
+ * Sprint MGL M2.1a — predicate user+group: compone
+ * isOperationallyEligibleLector + same-school. ÚNICA verdad sobre quién
+ * cuenta para fallback colegio hacia este grupo.
+ */
+export function isOperationallyEligibleFallbackUser(
+  user: MembershipUser | null | undefined,
+  group: MembershipGroup | null | undefined,
+): boolean;
+
 export function addUserIdToGroup(group: MembershipGroup, userId: string): boolean;
 export function removeUserIdFromGroup(group: MembershipGroup, userId: string): boolean;
 export function addGroupIdToUser(user: MembershipUser, groupId: string): boolean;

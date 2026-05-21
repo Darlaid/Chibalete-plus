@@ -1,0 +1,57 @@
+# P3-B — GlitchTip self-host COMPLETO (error tracking, MIT). Overlay
+# REVERSIBLE y AISLADO: stack propio (Postgres + Valkey-BSD + web + worker),
+# NO toca el compose de la app. Rollback = no levantar este -f + DSN vacío
+# (el SDK @sentry/node ya es noop sin DSN — P2).
+#
+#   docker compose -f docker-compose.prod.yml \
+#     -f observability/docker-compose.observability.yml \
+#     -f observability/docker-compose.glitchtip.yml up -d
+#
+# Valkey (BSD-3, NO Redis SSPL/AGPL). Postgres (PostgreSQL License ≈ BSD).
+# UIs solo loopback del VPS (SSH tunnel). Recursos acotados (no enterprise).
+services:
+  glitchtip-postgres:
+    image: postgres:16-alpine
+    container_name: chibalete-gt-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_PG_PASSWORD:?set GLITCHTIP_PG_PASSWORD}
+    volumes: [ "gt-pg:/var/lib/postgresql/data" ]
+    mem_limit: 512m
+
+  glitchtip-valkey:
+    image: valkey/valkey:8-alpine          # BSD-3 (NO Redis)
+    container_name: chibalete-gt-valkey
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    mem_limit: 256m
+
+  glitchtip-web:
+    image: glitchtip/glitchtip:v4.1         # MIT
+    container_name: chibalete-gt-web
+    restart: unless-stopped
+    depends_on: [ glitchtip-postgres, glitchtip-valkey ]
+    environment: &gt_env
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_PG_PASSWORD}@glitchtip-postgres:5432/glitchtip
+      REDIS_URL: redis://glitchtip-valkey:6379/0   # protocolo redis, server Valkey
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?set GLITCHTIP_SECRET_KEY}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-http://localhost:8000}
+      DEFAULT_FROM_EMAIL: ops@chibalete.local
+      # Privacy/PII: el SDK ya hace beforeSend scrub (P2). Retención corta:
+      GLITCHTIP_MAX_EVENT_LIFE_DAYS: "30"
+    ports: [ "127.0.0.1:8000:8080" ]        # UI loopback-only
+    mem_limit: 768m
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip:v4.1
+    container_name: chibalete-gt-worker
+    restart: unless-stopped
+    depends_on: [ glitchtip-postgres, glitchtip-valkey ]
+    command: ["./bin/run-celery-with-beat.sh"]
+    environment: *gt_env
+    mem_limit: 512m
+
+volumes:
+  gt-pg:

@@ -165,6 +165,22 @@ if (fs.existsSync(HOOK_PATH)) {
     for (let i = 0; i < lines.length; i++) {
         // setTimeout(() => { ... setIdx/navigate/load ... }, X)
         if (/setTimeout\s*\(/.test(lines[i])) {
+            // BLOCKER FINAL V2 — el trigger es una LLAMADA a setTimeout, no la
+            // prosa. Una línea de comentario/JSDoc que MENCIONA "setTimeout("
+            // (p.ej. "El visor lo dispara en setTimeout(1500ms)") NO es un
+            // callback: scanearla genera falsos positivos cuando comentarios
+            // vecinos describen setIdx/load. Esto NO debilita la regla — las
+            // llamadas reales `x = setTimeout(fn, …)` no son comentarios y se
+            // siguen escaneando (todas las del hook tienen guards). Alinea con
+            // la doctrina M-5.4: ruido sin causa accionable es peor que nada.
+            const codePart = lines[i].replace(/\/\/.*$/, '');
+            const trimmed  = lines[i].trim();
+            const isCommentLine =
+                trimmed.startsWith('*')  ||
+                trimmed.startsWith('//') ||
+                trimmed.startsWith('/*') ||
+                !/setTimeout\s*\(/.test(codePart); // el match vivía tras un //
+            if (isCommentLine) continue;
             // Mirar las próximas 30 líneas para detectar el callback
             const block = lines.slice(i, Math.min(lines.length, i + 30)).join('\n');
             const calls = block.match(/(setIdx|navigate|load\s*\()/);

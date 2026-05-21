@@ -22,6 +22,11 @@ import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
 // Sprint Modo accesible (experiencia) — overlay opt-in que solo aparece
 // cuando el contexto del Modo accesible está activo. Si no, render = null.
 import { VisorTextoAccesibleOverlay } from '../components/accesible/VisorTextoAccesibleOverlay';
+// CRR Fase 2 — bridge de observación. Default OFF; cuando QA activa
+// localStorage 'READING_RUNTIME__guided=v2' abre una sesión paralela del CRR
+// sin tocar TTS, audioRef ni el lifecycle existente. El TTS sigue siendo
+// 100% manejado por VisorTexto (legacy) en esta fase.
+import { useReadingRuntimeBridge } from '../hooks/useReadingRuntimeBridge';
 
 // Cache de TTS legacy eliminada — /api/tts usa Cache-Control: 1h desde el servidor.
 // El navegador evita re-generar el mismo texto sin necesidad de cache en memoria.
@@ -889,6 +894,19 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const currentIndex = currentAudioIndex < sentences.length ? currentAudioIndex : 0;
     // Keep ref fresh so the scroll handler (stale closure) can read sentence count
     sentencesCountRef.current = sentences.length;
+
+    // CRR Fase 2 — observation bridge (default OFF). Cuando el flag se
+    // activa con localStorage 'READING_RUNTIME__guided=v2' abre una sesión
+    // paralela del CRR. `enabled` se desactiva hasta que el texto esté
+    // hidratado, para no spawnar/cerrar sesiones huérfanas durante la carga.
+    // El TTS y el audioRef siguen 100% en el path legacy.
+    useReadingRuntimeBridge({
+        mode:         'guided',
+        userId:       user?.id ?? null,
+        contentId:    content.id,
+        totalIndices: sentences.length,
+        enabled:      !loading && !!text && sentences.length > 0,
+    });
 
     const scrollUp = () => {
         window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' });

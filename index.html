@@ -7,8 +7,10 @@
   <title>Chibalete+</title>
   <link rel="icon" type="image/png" href="/favicon.png" />
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- PDF.js from Mozilla CDN -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- PDF.js self-hosted (P0.5) — v3.11.174 pinneada en /public/vendor/pdfjs/.
+       Sin CDN externo: elimina riesgo supply-chain y habilita offline futuro.
+       MISMA versión que antes (cero cambio de comportamiento). -->
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
   <!-- Fonts: Inter (UI) and Merriweather (Reading) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -81,7 +83,7 @@
   <!-- PDF.js Worker Configuration -->
   <script>
     if (typeof pdfjsLib !== 'undefined') {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
     }
   </script>
   <link rel="stylesheet" href="/index.css">

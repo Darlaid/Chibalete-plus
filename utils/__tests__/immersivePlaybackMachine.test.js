@@ -104,31 +104,25 @@ console.log('\n[C2] COMMIT_ADVANCE emite index_commit antes de sentence_advanced
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// CRITERIO 3 — COMMIT_ADVANCE espera VISUAL_ACK si requireVisualAck=true
+// CRITERIO 3 (M-5.4.6 Phase 1.b.4) — VISUAL_ACK ELIMINADO.
+// Las assertions originales exigían que COMMIT_ADVANCE se bloqueara hasta
+// recibir VISUAL_ACK. Ese gate violaba el nuevo INV "playback must never
+// wait for render confirmation". La action queda como deprecated no-op.
 // ───────────────────────────────────────────────────────────────────────────
 
-console.log('\n[C3] COMMIT_ADVANCE respeta requireVisualAck');
+console.log('\n[C3] (M-5.4.6) VISUAL_ACK action eliminada — sólo emite deprecated log');
 
 {
     let s = initialState(baseInit);
     s = reduce(s, { type: Actions.START_PLAY, index: 45 }).state;
     s = reduce(s, { type: Actions.SCHEDULE_ADVANCE, fromIndex: 45, toIndex: 46, reason: 'audio_ended', requireVisualAck: true }).state;
 
-    // Sin ack → commit bloqueado
-    const blocked = reduce(s, { type: Actions.COMMIT_ADVANCE, transitionId: s.pendingTransition.id });
-    ok('COMMIT_ADVANCE sin VISUAL_ACK → commit_rejected reason=awaiting_visual_ack',
-       blocked.effects.some(e => e.tag === 'commit_rejected' && e.data?.reason === 'awaiting_visual_ack'));
-    ok('Estado sigue en pending_advance',
-       blocked.state.status === 'pending_advance');
-
-    // Con ack → commit pasa
-    const withAck = reduce(s, { type: Actions.VISUAL_ACK, index: 46 });
-    ok('VISUAL_ACK(46) marca visualAckReceived=true',
-       withAck.state.pendingTransition.visualAckReceived === true);
-
-    const committedNow = reduce(withAck.state, { type: Actions.COMMIT_ADVANCE, transitionId: withAck.state.pendingTransition.id });
-    ok('COMMIT_ADVANCE después de VISUAL_ACK → commit exitoso',
-       effectTags(committedNow.effects).includes('index_commit'));
+    // VISUAL_ACK ahora es no-op — devuelve state sin mutar y un log deprecated.
+    const ackResult = reduce(s, { type: Actions.VISUAL_ACK, index: 46 });
+    ok('VISUAL_ACK devuelve state sin mutar (deprecated)',
+       ackResult.state === s);
+    ok('VISUAL_ACK emite PB_VISUAL_HIGHLIGHT_ACK_DEPRECATED',
+       ackResult.effects.some(e => e.tag === 'PB_VISUAL_HIGHLIGHT_ACK_DEPRECATED'));
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -198,10 +192,16 @@ console.log('\n[C6] SKIP durante pending cancela y hace hard resync');
        skipResult.state.audioIndex === 30);
     ok('Tras SKIP: pendingTransition=null',
        skipResult.state.pendingTransition === null);
-    ok('Tras SKIP: emite hard_resync',
-       skipResult.effects.some(e => e.tag === 'hard_resync' && e.data?.to === 30));
-    ok('Tras SKIP: emite cancel_pending reason=skip',
-       skipResult.effects.some(e => e.type === 'cancel_pending' && e.reason === 'skip'));
+    // M-5.4.6 (Case 4) — MA.SKIP ya NO emite hard_resync ni HARD_RESYNC effect.
+    // Manual nav (next/prev) es un gesto deterministico, no un recovery.
+    ok('M-5.4.6 — Tras SKIP: NO emite tag hard_resync',
+       !skipResult.effects.some(e => e.tag === 'hard_resync'));
+    ok('M-5.4.6 — Tras SKIP: NO emite HARD_RESYNC effect',
+       !skipResult.effects.some(e => e.type === 'HARD_RESYNC'));
+    ok('M-5.4.6 — Tras SKIP: emite tag manual_nav_commit',
+       skipResult.effects.some(e => e.tag === 'manual_nav_commit' && e.data?.to === 30));
+    ok('M-5.4.6 — Tras SKIP: emite cancel_pending reason=manual_nav',
+       skipResult.effects.some(e => e.type === 'cancel_pending' && e.reason === 'manual_nav'));
     ok('Tras SKIP: emite load_audio index=30 autoPlay=true',
        skipResult.effects.some(e => e.type === 'load_audio' && e.index === 30 && e.autoPlay === true));
 }

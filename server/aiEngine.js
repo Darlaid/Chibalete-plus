@@ -75,11 +75,52 @@ export const generateHash = (text, language = 'es', voice = 'default', provider 
     return crypto.createHash('md5').update(payload).digest('hex');
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// M-4.3.2 — PCM → WAV wrap (surgical fix audio_contract_failed)
+//
+// Gemini TTS API devuelve audio raw PCM L16 (signed 16-bit LE, 24 kHz mono
+// por defecto) en `part.inlineData.data`, IGNORANDO el hint
+// `response_mime_type: 'audio/mp3'` del request. El backend antes lo enviaba
+// como `audio/mpeg` produciendo `src_not_supported` en HTMLAudioElement (los
+// bytes son PCM, no MPEG layer-3 frames).
+//
+// Helpers públicos al módulo: cero deps, ~25 líneas total. Wrappean el PCM
+// en contenedor WAV (RIFF) para que cualquier browser pueda decodificarlo.
+// ─────────────────────────────────────────────────────────────────────────────
+function _wrapPcmAsWav(pcmBuffer, sampleRate = 24000, channels = 1, bitsPerSample = 16) {
+    const byteRate   = sampleRate * channels * bitsPerSample / 8;
+    const blockAlign = channels * bitsPerSample / 8;
+    const dataSize   = pcmBuffer.length;
+    const header = Buffer.alloc(44);
+    header.write('RIFF', 0);
+    header.writeUInt32LE(36 + dataSize, 4);
+    header.write('WAVE', 8);
+    header.write('fmt ', 12);
+    header.writeUInt32LE(16, 16);              // SubChunk1Size (PCM)
+    header.writeUInt16LE(1, 20);               // AudioFormat = 1 (PCM)
+    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitsPerSample, 34);
+    header.write('data', 36);
+    header.writeUInt32LE(dataSize, 40);
+    return Buffer.concat([header, pcmBuffer]);
+}
+
+function _parseSampleRate(mimeType) {
+    if (typeof mimeType !== 'string') return 24000;
+    const m = mimeType.match(/rate=(\d+)/i);
+    return m ? parseInt(m[1], 10) : 24000;
+}
+
 const getMockResponse = (taskType, payload) => {
     log(`[AI] Using MOCK mode for task=${taskType}`);
     if (taskType === 'tts') {
-        // Return an empty valid 1KB buffer representing silence/mock mp3
-        return Buffer.alloc(1024, 0);
+        // M-4.3.2 — silent valid WAV (44 byte header + 980 bytes zero PCM @24kHz/16bit/mono
+        // ≈ 20 ms de silencio). Reemplaza el Buffer.alloc(1024, 0) anterior que era
+        // bytes nulos crudos enviados como audio/mpeg → src_not_supported en mock mode.
+        return _wrapPcmAsWav(Buffer.alloc(980, 0), 24000, 1, 16);
     } else if (taskType === 'text_light') {
         return "[MOCK] Resumen generado sin costo.";
     } else if (taskType === 'chat' || taskType === 'chat_visual') {
@@ -114,7 +155,8 @@ const executeWithProvider = async (provider, model, taskType, payload) => {
                 input: payload.text,
             });
             const buffer = Buffer.from(await mp3.arrayBuffer());
-            return { provider, model, data: buffer };
+            // M-4.3.2 — declarar mimeType explícito (OpenAI sí devuelve MP3 real).
+            return { provider, model, data: buffer, mimeType: 'audio/mpeg' };
         } else if (taskType === 'text_light') {
             const completion = await ai.chat.completions.create({
                 model: model,
@@ -161,7 +203,19 @@ const executeWithProvider = async (provider, model, taskType, payload) => {
             });
             const part = response.candidates?.[0]?.content?.parts?.[0];
             if (part?.inlineData?.data) {
-                return { provider, model, data: Buffer.from(part.inlineData.data, 'base64') };
+                const rawBuffer  = Buffer.from(part.inlineData.data, 'base64');
+                const inlineMime = part.inlineData.mimeType ?? '';
+                // M-4.3.2 — root cause de audio_contract_failed: Gemini devuelve
+                // PCM L16 raw IGNORANDO el response_mime_type hint del request.
+                // Wrap en contenedor WAV para que el browser pueda decodificarlo.
+                // Si Gemini eventualmente devuelve MP3/OGG real, pasa-through.
+                if (/^audio\/(l16|pcm)/i.test(inlineMime) || /codec=pcm/i.test(inlineMime)) {
+                    const sampleRate = _parseSampleRate(inlineMime);
+                    const wavBuffer  = _wrapPcmAsWav(rawBuffer, sampleRate, 1, 16);
+                    return { provider, model, data: wavBuffer, mimeType: 'audio/wav' };
+                }
+                // mimeType desconocido o ya container-wrapped: pasa raw + mimeType honesto.
+                return { provider, model, data: rawBuffer, mimeType: inlineMime || 'audio/mpeg' };
             }
             throw new Error("No audio data in Gemini response");
         } else if (taskType === 'text_light') {
@@ -216,7 +270,10 @@ export const runHybridTask = async (taskType, payload) => {
     // Check Dev/Mock Mode Safety Net
     if ((taskType === 'tts' && TTS_MODE === 'mock') || (AI_MODE === 'mock')) {
         const mockData = getMockResponse(taskType, payload);
-        return { provider: 'mock', model: 'mock-engine', data: mockData };
+        // M-4.3.2 — propagar mimeType para que el endpoint pueda enviar Content-Type
+        // honesto. Mock TTS ahora devuelve WAV válido (silent), no zeros bytes.
+        const mockMime = taskType === 'tts' ? 'audio/wav' : undefined;
+        return { provider: 'mock', model: 'mock-engine', data: mockData, mimeType: mockMime };
     }
 
     const config = AI_CONFIG[taskType];

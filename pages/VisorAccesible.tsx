@@ -47,6 +47,10 @@ import { useA11yAnalytics } from '../hooks/useA11yAnalytics';
 import { useA11yReaderNavigation } from '../hooks/useA11yReaderNavigation';
 import { useA11yReadingSettings, type ReadingLanguage } from '../hooks/useA11yReadingSettings';
 import { useReadingSegments } from '../hooks/useReadingSegments';
+// CRR Fase 2 — bridge de observación. Default OFF; cuando se activa via
+// localStorage 'READING_RUNTIME__accessible=v2' abre una sesión paralela del
+// CRR sin tocar nada del visor. Audio NULL (VisorAccesible no usa TTS).
+import { useReadingRuntimeBridge } from '../hooks/useReadingRuntimeBridge';
 import type { A11yBook } from '../types/a11y';
 import type { Content } from '../types';
 
@@ -185,6 +189,21 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
     const analytics = useA11yAnalytics({
         userId:    user?.id,
         contentId: id,
+    });
+
+    // CRR Fase 2 — observation bridge. Si el flag está OFF (default), este
+    // hook es completamente inerte (no abre runtime, no escribe storage, no
+    // suscribe listeners). Cuando QA activa el flag con
+    //   localStorage.setItem('READING_RUNTIME__accessible', 'v2')
+    // el bridge corre en paralelo a useA11yAnalytics, sin tocar el lifecycle
+    // existente. El total de párrafos del libro se pasa solo si está
+    // disponible; si no, hydrateContent lo resolverá a 0 (el runtime acepta
+    // total dinámico).
+    useReadingRuntimeBridge({
+        mode:         'accessible',
+        userId:       user?.id ?? null,
+        contentId:    id,
+        totalIndices: book?.totalParagraphs ?? 0,
     });
 
     // IMPORTANTE: el objeto `analytics` es UNA NUEVA REFERENCIA en cada render

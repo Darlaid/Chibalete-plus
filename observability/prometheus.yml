@@ -1,0 +1,27 @@
+# P2-B Prometheus scrape config. Señal alta, scrape 15s, retención corta.
+# /metrics NO va por nginx edge: Prometheus scrapea el api por red interna
+# docker (service name). En el VPS 4-container, reemplazar el target por
+# ['chibalete_api_1:3000','chibalete_api_2:3000'] (ambas instancias).
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    platform: chibalete
+
+scrape_configs:
+  - job_name: chibalete-api
+    metrics_path: /metrics
+    static_configs:
+      # Local/prod-simple (docker-compose.prod.yml): service `api`.
+      - targets: ['api:3000']
+        labels: { instance_role: api }
+      # VPS 4-container (descomentar y ajustar al desplegar allí):
+      # - targets: ['chibalete_api_1:3000']
+      #   labels: { instance_role: api_1 }
+      # - targets: ['chibalete_api_2:3000']
+      #   labels: { instance_role: api_2 }
+
+  - job_name: prometheus-self
+    static_configs:
+      - targets: ['localhost:9090']

@@ -1,0 +1,79 @@
+# P3-C — reglas de alerta ACCIONABLES. Cada alerta = "algo que un humano
+# debe hacer ahora", atada a las métricas P2 reales. Sin vanity/spam:
+# windows largos + thresholds operacionales, severidad explícita, runbook.
+# Montar en prometheus.yml:  rule_files: [ "/etc/prometheus/alerts.yml" ]
+groups:
+  - name: chibalete-runtime
+    rules:
+      - alert: ImmersiveDriftExplosion
+        expr: sum(rate(chibalete_immersive_drift_total[5m])) > 0.5
+        for: 10m
+        labels: { severity: warning, area: runtime }
+        annotations:
+          summary: "Drift inmersivo elevado ({{ $value | humanize }}/s)"
+          runbook: "docs/P3-incident-playbooks.md#drift-explosion → si runtime=v2 dominante, bajar IMMERSIVE_V2_COHORT_PCT o killswitch"
+
+      - alert: RuntimeCrashSpike
+        expr: sum(increase(chibalete_runtime_crash_total[10m])) > 5
+        for: 0m
+        labels: { severity: critical, area: runtime }
+        annotations:
+          summary: "Spike de crashes de runtime ({{ $value }}/10m)"
+          runbook: "#runtime-crash-spike → V2 killswitch inmediato si source=v2"
+
+      - alert: AudioRecoveryStorm
+        expr: sum(rate(chibalete_immersive_audio_recovery_total[5m])) > 1
+        for: 10m
+        labels: { severity: warning, area: runtime }
+
+  - name: chibalete-persistence
+    rules:
+      - alert: ShadowInconsistency
+        expr: min(chibalete_shadow_consistency_ok) < 1
+        for: 5m
+        labels: { severity: critical, area: persistence }
+        annotations:
+          summary: "shadow_audit reporta mismatch JSON↔SQLite"
+          runbook: "#shadow-inconsistency → NO hacer cutover de lectura; revisar shadow_audit"
+
+      - alert: SqliteBusySpike
+        expr: sum(rate(chibalete_sqlite_busy_total[5m])) > 0.2
+        for: 10m
+        labels: { severity: warning, area: persistence }
+
+  - name: chibalete-platform
+    rules:
+      - alert: EventLoopLagHigh
+        expr: chibalete_nodejs_eventloop_lag_seconds > 0.1
+        for: 5m
+        labels: { severity: warning, area: platform }
+        annotations: { summary: "Event-loop lag {{ $value }}s (saturación CPU)" }
+
+      - alert: MemoryLeakSuspected
+        expr: deriv(chibalete_process_resident_memory_bytes[30m]) > 1.5e5
+        for: 30m
+        labels: { severity: warning, area: platform }
+        annotations: { summary: "RSS crece sostenido (posible leak)" }
+
+      - alert: RestartLoop
+        expr: increase(chibalete_process_start_time_seconds[15m]) > 0 and changes(chibalete_process_start_time_seconds[15m]) >= 3
+        for: 0m
+        labels: { severity: critical, area: platform }
+        annotations: { runbook: "#restart-loop → revisar logs pino del container" }
+
+      - alert: ApiInstanceDown
+        expr: up{job="chibalete-api"} == 0
+        for: 1m
+        labels: { severity: critical, area: platform }
+        annotations: { summary: "Instancia {{ $labels.instance_role }} caída (dual-api: ¿degradado a 1?)" }
+
+      - alert: HighErrorRate
+        expr: sum(rate(chibalete_http_requests_total{status_class="5xx"}[5m])) / sum(rate(chibalete_http_requests_total[5m])) > 0.02
+        for: 10m
+        labels: { severity: critical, area: platform }
+
+      - alert: AuthFailureSpike
+        expr: sum(increase(chibalete_login_failures_total[10m])) > 50
+        for: 0m
+        labels: { severity: warning, area: security }
+        annotations: { summary: "Posible fuerza bruta / incidente auth" }

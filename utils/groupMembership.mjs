@@ -56,6 +56,56 @@ export function userIsLectorLike(user) {
     return arr(user.roles).includes(READER_ROLE);
 }
 
+/**
+ * isOperationallyEligibleLector — Single Source of Truth de "lector
+ * operacionalmente visible". Predicate user-level: NO chequea school.
+ *
+ * Sprint MGL Fase 1 / M2.1a — antes había dos definiciones divergentes:
+ *   - applyLegacyColegioFallback (runtime) → contaba soft-deleted como
+ *     elegibles para fallback colegio.
+ *   - buildGovernanceIndexes.usersBySchool (snapshot) → los excluía.
+ *
+ * Resultado: el snapshot decía "5 lectores fallback" mientras runtime
+ * materializaba 7 (incluyendo fantasmas). Eso es una fractura de
+ * observability parity inaceptable. M2.1a unifica el universo: este
+ * helper es la ÚNICA verdad sobre quién cuenta operacionalmente.
+ *
+ * Excluye:
+ *   - null/undefined
+ *   - sin id (string vacío o no-string)
+ *   - sin roles array
+ *   - sin rol 'lector'
+ *   - soft-deleted explícito (deleted === true)
+ *   - soft-deleted con timestamp (deletedAt: string truthy)
+ *
+ * NO chequea school — eso es contextual y lo hace el caller (o el helper
+ * compuesto isOperationallyEligibleFallbackUser).
+ */
+export function isOperationallyEligibleLector(user) {
+    if (!user || typeof user !== 'object') return false;
+    if (typeof user.id !== 'string' || user.id.length === 0) return false;
+    if (!Array.isArray(user.roles)) return false;
+    if (!user.roles.includes(READER_ROLE)) return false;
+    if (user.deleted === true) return false;
+    if (typeof user.deletedAt === 'string' && user.deletedAt.length > 0) return false;
+    return true;
+}
+
+/**
+ * isOperationallyEligibleFallbackUser — predicate user+group.
+ *
+ * Compone isOperationallyEligibleLector + same-school check. ÚNICA
+ * definición de "lector que cuenta para fallback colegio hacia este
+ * grupo". Cualquier consumidor (resolver runtime, classifier, snapshot,
+ * diagnosis) debe pasar por aquí — no reimplementar.
+ */
+export function isOperationallyEligibleFallbackUser(user, group) {
+    if (!isOperationallyEligibleLector(user)) return false;
+    if (!group?.school || typeof group.school !== 'string') return false;
+    if (typeof user.colegio !== 'string') return false;
+    return norm(user.colegio) === norm(group.school);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Add / remove primitives — mutates input. Idempotent.
 // ────────────────────────────────────────────────────────────────────────────
@@ -134,6 +184,16 @@ export function getExplicitGroupMembers(group, users) {
  * coincide. NO se activa para escuelas con múltiples grupos (no podemos
  * adivinar a cuál pertenecen).
  *
+ * Sprint MGL M2.1a — el filtro de elegibilidad se delega a
+ * `isOperationallyEligibleFallbackUser` (SoT). Esto ENDURECE el resolver:
+ * lectores soft-deleted (deleted=true / deletedAt) ya NO se incluyen en
+ * `matched`, alineando runtime con el snapshot de governance.
+ *
+ * Cambio observable cross-codebase:
+ *   - getGroupMembers (visibilidad runtime) deja de listar fantasmas.
+ *   - resolveMaterializableUsers (classifier) converge con el index.
+ *   - buildGroupDiagnosis (warnings) deja de mencionar fantasmas.
+ *
  * Devuelve { matched: Set<userId>, used: bool, reason?: string }.
  */
 export function applyLegacyColegioFallback(group, users, allGroups) {
@@ -154,10 +214,9 @@ export function applyLegacyColegioFallback(group, users, allGroups) {
         return out;
     }
     for (const u of users) {
-        if (!userIsLectorLike(u)) continue;
-        if (typeof u.colegio !== 'string') continue;
-        if (norm(u.colegio) !== schoolKey) continue;
-        out.matched.add(u.id);
+        if (isOperationallyEligibleFallbackUser(u, group)) {
+            out.matched.add(u.id);
+        }
     }
     out.used = out.matched.size > 0;
     return out;

@@ -1,0 +1,119 @@
+# npm audit report
+
+@opentelemetry/auto-instrumentations-node  <=0.74.0
+Severity: high
+Depends on vulnerable versions of @opentelemetry/sdk-node
+Prometheus exporter process crash via malformed HTTP request - https://github.com/advisories/GHSA-q7rr-3cgh-j5r3
+fix available via `npm audit fix --force`
+Will install @opentelemetry/auto-instrumentations-node@0.76.0, which is a breaking change
+node_modules/@opentelemetry/auto-instrumentations-node
+
+@opentelemetry/exporter-prometheus  <0.217.0
+Severity: high
+Prometheus exporter process crash via malformed HTTP request - https://github.com/advisories/GHSA-q7rr-3cgh-j5r3
+fix available via `npm audit fix --force`
+Will install @opentelemetry/sdk-node@0.218.0, which is a breaking change
+node_modules/@opentelemetry/exporter-prometheus
+  @opentelemetry/sdk-node  <=0.216.0
+  Depends on vulnerable versions of @opentelemetry/exporter-prometheus
+  node_modules/@opentelemetry/sdk-node
+
+
+@protobufjs/utf8  <=1.1.0
+Severity: moderate
+protobufjs has overlong UTF-8 decoding - https://github.com/advisories/GHSA-q6x5-8v7m-xcrf
+fix available via `npm audit fix`
+node_modules/@protobufjs/utf8
+
+brace-expansion  2.0.0 - 2.0.2
+Severity: moderate
+brace-expansion: Zero-step sequence causes process hang and memory exhaustion - https://github.com/advisories/GHSA-f886-m6hf-6m8v
+fix available via `npm audit fix`
+node_modules/brace-expansion
+
+express-rate-limit  8.0.1 - 8.5.0
+Severity: high
+express-rate-limit: IPv4-mapped IPv6 addresses bypass per-client rate limiting on servers with dual-stack network - https://github.com/advisories/GHSA-46wh-pxpv-q5gq
+Depends on vulnerable versions of ip-address
+fix available via `npm audit fix`
+node_modules/express-rate-limit
+
+file-type  20.0.0 - 21.3.1
+Severity: moderate
+file-type: ZIP Decompression Bomb DoS via [Content_Types].xml entry - https://github.com/advisories/GHSA-j47w-4g3g-c36v
+fix available via `npm audit fix`
+node_modules/file-type
+
+ip-address  <=10.1.0
+Severity: moderate
+ip-address has XSS in Address6 HTML-emitting methods - https://github.com/advisories/GHSA-v2v4-37r5-5v8g
+fix available via `npm audit fix`
+node_modules/ip-address
+
+lodash  <=4.17.23
+Severity: high
+lodash vulnerable to Code Injection via `_.template` imports key names - https://github.com/advisories/GHSA-r5fr-rjxr-66jc
+lodash vulnerable to Prototype Pollution via array path bypass in `_.unset` and `_.omit` - https://github.com/advisories/GHSA-f23m-r3pf-42rh
+fix available via `npm audit fix`
+node_modules/lodash
+
+minimatch  9.0.0 - 9.0.6
+Severity: high
+minimatch has a ReDoS via repeated wildcards with non-matching literal in pattern - https://github.com/advisories/GHSA-3ppc-4f35-3m26
+minimatch has ReDoS: matchOne() combinatorial backtracking via multiple non-adjacent GLOBSTAR segments - https://github.com/advisories/GHSA-7r86-cg39-jmmj
+minimatch ReDoS: nested *() extglobs generate catastrophically backtracking regular expressions - https://github.com/advisories/GHSA-23c5-xmqv-rm74
+fix available via `npm audit fix`
+node_modules/minimatch
+
+path-to-regexp  8.0.0 - 8.3.0
+Severity: high
+path-to-regexp vulnerable to Denial of Service via sequential optional groups - https://github.com/advisories/GHSA-j3q9-mxjg-w52f
+path-to-regexp vulnerable to Regular Expression Denial of Service via multiple wildcards - https://github.com/advisories/GHSA-27v5-c462-wpq7
+fix available via `npm audit fix`
+node_modules/path-to-regexp
+
+protobufjs  <=7.5.7
+Severity: critical
+Arbitrary code execution in protobufjs - https://github.com/advisories/GHSA-xq3m-2v4x-88gg
+protobuf.js: Code injection through bytes field defaults in generated toObject code - https://github.com/advisories/GHSA-66ff-xgx4-vchm
+protobuf.js: Denial of service from crafted field names in generated code - https://github.com/advisories/GHSA-2pr8-phx7-x9h3
+protobuf.js: Prototype injection in generated message constructors - https://github.com/advisories/GHSA-fx83-v9x8-x52w
+protobuf.js: Code generation gadget after prototype pollution - https://github.com/advisories/GHSA-75px-5xx7-5xc7
+protobuf.js: Process-wide denial of service through unsafe option paths - https://github.com/advisories/GHSA-jvwf-75h9-cwgg
+protobuf.js: Denial of service through unbounded protobuf recursion - https://github.com/advisories/GHSA-685m-2w69-288q
+protobufjs has overlong UTF-8 decoding - https://github.com/advisories/GHSA-q6x5-8v7m-xcrf
+protobufjs: Denial of Service via unbounded recursive JSON descriptor expansion - https://github.com/advisories/GHSA-jggg-4jg4-v7c6
+fix available via `npm audit fix`
+node_modules/protobufjs
+
+qs  <=6.14.1
+Severity: moderate
+qs's arrayLimit bypass in comma parsing allows denial of service - https://github.com/advisories/GHSA-w7fw-mjwx-w883
+qs's arrayLimit bypass in its bracket notation allows DoS via memory exhaustion - https://github.com/advisories/GHSA-6rw7-vpxm-498p
+fix available via `npm audit fix`
+node_modules/qs
+
+react-router  7.0.0 - 7.12.0-pre.0
+Severity: high
+React Router has CSRF issue in Action/Server Action Request Processing - https://github.com/advisories/GHSA-h5cw-625j-3rxh
+React Router vulnerable to XSS via Open Redirects - https://github.com/advisories/GHSA-2w69-qvjg-hvjx
+React Router SSR XSS in ScrollRestoration - https://github.com/advisories/GHSA-8v8x-cx79-35w7
+fix available via `npm audit fix`
+node_modules/react-router
+  react-router-dom  7.0.0-pre.0 - 7.11.0
+  Depends on vulnerable versions of react-router
+  node_modules/react-router-dom
+
+ws  8.0.0 - 8.20.0
+Severity: moderate
+ws: Uninitialized memory disclosure - https://github.com/advisories/GHSA-58qx-3vcg-4xpx
+fix available via `npm audit fix`
+node_modules/ws
+
+16 vulnerabilities (7 moderate, 8 high, 1 critical)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force

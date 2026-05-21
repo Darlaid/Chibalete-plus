@@ -129,7 +129,8 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
                     if (typeof pdfjsLib === 'undefined') throw new Error("Motor PDF no inicializado.");
                 }
                 if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-                    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                    // P0.5 — self-hosted, sin CDN externo (misma v3.11.174).
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
                 }
 
                 const loadingTask = pdfjsLib.getDocument(url);

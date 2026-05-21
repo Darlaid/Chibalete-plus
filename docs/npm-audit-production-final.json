@@ -1,0 +1,128 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "@opentelemetry/auto-instrumentations-node": {
+      "name": "@opentelemetry/auto-instrumentations-node",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        "@opentelemetry/sdk-node",
+        {
+          "source": 1117941,
+          "name": "@opentelemetry/auto-instrumentations-node",
+          "dependency": "@opentelemetry/auto-instrumentations-node",
+          "title": "Prometheus exporter process crash via malformed HTTP request",
+          "url": "https://github.com/advisories/GHSA-q7rr-3cgh-j5r3",
+          "severity": "high",
+          "cwe": [
+            "CWE-755"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          },
+          "range": "<0.75.0"
+        }
+      ],
+      "effects": [],
+      "range": "<=0.74.0",
+      "nodes": [
+        "node_modules/@opentelemetry/auto-instrumentations-node"
+      ],
+      "fixAvailable": {
+        "name": "@opentelemetry/auto-instrumentations-node",
+        "version": "0.76.0",
+        "isSemVerMajor": true
+      }
+    },
+    "@opentelemetry/exporter-prometheus": {
+      "name": "@opentelemetry/exporter-prometheus",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1117943,
+          "name": "@opentelemetry/exporter-prometheus",
+          "dependency": "@opentelemetry/exporter-prometheus",
+          "title": "Prometheus exporter process crash via malformed HTTP request",
+          "url": "https://github.com/advisories/GHSA-q7rr-3cgh-j5r3",
+          "severity": "high",
+          "cwe": [
+            "CWE-755"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          },
+          "range": "<0.217.0"
+        }
+      ],
+      "effects": [
+        "@opentelemetry/sdk-node"
+      ],
+      "range": "<0.217.0",
+      "nodes": [
+        "node_modules/@opentelemetry/exporter-prometheus"
+      ],
+      "fixAvailable": {
+        "name": "@opentelemetry/sdk-node",
+        "version": "0.218.0",
+        "isSemVerMajor": true
+      }
+    },
+    "@opentelemetry/sdk-node": {
+      "name": "@opentelemetry/sdk-node",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        "@opentelemetry/exporter-prometheus",
+        {
+          "source": 1117942,
+          "name": "@opentelemetry/sdk-node",
+          "dependency": "@opentelemetry/sdk-node",
+          "title": "Prometheus exporter process crash via malformed HTTP request",
+          "url": "https://github.com/advisories/GHSA-q7rr-3cgh-j5r3",
+          "severity": "high",
+          "cwe": [
+            "CWE-755"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          },
+          "range": "<0.217.0"
+        }
+      ],
+      "effects": [
+        "@opentelemetry/auto-instrumentations-node"
+      ],
+      "range": "<=0.216.0",
+      "nodes": [
+        "node_modules/@opentelemetry/sdk-node"
+      ],
+      "fixAvailable": {
+        "name": "@opentelemetry/sdk-node",
+        "version": "0.218.0",
+        "isSemVerMajor": true
+      }
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 3,
+      "critical": 0,
+      "total": 3
+    },
+    "dependencies": {
+      "prod": 516,
+      "dev": 152,
+      "optional": 64,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 678
+    }
+  }
+}

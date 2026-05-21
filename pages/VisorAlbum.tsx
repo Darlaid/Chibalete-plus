@@ -18,6 +18,8 @@ import { useNarrativeAudio } from '../hooks/useNarrativeAudio';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, HelpCircle, Volume2, VolumeX, RotateCcw, Eye, EyeOff } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import Chatbot from '../components/Chatbot';
+// Fase 4 — accessibility experience: respeta prefers-reduced-motion del SO.
+import { useReducedMotion } from '../hooks/useReducedMotion';
 
 // Normalize album data — backfills missing ids/text/coords, migrates legacy
 // isInteractive into the canonical type field, and synthesizes region.action
@@ -135,6 +137,12 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
     const navigate = useNavigate();
     const { user } = useAuth();
     const albumData = useMemo(() => normalizeAlbumData(content.album_data || []), [content.album_data]);
+    // Fase 4 — el usuario tiene activado prefers-reduced-motion en el SO.
+    // Cuando es true: silenciamos confetti, removemos easing asimétrico del
+    // narrative overlay y dejamos transitions instantáneas. Tailwind ya
+    // respeta motion-reduce: para classes responsive; este flag complementa
+    // las animaciones JS-driven (confetti programmatic, narrativeTransition).
+    const reducedMotion = useReducedMotion();
 
     // Navigation State — declared BEFORE any useMemo that reads these values.
     // Rule: no hook may reference a variable not yet declared in the same component body.
@@ -313,10 +321,14 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
     //   → HIGHLIGHT: 50ms ease-out  — fast tactile snap (contact, not wait)
     //   → PENDING:   80ms ease-out  — smooth settle into anticipation
     //   → IDLE/ACTIVE: 130ms ease-in-out — organic release back to full opacity
-    const narrativeTransition =
-        interaction.phase === 'HIGHLIGHT' ? 'opacity 50ms ease-out' :
-        interaction.phase === 'PENDING'   ? 'opacity 80ms ease-out' :
-        /* IDLE or ACTIVE */                'opacity 130ms ease-in-out';
+    // Fase 4 — reducedMotion override: si el usuario prefiere movimiento
+    // reducido, las transitions narrativas pasan a 'none' (cambio instantáneo).
+    // Mantiene la semántica visual (opacity values) sin el easing asimétrico.
+    const narrativeTransition = reducedMotion
+        ? 'none'
+        : (interaction.phase === 'HIGHLIGHT' ? 'opacity 50ms ease-out' :
+           interaction.phase === 'PENDING'   ? 'opacity 80ms ease-out' :
+           /* IDLE or ACTIVE */                'opacity 130ms ease-in-out');
 
     // narrativeFallbackOpacity: additive white overlay for dark-scene reinforcement.
     //
@@ -1291,7 +1303,10 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
         if (hit) {
             audio.playEffect('challenge_hit');
             try {
-                confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+                // Fase 4 — reducedMotion: omitir confetti (motion intensa).
+                if (!reducedMotion) {
+                    confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+                }
             } catch (err) {
                 console.warn('confetti failed', err);
             }
@@ -1353,7 +1368,10 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
     useEffect(() => {
         if (viewerState !== 'complete') return;
         try {
-            confetti({ particleCount: 140, spread: 80, origin: { y: 0.55 }, colors: ['#818cf8', '#a78bfa', '#c084fc', '#f9a8d4', '#fde68a', '#6ee7b7'] });
+            // Fase 4 — reducedMotion: omitir burst de celebración.
+            if (!reducedMotion) {
+                confetti({ particleCount: 140, spread: 80, origin: { y: 0.55 }, colors: ['#818cf8', '#a78bfa', '#c084fc', '#f9a8d4', '#fde68a', '#6ee7b7'] });
+            }
         } catch { /* ignore — confetti is enhancement only */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [viewerState]);

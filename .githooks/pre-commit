@@ -1,0 +1,27 @@
+#!/usr/bin/env sh
+# P0.1 — pre-commit secret scan (sin husky / sin dep npm).
+# Activar (una vez, por clon):   git config core.hooksPath .githooks
+# Desactivar (rollback):         git config --unset core.hooksPath
+#
+# Escanea SOLO lo staged (rápido, no el historial). Si gitleaks no está
+# instalado, NO bloquea el commit (warn) para no frenar a quien aún no lo
+# instaló — el gate duro vive en CI (.github/workflows/security.yml).
+set -e
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-commit] ⚠ gitleaks no instalado — saltando scan local."
+  echo "[pre-commit]   Instalá: https://github.com/gitleaks/gitleaks/releases"
+  echo "[pre-commit]   (el gate obligatorio corre igual en CI)"
+  exit 0
+fi
+
+echo "[pre-commit] gitleaks protect --staged ..."
+if ! gitleaks protect --staged --source . --config .gitleaks.toml --redact -v; then
+  echo ""
+  echo "[pre-commit] ✗ POSIBLE SECRETO detectado en cambios staged. Commit ABORTADO."
+  echo "[pre-commit]   Revisá arriba. Si es falso positivo, ajustá [allowlist] en .gitleaks.toml"
+  echo "[pre-commit]   (con justificación) o usá 'git commit --no-verify' SOLO si estás seguro."
+  exit 1
+fi
+echo "[pre-commit] ✓ sin secretos en staged."
+exit 0

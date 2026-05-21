@@ -1,0 +1,103 @@
+name: security
+
+# P0 — STOP THE BLEED: secret scanning + SCA + container/IaC scan.
+# Gate de seguridad. NO toca runtime, build ni deploy: solo analiza.
+#
+# Criterios fail/pass:
+#   - gitleaks (historial): CUALQUIER hallazgo → FAIL.
+#   - OSV-Scanner (package-lock.json): vuln conocida sin ignore razonado → FAIL.
+#   - Trivy fs (secret+config+vuln, ignore-unfixed): HIGH/CRITICAL con fix → FAIL.
+#   - Trivy image (api/front): HIGH/CRITICAL con fix → FAIL; base CVEs sin
+#     fix NO bloquean (ignore-unfixed) — práctica DevSecOps de ratchet.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"   # lunes 06:00 UTC — re-scan de deps/imagen
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── P0.1 — Secret scanning (historial COMPLETO) ─────────────────────────
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # historial completo (detecta creds ya commiteadas)
+      - name: Install gitleaks (binario oficial, sin licencia)
+        run: |
+          VER=8.21.2
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: gitleaks detect (history)
+        run: gitleaks detect --source . --config .gitleaks.toml --redact -v --exit-code 1
+
+  # ── P0.2a — SCA npm (protobufjs/firebase/vite/etc.) ─────────────────────
+  osv-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OSV-Scanner (lockfile)
+        uses: google/osv-scanner-action/osv-scanner-action@v2.0.0
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json
+            --config=osv-scanner.toml
+
+  # ── P0.2b — Trivy: fs (secret+config+vuln) + imágenes Docker ────────────
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem (vuln + misconfig + secret)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+      - name: Trivy config (docker-compose + Dockerfiles + nginx)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+      - name: Build api image (scan target)
+        run: docker build -f Dockerfile.api -t chibalete/api:ci .
+      - name: Trivy image — chibalete/api
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: chibalete/api:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Build front image (scan target)
+        run: docker build -f Dockerfile.front -t chibalete/front:ci .
+      - name: Trivy image — chibalete/front (incluye nginx base)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: chibalete/front:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

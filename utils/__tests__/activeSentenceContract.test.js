@@ -49,15 +49,23 @@ ok('ImmersiveShell incluye data-sentence-index',
 ok('ImmersiveShell incluye aria-current (accesibilidad)',
    /aria-current\s*=\s*\{\s*isActive\s*\?\s*['"]true['"]/.test(shellSrc));
 
-// REGRESION GUARD: si alguien quita los attrs por cleanup automático
+// REGRESION GUARD: si alguien quita los attrs por cleanup automático.
+// Ventana ampliada para acomodar data-sentence-len + data-active-fit-scale
+// + style (M-5.4.6 Case 3 layout fit).
 ok('REGRESION GUARD: ImmersiveShell.tsx mantiene los 3 attrs juntos en la misma render',
-   /data-sentence-index\s*=[\s\S]{0,150}data-active-sentence[\s\S]{0,150}aria-current/.test(shellSrc));
+   /data-sentence-index\s*=[\s\S]{0,400}data-active-sentence[\s\S]{0,400}aria-current/.test(shellSrc));
 
 // ───────────────────────────────────────────────────────────────────────────
-// VisorInmersivo — useLayoutEffect contract validator
+// M-5.4.6 (DEMOLITION Phase 1.b.2) — Sección "VisorInmersivo — useLayoutEffect
+// contract validator" ELIMINADA. El visor pasó a READ-ONLY. Ya no:
+//   - emite visual_highlight_ack
+//   - marca domVerified:true
+//   - distingue active_sentence_missing/duplicate/index_mismatch (los logs
+//     genéricos PB_VISUAL_HIGHLIGHT_REJECTED + PB_ACTIVE_SENTENCE_REVEAL_FAILED
+//     siguen existiendo pero como observabilidad pura, no autorizan playback)
 // ───────────────────────────────────────────────────────────────────────────
 
-console.log('\n[INV-18] VisorInmersivo valida contract DOM post-render');
+console.log('\n[INV-18] Visor sigue teniendo useLayoutEffect read-only');
 
 ok('VisorInmersivo importa useLayoutEffect',
    /import\s+React,\s*\{[^}]*useLayoutEffect[^}]*\}\s+from\s+['"]react['"]/.test(visorSrc));
@@ -65,72 +73,37 @@ ok('VisorInmersivo importa useLayoutEffect',
 ok('VisorInmersivo tiene useLayoutEffect',
    /useLayoutEffect\s*\(/.test(visorSrc));
 
-ok('Validator consulta document.querySelectorAll([data-active-sentence="true"])',
+ok('Validator consulta document.querySelectorAll([data-active-sentence="true"]) (read-only)',
    /querySelectorAll\(['"][^'"]*data-active-sentence[^'"]*=[^'"]*['"]true['"][^'"]*['"]/.test(visorSrc));
 
-ok('Validator chequea count === 0 (active_sentence_missing)',
-   /active_sentence_missing/.test(visorSrc));
+// Verificamos que NO existan callers reales (kind: 'visual_highlight_ack',
+// pb.acknowledgeVisualHighlight(...)) — sólo se admite la palabra en
+// comentarios documentales.
+ok('M-5.4.6 — Visor NO emite visual_highlight_ack como kind de immersiveLog',
+   !/kind:\s*viaReveal\s*\?\s*['"]PB_VISUAL_HIGHLIGHT_ACK_AFTER_REVEAL['"]\s*:\s*['"]visual_highlight_ack['"]/.test(visorSrc));
 
-ok('Validator chequea count > 1 (active_sentence_duplicate)',
-   /active_sentence_duplicate/.test(visorSrc));
+ok('M-5.4.6 — Visor NO llama pb.acknowledgeVisualHighlight',
+   !/pb\.acknowledgeVisualHighlight\s*\(/.test(visorSrc));
 
-ok('Validator chequea data-sentence-index vs currentIndex (mismatch)',
-   /active_sentence_index_mismatch/.test(visorSrc));
-
-ok('Validator emite visual_highlight_ack cuando contract pasa',
-   /visual_highlight_ack/.test(visorSrc));
-
-ok('Validator marca domVerified:true en el log de ack',
-   /domVerified:\s*true/.test(visorSrc));
+ok('M-5.4.6 — Visor NO marca domVerified:true (ack writer eliminado)',
+   !/domVerified:\s*true/.test(visorSrc));
 
 // ───────────────────────────────────────────────────────────────────────────
-// VisorInmersivo — drift detector
+// M-5.4.6 (DEMOLITION Phase 1.a) — Sección "VisorInmersivo — drift detector"
+// ELIMINADA. El drift detector fue removido del visor. Las assertions que
+// vivían acá enforce-aban su presencia (setInterval 250ms, strikes,
+// PB_INDEX_DRIFT_DETECTED, hardResync recovery, etc.) — ya no aplican.
 // ───────────────────────────────────────────────────────────────────────────
 
-console.log('\n[INV-18] Drift detector activo cada 250ms durante playback');
+// REGRESION GUARD que SOBREVIVE: el visor NO debe navegar a otro libro como
+// reacción a drift. Mantengo este check porque sigue siendo cierto en el
+// modelo nuevo (navegar a otro libro NUNCA es respuesta a un problema de
+// runtime — sólo a un gesto manual del usuario).
+console.log('\n[INV-18] REGRESION GUARD: visor no navega a otro libro por drift');
 
-ok('Drift detector usa setInterval con 250ms',
-   /setInterval\([\s\S]+?,\s*250\s*\)/.test(visorSrc));
-
-ok('Drift detector solo corre si pb.isPlaying (no en pause)',
-   /if\s*\(\s*!\s*pb\.isPlaying[\s\S]{0,100}?return/.test(visorSrc));
-
-ok('Drift detector incrementa strikes en driftStrikesRef',
-   /driftStrikesRef\s*=\s*useRef\s*\(\s*0\s*\)/.test(visorSrc) &&
-   /driftStrikesRef\.current\+\+/.test(visorSrc));
-
-ok('Drift detector emite drift_detected con strikes',
-   /drift_detected[\s\S]{0,400}?strikes:\s*driftStrikesRef\.current/.test(visorSrc));
-
-ok('Tras >=2 strikes, dispara hardResync vía pb.skip(currentIndex)',
-   /driftStrikesRef\.current\s*>=\s*2[\s\S]+?pb\.skip\s*\(\s*currentIndex\s*\)/.test(visorSrc));
-
-ok('Emite drift_recovery_hard_resync antes del skip',
-   /drift_recovery_hard_resync/.test(visorSrc));
-
-ok('Resetea strikes a 0 después del recovery',
-   /driftStrikesRef\.current\s*=\s*0/.test(visorSrc));
-
-// Cleanup del setInterval en return
-ok('useEffect del drift detector limpia el setInterval en cleanup',
-   /clearInterval\(id\)/.test(visorSrc));
-
-// ───────────────────────────────────────────────────────────────────────────
-// REGRESION GUARDS específicas del bug
-// ───────────────────────────────────────────────────────────────────────────
-
-console.log('\n[INV-18] REGRESION GUARDS');
-
-ok('REGRESION GUARD: no se inicia audio sin que exista visual_highlight_ack en el flujo',
-   /visual_highlight_ack/.test(visorSrc),
-   'el log de ack debe estar presente');
-
-ok('REGRESION GUARD: pb.skip se invoca en drift recovery (no navigate)',
-   /pb\.skip\s*\(\s*currentIndex\s*\)/.test(visorSrc));
-
-ok('REGRESION GUARD: hardResync NO usa navigate (no cambia de libro)',
+ok('REGRESION GUARD: visor NO usa navigate por drift recovery',
    !/navigate\([^)]*['"]\/leer\/inmersivo\/[\s\S]{0,200}drift/.test(visorSrc),
-   'drift recovery no debe navegar a otro libro');
+   'drift recovery (eliminado) no debe navegar a otro libro');
 
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 if (fail > 0) process.exit(1);

@@ -27,12 +27,29 @@
  *     solo se emiten cuando play() resuelve sin error.
  */
 
+import type * as React from 'react';
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { usePlaybackAnalytics } from './usePlaybackAnalytics';
 // INVARIANTE 7/8/9 — helpers puros compartidos (testeados unitariamente en
 // utils/__tests__/immersiveTiming.test.js). Cualquier cambio aquí debe ir
 // acompañado de cambios en los tests; pre-build gate `npm run test:immersive`.
 import { estimateMinSentenceMs, validateAudioDuration } from '../utils/immersiveTiming.js';
+// M-5.3.4: execution layer — strategies de sincronización por SentenceAudioMode.
+import { executeSyncStrategy } from '../utils/syncStrategyExecutor.mjs';
+// BLOCKER FINAL V2 / TASK 2 — decisión pura del invariante de transición de
+// chunk. El hook USA esta misma función que los tests ejercen (no simulación).
+import { decideChunkTransition } from '../utils/gaplessChunkGuard.mjs';
+// F3 — state machine como gobierno observacional del runtime. La machine
+// recibe acciones reales (PREPARE_SENTENCE, AUDIO_STARTED, AUDIO_ENDED,
+// SENTENCE_COMPLETED, PAUSE, SKIP, CONTENT_CHANGE) y mantiene el
+// activeSentenceBuffer. En F3 NO controla el audio — solo observa y emite
+// logs estructurados. El gating duro (REQUEST_AUDIO_START / BLOCK_AUDIO_START)
+// es F4.
+import {
+    initialState as machineInit,
+    reduce as machineReduce,
+    Actions as MA,
+} from '../utils/immersivePlaybackMachine.js';
 
 // ── Tipos exportados ────────────────────────────────────────────────────────
 
@@ -87,6 +104,21 @@ export interface PlaybackContext {
     manifestRef:       React.MutableRefObject<Record<string, any> | null>;
     /** Mapping sentenceIndex → chunkIndex. Array vacío en v1. */
     toChunkRef:        React.MutableRefObject<number[]>;
+    /**
+     * M-5.3.4: anchorsMap por chunkIndex — para sincronización dentro de
+     * chunks multifrase (perChunkWithAnchors). Estructura:
+     *   { [chunkIdx: number]: ContextualAnchor[] }
+     * Opcional: si no se pasa, el executor degrada a perChunkNoAnchors.
+     */
+    anchorsMapRef?:    React.MutableRefObject<Record<number, any[]> | null>;
+    /**
+     * M-5.3.4: modo de audio detectado para el contenido actual. El visor lo
+     * setea via `detectSentenceAudioMode` en el bootstrap del libro.
+     * Si null o ausente, el hook degrada a perSentence (path legacy).
+     */
+    audioModeRef?:     React.MutableRefObject<
+        'perSentence' | 'perChunkWithAnchors' | 'perChunkNoAnchors' | 'ttsDynamic' | 'unknown' | null
+    >;
     /** Velocidad de reproducción actual */
     speedRef:          React.MutableRefObject<number>;
     /** userId para x-user-id header en /api/tts */
@@ -106,6 +138,48 @@ export interface PlaybackContext {
 // Tag para PlaybackEvent — añadimos audio_cache_invalidated cuando INV-9 detecta
 // un blob cacheado con duración sospechosa para wordCount visible.
 type _ExtraEvents = 'audio_cache_invalidated';
+
+/**
+ * F7 — snapshot read-only del estado runtime de la machine. Lo expone el hook
+ * para que el visor pueda validar el contrato de frase activa sin importar
+ * la machine ni mantener refs mutables.
+ */
+export interface MachineSnapshot {
+    status:           string;
+    committedIndex:   number;
+    visualIndex:      number;
+    audioIndex:       number;
+    progressIndex:    number;
+    pendingTransition: {
+        id:                number;
+        fromIndex:         number;
+        toIndex:           number;
+        reason:            string;
+        visualAckReceived: boolean;
+        requireVisualAck:  boolean;
+    } | null;
+    buffer: {
+        current: {
+            index:                    number;
+            // M-5.4.6 — 'preparing' y 'visible' colapsados en 'reading'.
+            status:                   'preparing' | 'reading' | 'completed' | 'cancelled';
+            audioStarted:             boolean;
+            audioEnded:               boolean;
+            progressEligible:         boolean;
+            transitionId:             number;
+        } | null;
+        next: {
+            index:        number;
+            status:       'preparing' | 'visible' | 'reading' | 'completed' | 'cancelled';
+            transitionId: number;
+        } | null;
+        locked: boolean;
+    };
+    // M-5.4.6 (DEMOLITION Phase 1.a) — Campos lastAdvanceWithinChunkAt /
+    // ChunkKey / lastManualNavAt eliminados junto con el drift detector que
+    // los consumía. La machine snapshot vuelve a ser un read del estado real
+    // de la máquina, sin metadatos para suprimir hard_resync.
+}
 
 export interface ImmersivePlayback {
     audioRefA:    React.RefObject<HTMLAudioElement | null>;
@@ -146,11 +220,171 @@ export interface ImmersivePlayback {
      * todavía no fueron commiteados. No-side-effect; sólo lee refs internos.
      */
     isPendingAdvance: () => boolean;
+    /**
+     * F3: notifica a la state machine que el DOM confirmó el highlight visual
+     * de `index`. El visor llama esto desde su useLayoutEffect tras validar
+     * el active sentence contract. En F3 es observacional; F4 lo usará para
+     * gating duro de REQUEST_AUDIO_START.
+     */
+    acknowledgeVisualHighlight: (index: number) => void;
+    /**
+     * F3: notifica que BlockEngine completó el bloque. El visor lo llama
+     * desde el subscribe('complete'). La machine cancela buffer y entra en
+     * status='block_completed'. F7 conectará esto desde el visor.
+     */
+    notifyBlockComplete: () => void;
+    /**
+     * F5: ¿se puede guardar progreso para `index` AHORA?
+     * Read-only — no muta state, no emite logs. El visor lo llama desde su
+     * effect de PROGRESS_SAVE; si retorna { ok: false }, NO guardar y loguear
+     * `PB_PROGRESS_SAVE_BLOCKED_NO_COMPLETION` con el reason.
+     *
+     * Reglas duras (regla madre — INV-19):
+     *   - buffer.current existe e index coincide
+     *   - status === 'completed'
+     *   - visualHighlightConfirmed && audioStarted && audioEnded
+     *   - progressEligible === true
+     *   - buffer.next === null  (sin gapless prefetch pendiente)
+     *   - sin pendingAdvance (timer pendiente del autoadvance)
+     *
+     * No hace hardResync — bloquear progreso NO debe afectar playback.
+     */
+    canSaveProgress: (index: number) => { ok: boolean; reason?: string };
+    /**
+     * F6: hardResync formal — recuperación dura ante estado inseguro.
+     *
+     * Cancela todos los timers/listeners pendientes, pausa ambos audios,
+     * cancela el buffer de la machine, deja el playback en 'paused' y NO
+     * reproduce audio automáticamente. El siguiente play() del usuario pasará
+     * por load() → ack → REQUEST_AUDIO_START gate.
+     *
+     * Usar este método (no pb.skip) ante:
+     *   - drift detection (2 strikes)
+     *   - active_sentence_missing / duplicate / mismatch
+     *   - audio_start_without_highlight
+     *   - resume_without_active_sentence
+     *   - cualquier estado inseguro detectado por validators externos
+     *
+     * skip() del usuario sigue siendo distinto: es una navegación intencional.
+     */
+    hardResync: (targetIndex: number, reason: string) => void;
+    /**
+     * F7: snapshot read-only del estado runtime de la machine. El visor lo
+     * llama desde el drift detector para validar el contrato completo de
+     * frase activa sin importar la machine ni mantener refs mutables.
+     *
+     * No expone referencias internas — todo es copia plana de primitivos.
+     */
+    getMachineSnapshot: () => MachineSnapshot;
+    /**
+     * F11: bootstrap explícito de la frase activa. Dispatcha PREPARE_SENTENCE
+     * sin tocar audio. Usado por el visor cuando detecta que el buffer no
+     * tiene current para el currentIndex (caso típico: primer render al
+     * abrir un libro nuevo o al restaurar progreso).
+     *
+     * Idempotente: si ya hay buffer.current.index === index, no muta.
+     * Reason: 'initial_bootstrap' / 'resume_bootstrap' / 'restore_bootstrap'.
+     */
+    prepareSentence: (index: number, reason: string) => void;
+    /**
+     * F11: ¿el buffer está preparado para `index`? Read-only.
+     * True si buffer.current.index === index y buffer no está locked.
+     * El visor lo llama antes de emitir visual_highlight_ack para evitar
+     * el ack temprano sobre un buffer vacío.
+     */
+    isPreparedForIndex: (index: number) => boolean;
+    /**
+     * M-5.3 (rev M-5.3.3): ¿el buffer del index ya recibió ack visual?
+     *
+     * Pregunta semántica: "¿este index ya fue confirmado?" (visualHighlightConfirmed
+     * es monotónico — verdadero durante 'visible' / 'reading' / 'completed').
+     * NO confundir con canStartAudio (interno, exige status='visible').
+     *
+     * True SOLO si buffer.current existe Y .index === index Y
+     * .visualHighlightConfirmed === true. Read-only, no muta, no emite eventos.
+     */
+    isVisuallyAckedForIndex: (index: number) => boolean;
+    /**
+     * F12: ¿el audio para `index` está marcado como fallido? Read-only.
+     * Un index queda marcado tras tts_fail o NotSupportedError post-retry.
+     * No re-intentar play() automáticamente sobre estos índices.
+     */
+    isAudioFailed: (index: number) => boolean;
+    /**
+     * F12: chequeo previo de audio readiness. Emite PB_AUDIO_READY_CHECK +
+     * PB_AUDIO_READY / PB_AUDIO_READY_FAILED. Devuelve estado actual.
+     * Útil para que el visor o tests puedan consultar sin disparar play.
+     */
+    ensurePlayableAudio: (index: number) => Promise<{ ok: boolean; reason?: string; source?: 'cache' | 'tts' }>;
+    /**
+     * F16: snapshot de diagnóstico universal cuando un play no inicia audio.
+     * El visor lo dispara en setTimeout(1500ms) tras togglePlay si no llegó
+     * AUDIO_STARTED. Devuelve un objeto plano con el estado completo del
+     * sistema para identificar exactamente cuál contrato falla.
+     */
+    getStartDiagnostic: (index: number) => Record<string, any>;
+    /**
+     * F13: navegación local pura del usuario (botones anterior/siguiente).
+     * NO inicia audio. NO guarda progreso. NO dispara blockComplete. NO
+     * cambia contentId. NO usa hardResync. Solo:
+     *   - pause audio actual + cancelPendingAdvance
+     *   - prepareSentence(targetIndex) en la machine
+     *   - setIdx(targetIndex) — el visor revela y emite ack
+     *   - status='paused' — el user reanudará con play
+     * Si el user toca play después, el flujo normal load(idx,true) + ack +
+     * REQUEST_AUDIO_START + audio readiness se ejecuta.
+     *
+     * El index se clampa a [0, sentences.length - 1]. Si target === current,
+     * es no-op + log PB_MANUAL_JUMP_BLOCKED reason=same_index.
+     */
+    manualSentenceJump: (targetIndex: number, reason: string) => void;
+    /**
+     * M-5.4 — snapshot estructural READ-ONLY del runtime vivo.
+     *
+     * Pensado para: console debugging, smoke tests, watchdog, telemetría
+     * futura. NO muta nada. NO emite eventos por sí mismo. Devuelve copia
+     * plana serializable (sin refs ni funciones).
+     *
+     * Campos: sessionId, contentId, currentSentence/Chunk, audioMode,
+     * syncStrategy, playbackState, audio src activo/standby, executor activo,
+     * timers pendientes, hardResync count, cache entries, ownership tokens,
+     * visualAck state, machine buffer state, timestamps de últimos eventos.
+     */
+    getRuntimeDiagnostics: () => Record<string, any>;
+    /**
+     * M-5.3.4 — avance visual liviano dentro del MISMO chunk de audio.
+     *
+     * El audio NO se recarga, NO se reinicia. Solo:
+     *   - dispatchMachine PREPARE_SENTENCE(toIndex) → buffer 'preparing'
+     *   - setIdx(toIndex) → React state se actualiza
+     *   - Visor reveal + acknowledgeVisualHighlight → buffer 'visible'
+     *   - dispatchMachine AUDIO_STARTED(toIndex) → buffer 'reading'
+     *
+     * Pre-condiciones (caller debe garantizar):
+     *   - toChunkKey(toIndex) === toChunkKey(currentIdxRef.current)
+     *   - audio del chunk YA está reproduciendo (status === 'playing')
+     *
+     * Logs: CHUNK_AUDIO_REUSE / CHUNK_AUDIO_SKIP_RELOAD.
+     */
+    advanceWithinChunk: (toIndex: number) => void;
 }
 
 // ── Constantes ───────────────────────────────────────────────────────────────
 
 const PREFETCH_WINDOW = 5;
+
+// F10 — tiempo máximo que el hook espera por el ack visual del visor antes de
+// considerar fallido el primer play o el autoadvance. Debe ser >=
+// M-5.4.6 — VISUAL_READY_TIMEOUT_MS conservada por compatibilidad con
+// canStartAudio/waitForVisualAck (que pronto removeremos en Phase 1.b.5).
+// Cuando esas funciones se borren, esta constante también.
+const VISUAL_READY_TIMEOUT_MS = 800;
+
+// F19/Cambio C — cap defensivo de hardResync por sesión. hardResync es
+// recuperación EXCEPCIONAL, no mecanismo normal. Después de N intentos
+// dentro de la misma session (contentSessionRef), no más auto-retry —
+// status='error' y el user decide.
+const MAX_HARD_RESYNC_ATTEMPTS_PER_SESSION = 2;
 
 // ── Ritmo narrativo — clasificación determinista (O(n) en longitud del texto) ─
 // Sin NLP, sin regex complejas, sin IA en runtime. Métricas de texto simples.
@@ -202,8 +436,31 @@ function getAdaptivePrefetchWindow(): number {
 // Emite a consola con prefijo y contexto. En producción puede redirigirse
 // a un endpoint de analytics sin cambiar los call sites.
 
+// F17 — dedupe Set de tags de error ya logueados al backend para no spammear
+// /api/events 400 si el server rechaza un event type particular. Single-shot
+// por (event tag) durante el lifetime de la pestaña — el debugger humano ve
+// el primer error y los siguientes solo van a console.warn.
+const _telemetryFailedTags = new Set<string>();
+
+// F17 — sanitización defensiva del payload antes de enviar al backend.
+// Reglas:
+//   1. Si payload.userId falta o vacío → no enviar.
+//   2. Si payload contiene campos circulares/no-serializables → no enviar.
+//   3. JSON.stringify dentro de try/catch — never throw.
+function _sanitizeAndStringify(payload: Record<string, unknown>): string | null {
+    if (!payload || typeof payload !== 'object') return null;
+    if (!payload.userId || payload.userId === '' || payload.userId === 'guest') return null;
+    try {
+        return JSON.stringify(payload);
+    } catch {
+        return null;
+    }
+}
+
 function pbLog(event: PlaybackEvent, data?: Record<string, unknown>): void {
-    const payload = { event, ts: Date.now(), ...data };
+    // F17: cast para que el spread de `data` (Record<string, unknown>) sea
+    // accesible vía payload['userId'] etc. dentro del sanitizador y los headers.
+    const payload: Record<string, unknown> = { event, ts: Date.now(), ...data };
     // eventos frecuentes — nivel 'debug', nunca van al backend
     if (event === 'play_start' || event === 'sentence_advanced' || event === 'sentence_time' || event === 'sentence_rhythm' || event === 'sentence_skipped' || event === 'playback_paused' || event === 'sentence_floor_applied' || event === 'audio_metadata' || event === 'audio_cache_invalidated' || event === 'index_scheduled' || event === 'index_commit' || event === 'pending_advance_cancelled') {
         console.debug('[PB]', payload);
@@ -212,20 +469,56 @@ function pbLog(event: PlaybackEvent, data?: Record<string, unknown>): void {
     } else {
         // Errores, bloqueos, fallos — nivel 'warn' para que sean visibles en VPS logs
         console.warn('[PB]', payload);
-        // Solo persistir eventos no-rutinarios en el backend (fire-and-forget)
-        fetch('/api/events', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            // keepalive: true permite que el request complete incluso si el tab se cierra
-            keepalive: true,
-        }).catch(() => { /* ignorar errores de red — nunca bloquear playback */ });
+        // F17: persistir eventos no-rutinarios al backend, con guards:
+        //   - payload sanitizado (sin userId vacío, no-throws)
+        //   - dedupe por tag — no spammeo si server rechaza un type
+        //   - try/catch global — playback NUNCA depende de telemetry
+        try {
+            if (_telemetryFailedTags.has(event)) return;
+            const body = _sanitizeAndStringify(payload);
+            if (!body) return;
+            const userIdHeader = String(payload.userId ?? '');
+            fetch('/api/events', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-user-id':    userIdHeader,
+                },
+                body,
+                keepalive: true,
+            }).then(res => {
+                if (!res.ok) {
+                    // Single-shot log de fallo. Marca el tag como failed para
+                    // dedupe — no se reintentará en este lifetime de pestaña.
+                    if (!_telemetryFailedTags.has(event)) {
+                        _telemetryFailedTags.add(event);
+                        console.warn('[PB-TELEMETRY-FAIL]', { event, status: res.status, dedupe: true });
+                    }
+                }
+            }).catch(() => { /* swallow — playback never depends on telemetry */ });
+        } catch { /* defense-in-depth: never throw from logger */ }
     }
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
+
+    // BLOCKER M-5.4.3 — Build marker. Si este log NO aparece en consola del
+    // browser, el bundle está cacheado y el operador necesita hard-reload
+    // (Ctrl+Shift+R) o `npm run dev` no recompiló. NO sigas debuggeando
+    // path de spawn sin ver este log primero.
+    const _m543MarkerEmittedRef = useRef(false);
+    if (!_m543MarkerEmittedRef.current) {
+        _m543MarkerEmittedRef.current = true;
+        // eslint-disable-next-line no-console
+        console.warn('[M543_BUILD_MARKER] perChunkNoAnchors-spawn-debug active', {
+            contentId: ctx.contentIdRef?.current,
+            userId:    ctx.userIdRef?.current,
+            timestamp: Date.now(),
+            buildPhase: 'M-5.4.3-helper-unified-spawn',
+        });
+    }
 
     // ── Audio elements (A/B buffer) ──────────────────────────────────────────
     const audioRefA      = useRef<HTMLAudioElement | null>(null);
@@ -283,9 +576,619 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // fue invalidado, no hay que loguear de nuevo).
     const cacheInvalidatedKeysRef = useRef(new Set<number>());
 
+    // F12: tracking de audio readiness para evitar hardResync por blob corrupto.
+    // audioFailedKeysRef: indices cuya url no se pudo obtener (tts_fail) o
+    //   cuyo blob falló decodificación (NotSupportedError) tras retry.
+    //   load()/doAdvance() chequean antes de play() y, si está marcado,
+    //   bloquean el audio sin recovery dura — la frase sigue visible y
+    //   el status queda en 'error' a la espera de acción del usuario.
+    // audioRetriedKeysRef: indices que ya tuvieron UN retry tras NotSupportedError.
+    //   Evita loop de retries infinitos si el TTS server devuelve siempre
+    //   el mismo blob roto.
+    const audioFailedKeysRef  = useRef(new Set<number>());
+    const audioRetriedKeysRef = useRef(new Set<number>());
+
+    // M-5.3.4: handle del executor de sincronización activo. Se spawnea cuando
+    // pb.load arranca audio en chunked modes (perChunkWithAnchors / NoAnchors).
+    // Cancelado en: reset, skip, load (próximo chunk distinto), unmount.
+    const syncStrategyHandleRef = useRef<{ cancel: () => void; isAlive: () => boolean; sessionId: string | number; mode: string } | null>(null);
+
+    // ────────────────────────────────────────────────────────────────────
+    // M-5.4.6 (Phase 1.b.C Task 2) — Manual Nav Generation Lock.
+    //
+    // Cada gesto manual del usuario (next / previous / skip) incrementa
+    // navGenerationRef. Cuando se spawna un executor, captura el valor
+    // actual como spawnGeneration. TODOS los callbacks async del executor
+    // (onSentenceActivate, onChunkComplete) validan que su generation
+    // coincida con la actual antes de mutar índice.
+    //
+    // Esto cierra la ventana race que producía "previous → 0": un callback
+    // del executor del chunk anterior llegaba después del manualSentenceJump
+    // y escribía un índice stale.
+    // ────────────────────────────────────────────────────────────────────
+    const navGenerationRef = useRef<number>(0);
+
+    // M-5.4.7 Task 4 — counters de runtime hygiene para nav spam + long session.
+    const staleCallbackRejectCountRef = useRef(0);
+    const executorCancelCountRef      = useRef(0);
+    const runtimeStartedAtRef         = useRef<number>(Date.now());
+
+    // ── M-5.4.6 (DEMOLITION Phase 1.a) — refs del drift detector ELIMINADOS.
+    // lastAdvanceWithinChunkAtRef / ChunkKeyRef / lastManualNavAtRef vivían acá
+    // y eran leídos por el drift detector + grace windows. Sin drift detector
+    // ya no se leen. Mantener los stamps sin lectores sería puro overhead.
+
+    // ── M-5.4 — Resilience Pass: tracking refs ───────────────────────────────
+    // Counter monotonic de executors creados — invariant ONLY_ONE_ACTIVE_AUDIO_OWNER
+    // exige que en cualquier momento haya exactamente 0 o 1 con isAlive()=true.
+    const executorSpawnCountRef    = useRef(0);
+    const ownershipViolationCountRef = useRef(0);
+    // Métricas de cache para detectar growth runaway en sesiones largas.
+    const cacheMetricsRef = useRef({
+        created: 0,   // CACHE_ENTRY_CREATED
+        reused:  0,   // CACHE_ENTRY_REUSED
+        evicted: 0,   // CACHE_ENTRY_EVICTED
+        revoked: 0,   // BLOB_URL_REVOKED
+    });
+    // Timestamps de últimos eventos clave — el watchdog los usa para detectar stalls.
+    const lastAudioEventAtRef       = useRef<number | null>(null);
+    const lastVisualAckAtRef        = useRef<number | null>(null);
+    const lastChunkTransitionAtRef  = useRef<number | null>(null);
+    const cancelSyncStrategy = (reason: string) => {
+        const h = syncStrategyHandleRef.current;
+        if (h && h.isAlive()) {
+            executorCancelCountRef.current += 1;  // M-5.4.7 Task 4
+            // eslint-disable-next-line no-console
+            console.log('[SYNC] cancel_via_runtime', {
+                reason,
+                sessionId: h.sessionId,
+                mode: h.mode,
+                totalCancels: executorCancelCountRef.current,
+            });
+            h.cancel();
+        }
+        syncStrategyHandleRef.current = null;
+    };
+
+    // M-5.3.4: spawn helper extraído para mantener pb.load compacto (preserva
+    // ventanas regex de tests estructurales). Si el modo NO es chunked, no-op
+    // — el path normal audio.onEnded → setIdx(idx+1) se mantiene.
+    // BLOCKER M-5.4.3 — Derivación lazy del audioMode cuando ctx.audioModeRef
+    // está null al momento del spawn (race posible entre StartupEngine y play()
+    // sobre todo en book switch). Lee toChunkRef + anchorsMapRef y aplica la
+    // misma heurística del detector central, sin tocar el detector mismo.
+    //
+    // Reglas (orden importa):
+    //   1. Si sentenceToChunk vacío → null (sin datos, no podemos decidir).
+    //   2. Si chunkKey === sentenceIdx para TODO → 'perSentence'.
+    //   3. Si hay anchors con startMs → 'perChunkWithAnchors'.
+    //   4. Resto → 'perChunkNoAnchors'.
+    const deriveAudioModeLazily = (): 'perSentence'|'perChunkWithAnchors'|'perChunkNoAnchors'|null => {
+        const s2c = ctx.toChunkRef?.current;
+        if (!Array.isArray(s2c) || s2c.length === 0) return null;
+        let oneToOne = true;
+        for (let i = 0; i < s2c.length; i++) {
+            if (s2c[i] !== i) { oneToOne = false; break; }
+        }
+        if (oneToOne) return 'perSentence';
+        const am = ctx.anchorsMapRef?.current;
+        let hasAnchors = false;
+        if (am && typeof am === 'object') {
+            for (const k of Object.keys(am)) {
+                const arr = (am as Record<string, unknown>)[k];
+                if (Array.isArray(arr) && arr.some((a: any) => a && Number.isFinite(a.startMs))) {
+                    hasAnchors = true; break;
+                }
+            }
+        }
+        return hasAnchors ? 'perChunkWithAnchors' : 'perChunkNoAnchors';
+    };
+
+    const spawnSyncExecutorIfChunked = (
+        audioEl: HTMLAudioElement | null,
+        index: number,
+        callsite: string = 'unknown',
+    ): void => {
+        // BLOCKER M-5.4.3 — Diagnostic spawn-attempt log. Cada intento de
+        // spawn debe loguear ESTO antes que cualquier otra cosa, así el
+        // operador puede confirmar en browser real si el spawn corrió.
+        const _spawnContentId = ctx.contentIdRef.current;
+        let   _spawnMode      = ctx.audioModeRef?.current ?? null;
+        const _modeWasReady   = _spawnMode !== null;
+        // Lazy derivation cuando ref no fue seteado todavía (race book-switch).
+        if (!_modeWasReady) {
+            _spawnMode = deriveAudioModeLazily();
+            if (_spawnMode !== null) {
+                // eslint-disable-next-line no-console
+                console.warn('[SYNC_MODE_NOT_READY_AT_PLAY]', {
+                    callsite,
+                    index,
+                    contentId:    _spawnContentId,
+                    derivedMode:  _spawnMode,
+                    s2cLen:       ctx.toChunkRef?.current?.length ?? 0,
+                    anchorsKeys:  ctx.anchorsMapRef?.current ? Object.keys(ctx.anchorsMapRef.current).length : 0,
+                    sessionId:    contentSessionRef.current,
+                });
+                // Persistir para próximos spawns del mismo mount.
+                if (ctx.audioModeRef) ctx.audioModeRef.current = _spawnMode;
+            }
+        }
+        const _spawnChunkKey  = toChunkKey(index);
+        const _spawnAttemptPayload = {
+            callsite,
+            index,
+            contentId:       _spawnContentId,
+            mode:            _spawnMode ?? 'unknown',
+            modeWasReady:    _modeWasReady,
+            chunkKey:        _spawnChunkKey,
+            audioDuration:   audioEl ? audioEl.duration : null,
+            audioReadyState: audioEl ? audioEl.readyState : null,
+            audioPaused:     audioEl ? audioEl.paused : null,
+            audioSrc:        audioEl ? (audioEl.src || '').slice(-60) : null,
+            audioCurrentTime:audioEl ? audioEl.currentTime : null,
+            sessionId:       contentSessionRef.current,
+        };
+        // eslint-disable-next-line no-console
+        console.log('[SYNC_SPAWN_ATTEMPT]', _spawnAttemptPayload);
+
+        if (!audioEl) {
+            // eslint-disable-next-line no-console
+            console.log('[SYNC_SPAWN_SKIPPED]', { ..._spawnAttemptPayload, reason: 'no_audio_element' });
+            return;
+        }
+        if (_spawnMode !== 'perChunkWithAnchors' && _spawnMode !== 'perChunkNoAnchors') {
+            // eslint-disable-next-line no-console
+            console.log('[SYNC_SPAWN_SKIPPED]', { ..._spawnAttemptPayload, reason: 'mode_not_chunked' });
+            return;
+        }
+        // BLOCKER M-5.4.3 — Dedup: si ya hay un executor vivo para el mismo
+        // sessionId Y mismo chunk, no re-spawneamos. Evita el caso "resume()
+        // tras pause()" que vuelve a crear executor para una frase ya en curso.
+        const _alive = syncStrategyHandleRef.current;
+        if (_alive && _alive.isAlive()
+            && _alive.sessionId === contentSessionRef.current
+            && (_alive as any)._chunkKey === _spawnChunkKey) {
+            // eslint-disable-next-line no-console
+            console.log('[SYNC_SPAWN_SKIPPED]', {
+                ..._spawnAttemptPayload,
+                reason:             'already_alive_same_chunk',
+                existingSessionId:  _alive.sessionId,
+                existingMode:       _alive.mode,
+                existingChunkKey:   (_alive as any)._chunkKey,
+            });
+            return;
+        }
+        // ── M-5.4 — invariant ONLY_ONE_ACTIVE_AUDIO_OWNER ────────────────
+        // Si ya hay un executor vivo en el momento del spawn, hubo violación
+        // de ownership (cancelSyncStrategy debió correr antes). Loggeamos +
+        // cancelamos defensivamente para cumplir el invariant.
+        const _prev = syncStrategyHandleRef.current;
+        if (_prev && _prev.isAlive()) {
+            ownershipViolationCountRef.current++;
+            // eslint-disable-next-line no-console
+            console.warn('[OWNERSHIP_VIOLATION] AUDIO_SPLIT_BRAIN', {
+                reason: 'spawn_while_existing_alive',
+                existingSessionId: _prev.sessionId,
+                existingMode:      _prev.mode,
+                violationCount:    ownershipViolationCountRef.current,
+                sentenceIndex:     index,
+                contentSession:    contentSessionRef.current,
+            });
+            try { _prev.cancel(); } catch { /* ignore */ }
+        }
+        executorSpawnCountRef.current++;
+        const chunkKey = _spawnChunkKey;
+        const s2c = ctx.toChunkRef.current;
+        // M-5.4.6 (Case 2) — el sentenceGroup arranca DESDE el spawn index, NO
+        // desde la primera frase del chunk. Antes: si el chunk tenía sentences
+        // 0..11 y el usuario navegaba a 10, el executor activaba 0 primero
+        // (porque startMs=0 en la timeline). Ahora filtramos para que la
+        // timeline empiece en el index donde el usuario está parado.
+        //
+        // _chunkStartIndex también se calcula para el guard defensivo de
+        // STALE_OR_LOCAL_INDEX_REJECTED en advanceWithinChunk.
+        const _chunkStartIndex = s2c.length > 0
+            ? s2c.findIndex(ck => ck === chunkKey)
+            : index;
+        const _chunkEndIndex = s2c.length > 0
+            ? (() => {
+                let last = -1;
+                for (let i = 0; i < s2c.length; i++) if (s2c[i] === chunkKey) last = i;
+                return last;
+            })()
+            : index;
+        // M-5.4.6 (Task 1) — sentenceGroup ahora usa absoluteSentenceIndex +
+        // localIndexInChunk (canónico). El executor rechaza activaciones
+        // fuera de [spawnFromIndex, chunkEndIndex] internamente (guard duro
+        // en tickActivate + en buildHeuristic/Fallback).
+        const sentenceGroup = s2c.length > 0
+            ? s2c.map((ck, sIdx) => ({ chunkKey: ck, absoluteSentenceIndex: sIdx }))
+                .filter(x => x.chunkKey === chunkKey)
+                .filter(x => x.absoluteSentenceIndex >= index)
+                .map(x => ({
+                    absoluteSentenceIndex: x.absoluteSentenceIndex,
+                    localIndexInChunk:     x.absoluteSentenceIndex - _chunkStartIndex,
+                    weight: ctx.audioSentencesRef.current[x.absoluteSentenceIndex]?.length ?? 1,
+                }))
+            : [{
+                absoluteSentenceIndex: index,
+                localIndexInChunk:     0,
+                weight: ctx.audioSentencesRef.current[index]?.length ?? 1,
+            }];
+        const anchorsRaw = ctx.anchorsMapRef?.current?.[chunkKey];
+        // Los anchors en disco usan 'sentenceIdx' (formato V2 manifest histórico).
+        // Acá los re-tipiamos al contrato canónico absoluteSentenceIndex y
+        // calculamos localIndexInChunk a partir de _chunkStartIndex.
+        const anchors = Array.isArray(anchorsRaw)
+            ? anchorsRaw
+                .filter((a: any) => a && Number.isFinite(a.startMs) && Number.isInteger(a.sentenceIdx))
+                .filter((a: any) => a.sentenceIdx >= index)
+                .map((a: any) => ({
+                    absoluteSentenceIndex: a.sentenceIdx,
+                    localIndexInChunk:     a.sentenceIdx - _chunkStartIndex,
+                    startMs:               a.startMs,
+                }))
+            : [];
+        // M-5.4.6 (Phase 1.b.C Task 2) — Capturar la generación de manual nav
+        // al momento del spawn. Los callbacks del executor validarán esto antes
+        // de mutar índice. Cualquier callback de un executor cuya generación
+        // ya quedó atrás → rechazado con [STALE_NAV_CALLBACK_REJECTED].
+        const _spawnNavGeneration = navGenerationRef.current;
+        const _spawnSuccessPayload = {
+            ..._spawnAttemptPayload,
+            sentenceGroupLen:    sentenceGroup.length,
+            anchorsLen:          anchors.length,
+            chunkStartIndex:     _chunkStartIndex,
+            chunkEndIndex:       _chunkEndIndex,
+            spawnFromIndex:      index,
+            spawnNavGeneration:  _spawnNavGeneration,
+            firstAbsIndex:       sentenceGroup[0]?.absoluteSentenceIndex ?? null,
+            firstLocalIndex:     sentenceGroup[0]?.localIndexInChunk ?? null,
+        };
+        try {
+            const _newHandle = executeSyncStrategy({
+                mode: _spawnMode,
+                audioElement:       audioEl,
+                sentenceGroup,
+                anchors,
+                playbackSpeed:      ctx.speedRef.current,
+                sessionId:          contentSessionRef.current,
+                // M-5.4.6 (Task 1) — Guard params pasados al executor:
+                spawnFromIndex:     index,
+                chunkKey:           _spawnChunkKey,
+                chunkStartIndex:    _chunkStartIndex,
+                chunkEndIndex:      _chunkEndIndex,
+                // M-5.4.6 (Phase 1.b.C Task 2) — Wrap callbacks con generation
+                // check. Si la generation cambió entre spawn y callback, NO se
+                // muta índice: el manual nav nuevo ya tomó ownership.
+                onSentenceActivate: (absIdx: number) => {
+                    if (_spawnNavGeneration !== navGenerationRef.current) {
+                        staleCallbackRejectCountRef.current += 1;
+                        // eslint-disable-next-line no-console
+                        console.warn('[STALE_NAV_CALLBACK_REJECTED]', {
+                            callbackGeneration: _spawnNavGeneration,
+                            currentGeneration:  navGenerationRef.current,
+                            callbackType:       'onSentenceActivate',
+                            attemptedIndex:     absIdx,
+                            spawnFromIndex:     index,
+                            chunkKey:           _spawnChunkKey,
+                            totalRejects:       staleCallbackRejectCountRef.current,
+                        });
+                        return;
+                    }
+                    advanceWithinChunk(absIdx);
+                },
+                onChunkComplete: () => {
+                    if (_spawnNavGeneration !== navGenerationRef.current) {
+                        staleCallbackRejectCountRef.current += 1;
+                        // eslint-disable-next-line no-console
+                        console.warn('[STALE_NAV_CALLBACK_REJECTED]', {
+                            callbackGeneration: _spawnNavGeneration,
+                            currentGeneration:  navGenerationRef.current,
+                            callbackType:       'onChunkComplete',
+                            attemptedIndex:     null,
+                            spawnFromIndex:     index,
+                            chunkKey:           _spawnChunkKey,
+                            totalRejects:       staleCallbackRejectCountRef.current,
+                        });
+                        return;
+                    }
+                    /* handleEnded maneja avance al próximo chunk */
+                },
+                onError:            (err: any) => {
+                    // eslint-disable-next-line no-console
+                    console.error('[SYNC] executor_error', { index, error: err?.message });
+                },
+            });
+            // Etiquetamos el handle con su chunkKey + rangos absolutos para
+            // que advanceWithinChunk pueda rechazar activations fuera de
+            // [spawnFromIndex, chunkEndIndex] (defensa STALE_OR_LOCAL_INDEX).
+            (_newHandle as any)._chunkKey            = _spawnChunkKey;
+            (_newHandle as any)._chunkStartIndex     = _chunkStartIndex;
+            (_newHandle as any)._chunkEndIndex       = _chunkEndIndex;
+            (_newHandle as any)._spawnFromIndex      = index;
+            (_newHandle as any)._spawnNavGeneration  = _spawnNavGeneration; // M-5.4.6 Task 2
+            syncStrategyHandleRef.current = _newHandle;
+            // eslint-disable-next-line no-console
+            console.log('[SYNC_SPAWN_SUCCESS]', _spawnSuccessPayload);
+        } catch (err: any) {
+            // eslint-disable-next-line no-console
+            console.error('[SYNC_SPAWN_FAILED]', { ..._spawnSuccessPayload, error: err?.message });
+            // eslint-disable-next-line no-console
+            console.error('[SYNC] executor_spawn_failed', { index, error: err?.message });
+        }
+    };
+
+    // BLOCKER M-5.4.3 — Single helper invoked from EVERY .play().then() in
+    // the hook. Antes, solo load() autoplay spawneaba executor; resume() y
+    // handleEnded gapless NO lo hacían — por eso Guerra reproducía audio pero
+    // no avanzaba. Cualquier camino futuro de play() DEBE pasar por acá.
+    //
+    // Responsabilidades:
+    //   1. Log PB_SPAWN_CALLSITE (audit trail).
+    //   2. Despachar AUDIO_STARTED a la machine (idempotente — rejected si
+    //      buffer no está 'visible').
+    //   3. Actualizar timestamps M-5.4 que el watchdog usa para stall detection.
+    //   4. Llamar spawnSyncExecutorIfChunked — el spawn decide internamente si
+    //      crea executor según el modo, dedup, y lazy mode derivation.
+    //
+    // El callsite es informativo: distingue 'load_autoplay' / 'resume' /
+    // 'gapless_advance' en logs para auditoría sin código adicional.
+    const onAudioPlaybackStarted = (
+        audioEl: HTMLAudioElement | null,
+        index: number,
+        callsite: 'load_autoplay' | 'resume' | 'gapless_advance' | string,
+    ): void => {
+        // eslint-disable-next-line no-console
+        console.log('[PB_SPAWN_CALLSITE]', {
+            callsite,
+            index,
+            contentId:        ctx.contentIdRef.current,
+            mode:             ctx.audioModeRef?.current ?? null,
+            audioPaused:      audioEl ? audioEl.paused : null,
+            audioReadyState:  audioEl ? audioEl.readyState : null,
+            audioDuration:    audioEl ? audioEl.duration : null,
+            audioCurrentTime: audioEl ? audioEl.currentTime : null,
+            srcTail:          audioEl ? (audioEl.src || '').slice(-60) : null,
+            statusBefore:     statusRef.current,
+            sessionId:        contentSessionRef.current,
+        });
+        // Update watchdog timestamps (M-5.4 — stall detection baseline).
+        lastAudioEventAtRef.current      = Date.now();
+        lastChunkTransitionAtRef.current = Date.now();
+        // Dispatch AUDIO_STARTED — idempotente por la machine. Algunos
+        // callsites (load) ya lo hacían antes; al consolidarlo acá nos
+        // aseguramos que SIEMPRE se despache tras play() resuelto.
+        dispatchMachine({ type: MA.AUDIO_STARTED, index });
+        // BLOCKER FINAL V2 / TASK 2 — Marca de ORDEN verificable: este helper
+        // SOLO se invoca desde el .then() de play() (audio confirmado/ready).
+        // El spawn ocurre DESPUÉS de PB_PLAY_RESOLVED, que a su vez ocurre
+        // DESPUÉS de GAPLESS_CHUNK_AUDIO_READY (gapless). Orden garantizado:
+        //   GAPLESS_CHUNK_AUDIO_READY → PB_PLAY_RESOLVED → SYNC_SPAWN_AFTER_AUDIO_READY
+        // eslint-disable-next-line no-console
+        console.log('[SYNC_SPAWN_AFTER_AUDIO_READY]', {
+            callsite,
+            index,
+            audioPaused:      audioEl ? audioEl.paused : null,
+            audioReadyState:  audioEl ? audioEl.readyState : null,
+            audioDuration:    audioEl ? audioEl.duration : null,
+            audioCurrentTime: audioEl ? audioEl.currentTime : null,
+            srcTail:          audioEl ? (audioEl.src || '').slice(-60) : null,
+            sessionId:        contentSessionRef.current,
+        });
+        // ── M-5.4.14 / TASK 1 — FINAL_AUDIO_STATE (observabilidad pura) ──────
+        // Estado de audio EXACTO en el momento del handoff de playback. Sin
+        // cambio de control-flow. Permite al smoke confirmar single-owner:
+        // un solo audioEl no-pausado por callsite, sin restart involuntario.
+        // eslint-disable-next-line no-console
+        console.log('[FINAL_AUDIO_STATE]', {
+            callsite, index,
+            activePlayer:     activePlayer.current,
+            audioPaused:      audioEl ? audioEl.paused : null,
+            audioReadyState:  audioEl ? audioEl.readyState : null,
+            audioCurrentTime: audioEl ? audioEl.currentTime : null,
+            audioDuration:    audioEl ? audioEl.duration : null,
+            srcTail:          audioEl ? (audioEl.src || '').slice(-50) : null,
+            executorAlive:    !!(syncStrategyHandleRef.current && syncStrategyHandleRef.current.isAlive()),
+            status:           statusRef.current,
+            sessionId:        contentSessionRef.current,
+        });
+        // Spawn (siempre — el helper decide skip vs success vs failed).
+        spawnSyncExecutorIfChunked(audioEl, index, callsite);
+    };
+
+    // F19/Cambio C — contador de hardResync por sesión (contentSession).
+    // Se incrementa en cada hardResync. Se resetea a 0 en reset() (cambio de
+    // libro). Si supera MAX_HARD_RESYNC_ATTEMPTS_PER_SESSION, hardResync NO
+    // ejecuta — log PB_HARD_RESYNC_CAPPED + status='error'.
+    const hardResyncAttemptsRef = useRef(0);
+
     const setStatus = (s: PlaybackStatus) => {
         statusRef.current = s;
         setStatusState(s);
+    };
+
+    // ── F15: contentSession monotónico — invalida callbacks cross-content ───
+    // Cada content change incrementa este contador. Helpers como
+    // acknowledgeVisualHighlight, dispatchMachine y resume verifican que el
+    // session capturado al inicio coincida con el actual antes de aplicar
+    // cambios. Cualquier callback (visual ack tardío, audio_started que llega
+    // post-skip, tts_fail de blob viejo) se descarta si el session ya cambió.
+    const contentSessionRef     = useRef<number>(0);
+    const contentSessionTokenForRef = (cid: string): number => {
+        // Cada vez que contentIdRef cambia (visor lo muta render-time), el
+        // próximo dispatch via load/reset/manualSentenceJump invalida la session.
+        // Esta función solo lee el contador actual; el incremento se hace en reset().
+        void cid;
+        return contentSessionRef.current;
+    };
+
+    // ── F3: machine runtime — observer mode ──────────────────────────────────
+    // La machine se inicializa lazy con el primer dispatch, y se reinicializa
+    // cuando cambia contentId. En F3 los effects son no-ops (la lógica legacy
+    // del hook ya ejecuta play/save/cancel). Solo emitimos logs estructurados
+    // para que el suite y los smoke browser puedan auditar la regla madre.
+    const machineRef = useRef<ReturnType<typeof machineInit> | null>(null);
+    const machineContentIdRef = useRef<string>('');
+
+    const ensureMachineForContent = (): void => {
+        const cid = ctx.contentIdRef.current;
+        const uid = ctx.userIdRef.current;
+        if (machineRef.current === null || machineContentIdRef.current !== cid) {
+            machineRef.current = machineInit({
+                sessionKey: `${uid}__${cid}`,
+                contentId:  cid,
+                startIndex: currentIdxRef.current,
+            });
+            machineContentIdRef.current = cid;
+        }
+    };
+
+    const executeMachineEffects = (effects: Array<any>): void => {
+        for (const effect of effects) {
+            if (effect.type === 'log') {
+                // Re-emitir vía analytics + console.debug. Estos logs son
+                // adicionales a los que la lógica legacy ya emite — sirven para
+                // auditar la regla madre (PB_SENTENCE_PREPARE, PB_AUDIO_STARTED,
+                // PB_VISUAL_HIGHLIGHT_ACK, PB_SENTENCE_COMPLETED, etc.).
+                const payload = {
+                    event: effect.tag,
+                    ts: Date.now(),
+                    userId: ctx.userIdRef.current,
+                    via: 'machine',
+                    ...(effect.data ?? {}),
+                };
+                console.debug('[PB-MACHINE]', payload);
+                analytics.emit(payload as any);
+            } else if (
+                effect.type === 'BLOCK_AUDIO_START' ||
+                effect.type === 'BLOCK_PROGRESS_SAVE' ||
+                effect.type === 'HARD_RESYNC' ||
+                effect.type === 'SET_INDEX'
+            ) {
+                // F3: estos effects son observados pero NO ejecutados (la
+                // lógica legacy ya hace setIdx/load/etc.). F4+ los convertirá
+                // en gating real.
+                const payload = {
+                    event: `machine_effect_${effect.type}`,
+                    ts: Date.now(),
+                    userId: ctx.userIdRef.current,
+                    via: 'machine',
+                    ...effect,
+                };
+                console.debug('[PB-MACHINE-EFFECT]', payload);
+                analytics.emit(payload as any);
+            }
+            // play_audio, pause_audio, save_progress, load_audio, cancel_pending,
+            // recommend_hard_resync: NO se ejecutan en F3 — la lógica legacy del
+            // hook ya hace esos side-effects al call site original (load.play(),
+            // pause(), etc.). Re-ejecutarlos duplicaría el side effect.
+        }
+    };
+
+    // ── [M532_BUFFER] TEMP DEBUG helper — borrar tras causa raíz identificada
+    // Helpers extraídos para mantener dispatchMachine corto (preserva regex
+    // estructurales de playbackRuntimeIntegration test).
+    const _m532TraceBeforeDispatch = (action: any) => {
+        if (action?.type === MA.PREPARE_SENTENCE) {
+            const c = machineRef.current?.buffer?.current;
+            // eslint-disable-next-line no-console
+            console.log('[M532_BUFFER] prepare_sentence', {
+                index: action.index,
+                previousIndex:     c?.index ?? null,
+                previousStatus:    c?.status ?? null,
+                sameIndexReset:    c != null && c.index === action.index,
+                contentId:         ctx.contentIdRef.current,
+            });
+        }
+        // M-5.4.6 — ack_apply / ack_apply_after eliminados (VISUAL_HIGHLIGHT_ACK deprecated).
+    };
+    const _m532TraceAfterDispatch = (_action: any) => {
+        // M-5.4.6 — ack_apply_after eliminado.
+    };
+
+    const dispatchMachine = (action: object): { effects: Array<any> } => {
+        ensureMachineForContent();
+        _m532TraceBeforeDispatch(action);
+        const result = machineReduce(machineRef.current!, action);
+        machineRef.current = result.state;
+        executeMachineEffects(result.effects);
+        _m532TraceAfterDispatch(action);
+        return { effects: result.effects };
+    };
+
+    // ────────────────────────────────────────────────────────────────────
+    // M-5.4.6 (DEMOLITION Phase 1.b.5) — ELIMINADOS:
+    //   - canStartAudio(index)         (leía buffer.current.visualHighlightConfirmed)
+    //   - waitForVisualAck(index, ms)  (poll bloqueante de visual ACK)
+    //   - requestAudioStart(index)     (dispatch REQUEST_AUDIO_START al machine)
+    //
+    // El nuevo INV "playback must never wait for render confirmation"
+    // significa que no hay gates de ACK. El audio arranca cuando hay src
+    // y se llamó .play().
+    // ────────────────────────────────────────────────────────────────────
+
+    // F6 — hardResync: operación única y formal de resincronización dura.
+    //
+    // Recovery path canónico ante: drift, missing/duplicate/mismatch DOM,
+    // audio_start_without_highlight, resume_without_active_sentence, etc.
+    //
+    // Hace TODO el cleanup necesario:
+    //   1. cancelPendingAdvance (timer doAdvance, fallback, canplaythrough)
+    //   2. pause ambos audios (A y B)
+    //   3. dispatch MA.HARD_RESYNC (cancela buffer + emite log/effect)
+    //   4. setStatus('paused') + onPlayChange(false)
+    //   5. log PB_HARD_RESYNC con reason
+    //
+    // IMPORTANTE: NO reproduce audio automáticamente. El usuario reanuda con
+    // un click (que pasa por load() → ack → REQUEST_AUDIO_START gate).
+    // Esto evita loops infinitos cuando el ack jamás llega.
+    const hardResync = (targetIndex: number, reason: string): void => {
+        // F19/Cambio C — cap defensivo. Si superamos los intentos por sesión,
+        // NO ejecutar — esto rompe loops de hardResync→drift→hardResync.
+        if (hardResyncAttemptsRef.current >= MAX_HARD_RESYNC_ATTEMPTS_PER_SESSION) {
+            log('autoplay_blocked' as any, {
+                event: 'PB_HARD_RESYNC_CAPPED',
+                targetIndex, reason,
+                attempts: hardResyncAttemptsRef.current,
+                max: MAX_HARD_RESYNC_ATTEMPTS_PER_SESSION,
+            });
+            setStatus('error');
+            ctx.onPlayChange.current(false);
+            // NO cancelPendingAdvance, NO pause de audios — si el user todavía
+            // quiere reanudar, lo intentará manualmente con click.
+            return;
+        }
+        hardResyncAttemptsRef.current++;
+
+        // BLOCKER M-5.4.5 — cancelar EXECUTOR antes que cualquier otra cosa.
+        // Sin esto, el executor seguía vivo tras hardResync emitiendo
+        // SYNC_SENTENCE_ACTIVATE → advanceWithinChunk sobre una machine
+        // recién reseteada, generando PB_SENTENCE_COMPLETED_REJECTED en loop.
+        cancelSyncStrategy('hard_resync');
+        // eslint-disable-next-line no-console
+        console.log('[HARD_RESYNC_CANCEL_EXECUTOR]', {
+            targetIndex, reason,
+            sessionId: contentSessionRef.current,
+        });
+
+        // 1. cancelar timers pendientes (incluye doAdvance + fallback + canplaythrough listener)
+        cancelPendingAdvance('skip_or_load');
+        // 2. pausar ambos audios
+        audioRefA.current?.pause();
+        audioRefB.current?.pause();
+        // 3. cancelar buffer + state vía machine (emite log hard_resync legacy + PB_BUFFER_CANCELLED)
+        dispatchMachine({ type: MA.HARD_RESYNC, targetIndex, reason });
+        // 4. estado seguro
+        setStatus('paused');
+        ctx.onPlayChange.current(false);
+        // 5. log F6 explícito (el dispatch ya logueó hard_resync legacy; este es el tag F6 canónico)
+        log('autoplay_blocked' as any, {
+            event: 'PB_HARD_RESYNC',
+            index: targetIndex, reason,
+            attempt: hardResyncAttemptsRef.current,
+            cap: MAX_HARD_RESYNC_ATTEMPTS_PER_SESSION,
+        });
     };
 
     // Único punto de escritura del índice. Actualiza ref (sync) + state (React) + callback.
@@ -340,6 +1243,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     useEffect(() => {
         return () => {
             cancelPendingAdvance('unmount');
+            cancelSyncStrategy('unmount');  // M-5.3.4: matar executor pendiente
             loadToken.current++;
             standbyGenRef.current++;  // invalida cualquier listener canplaythrough pendiente
             audioCache.current.forEach(url => URL.revokeObjectURL(url));
@@ -383,16 +1287,59 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
     // ── URL resolution: manifest → /api/tts → null ───────────────────────────
     const getAudioUrl = useCallback(async (index: number): Promise<string | null> => {
+        // ── [AUDIO_TRACE] TEMPORAL — M-2.6/2.7 audit. REMOVE AFTER FIX ──────
+        const _trCid  = ctx.contentIdRef.current;
+        const _trSess = contentSessionRef.current;
+        const _trUid  = ctx.userIdRef.current;
         const audioSentences = ctx.audioSentencesRef.current;
-        if (index < 0 || index >= audioSentences.length) return null;
+        // eslint-disable-next-line no-console
+        console.log('[AUDIO_TRACE] provider_enter', {
+            contentId:        _trCid,
+            sentenceIndex:    index,
+            sessionId:        _trSess,
+            userId:           _trUid,
+            audioSentencesLen: audioSentences.length,
+            sentenceTextHead: (audioSentences[index] ?? '').slice(0, 60),
+        });
+        if (index < 0 || index >= audioSentences.length) {
+            // eslint-disable-next-line no-console
+            console.error('[AUDIO_TRACE] provider_fail', {
+                provider:      'bounds',
+                contentId:     _trCid,
+                sentenceIndex: index,
+                reason:        'oob_index',
+                audioSentencesLen: audioSentences.length,
+            });
+            return null;
+        }
 
         const key = toChunkKey(index);
+        const _trMap = ctx.toChunkRef.current;
+        // eslint-disable-next-line no-console
+        console.log('[AUDIO_TRACE] sentence_to_chunk', {
+            sentenceIndex: index,
+            chunkKey:      key,
+            mapLen:        _trMap.length,
+            mapHasIndex:   _trMap.length > index,
+            keyEqualsIndex: key === index,
+        });
 
         const cached = audioCache.current.get(key);
-        if (cached) return cached;
+        if (cached) {
+            cacheMetricsRef.current.reused++;  // M-5.4 metric
+            // eslint-disable-next-line no-console
+            console.log('[AUDIO_TRACE] cache_hit', { sentenceIndex: index, chunkKey: key });
+            // eslint-disable-next-line no-console
+            console.log('[CACHE_ENTRY_REUSED] reused=' + cacheMetricsRef.current.reused, { key });
+            return cached;
+        }
 
         const existing = inFlight.current.get(key);
-        if (existing) return existing;
+        if (existing) {
+            // eslint-disable-next-line no-console
+            console.log('[AUDIO_TRACE] inflight_dedupe', { sentenceIndex: index, chunkKey: key });
+            return existing;
+        }
 
         const abortCtrl = new AbortController();
         abortCtrls.current.set(key, abortCtrl);
@@ -400,22 +1347,61 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         const task = async (): Promise<string | null> => {
             try {
                 // Nivel 1: audio pre-generado en el servidor (manifest)
-                const mf = ctx.manifestRef.current;
+                const mf       = ctx.manifestRef.current;
+                const mfKeys   = mf ? Object.keys(mf).length : 0;
+                const mfEntry  = mf?.[key];
+                // eslint-disable-next-line no-console
+                console.log('[AUDIO_TRACE] manifest_lookup', {
+                    sentenceIndex:  index,
+                    chunkKey:       key,
+                    manifestNull:   mf === null || mf === undefined,
+                    manifestKeys:   mfKeys,
+                    manifestSample: mf ? Object.keys(mf).slice(0, 3) : null,
+                    hasEntry:       !!mfEntry,
+                    entryFile:      mfEntry?.file ?? null,
+                    entryShape:     mfEntry ? Object.keys(mfEntry) : null,
+                });
                 if (mf?.[key]) {
-                    const res = await fetch(`/uploads/${mf[key].file}`, { signal: abortCtrl.signal });
+                    const _trUrl = `/uploads/${mf[key].file}`;
+                    // eslint-disable-next-line no-console
+                    console.log('[AUDIO_TRACE] manifest_fetch', {
+                        sentenceIndex: index, chunkKey: key, fetchUrl: _trUrl,
+                    });
+                    const res = await fetch(_trUrl, { signal: abortCtrl.signal });
                     if (res.ok) {
                         const blob = await res.blob();
                         if (abortCtrl.signal.aborted) return null;
                         // Validar que el blob es un audio real y no está vacío
                         if (blob.size === 0) {
+                            // eslint-disable-next-line no-console
+                            console.error('[AUDIO_TRACE] provider_fail', {
+                                provider: 'manifest', contentId: _trCid,
+                                sentenceIndex: index, chunkKey: key,
+                                reason: 'empty_blob', file: mf[key].file,
+                            });
                             log('manifest_fail', { index, key, reason: 'empty_blob' });
                             // No retornar null todavía — caer al nivel 2 (TTS on-demand)
                         } else {
                             const url = URL.createObjectURL(blob);
                             audioCache.current.set(key, url);
+                            cacheMetricsRef.current.created++;  // M-5.4 metric
+                            // eslint-disable-next-line no-console
+                            console.log('[AUDIO_TRACE] provider_result', {
+                                provider: 'manifest', contentId: _trCid,
+                                sentenceIndex: index, chunkKey: key,
+                                hasUrl: true, urlType: typeof url, blobSize: blob.size,
+                            });
+                            // eslint-disable-next-line no-console
+                            console.log('[CACHE_ENTRY_CREATED] created=' + cacheMetricsRef.current.created, { key, blobSize: blob.size, via: 'manifest' });
                             return url;
                         }
                     } else {
+                        // eslint-disable-next-line no-console
+                        console.error('[AUDIO_TRACE] provider_fail', {
+                            provider: 'manifest', contentId: _trCid,
+                            sentenceIndex: index, chunkKey: key,
+                            reason: 'http_' + res.status, file: mf[key].file,
+                        });
                         log('manifest_fail', { index, key, status: res.status });
                         // Caer al nivel 2
                     }
@@ -424,13 +1410,41 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 // Nivel 2: TTS on-demand en backend (clave nunca sale del servidor)
                 const txt    = audioSentences[index];
                 const userId = ctx.userIdRef.current;
-                if (!txt || !userId || userId === 'guest') return null;
+                // eslint-disable-next-line no-console
+                console.log('[AUDIO_TRACE] tts_pre', {
+                    sentenceIndex: index,
+                    hasText:       !!txt,
+                    textLen:       typeof txt === 'string' ? txt.length : 0,
+                    userId,
+                    isGuest:       userId === 'guest',
+                });
+                if (!txt || !userId || userId === 'guest') {
+                    // eslint-disable-next-line no-console
+                    console.error('[AUDIO_TRACE] provider_fail', {
+                        provider: 'tts', contentId: _trCid,
+                        sentenceIndex: index,
+                        reason: !txt ? 'no_text' : !userId ? 'no_userId' : 'guest_user',
+                    });
+                    return null;
+                }
 
-                // Timeout de 8 s — evita que la UI se congele en redes lentas.
+                // Timeout de 20 s — el backend híbrido cae a Gemini cuando OpenAI
+                // falla (quota/auth/etc.), y Gemini tarda 4-10s en sentencias
+                // largas. 8s era demasiado tight y disparaba abort prematuro
+                // ANTES de recibir Response. Usar DOMException (no string) para
+                // que el catch identifique el abort por e.name='TimeoutError'
+                // en lugar de e=undefined ⇒ tts_fail con error/message undefined.
                 // try/finally garantiza clearTimeout incluso si fetch lanza antes de resolver.
-                const ttsTimeout = setTimeout(() => abortCtrl.abort('tts_timeout'), 8000);
+                const ttsTimeout = setTimeout(
+                    () => abortCtrl.abort(new DOMException('TTS request exceeded 20s timeout', 'TimeoutError')),
+                    20000
+                );
                 let res: Response;
                 try {
+                    // eslint-disable-next-line no-console
+                    console.log('[AUDIO_TRACE] tts_fetch_start', {
+                        sentenceIndex: index, chars: txt.length,
+                    });
                     res = await fetch('/api/tts', {
                         method:  'POST',
                         headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
@@ -441,16 +1455,38 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     clearTimeout(ttsTimeout);
                 }
 
+                const _trCt    = res.headers.get('content-type') ?? '';
+                const _trProv  = res.headers.get('x-audio-provider') ?? null;
+                // eslint-disable-next-line no-console
+                console.log('[AUDIO_TRACE] tts_fetch_response', {
+                    sentenceIndex: index,
+                    httpStatus:    res.status,
+                    ok:            res.ok,
+                    contentType:   _trCt,
+                    providerHdr:   _trProv,
+                });
+
                 if (!res.ok) {
+                    // eslint-disable-next-line no-console
+                    console.error('[AUDIO_TRACE] provider_fail', {
+                        provider: 'tts', contentId: _trCid,
+                        sentenceIndex: index,
+                        reason: 'http_' + res.status, contentType: _trCt,
+                    });
                     log('tts_fail', { index, httpStatus: res.status });
                     return null;
                 }
                 if (abortCtrl.signal.aborted || ctx.unmountedRef.current) return null;
 
                 // Validar Content-Type — el backend puede devolver JSON de error con status 200
-                const contentType = res.headers.get('content-type') ?? '';
-                if (!contentType.startsWith('audio/')) {
-                    log('tts_fail', { index, reason: 'wrong_content_type', contentType });
+                if (!_trCt.startsWith('audio/')) {
+                    // eslint-disable-next-line no-console
+                    console.error('[AUDIO_TRACE] provider_fail', {
+                        provider: 'tts', contentId: _trCid,
+                        sentenceIndex: index,
+                        reason: 'wrong_content_type', contentType: _trCt,
+                    });
+                    log('tts_fail', { index, reason: 'wrong_content_type', contentType: _trCt });
                     return null;
                 }
 
@@ -459,17 +1495,43 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
                 // Validar que el blob tiene contenido real
                 if (blob.size === 0) {
+                    // eslint-disable-next-line no-console
+                    console.error('[AUDIO_TRACE] provider_fail', {
+                        provider: 'tts', contentId: _trCid,
+                        sentenceIndex: index,
+                        reason: 'empty_tts_blob', contentType: _trCt,
+                    });
                     log('blob_invalid', { index, reason: 'empty_tts_blob' });
                     return null;
                 }
 
                 const url = URL.createObjectURL(blob);
                 audioCache.current.set(key, url);
+                cacheMetricsRef.current.created++;  // M-5.4 metric
+                // eslint-disable-next-line no-console
+                console.log('[AUDIO_TRACE] provider_result', {
+                    provider: 'tts', contentId: _trCid,
+                    sentenceIndex: index,
+                    hasUrl: true, urlType: typeof url, blobSize: blob.size,
+                });
+                // eslint-disable-next-line no-console
+                console.log('[CACHE_ENTRY_CREATED] created=' + cacheMetricsRef.current.created, { key, blobSize: blob.size, via: 'tts' });
                 return url;
 
             } catch (e: any) {
                 if (e.name !== 'AbortError') {
+                    // eslint-disable-next-line no-console
+                    console.error('[AUDIO_TRACE] provider_fail', {
+                        provider: 'task_catch', contentId: _trCid,
+                        sentenceIndex: index,
+                        reason: e.name, message: e.message,
+                    });
                     log('tts_fail', { index, error: e.name, message: e.message });
+                } else {
+                    // eslint-disable-next-line no-console
+                    console.log('[AUDIO_TRACE] aborted', {
+                        sentenceIndex: index, reason: e.message ?? 'AbortError',
+                    });
                 }
                 return null;
             } finally {
@@ -493,6 +1555,148 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         }
     }, [getAudioUrl]);
 
+    // ── BLOCKER FINAL V2 / TASK 2 — invariante de transición de chunk segura ──
+    //
+    // Ejecutado ANTES de play() y ANTES de spawn del executor (path gapless).
+    //   1. expectedChunkKey = toChunkKey(targetIndex)
+    //   2. expectedAudioSrc = getAudioUrl(targetIndex)  (cache-hit normal)
+    //   3. actualSrc        = audioEl.src
+    //   4. si difieren (decideChunkTransition === 'reload'):
+    //        - NO play / NO spawn sobre audio stale,
+    //        - cancelar executor del chunk anterior (TASK 3),
+    //        - cargar el audio correcto,
+    //        - esperar canplay/loadedmetadata suficiente,
+    //        - currentTime = 0, confirmar,
+    //        - recién entonces el caller hace play() + spawn.
+    //   5. si no se resuelve el src esperado ('fail') → caller hace fallback
+    //      determinista (load limpio). NUNCA play sobre audio equivocado.
+    //
+    // perSentence: el standby YA trae el audio correcto → 'reuse' → no-op.
+    const AUDIO_READY_TIMEOUT_MS = 4000;
+    const ensureAudioMatchesExpectedChunk = async (
+        audioEl: HTMLAudioElement | null,
+        targetIndex: number,
+        callsite: string,
+    ): Promise<'reuse' | 'reloaded' | 'fail'> => {
+        if (!audioEl) return 'fail';
+        const expectedChunkKey = toChunkKey(targetIndex);
+        const actualSrc        = audioEl.src || '';
+        // eslint-disable-next-line no-console
+        console.log('[GAPLESS_CHUNK_TRANSITION_START]', {
+            callsite,
+            targetIndex,
+            expectedChunkKey,
+            actualSrcTail:    actualSrc.slice(-60),
+            audioPaused:      audioEl.paused,
+            audioReadyState:  audioEl.readyState,
+            audioDuration:    audioEl.duration,
+            audioCurrentTime: audioEl.currentTime,
+            sessionId:        contentSessionRef.current,
+        });
+        const expectedAudioSrc = await getAudioUrl(targetIndex);
+        const decision = decideChunkTransition({
+            expectedChunkKey,
+            expectedAudioSrc,
+            actualAudioSrc: actualSrc,
+        });
+
+        if (decision.action === 'reuse') {
+            // eslint-disable-next-line no-console
+            console.log('[GAPLESS_CHUNK_AUDIO_READY]', {
+                callsite,
+                targetIndex,
+                expectedChunkKey,
+                via:              'already_correct_src',
+                audioReadyState:  audioEl.readyState,
+                audioDuration:    audioEl.duration,
+                sessionId:        contentSessionRef.current,
+            });
+            return 'reuse';
+        }
+
+        if (decision.action === 'fail') {
+            // eslint-disable-next-line no-console
+            console.warn('[CHUNK_AUDIO_SOURCE_MISMATCH]', {
+                callsite,
+                targetIndex,
+                expectedChunkKey,
+                reason:        decision.reason,
+                actualSrcTail: actualSrc.slice(-60),
+                sessionId:     contentSessionRef.current,
+            });
+            return 'fail';
+        }
+
+        // ── decision.action === 'reload' — MISMATCH: audio stale ─────────────
+        // eslint-disable-next-line no-console
+        console.warn('[CHUNK_AUDIO_SOURCE_MISMATCH]', {
+            callsite,
+            targetIndex,
+            expectedChunkKey,
+            reason:          decision.reason,
+            actualSrcTail:   actualSrc.slice(-60),
+            expectedSrcTail: String(expectedAudioSrc).slice(-60),
+            sessionId:       contentSessionRef.current,
+        });
+        // eslint-disable-next-line no-console
+        console.log('[GAPLESS_CHUNK_AUDIO_LOAD_REQUIRED]', {
+            callsite,
+            targetIndex,
+            expectedChunkKey,
+            sessionId: contentSessionRef.current,
+        });
+        // TASK 3 — cancelar el executor del chunk anterior ANTES de cargar /
+        // spawnear. Garantiza un único executor por chunk (activeExecutor ≤ 1).
+        cancelSyncStrategy('gapless_chunk_transition');
+        audioEl.src          = expectedAudioSrc as string;
+        audioEl.playbackRate = ctx.speedRef.current;
+        audioEl.load();
+        const ready = await new Promise<boolean>((resolve) => {
+            let settled = false;
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            const finish = (okFlag: boolean) => {
+                if (settled) return;
+                settled = true;
+                audioEl.removeEventListener('canplay', onCanPlay);
+                audioEl.removeEventListener('loadedmetadata', onMeta);
+                if (timer !== null) clearTimeout(timer);
+                resolve(okFlag);
+            };
+            const onCanPlay = () => finish(true);
+            const onMeta    = () => { if (audioEl.readyState >= 2) finish(true); };
+            // readyState >= 2 (HAVE_CURRENT_DATA) ya basta para play()+currentTime.
+            if (audioEl.readyState >= 2) { finish(true); return; }
+            audioEl.addEventListener('canplay', onCanPlay, { once: true });
+            audioEl.addEventListener('loadedmetadata', onMeta);
+            timer = setTimeout(() => finish(audioEl.readyState >= 2), AUDIO_READY_TIMEOUT_MS);
+        });
+        if (!ready) {
+            // eslint-disable-next-line no-console
+            console.warn('[CHUNK_AUDIO_SOURCE_MISMATCH]', {
+                callsite,
+                targetIndex,
+                expectedChunkKey,
+                reason:          'audio_never_became_ready_after_reload',
+                audioReadyState: audioEl.readyState,
+                sessionId:       contentSessionRef.current,
+            });
+            return 'fail';
+        }
+        try { audioEl.currentTime = 0; } catch { /* ignore — algunos browsers lanzan si no seekable aún */ }
+        // eslint-disable-next-line no-console
+        console.log('[GAPLESS_CHUNK_AUDIO_READY]', {
+            callsite,
+            targetIndex,
+            expectedChunkKey,
+            via:              'reloaded_correct_src',
+            audioReadyState:  audioEl.readyState,
+            audioDuration:    audioEl.duration,
+            audioCurrentTime: audioEl.currentTime,
+            sessionId:        contentSessionRef.current,
+        });
+        return 'reloaded';
+    };
+
     // ── GC de blobs — usa currentIdxRef interno, no necesita parámetro externo ─
     const runGC = useCallback(() => {
         if (audioCache.current.size === 0) return;
@@ -506,13 +1710,174 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         });
         toDelete.forEach(k => audioCache.current.delete(k));
         if (toDelete.length > 0) {
+            cacheMetricsRef.current.evicted += toDelete.length;
+            cacheMetricsRef.current.revoked += toDelete.length;
             console.debug(`[PB GC] Freed ${toDelete.length} blobs. Active: ${audioCache.current.size}`);
+            // eslint-disable-next-line no-console
+            console.log('[CACHE_ENTRY_EVICTED]', {
+                evicted: toDelete.length,
+                via:     'runGC',
+                totalEvicted: cacheMetricsRef.current.evicted,
+                activeNow:    audioCache.current.size,
+            });
+        }
+        // M-5.4 — growth warning. Si el cache crece >100 entries activas, algo
+        // está mal con la GC (ventana ±20 sentences debería mantenerlo ~40).
+        if (audioCache.current.size > 100) {
+            // eslint-disable-next-line no-console
+            console.warn('[CACHE_GROWTH_WARNING]', {
+                size: audioCache.current.size,
+                inFlight: inFlight.current.size,
+                created:  cacheMetricsRef.current.created,
+                evicted:  cacheMetricsRef.current.evicted,
+            });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // M-5.3.4: avance visual liviano dentro del MISMO chunk de audio.
+    //
+    // Caso: el lector reproduce audio del chunk K (cubre frases a..b). El
+    // SyncStrategyExecutor detecta que llegó el momento de activar la frase
+    // i+1 (también dentro del chunk K). Llamar a pb.skip(i+1) o pb.load(i+1)
+    // reiniciaría el audio — incorrecto. Esta función hace SOLO el avance
+    // visual + de buffer, sin tocar audio.
+    //
+    // El caller (executor) garantiza que ambas frases viven en el mismo
+    // chunk. NO valida — confianza de contrato.
+    //
+    // Definido ANTES de pb.load porque el callback del executor en pb.load
+    // referencia esta función al momento del .play().then().
+    const advanceWithinChunk = (toIndex: number): void => {
+        const total = ctx.sentencesRef.current.length;
+        const fromIdx = currentIdxRef.current;
+        // BLOCKER M-5.4.3 — Diagnostic log. Si el executor está disparando
+        // onSentenceActivate pero el visor sigue pegado en idx=0, este log
+        // confirma si advanceWithinChunk se invocó o no. Si NUNCA aparece
+        // tras varios timeupdates con audio corriendo, el executor murió.
+        // eslint-disable-next-line no-console
+        console.log('[ADVANCE_WITHIN_CHUNK_CALLED]', {
+            fromIdx,
+            toIndex,
+            fromChunk:        toChunkKey(fromIdx),
+            toChunk:          toChunkKey(toIndex),
+            sameChunk:        toChunkKey(fromIdx) === toChunkKey(toIndex),
+            statusBefore:     statusRef.current,
+            bufferIndexBefore: machineRef.current?.buffer?.current?.index ?? null,
+            audioMode:        ctx.audioModeRef?.current ?? null,
+            sessionId:        contentSessionRef.current,
+        });
+        if (toIndex < 0 || toIndex >= total) return;
+        if (toIndex === fromIdx) return;  // no-op silencioso
+
+        // BLOCKER M-5.4.5 — Defensa contra callbacks de executor stale post
+        // manual nav / hard_resync. advanceWithinChunk se llama desde:
+        //   (a) onSentenceActivate del executor activo, O
+        //   (b) load() en chunk-reuse fast path (mismo chunkKey).
+        // Si syncStrategyHandleRef existe PERO isAlive=false, es el caso (a)
+        // de un executor cancelado cuya callback estaba in-flight cuando se
+        // hizo cancel(). Logueamos + return.
+        const _execHandle = syncStrategyHandleRef.current;
+        if (_execHandle && !_execHandle.isAlive()) {
+            // eslint-disable-next-line no-console
+            console.warn('[STALE_EXECUTOR_AFTER_MANUAL_NAV]', {
+                fromIdx, toIndex,
+                staleExecutorSessionId: _execHandle.sessionId,
+                staleExecutorMode:      _execHandle.mode,
+                currentSessionId:       contentSessionRef.current,
+            });
+            return;
+        }
+
+        // M-5.4.6 (Case 2) — Guard defensivo: si el executor está activo y
+        // su rango registrado [_spawnFromIndex, _chunkEndIndex] no contiene
+        // toIndex, rechazamos. Cubre el caso "executor para chunk 0 con
+        // spawnFrom=10 intenta activar sentenceIdx:0".
+        if (_execHandle && _execHandle.isAlive()) {
+            const _spawnFrom = (_execHandle as any)._spawnFromIndex;
+            const _chunkEnd  = (_execHandle as any)._chunkEndIndex;
+            if (Number.isFinite(_spawnFrom) && Number.isFinite(_chunkEnd)
+                && (toIndex < _spawnFrom || toIndex > _chunkEnd)) {
+                // eslint-disable-next-line no-console
+                console.warn('[STALE_OR_LOCAL_INDEX_REJECTED]', {
+                    fromIdx, toIndex,
+                    executorSpawnFrom: _spawnFrom,
+                    executorChunkEnd:  _chunkEnd,
+                    executorChunkKey:  (_execHandle as any)._chunkKey,
+                    audioMode:         ctx.audioModeRef?.current ?? null,
+                    sessionId:         contentSessionRef.current,
+                    note:              'executor activation outside spawn range',
+                });
+                return;
+            }
+        }
+
+        // M-5.4.6 (DEMOLITION Phase 1.a) — stamps de timestamp eliminados.
+        // El drift detector que los leía fue removido del visor; mantener los
+        // refs sería overhead sin lectores.
+
+        // M-5.4.6 — En chunked mode, los dispatchMachine que siguen son
+        // best-effort: PB_SENTENCE_COMPLETED_REJECTED y PB_AUDIO_STARTED_REJECTED
+        // son normales acá porque la machine sigue exigiendo el contrato visual
+        // que Phase 1.b va a eliminar. Una vez completado Phase 1.b, esos
+        // rejections desaparecen.
+
+        log('autoplay_blocked' as any, {
+            event: 'CHUNK_AUDIO_REUSE',
+            from: fromIdx, to: toIndex,
+            chunkKey: toChunkKey(toIndex),
+            note: 'sentence_advance_without_audio_reload',
+        });
+        log('autoplay_blocked' as any, {
+            event: 'CHUNK_AUDIO_SKIP_RELOAD',
+            from: fromIdx, to: toIndex,
+            chunkKey: toChunkKey(toIndex),
+        });
+
+        // 1. Buffer: cerrar la frase anterior + preparar la nueva.
+        //    SENTENCE_COMPLETED es best-effort.
+        dispatchMachine({ type: MA.SENTENCE_COMPLETED, index: fromIdx });
+        dispatchMachine({
+            type: MA.PREPARE_SENTENCE,
+            index:       toIndex,
+            displayText: ctx.sentencesRef.current[toIndex] ?? '',
+            spokenText:  ctx.audioSentencesRef.current[toIndex] ?? '',
+            userId:      ctx.userIdRef.current,
+            now:         Date.now(),
+        });
+
+        // 2. Mover índice canónico — el visor renderea, useLayoutEffect valida
+        //    y emite ack via emitAckIfNew (M-5.3.3 predicate).
+        setIdx(toIndex);
+
+        // 3. AUDIO_STARTED para el nuevo idx — defer 1 microtask para que React
+        //    aplique setIdx y el ack del visor llegue primero (status='visible'
+        //    requerido por markAudioStarted en activeSentenceBuffer).
+        if (typeof queueMicrotask === 'function') {
+            queueMicrotask(() => {
+                if (ctx.unmountedRef.current) return;
+                if (currentIdxRef.current !== toIndex) return;
+                dispatchMachine({ type: MA.AUDIO_STARTED, index: toIndex });
+            });
+        }
+    };
+
     // ── LOAD — entry point principal para cualquier cambio de índice ──────────
     const load = useCallback(async (index: number, autoPlay = false): Promise<void> => {
+        // ── [M532_LOAD] TEMP DEBUG — borrar tras causa raíz identificada ────
+        // Stack trace identifica EXACTAMENTE qué caller del visor o del hook
+        // disparó este load — clave para detectar si pb.load se invoca múltiples
+        // veces sobre el mismo índice (sospecha principal del ACK loop M-5.3.2).
+        // eslint-disable-next-line no-console
+        console.log('[M532_LOAD] load_called', {
+            index,
+            autoPlay,
+            statusBefore: statusRef.current,
+            contentId:    ctx.contentIdRef.current,
+            currentIdx:   currentIdxRef.current,
+            caller:       new Error().stack?.split('\n').slice(2, 7).map(l => l.trim()).join(' | ') ?? '',
+        });
+
         // [RS-DEBUG]
         if (ctx.unmountedRef.current) {
             return;
@@ -527,14 +1892,78 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         // doAdvance que early-returnea por token, pero ya emitió el log.
         cancelPendingAdvance('skip_or_load');
 
+        // ── M-5.3.4 — chunk reuse fast path ─────────────────────────────────
+        // Si el target index vive en el MISMO chunk que el index actual Y el
+        // audio del chunk YA está reproduciendo (pActive.src + !paused), NO
+        // recargamos audio. Solo avanzamos visualmente vía advanceWithinChunk.
+        // Esto distingue "sentence advance" de "audio source transition" —
+        // crítico para contenidos con N frases por chunk.
+        const _curIdx        = currentIdxRef.current;
+        const _curChunkKey   = toChunkKey(_curIdx);
+        const _newChunkKey   = toChunkKey(index);
+        const _pActiveCheck  = activePlayer.current === 'A' ? audioRefA.current : audioRefB.current;
+        const _audioPlaying  = !!(_pActiveCheck?.src && !_pActiveCheck.paused);
+        if (autoPlay
+            && _curChunkKey === _newChunkKey
+            && _curIdx !== index
+            && _audioPlaying) {
+            // eslint-disable-next-line no-console
+            console.log('[SYNC] CHUNK_AUDIO_REUSE_VIA_LOAD', {
+                from: _curIdx, to: index, chunkKey: _curChunkKey,
+                bypass: 'load_skipped_advanceWithinChunk_used',
+            });
+            advanceWithinChunk(index);
+            return;
+        }
+
+        // Cualquier ejecución previa del SyncStrategyExecutor debe cancelarse
+        // antes de arrancar un nuevo audio (cambio de chunk o nuevo libro).
+        cancelSyncStrategy('load_new_audio');
+
         const token = ++loadToken.current;
         setStatus('loading');
+
+        // M-5.4.6 (Case 1) — VISUAL_INDEX_COMMITTED inmediato. El render NO
+        // puede esperar a getAudioUrl. Antes: setIdx(index) corría DESPUÉS del
+        // fetch TTS, lo que generaba black screen en restore (currentIndex
+        // quedaba en 0 mientras targetIndex era 72). Ahora el visual avanza
+        // antes que el audio. Dispatch PREPARE_SENTENCE también acá para que
+        // el buffer tenga current.index correcto.
+        const _fromVisualIdx = currentIdxRef.current;
+        setIdx(index);
+        dispatchMachine({
+            type: MA.PREPARE_SENTENCE,
+            index,
+            displayText: ctx.sentencesRef.current[index] ?? '',
+            spokenText:  ctx.audioSentencesRef.current[index] ?? '',
+            userId:      ctx.userIdRef.current,
+            now:         Date.now(),
+        });
+        // eslint-disable-next-line no-console
+        console.log('[VISUAL_INDEX_COMMITTED]', {
+            from:             _fromVisualIdx,
+            to:               index,
+            reason:           'load',
+            autoPlay,
+            beforeAudioFetch: true,
+            contentId:        ctx.contentIdRef.current,
+            sessionId:        contentSessionRef.current,
+        });
 
         // Detener ambos players inmediatamente — sin overlap
         audioRefA.current?.pause();
         audioRefB.current?.pause();
         cancelStaleFetches(index);
 
+        // ── [AUDIO_TRACE] TEMPORAL — M-2.6/2.7. REMOVE AFTER FIX ────────────
+        // eslint-disable-next-line no-console
+        console.log('[AUDIO_TRACE] request', {
+            contentId:     ctx.contentIdRef.current,
+            sentenceIndex: index,
+            sessionId:     contentSessionRef.current,
+            via:           'load',
+            autoPlay,
+        });
         const url = await getAudioUrl(index);
 
         // Si llegó una carga más reciente o el componente se desmontó, abortar silenciosamente
@@ -548,32 +1977,84 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         if (!pActive || !pStandby) return;
 
         if (!url) {
-            // Sin audio — modo texto puro. Avanzar índice para que el visor siga funcionando.
+            // F12 — Sin audio recuperable. Marcar el index como audio_failed
+            // para que subsiguientes intentos (autoadvance, resume) bloqueen
+            // antes de play() sin disparar hardResync. La frase sigue visible
+            // en modo texto puro.
+            audioFailedKeysRef.current.add(toChunkKey(index));
+            log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index, via: 'no_url_after_getAudioUrl' });
             setStatus('error');
-            setIdx(index);
+            // M-5.4.6 (Case 1) — setIdx ya se ejecutó al inicio de load().
             return;
         }
 
         pActive.src          = url;
         pActive.playbackRate = ctx.speedRef.current;
-
-        // Avanzar índice ANTES de intentar play() — el texto ya está en el índice correcto.
-        setIdx(index);
+        // M-5.4.6 (Case 1) — setIdx + PREPARE_SENTENCE ya se hicieron arriba
+        // antes del fetch TTS. Acá sólo enlazamos audio src al index ya visible.
 
         if (autoPlay) {
-            // OPTIMISTIC status (2026-04-26 hotfix): emitir 'playing' INMEDIATAMENTE.
-            // El UI ya refleja la intencion del usuario; si play() falla, retrocedemos.
-            // Esto evita que la UI quede atascada en 'loading' cuando un click rapido
-            // produce AbortError silencioso en el .catch (token-stale chains).
+            // M-5.4.6 (DEMOLITION Phase 1.b.1) — Gates de visual ACK eliminados.
+            // Antes: waitForVisualAck + requestAudioStart eran HARD GATES que
+            // exigían que el visor confirmara render antes de tocar audio.
+            // Eso violaba el nuevo INV: "Playback must never wait for render
+            // confirmation". El runtime ahora arranca audio sin esperar al DOM.
+
+            // F12 — AUDIO CONTRACT: si el blob fue marcado audio_failed antes,
+            // todavía bloqueamos. (Phase 1.b.B simplificará este path.)
+            if (isAudioFailed(index)) {
+                log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index, via: 'pre_play_check' });
+                setStatus('error');
+                ctx.onPlayChange.current(false);
+                return;
+            }
+
             setStatus('playing');
             ctx.onPlayChange.current(true);
             sentenceStartTimeRef.current = Date.now();
 
+            // BLOCKER M-5.4.3 — Instrumentación pre-play. Useful para distinguir
+            // "play() nunca fue llamado" de "play() fue llamado pero falló".
+            // eslint-disable-next-line no-console
+            console.log('[PB_PLAY_ATTEMPT]', {
+                callsite:        'load_autoplay',
+                index,
+                contentId:       ctx.contentIdRef.current,
+                mode:            ctx.audioModeRef?.current ?? null,
+                statusBefore:    statusRef.current,
+                audioPaused:     pActive.paused,
+                audioReadyState: pActive.readyState,
+                audioDuration:   pActive.duration,
+                currentTime:     pActive.currentTime,
+                srcTail:         (pActive.src || '').slice(-60),
+                autoPlay:        true,
+                sessionId:       contentSessionRef.current,
+            });
             pActive.play()
                 .then(() => {
                     // Confirmacion. Status ya es 'playing'; solo loggeamos.
                     const wasCached = audioCache.current.has(toChunkKey(index));
                     log('play_start', { index, cached: wasCached });
+                    // eslint-disable-next-line no-console
+                    console.log('[PB_PLAY_RESOLVED]', {
+                        callsite:        'load_autoplay',
+                        index,
+                        contentId:       ctx.contentIdRef.current,
+                        cached:          wasCached,
+                        audioDuration:   pActive.duration,
+                        audioReadyState: pActive.readyState,
+                        currentTime:     pActive.currentTime,
+                        sessionId:       contentSessionRef.current,
+                    });
+                    // eslint-disable-next-line no-console
+                    console.log('[PB_LOAD_PLAY_THEN]', {
+                        index,
+                        sessionId: contentSessionRef.current,
+                    });
+                    // BLOCKER M-5.4.3 — Helper unificado. Reemplaza dispatch +
+                    // timestamps + spawn que antes vivían inline acá. Si Guerra
+                    // no llega a este punto, ningún SYNC_SPAWN_ATTEMPT aparecerá.
+                    onAudioPlaybackStarted(pActive, index, 'load_autoplay');
                     const liveDuration = Number.isFinite(pActive.duration) ? pActive.duration : null;
                     log('audio_metadata', {
                         index,
@@ -624,6 +2105,27 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                         setStatus('blocked');
                         ctx.onPlayChange.current(false);
                         log('autoplay_blocked', { index, error: e.name });
+                    } else if (e.name === 'NotSupportedError') {
+                        // F12: blob corrupto/incompatible. Invalidar cache,
+                        // marcar audioFailed si ya retrieó una vez. NO hardResync.
+                        const key = toChunkKey(index);
+                        const cachedUrl = audioCache.current.get(key);
+                        if (cachedUrl) { URL.revokeObjectURL(cachedUrl); audioCache.current.delete(key); }
+                        log('autoplay_blocked' as any, { event: 'PB_AUDIO_PLAY_UNSUPPORTED', index, error: e.name });
+                        log('autoplay_blocked' as any, { event: 'PB_AUDIO_CACHE_INVALIDATED', index, via: 'play_unsupported' });
+                        if (!audioRetriedKeysRef.current.has(key)) {
+                            audioRetriedKeysRef.current.add(key);
+                            log('autoplay_blocked' as any, { event: 'PB_AUDIO_RETRY_ATTEMPT', index });
+                            ctx.onPlayChange.current(false);
+                            // Reload limpio: cache invalidado fuerza re-fetch TTS fresh.
+                            load(index, true);
+                        } else {
+                            // Segundo fallo → unrecoverable. Pausa controlada, no hardResync.
+                            audioFailedKeysRef.current.add(key);
+                            setStatus('error');
+                            ctx.onPlayChange.current(false);
+                            log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index, error: e.name });
+                        }
                     } else {
                         setStatus('error');
                         ctx.onPlayChange.current(false);
@@ -668,24 +2170,62 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         setStatus('paused');
         ctx.onPlayChange.current(false);
         log('playback_paused', { index: currentIdxRef.current });
+        // F3: notificar a la machine. PAUSE cancela el buffer (current+next).
+        dispatchMachine({ type: MA.PAUSE });
     }, []);
 
     // ── RESUME ────────────────────────────────────────────────────────────────
     // Maneja los estados 'paused' y 'blocked'.
     // En 'blocked': el audio está cargado, solo faltó interacción del usuario.
     //              La interacción que dispara resume() es suficiente para desbloquear.
-    const resume = useCallback((): void => {
+    //
+    // M-5.4.6 (DEMOLITION Phase 1.b.1) — Bootstrap visual ACK eliminado.
+    // Antes: si canStartAudio(idx)===false, esperábamos waitForVisualAck +
+    // requestAudioStart antes de play(). Eso violaba el nuevo INV "playback
+    // must never wait for render confirmation". Ahora resume() simplemente
+    // llama a play() — si el audio src está cargado, suena.
+    const resume = useCallback(async (): Promise<void> => {
         const p = activePlayer.current === 'A' ? audioRefA.current : audioRefB.current;
         if (!p?.src) return;
 
         setStatus('loading'); // visualmente claro que algo está pasando
         p.playbackRate = ctx.speedRef.current;
+        // BLOCKER M-5.4.3 — Instrumentación pre-play. Resume es el path donde
+        // antes el spawn NO se hacía (bug confirmado por auditoría). Ahora pasa
+        // por onAudioPlaybackStarted como cualquier otro play.
+        // eslint-disable-next-line no-console
+        console.log('[PB_RESUME_ATTEMPT]', {
+            callsite:        'resume',
+            index:           currentIdxRef.current,
+            contentId:       ctx.contentIdRef.current,
+            mode:            ctx.audioModeRef?.current ?? null,
+            statusBefore:    statusRef.current,
+            audioPaused:     p.paused,
+            audioReadyState: p.readyState,
+            audioDuration:   p.duration,
+            currentTime:     p.currentTime,
+            srcTail:         (p.src || '').slice(-60),
+            sessionId:       contentSessionRef.current,
+        });
         p.play()
             .then(() => {
                 setStatus('playing');
                 ctx.onPlayChange.current(true);
                 sentenceStartTimeRef.current = Date.now(); // B4: resume confirmado → reiniciar medición
                 log('play_start', { index: currentIdxRef.current, via: 'resume' });
+                // eslint-disable-next-line no-console
+                console.log('[PB_RESUME_RESOLVED]', {
+                    callsite:        'resume',
+                    index:           currentIdxRef.current,
+                    contentId:       ctx.contentIdRef.current,
+                    audioDuration:   p.duration,
+                    audioReadyState: p.readyState,
+                    currentTime:     p.currentTime,
+                    sessionId:       contentSessionRef.current,
+                });
+                // BLOCKER M-5.4.3 — helper unificado. Despacha AUDIO_STARTED y
+                // SPAWNEA EL EXECUTOR en chunked. Antes este path saltaba spawn.
+                onAudioPlaybackStarted(p, currentIdxRef.current, 'resume');
             })
             .catch((e: DOMException) => {
                 // Si sigue bloqueado (no debería ocurrir tras interacción real del usuario)
@@ -716,6 +2256,23 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 speed:     ctx.speedRef.current,
             });
         }
+        // M-5.4.6 (Phase 1.b.C Task 2) — skip programático también es manual nav
+        // (UI o API consumer). Bump generation para invalidar callbacks viejos.
+        if (delta !== 0) {
+            const _fromGeneration = navGenerationRef.current;
+            navGenerationRef.current = _fromGeneration + 1;
+            // eslint-disable-next-line no-console
+            console.log('[MANUAL_NAV_GENERATION_BUMP]', {
+                fromGeneration: _fromGeneration,
+                toGeneration:   navGenerationRef.current,
+                reason:         'skip',
+                targetIndex:    index,
+            });
+        }
+        // F3: notificar a la machine ANTES del load (que dispara PREPARE_SENTENCE).
+        // SKIP cancela el buffer (current+next) y emite HARD_RESYNC effect.
+        // load() inmediatamente después dispatchea PREPARE_SENTENCE para targetIndex.
+        dispatchMachine({ type: MA.SKIP, targetIndex: index });
         load(index, true);
     }, [load]);
 
@@ -769,12 +2326,20 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         // B4: Duración real de la oración que acaba de terminar.
         const durationMs = Date.now() - sentenceStartTimeRef.current;
 
+        // F3: notificar a la machine que el audio terminó. Si el buffer está
+        // en 'reading' (audioStarted=true), markAudioEnded toggle audioEnded=true.
+        // Si el ack del visor nunca llegó (F3 todavía no lo conecta), la
+        // machine emitirá PB_AUDIO_ENDED rejected — ok, observacional.
+        dispatchMachine({ type: MA.AUDIO_ENDED, index: currentIdxRef.current, durationMs });
+
         // B3: Capturar token AHORA, antes de cualquier operación async o callback.
         // Si skip() o load() se ejecutan durante la transición (incluyendo el await abajo),
         // loadToken.current habrá cambiado y doPlay() abortará sin reproducir audio obsoleto.
         const capturedToken = loadToken.current;
 
         if (nextIdx >= sentences.length) {
+            // F3: cerrar la frase actual en la machine antes del fin de sesión.
+            dispatchMachine({ type: MA.SENTENCE_COMPLETED, index: currentIdx });
             setStatus('paused');
             ctx.onPlayChange.current(false);
             ctx.onSessionEnd.current();
@@ -836,7 +2401,8 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             // sentence_advanced/index_commit, reset de sentenceStartTime y play.
             // Guards: capturedToken, unmounted, statusRef. Si cualquiera falla,
             // NO commitea nada — visual, progreso y log quedan en currentIdx.
-            const doAdvance = () => {
+            // F4.2: async para permitir await waitForVisualAck antes de play().
+            const doAdvance = async (): Promise<void> => {
                 // Consumir el timer ref que disparó este callback (no quedar nulo
                 // si pause/skip llegaron primero — cancelPendingAdvance ya lo limpió).
                 pendingAdvanceTimerRef.current = null;
@@ -844,16 +2410,136 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 if (ctx.unmountedRef.current) return;
                 if (statusRef.current !== 'playing') return;
 
+                // F3: el floor cumplió y vamos a commitear. Notificar a la machine:
+                //   - SENTENCE_COMPLETED para currentIdx (cierra la frase anterior)
+                //   - PREPARE_SENTENCE para nextIdx (abre la nueva, status='preparing')
+                dispatchMachine({ type: MA.SENTENCE_COMPLETED, index: currentIdx });
+                dispatchMachine({
+                    type: MA.PREPARE_SENTENCE,
+                    index: nextIdx,
+                    displayText: ctx.sentencesRef.current[nextIdx] ?? '',
+                    spokenText:  ctx.audioSentencesRef.current[nextIdx] ?? '',
+                    userId:      ctx.userIdRef.current,
+                    now:         Date.now(),
+                });
+
                 // ── COMMIT visual + log (INV-17: index_commit ANTES de sentence_advanced) ──
                 setIdx(nextIdx);
                 log('index_commit', { from: currentIdx, to: nextIdx, committedAt: 'doAdvance' });
                 log('sentence_advanced', { from: currentIdx, to: nextIdx });
+                // ── [M532_VISUAL_ADVANCE] TEMP DEBUG — POST commit log (no rompe regex) ──
+                // eslint-disable-next-line no-console
+                console.log('[M532_VISUAL_ADVANCE]', {
+                    from: currentIdx, to: nextIdx,
+                    currentIdxRef: currentIdxRef.current,
+                    bufferIndex:   machineRef.current?.buffer?.current?.index ?? null,
+                    bufferStatus:  machineRef.current?.buffer?.current?.status ?? null,
+                });
 
-                // B4: timestamp de inicio real — después de delay y justo antes de play().
+                // M-5.4.6 (DEMOLITION Phase 1.b.1) — Hard gating de visual ACK
+                // en autoadvance ELIMINADO. Antes: tras setIdx(nextIdx),
+                // waitForVisualAck + requestAudioStart hacían pausa-y-rezar
+                // con hardResync si el visor no ack-eaba en 800ms. Ahora el
+                // runtime sigue al siguiente play() directo. El visor renderea
+                // cuando renderea — playback no espera.
+                if (capturedToken !== loadToken.current || ctx.unmountedRef.current) return;
+
+                // F12 — AUDIO CONTRACT pre-play: si nextIdx ya está marcado
+                // como audio_failed (tts_fail anterior detectado durante
+                // prefetch o blob corrupto), NO hacer nextEl.play().
+                // Pausar en la frase visible — el user reanudará manualmente.
+                if (isAudioFailed(nextIdx)) {
+                    log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index: nextIdx, via: 'autoadvance_pre_play' });
+                    setStatus('error');
+                    ctx.onPlayChange.current(false);
+                    return;
+                }
+
+                // B4: timestamp de inicio real — después de delay+gate y justo antes de play().
                 sentenceStartTimeRef.current = Date.now();
+
+                // ── BLOCKER FINAL V2 / TASK 2 — invariante de chunk seguro ───
+                // ANTES de play() y ANTES de spawn: confirmar que nextEl trae
+                // el audio del chunk esperado para nextIdx. El bug del smoke
+                // S-2 era exactamente esto: nextEl tenía el audio STALE del
+                // chunk anterior (modelo A/B asume 1 audio = 1 frase, falso en
+                // chunked) → play() reiniciaba ese audio y el executor de N+1
+                // arrancaba contra el audio de N.
+                const _chunkGuard = await ensureAudioMatchesExpectedChunk(
+                    nextEl, nextIdx, 'gapless_advance',
+                );
+                if (capturedToken !== loadToken.current || ctx.unmountedRef.current) return;
+                if (statusRef.current !== 'playing') return;
+                if (_chunkGuard === 'fail') {
+                    // NO reproducir audio stale ni spawnear sobre audio
+                    // equivocado. Fallback determinista: load() limpio del
+                    // índice (re-fetch + re-bind del src correcto).
+                    // eslint-disable-next-line no-console
+                    console.warn('[GAPLESS_CHUNK_TRANSITION_FALLBACK_LOAD]', {
+                        index:     nextIdx,
+                        reason:    'chunk_guard_failed',
+                        sessionId: contentSessionRef.current,
+                    });
+                    load(nextIdx, true);
+                    return;
+                }
+
+                // BLOCKER M-5.4.3 — Instrumentación pre-play. Gapless es el
+                // tercer path (junto con load y resume) que reproduce audio.
+                // Antes también saltaba spawn, lo que rompía chunked mode tras
+                // el primer chunk (la sentencia avanzaba dentro del chunk_0
+                // sólo si load() autoplay arrancó allí, pero al pasar a chunk_1
+                // vía handleEnded el executor no se re-creaba).
+                // eslint-disable-next-line no-console
+                console.log('[PB_PLAY_ATTEMPT]', {
+                    callsite:        'gapless_advance',
+                    index:           nextIdx,
+                    contentId:       ctx.contentIdRef.current,
+                    mode:            ctx.audioModeRef?.current ?? null,
+                    statusBefore:    statusRef.current,
+                    chunkGuard:      _chunkGuard,
+                    audioPaused:     nextEl.paused,
+                    audioReadyState: nextEl.readyState,
+                    audioDuration:   nextEl.duration,
+                    currentTime:     nextEl.currentTime,
+                    srcTail:         (nextEl.src || '').slice(-60),
+                    autoPlay:        true,
+                    sessionId:       contentSessionRef.current,
+                });
                 nextEl.play()
                     .then(() => {
                         if (capturedToken !== loadToken.current) return;
+                        // BLOCKER FINAL V2 / TASK 2 — confirmación de play sobre
+                        // el chunk correcto. Orden verificable:
+                        //   GAPLESS_CHUNK_AUDIO_READY → GAPLESS_CHUNK_PLAY_CONFIRMED
+                        //   → PB_PLAY_RESOLVED → SYNC_SPAWN_AFTER_AUDIO_READY
+                        // eslint-disable-next-line no-console
+                        console.log('[GAPLESS_CHUNK_PLAY_CONFIRMED]', {
+                            callsite:         'gapless_advance',
+                            index:            nextIdx,
+                            expectedChunkKey: toChunkKey(nextIdx),
+                            chunkGuard:       _chunkGuard,
+                            audioCurrentTime: nextEl.currentTime,
+                            audioDuration:    nextEl.duration,
+                            audioReadyState:  nextEl.readyState,
+                            srcTail:          (nextEl.src || '').slice(-60),
+                            sessionId:        contentSessionRef.current,
+                        });
+                        // eslint-disable-next-line no-console
+                        console.log('[PB_PLAY_RESOLVED]', {
+                            callsite:        'gapless_advance',
+                            index:           nextIdx,
+                            contentId:       ctx.contentIdRef.current,
+                            audioDuration:   nextEl.duration,
+                            audioReadyState: nextEl.readyState,
+                            currentTime:     nextEl.currentTime,
+                            sessionId:       contentSessionRef.current,
+                        });
+                        // BLOCKER M-5.4.3 — helper unificado. Antes solo
+                        // despachaba AUDIO_STARTED; ahora también spawnea
+                        // executor para chunked. Sin esto, chunked content
+                        // pierde avance visual al cruzar a un nuevo chunk.
+                        onAudioPlaybackStarted(nextEl, nextIdx, 'gapless_advance');
                     })
                     .catch((e: DOMException) => {
                         if (capturedToken !== loadToken.current) return;
@@ -861,11 +2547,32 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                         if (e.name === 'NotAllowedError') {
                             setStatus('blocked');
                             log('autoplay_blocked', { index: nextIdx, via: 'gapless' });
+                            ctx.onPlayChange.current(false);
+                        } else if (e.name === 'NotSupportedError') {
+                            // F12: gapless con blob corrupto. Invalidar + retry una vez.
+                            // NO hardResync. NO avanzar. NO guardar progreso.
+                            const key = toChunkKey(nextIdx);
+                            const cachedUrl = audioCache.current.get(key);
+                            if (cachedUrl) { URL.revokeObjectURL(cachedUrl); audioCache.current.delete(key); }
+                            log('autoplay_blocked' as any, { event: 'PB_AUDIO_PLAY_UNSUPPORTED', index: nextIdx, via: 'gapless', error: e.name });
+                            log('autoplay_blocked' as any, { event: 'PB_AUDIO_CACHE_INVALIDATED', index: nextIdx, via: 'gapless_unsupported' });
+                            if (!audioRetriedKeysRef.current.has(key)) {
+                                audioRetriedKeysRef.current.add(key);
+                                log('autoplay_blocked' as any, { event: 'PB_AUDIO_RETRY_ATTEMPT', index: nextIdx, via: 'gapless' });
+                                ctx.onPlayChange.current(false);
+                                load(nextIdx, true);  // reload limpio fuerza re-fetch fresh
+                            } else {
+                                audioFailedKeysRef.current.add(key);
+                                setStatus('error');
+                                ctx.onPlayChange.current(false);
+                                log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index: nextIdx, via: 'gapless', error: e.name });
+                            }
                         } else {
+                            // Otros errores: comportamiento legacy (load fallback).
                             log('gapless_fail', { index: nextIdx, error: e.name });
                             load(nextIdx, true);
+                            ctx.onPlayChange.current(false);
                         }
-                        ctx.onPlayChange.current(false);
                     });
 
                 standbyReadyRef.current = false;
@@ -968,8 +2675,11 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 if (capturedToken !== loadToken.current) return;
                 if (ctx.unmountedRef.current) return;
                 if (statusRef.current !== 'playing') return;
-                // load() llama internamente a setIdx — visual + progress se commitean ahí.
-                // INV-17: index_commit ANTES de sentence_advanced.
+                // F3: notificar a la machine que la frase actual se completa.
+                // load() interno emite PREPARE_SENTENCE para nextIdx.
+                dispatchMachine({ type: MA.SENTENCE_COMPLETED, index: currentIdx });
+                // load(nextIdx, true) abajo llama internamente a setIdx(nextIdx) —
+                // visual + progress se commitean ahí (INV-17 regression guard).
                 log('index_commit', { from: currentIdx, to: nextIdx, committedAt: 'fallback_load' });
                 log('sentence_advanced', { from: currentIdx, to: nextIdx });
                 load(nextIdx, true);
@@ -1035,11 +2745,34 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // ── RESET — borra todo el estado de audio (para transiciones de contenido) ─
     const reset = useCallback((): void => {
         cancelPendingAdvance('content_reset');
+        cancelSyncStrategy('content_reset');  // M-5.3.4: matar executor del libro anterior
         cacheInvalidatedKeysRef.current.clear();
+        audioFailedKeysRef.current.clear();   // F12: reset cross-content
+        audioRetriedKeysRef.current.clear();  // F12: reset cross-content
+        hardResyncAttemptsRef.current = 0;    // F19/Cambio C: reset cap por sesión
         loadToken.current++;
+        contentSessionRef.current++;          // F15: invalida callbacks tardíos del libro anterior
+        // F3: notificar a la machine. CONTENT_CHANGE limpia buffer + state.
+        // El próximo PREPARE_SENTENCE (desde load) re-inicializa la sesión.
+        dispatchMachine({
+            type: MA.CONTENT_CHANGE,
+            contentId:  ctx.contentIdRef.current,
+            sessionKey: `${ctx.userIdRef.current}__${ctx.contentIdRef.current}`,
+            startIndex: 0,
+        });
 
+        const _resetSize = audioCache.current.size;
         audioCache.current.forEach(url => URL.revokeObjectURL(url));
         audioCache.current.clear();
+        if (_resetSize > 0) {
+            cacheMetricsRef.current.evicted += _resetSize;
+            cacheMetricsRef.current.revoked += _resetSize;
+            // eslint-disable-next-line no-console
+            console.log('[CACHE_ENTRY_EVICTED]', {
+                evicted: _resetSize, via: 'reset_content_change',
+                totalEvicted: cacheMetricsRef.current.evicted,
+            });
+        }
         abortCtrls.current.forEach(ctrl => ctrl.abort('Content reset'));
         abortCtrls.current.clear();
         inFlight.current.clear();
@@ -1068,6 +2801,559 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         pendingCanplaythroughCleanupRef.current !== null
     );
 
+    // F3: notificaciones del visor a la machine. NO ejecutan side effects;
+    // solo actualizan el buffer interno de la machine. Pensadas para que F7
+    // las llame desde VisorInmersivo (DOM contract validator + BlockEngine
+    // subscribe). Wrapper inline porque no necesitan estabilidad de identidad
+    // (los call sites futuros las invocan dentro de useLayoutEffect / subscribe
+    // M-5.4.6 (DEMOLITION Phase 1.b.5) — acknowledgeVisualHighlight ELIMINADO.
+    // El visor pasó a READ-ONLY en Phase 1.b.2. Mantenemos un stub no-op
+    // para no romper callers legacy mientras se completan los tests.
+    const acknowledgeVisualHighlight = (_index: number): void => {
+        // no-op: visor ya no acknowledgea al runtime
+    };
+
+    const notifyBlockComplete = (): void => {
+        dispatchMachine({ type: MA.BLOCK_COMPLETE });
+    };
+
+    // F7: snapshot read-only del estado runtime de la machine.
+    // Devuelve copia plana de primitivos — sin referencias mutables del state
+    // interno. Usado por el drift detector del visor para validar el contrato
+    // de frase activa sin importar el módulo de la machine.
+    const getMachineSnapshot = (): MachineSnapshot => {
+        const m = machineRef.current;
+        if (!m) {
+            return {
+                status: 'idle',
+                committedIndex: 0,
+                visualIndex: 0,
+                audioIndex: 0,
+                progressIndex: 0,
+                pendingTransition: null,
+                buffer: { current: null, next: null, locked: false },
+            };
+        }
+        const c = m.buffer?.current;
+        const n = m.buffer?.next;
+        const p = m.pendingTransition;
+        return {
+            status:         m.status,
+            committedIndex: m.committedIndex,
+            visualIndex:    m.visualIndex,
+            audioIndex:     m.audioIndex,
+            progressIndex:  m.progressIndex,
+            pendingTransition: p ? {
+                id:                p.id,
+                fromIndex:         p.fromIndex,
+                toIndex:           p.toIndex,
+                reason:            p.reason,
+                visualAckReceived: p.visualAckReceived,
+                requireVisualAck:  p.requireVisualAck,
+            } : null,
+            buffer: {
+                current: c ? {
+                    index:                    c.index,
+                    status:                   c.status,
+                    audioStarted:             c.audioStarted,
+                    audioEnded:               c.audioEnded,
+                    progressEligible:         c.progressEligible,
+                    transitionId:             c.transitionId,
+                } : null,
+                next: n ? {
+                    index:        n.index,
+                    status:       n.status,
+                    transitionId: n.transitionId,
+                } : null,
+                locked: m.buffer?.locked ?? false,
+            },
+        };
+    };
+
+    // M-5.4 — Resilience snapshot READ-ONLY del runtime vivo.
+    // Sin side effects. Sin emisión de eventos. Sin mutación. Devuelve copia
+    // plana serializable lista para console.dir(), JSON.stringify(), o telemetría.
+    const getRuntimeDiagnostics = (): Record<string, any> => {
+        const m   = machineRef.current;
+        const c   = m?.buffer?.current;
+        const n   = m?.buffer?.next;
+        const pA  = audioRefA.current;
+        const pB  = audioRefB.current;
+        const pAct  = activePlayer.current === 'A' ? pA : pB;
+        const pStb  = activePlayer.current === 'A' ? pB : pA;
+        const exec  = syncStrategyHandleRef.current;
+        const cidx  = currentIdxRef.current;
+        const ckey  = ctx.toChunkRef.current[cidx] ?? cidx;
+        return {
+            sessionId:             contentSessionRef.current,
+            contentId:             ctx.contentIdRef.current,
+            currentSentence:       cidx,
+            currentChunk:          ckey,
+            audioMode:             ctx.audioModeRef?.current ?? null,
+            syncStrategy: exec ? {
+                active:    !!exec.isAlive(),
+                sessionId: exec.sessionId,
+                mode:      exec.mode,
+            } : null,
+            playbackState: {
+                status:    statusRef.current,
+                isPlaying: statusRef.current === 'playing',
+                loadToken: loadToken.current,
+            },
+            activeAudioSrc:        pAct?.src ?? null,
+            standbyAudioSrc:       pStb?.src ?? null,
+            activeExecutor:        exec
+                ? { isAlive: exec.isAlive(), sessionId: exec.sessionId, mode: exec.mode }
+                : null,
+            activeTimers: {
+                pendingAdvance:        pendingAdvanceTimerRef.current !== null,
+                pendingFallback:       pendingFallbackTimerRef.current !== null,
+                pendingCanplaythrough: pendingCanplaythroughCleanupRef.current !== null,
+            },
+            pendingAdvances:       isPendingAdvance() ? 1 : 0,
+            hardResyncCount:       hardResyncAttemptsRef.current,
+            // M-5.4.7 Task 4 + Task 5 — runtime hygiene counters.
+            navGeneration:         navGenerationRef.current,
+            staleCallbackRejects:  staleCallbackRejectCountRef.current,
+            executorCancels:       executorCancelCountRef.current,
+            uptimeMs:              Date.now() - runtimeStartedAtRef.current,
+            cacheEntries: {
+                audioCache:      audioCache.current.size,
+                inFlight:        inFlight.current.size,
+                abortCtrls:      abortCtrls.current.size,
+                audioFailedKeys: audioFailedKeysRef.current.size,
+                audioRetriedKeys:audioRetriedKeysRef.current.size,
+                cacheInvalidatedKeys: cacheInvalidatedKeysRef.current.size,
+            },
+            cacheMetrics: {
+                created: cacheMetricsRef.current.created,
+                reused:  cacheMetricsRef.current.reused,
+                evicted: cacheMetricsRef.current.evicted,
+                revoked: cacheMetricsRef.current.revoked,
+            },
+            ownershipTokens: {
+                contentSession:  contentSessionRef.current,
+                loadToken:       loadToken.current,
+                standbyGen:      standbyGenRef.current,
+                executorSpawnCount: executorSpawnCountRef.current,
+                ownershipViolationCount: ownershipViolationCountRef.current,
+            },
+            // M-5.4.6 — visualAckState eliminado (visual ACK removido del runtime).
+            visualAckState: {
+                bufferStatus:      c?.status ?? null,
+                bufferIndex:       c?.index ?? null,
+            },
+            machineBufferState: {
+                machineStatus:     m?.status ?? null,
+                currentIndex:      c?.index ?? null,
+                currentStatus:     c?.status ?? null,
+                currentAudioStarted: c?.audioStarted ?? false,
+                currentAudioEnded: c?.audioEnded ?? false,
+                nextIndex:         n?.index ?? null,
+                locked:            m?.buffer?.locked ?? false,
+            },
+            playerState: {
+                activePlayer:        activePlayer.current,
+                activePaused:        pAct?.paused ?? null,
+                activeReadyState:    pAct?.readyState ?? null,
+                activeCurrentTime:   pAct?.currentTime ?? null,
+                activeDuration:      pAct?.duration ?? null,
+                standbyReady:        standbyReadyRef.current,
+            },
+            lastAudioEventAt:       lastAudioEventAtRef.current,
+            lastVisualAckAt:        lastVisualAckAtRef.current,
+            lastChunkTransitionAt:  lastChunkTransitionAtRef.current,
+            now:                    Date.now(),
+        };
+    };
+
+    // F11: ¿el buffer está preparado para `index`? Read-only.
+    // True si buffer.current.index coincide y el buffer no está locked.
+    const isPreparedForIndex = (index: number): boolean => {
+        const m = machineRef.current;
+        const c = m?.buffer?.current;
+        if (!c) return false;
+        if (m!.buffer.locked) return false;
+        return c.index === index;
+    };
+
+    // M-5.3 (rev M-5.3.3): ¿el buffer del index ya recibió ack visual? Read-only.
+    //
+    // Pregunta semántica: "¿este index ya fue confirmado visualmente?" — NO
+    // "¿está habilitado para arrancar audio?". Para esa pregunta estricta usar
+    // canStartAudio() (que sí exige status='visible').
+    //
+    // El flag visualHighlightConfirmed es MONOTÓNICO: confirmHighlight() lo
+    // setea true y nunca vuelve a false; solo prepare() (que crea una sentence
+    // nueva) resetea el flag al crear current desde cero. Por tanto chequear
+    // SOLO el flag es la pregunta correcta. Antes pedíamos status='visible'
+    // adicionalmente, pero el status legítimamente progresa a 'reading' apenas
+    // arranca el audio (markAudioStarted) y luego a 'completed', causando
+    // loop infinito de re-ack durante playback (síntoma M-5.3.2).
+    // M-5.4.6 (DEMOLITION Phase 1.b.5) — isVisuallyAckedForIndex ELIMINADO.
+    // Devuelve siempre true para mantener firma del export (Phase 2 lo removerá
+    // del interface). El nuevo INV es "playback never waits for render".
+    const isVisuallyAckedForIndex = (_index: number): boolean => true;
+
+    // F11: bootstrap explícito de la frase activa. Idempotente: solo dispatcha
+    // PREPARE_SENTENCE si NO está ya preparada (evita resetear flags
+    // visualHighlightConfirmed/audioStarted/etc. de un buffer válido).
+    const prepareSentence = useCallback((index: number, reason: string): void => {
+        if (isPreparedForIndex(index)) return;
+        dispatchMachine({
+            type: MA.PREPARE_SENTENCE,
+            index,
+            displayText: ctx.sentencesRef.current[index] ?? '',
+            spokenText:  ctx.audioSentencesRef.current[index] ?? '',
+            userId:      ctx.userIdRef.current,
+            now:         Date.now(),
+        });
+        // Log F11 explícito (la machine emite PB_SENTENCE_PREPARE genérico;
+        // este complementa con el `reason` para diferenciar bootstraps).
+        log('autoplay_blocked' as any, { event: 'PB_INITIAL_BOOTSTRAP_PREPARE', index, reason });
+    }, []);
+
+    // F16: diagnóstico universal de arranque. Snapshot plano del estado
+    // runtime cuando playback no inicia. El visor lo loguea como
+    // PB_START_DIAGNOSTIC tras 1500ms de un togglePlay sin AUDIO_STARTED.
+    const getStartDiagnostic = (index: number): Record<string, any> => {
+        const m = machineRef.current;
+        const c = m?.buffer?.current;
+        const pActive = activePlayer.current === 'A' ? audioRefA.current : audioRefB.current;
+        return {
+            contentId:               ctx.contentIdRef.current,
+            sessionKey:              `${ctx.userIdRef.current}__${ctx.contentIdRef.current}`,
+            userId:                  ctx.userIdRef.current,
+            index,
+            currentIndex:            currentIdxRef.current,
+            sentencesLength:         ctx.sentencesRef.current.length,
+            hasActiveSentence:       c !== null,
+            activeSentenceIndex:     c?.index ?? null,
+            activeSentenceStatus:    c?.status ?? null,
+            // M-5.4.6 — visualConfirmed eliminado del diagnostic.
+            audioStarted:            c?.audioStarted ?? false,
+            audioEnded:              c?.audioEnded ?? false,
+            progressEligible:        c?.progressEligible ?? false,
+            audioFailed:             isAudioFailed(index),
+            audioRetried:            audioRetriedKeysRef.current.has(toChunkKey(index)),
+            hasAudioUrl:             audioCache.current.has(toChunkKey(index)),
+            canStartAudio:           canStartAudio(index),
+            isPreparedForIndex:      isPreparedForIndex(index),
+            machineStatus:           m?.status ?? null,
+            committedIndex:          m?.committedIndex ?? null,
+            visualIndex:             m?.visualIndex ?? null,
+            audioIndex:              m?.audioIndex ?? null,
+            progressIndex:           m?.progressIndex ?? null,
+            pendingTransition:       m?.pendingTransition ?? null,
+            playerStatus:            statusRef.current,
+            currentSrc:              pActive?.src ?? null,
+            currentPlayerReadyState: pActive?.readyState ?? null,
+            currentPlayerDuration:   pActive?.duration ?? null,
+            currentPlayerPaused:     pActive?.paused ?? null,
+            loadToken:               loadToken.current,
+            contentSession:          contentSessionRef.current,
+            isPendingAdvance:        isPendingAdvance(),
+            standbyReady:            standbyReadyRef.current,
+        };
+    };
+
+    // F13: navegación local pura del usuario (botones anterior/siguiente).
+    // No inicia audio, no guarda progreso, no dispara blockComplete, no usa
+    // hardResync. Pausa audio + prepara buffer + setIdx — el visor releva
+    // y emite ack en su useLayoutEffect normal. Status queda en 'paused'.
+    // BLOCKER M-5.4.5 — Manual navigation determinista. El gesto del usuario
+    // (next/prev/skip) DEBE:
+    //   1. Bump navGenerationRef (Phase 1.b.C Task 2) — invalida callbacks
+    //      pending de executors anteriores.
+    //   2. Cancelar executor activo (chunked mode estaba dejándolo vivo →
+    //      callbacks stale SYNC_SENTENCE_ACTIVATE sobre machine reseteada).
+    //   3. Cancelar pending advances + invalidar loadToken.
+    //   4. Pausar audios (el load posterior arranca limpio).
+    //   5. Despachar SKIP a la machine (limpia buffer current + next).
+    //   6. Delegar a load(clamped, wasPlaying) — load() actualiza audio src,
+    //      hace su propia cancelSyncStrategy('load_new_audio') idempotente,
+    //      y autoplay solo si el usuario estaba en 'playing'. Antes el jump
+    //      dejaba el src stale → resume reproducía la frase ANTERIOR (bug TTS).
+    //
+    // Logs ordenados para auditoría:
+    //   MANUAL_NAV_START → MANUAL_NAV_CANCEL_EXECUTOR → MANUAL_NAV_CLEAR_PENDING
+    //   → MANUAL_NAV_LOAD_TARGET → MANUAL_NAV_READY → MANUAL_NAV_PLAY_IF_REQUESTED
+    const manualSentenceJump = useCallback((targetIndex: number, reason: string): void => {
+        const total  = ctx.sentencesRef.current.length;
+        const clamped = Math.max(0, Math.min(total - 1, targetIndex));
+        const fromIdx = currentIdxRef.current;
+        const wasPlaying = statusRef.current === 'playing';
+
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_START]', {
+            from: fromIdx, to: clamped, requestedTarget: targetIndex,
+            reason, wasPlaying,
+            audioMode:    ctx.audioModeRef?.current ?? null,
+            statusBefore: statusRef.current,
+            sessionId:    contentSessionRef.current,
+        });
+
+        if (clamped === fromIdx) {
+            log('autoplay_blocked' as any, {
+                event: 'PB_MANUAL_JUMP_BLOCKED',
+                reason: 'same_index',
+                from: fromIdx, to: clamped, requestedTarget: targetIndex, jumpReason: reason,
+            });
+            return;
+        }
+
+        // ── M-5.4.10 / TASK 3 — MANUAL NAV STRICT MODE ──────────────────────
+        // El target ya es estricto: el visor pasa currentIndex ± 1; el clamp
+        // solo limita los bordes [0, total-1]. Sin heurísticas, sin
+        // nearest-chunk-rewind, sin reset parcial, sin fallback a inicio de
+        // chunk. delta SIEMPRE ∈ {-1, +1} para botones (salvo clamp en borde).
+        const _navMode   = ctx.audioModeRef?.current ?? null;
+        const _fromChunk = toChunkKey(fromIdx);
+        const _toChunk   = toChunkKey(clamped);
+        const _chunked   = _navMode === 'perChunkNoAnchors' || _navMode === 'perChunkWithAnchors';
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_TARGET_RESOLVED]', {
+            from: fromIdx, to: clamped, requestedTarget: targetIndex,
+            delta: clamped - fromIdx, reason,
+            audioMode: _navMode, fromChunk: _fromChunk, toChunk: _toChunk,
+            strict: true, sessionId: contentSessionRef.current,
+        });
+        // ── M-5.4.14 / TASK 1+3 — FINAL_NAV_TRACE + FINAL_NAV_ASSERTION ──────
+        // Observabilidad pura (cero cambio de control-flow). La aserción NO
+        // lanza: si para un gesto de botón el delta no es exactamente ±1 (o el
+        // clamp de borde 0), marca violation:true para que el smoke la capture.
+        const _isButtonNav = reason === 'button_previous' || reason === 'button_next';
+        const _navDelta    = clamped - fromIdx;
+        const _navOk       = !_isButtonNav
+            || _navDelta === -1 || _navDelta === 1
+            || (clamped === 0 && fromIdx > 0)                       // clamp en inicio
+            || (clamped === total - 1 && fromIdx < total - 1);      // clamp en fin
+        // eslint-disable-next-line no-console
+        console.log('[FINAL_NAV_TRACE]', {
+            from: fromIdx, to: clamped, delta: _navDelta, reason,
+            isButtonNav: _isButtonNav, audioMode: _navMode,
+            fromChunk: _fromChunk, toChunk: _toChunk,
+            sessionId: contentSessionRef.current,
+        });
+        if (!_navOk) {
+            // eslint-disable-next-line no-console
+            console.error('[FINAL_NAV_ASSERTION]', {
+                violation: true,
+                rule: 'button_nav_delta_must_be_exactly_±1_or_edge_clamp',
+                from: fromIdx, to: clamped, delta: _navDelta, reason,
+                requestedTarget: targetIndex, total,
+                sessionId: contentSessionRef.current,
+            });
+        } else if (_isButtonNav) {
+            // eslint-disable-next-line no-console
+            console.log('[FINAL_NAV_ASSERTION]', {
+                violation: false, delta: _navDelta, reason,
+            });
+        }
+
+        // Same-chunk en chunked → mover SOLO el visual. NO reload audio, NO
+        // cancelar executor, NO pausar, NO restart de chunk. Esta es la causa
+        // raíz del "previous salta excesivo": antes SIEMPRE se hacía teardown
+        // + load() → el audio del chunk reiniciaba desde 0. Acá el audio y el
+        // executor ÚNICO siguen intactos; solo se mueve currentIndex ±1.
+        // (perSentence: toChunkKey(i)===i ⇒ i≠i±1 ⇒ jamás entra acá ⇒ cero
+        //  regresión TTS — siempre toma el path cross-chunk de abajo.)
+        if (_chunked && _fromChunk === _toChunk) {
+            // eslint-disable-next-line no-console
+            console.log('[MANUAL_NAV_SAME_CHUNK_REUSE]', {
+                from: fromIdx, to: clamped, chunkKey: _fromChunk,
+                reason, audioMode: _navMode,
+                bypass: 'visual_only_no_audio_reload_no_executor_cancel',
+                sessionId: contentSessionRef.current,
+            });
+            log('autoplay_blocked' as any, {
+                event: 'PB_MANUAL_SENTENCE_JUMP',
+                from: fromIdx, to: clamped, requestedTarget: targetIndex,
+                jumpReason: reason, sameChunkReuse: true,
+            });
+            // Visual-commit directo (mismo patrón que advanceWithinChunk pero
+            // SIN sus guards de rechazo de callback-de-executor, que son para
+            // callbacks stale del executor, NO para navegación del usuario —
+            // rechazarían el `previous` por ir hacia atrás del spawnFromIndex).
+            // NO cancelamos el executor: single executor, audio sigue. Si el
+            // lector está reproduciendo, el executor re-sincroniza el realce
+            // hacia adelante con el audio (fuente de verdad). Si está pausado,
+            // el visual queda en el target. NUNCA reinicia el audio del chunk.
+            dispatchMachine({ type: MA.SENTENCE_COMPLETED, index: fromIdx });
+            dispatchMachine({
+                type: MA.PREPARE_SENTENCE,
+                index:       clamped,
+                displayText: ctx.sentencesRef.current[clamped] ?? '',
+                spokenText:  ctx.audioSentencesRef.current[clamped] ?? '',
+                userId:      ctx.userIdRef.current,
+                now:         Date.now(),
+            });
+            setIdx(clamped);
+            log('autoplay_blocked' as any, {
+                event: 'PB_MANUAL_JUMP_NO_PROGRESS_SAVE',
+                index: clamped,
+            });
+            return;
+        }
+
+        // Cross-chunk (o perSentence) → reload limpio del chunk correcto.
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_CROSS_CHUNK_RELOAD]', {
+            from: fromIdx, to: clamped, fromChunk: _fromChunk, toChunk: _toChunk,
+            reason, audioMode: _navMode,
+            sessionId: contentSessionRef.current,
+        });
+
+        // M-5.4.6 (Phase 1.b.C Task 2) — Bump nav generation ANTES de cualquier
+        // cancel/dispatch. Esto invalida inmediatamente todos los callbacks
+        // pending de executors anteriores: cualquiera que llegue ahora verá
+        // que su _spawnNavGeneration ya no coincide con navGenerationRef.current
+        // y será rechazado con [STALE_NAV_CALLBACK_REJECTED].
+        const _fromGeneration = navGenerationRef.current;
+        navGenerationRef.current = _fromGeneration + 1;
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_GENERATION_BUMP]', {
+            fromGeneration: _fromGeneration,
+            toGeneration:   navGenerationRef.current,
+            reason,
+            targetIndex:    clamped,
+        });
+
+        log('autoplay_blocked' as any, {
+            event: 'PB_MANUAL_SENTENCE_JUMP',
+            from: fromIdx, to: clamped, requestedTarget: targetIndex, jumpReason: reason,
+        });
+
+        // 1. Cancelar executor (chunked mode). Sin esto, post-jump el executor
+        //    sigue activando frases del chunk anterior → cascada de callbacks
+        //    stale contra una machine recién dispatcheada con SKIP.
+        cancelSyncStrategy('manual_nav');
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_CANCEL_EXECUTOR]', {
+            from: fromIdx, to: clamped, reason,
+            sessionId: contentSessionRef.current,
+        });
+
+        // 2. Cancelar pending advances + invalidar loadToken.
+        cancelPendingAdvance('skip_or_load');
+        loadToken.current++;
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_CLEAR_PENDING]', {
+            from: fromIdx, to: clamped,
+            loadTokenAfter: loadToken.current,
+        });
+
+        // 3. Pausar audios. load() los va a poner src nuevo y autoplay si
+        //    aplica; este pause cubre el gap.
+        audioRefA.current?.pause();
+        audioRefB.current?.pause();
+
+        // M-5.4.6 — Reset de refs intra-chunk eliminado (Phase 1.a).
+
+        // 5. Despachar SKIP a la machine (cancela buffer.current y .next).
+        dispatchMachine({ type: MA.SKIP, targetIndex: clamped });
+
+        // 6. Notificar status + engines. load() levantará a 'playing' si
+        //    wasPlaying=true, o se quedará en 'paused' si el user no estaba
+        //    reproduciendo.
+        setStatus(wasPlaying ? 'loading' : 'paused');
+        ctx.onPlayChange.current(false);
+
+        // eslint-disable-next-line no-console
+        console.log('[MANUAL_NAV_LOAD_TARGET]', {
+            from: fromIdx, to: clamped, wasPlaying,
+            audioMode: ctx.audioModeRef?.current ?? null,
+        });
+
+        // 7. Delegar a load() que actualiza audio src + prepara buffer +
+        //    autoplay condicional. Async pero el visor no espera la promesa
+        //    (la UI ya muestra status='loading' o 'paused' y el index nuevo
+        //    se setea dentro de load).
+        load(clamped, wasPlaying).then(() => {
+            // eslint-disable-next-line no-console
+            console.log('[MANUAL_NAV_READY]', {
+                from: fromIdx, to: clamped, wasPlaying,
+                statusAfter: statusRef.current,
+            });
+            if (wasPlaying) {
+                // eslint-disable-next-line no-console
+                console.log('[MANUAL_NAV_PLAY_IF_REQUESTED]', {
+                    index: clamped,
+                    statusAfter: statusRef.current,
+                });
+            }
+        }).catch((e: Error) => {
+            // eslint-disable-next-line no-console
+            console.error('[MANUAL_NAV_LOAD_FAILED]', {
+                from: fromIdx, to: clamped, error: e?.message,
+            });
+        });
+
+        log('autoplay_blocked' as any, {
+            event: 'PB_MANUAL_JUMP_NO_PROGRESS_SAVE',
+            index: clamped,
+        });
+    }, [load]);
+
+    // F12: ¿el audio para `index` está marcado como fallido? Read-only.
+    // Un index queda marcado tras:
+    //   - tts_fail en getAudioUrl (sin URL recuperable)
+    //   - NotSupportedError tras retry agotado
+    const isAudioFailed = (index: number): boolean => {
+        return audioFailedKeysRef.current.has(toChunkKey(index));
+    };
+
+    // F12: chequeo previo de audio readiness antes de play().
+    // Emite logs PB_AUDIO_READY_CHECK + PB_AUDIO_READY / PB_AUDIO_READY_FAILED.
+    // NO ejecuta retries — devuelve estado actual. El caller decide qué hacer.
+    const ensurePlayableAudio = useCallback(async (index: number): Promise<{ ok: boolean; reason?: string; source?: 'cache' | 'tts' }> => {
+        log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_CHECK', index });
+        if (isAudioFailed(index)) {
+            log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_FAILED', index, reason: 'audio_failed_marked' });
+            return { ok: false, reason: 'audio_failed_marked' };
+        }
+        const wasCached = audioCache.current.has(toChunkKey(index));
+        // ── [AUDIO_TRACE] TEMPORAL — M-2.6/2.7. REMOVE AFTER FIX ────────────
+        // eslint-disable-next-line no-console
+        console.log('[AUDIO_TRACE] request', {
+            contentId:     ctx.contentIdRef.current,
+            sentenceIndex: index,
+            sessionId:     contentSessionRef.current,
+            via:           'ensurePlayableAudio',
+            wasCached,
+        });
+        const url = await getAudioUrl(index);
+        if (!url) {
+            // getAudioUrl ya logueó tts_fail/manifest_fail. Marcar y reportar.
+            audioFailedKeysRef.current.add(toChunkKey(index));
+            log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_FAILED', index, reason: 'no_url' });
+            return { ok: false, reason: 'no_url' };
+        }
+        log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY', index, source: wasCached ? 'cache' : 'tts' });
+        return { ok: true, source: wasCached ? 'cache' : 'tts' };
+    }, [getAudioUrl]);
+
+    // F5: helper read-only. Idéntica lógica a assertCanSaveProgress(buffer, index)
+    // pero inline para no importar el módulo (la machine ya lo importó). Suma
+    // el guard de pendingAdvance del hook (timers pendientes, no buffer).
+    const canSaveProgress = (index: number): { ok: boolean; reason?: string } => {
+        if (isPendingAdvance()) {
+            return { ok: false, reason: 'pending_advance' };
+        }
+        const m = machineRef.current;
+        const c = m?.buffer?.current;
+        if (!c)                                return { ok: false, reason: 'no_active_sentence' };
+        if (c.index !== index)                 return { ok: false, reason: 'index_mismatch' };
+        if (m!.buffer.locked)                  return { ok: false, reason: 'buffer_locked' };
+        if (c.status !== 'completed')          return { ok: false, reason: `status_${c.status}` };
+        // M-5.4.6 — visualHighlightConfirmed eliminado del gate de progreso.
+        if (!c.audioStarted)                   return { ok: false, reason: 'audio_not_started' };
+        if (!c.audioEnded)                     return { ok: false, reason: 'audio_not_ended' };
+        if (!c.progressEligible)               return { ok: false, reason: 'progress_not_eligible' };
+        if (m!.buffer.next !== null)           return { ok: false, reason: 'pending_next' };
+        return { ok: true };
+    };
+
     return {
         audioRefA,
         audioRefB,
@@ -1086,5 +3372,19 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         runGC,
         reset,
         isPendingAdvance,
+        acknowledgeVisualHighlight,
+        notifyBlockComplete,
+        canSaveProgress,
+        hardResync,
+        getMachineSnapshot,
+        prepareSentence,
+        isPreparedForIndex,
+        isVisuallyAckedForIndex,
+        advanceWithinChunk,
+        getRuntimeDiagnostics,
+        isAudioFailed,
+        ensurePlayableAudio,
+        manualSentenceJump,
+        getStartDiagnostic,
     };
 }

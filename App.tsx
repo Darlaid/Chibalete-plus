@@ -75,6 +75,9 @@ const SubirContenido = React.lazy(() => import('./pages/SubirContenido'));
 const AdminUsuarios = React.lazy(() => import('./pages/AdminUsuarios'));
 const AdminDashboard = React.lazy(() => import('./pages/AdminDashboard'));
 const AulaViva = React.lazy(() => import('./pages/AulaViva'));
+// PASO 5 — centro operativo pedagógico longitudinal (ruta paralela, no
+// reemplaza ./pages/AulaViva existente).
+const AulaVivaOperacional = React.lazy(() => import('./pages/AulaVivaOperacional'));
 const VisorPDF = React.lazy(() => import('./pages/VisorPDF'));
 const VisorTexto = React.lazy(() => import('./pages/VisorTexto'));
 const VisorInmersivo = React.lazy(() => import('./pages/VisorInmersivo'));
@@ -237,6 +240,72 @@ const ImmersiveWrapper = () => {
     return <VisorInmersivo content={content} />;
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DEV ONLY — NO PROD ROUTE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Sprint Inmersivo V2 / Fase M-4 — smoke local manual obligatorio.
+//
+// Este wrapper monta `VisorInmersivoV2` (runtime nuevo) en una ruta paralela
+// `/visor-v2-local/:id` que NO sustituye la ruta productiva
+// `/leer/inmersivo/:id` (esa sigue montando V1).
+//
+// Doble guard:
+//   1. localStorage.IMMERSIVE_RUNTIME === 'v2-local'
+//      Sin esto, muestra instrucciones; NO renderiza el viewer V2.
+//   2. La ruta misma vive bajo path local-only y no aparece en menús.
+//
+// REGLAS:
+//   - NO commitear este bloque a producción.
+//   - NO mergear a main mientras V1 sea la ruta canónica.
+//   - Diff localizado intencionalmente para revertir trivialmente
+//     (eliminar este bloque + la <Route> de abajo + el lazy import).
+//
+// Para activar smoke local:
+//   1. localStorage.setItem('IMMERSIVE_RUNTIME', 'v2-local')
+//   2. (opcional) window.__IMMERSIVE_V2_DEBUG__ = true
+//   3. Visitar http://localhost:5173/#/visor-v2-local/<contentId>
+//
+// Para desactivar:
+//   localStorage.removeItem('IMMERSIVE_RUNTIME')
+// ═══════════════════════════════════════════════════════════════════════════
+const VisorInmersivoV2 = React.lazy(() => import('./pages/VisorInmersivoV2'));
+
+const ImmersiveV2LocalWrapper = () => {
+    const { id } = useParams();
+    const flagOk = typeof window !== 'undefined'
+        && window.localStorage?.getItem('IMMERSIVE_RUNTIME') === 'v2-local';
+    if (!flagOk) {
+        return (
+            <div style={{ padding: 40, fontFamily: 'monospace', color: '#222', background: '#fff' }}>
+                <h1 style={{ fontSize: 24, marginBottom: 16 }}>Visor V2 — bloqueado (DEV ONLY)</h1>
+                <p style={{ marginBottom: 12 }}>Este viewer es smoke local. Activá con:</p>
+                <pre style={{ background: '#f4f4f4', padding: 12, borderRadius: 4 }}>
+{`localStorage.setItem('IMMERSIVE_RUNTIME', 'v2-local')
+location.reload()`}
+                </pre>
+                <p style={{ marginTop: 16 }}>Para diagnostics panel adicional:</p>
+                <pre style={{ background: '#f4f4f4', padding: 12, borderRadius: 4 }}>
+{`window.__IMMERSIVE_V2_DEBUG__ = true`}
+                </pre>
+                <p style={{ marginTop: 24, color: '#888' }}>
+                    V1 sigue siendo la ruta productiva: <code>/leer/inmersivo/:id</code>
+                </p>
+            </div>
+        );
+    }
+    const content = dataService.getContenidoById(id || '');
+    if (!content) return <Navigate to="/" replace />;
+    return (
+        <Suspense fallback={<LoadingSpinner />}>
+            <VisorInmersivoV2 content={content} />
+        </Suspense>
+    );
+};
+// ═══════════════════════════════════════════════════════════════════════════
+// END DEV ONLY block
+// ═══════════════════════════════════════════════════════════════════════════
+
 const AlbumWrapper = () => (
     <AccessWrapper>{(content) => <VisorAlbum content={content} />}</AccessWrapper>
 );
@@ -312,6 +381,10 @@ const AppContent: React.FC = () => {
                 <Route path="/aula-viva" element={
                     <ProtectedRoute access={getRouteAccess('/aula-viva')}><Layout><AulaViva /></Layout></ProtectedRoute>
                 } />
+                {/* PASO 5 — Centro operativo Aula Viva. Reusa el access check de /aula-viva. */}
+                <Route path="/aula-viva/operacional" element={
+                    <ProtectedRoute access={getRouteAccess('/aula-viva')}><Layout><AulaVivaOperacional /></Layout></ProtectedRoute>
+                } />
 
                 {/* Mediator Course Dashboard */}
                 <Route path="/dashboard/curso/:courseId" element={
@@ -350,6 +423,13 @@ const AppContent: React.FC = () => {
                 } />
                 <Route path="/leer/inmersivo/:id" element={
                     <ProtectedRoute access={getRouteAccess('/leer/inmersivo/:id')}><ImmersiveWrapper /></ProtectedRoute>
+                } />
+                {/* DEV ONLY — NO PROD ROUTE — Sprint Inmersivo V2 / Fase M-4 smoke local.
+                    El acceso requiere localStorage.IMMERSIVE_RUNTIME==='v2-local'.
+                    Sin guard, el wrapper muestra instrucciones y NO renderiza V2.
+                    Eliminar esta Route + el wrapper + el lazy import al cerrar M-4. */}
+                <Route path="/visor-v2-local/:id" element={
+                    <ProtectedRoute access={getRouteAccess('/leer/inmersivo/:id')}><ImmersiveV2LocalWrapper /></ProtectedRoute>
                 } />
                 <Route path="/leer/accesible/:id" element={
                     <ProtectedRoute access={getRouteAccess('/leer/accesible/:id')}><AccesibleWrapper /></ProtectedRoute>

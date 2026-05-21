@@ -1,0 +1,43 @@
+# P2 — overlay de observabilidad. REVERSIBLE: NO modifica docker-compose
+# (prod ni local). Se levanta con:
+#
+#   docker compose -f docker-compose.prod.yml \
+#                   -f observability/docker-compose.observability.yml up -d
+#
+# Rollback total = NO pasar este -f (los containers jaeger/prometheus ni
+# existen; el api con flags OFF se comporta idéntico).
+#
+# Licencias: Jaeger = Apache-2.0, Prometheus = Apache-2.0. SIN Grafana
+# (AGPL, excluido). UIs en localhost del VPS (no expuestas por nginx edge).
+services:
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0   # Apache-2.0
+    container_name: chibalete-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"   # UI — SOLO loopback del VPS (SSH tunnel)
+      # 4318 OTLP/HTTP NO se publica al host: el api lo alcanza por red interna.
+    expose:
+      - "4318"
+    mem_limit: 512m
+
+  prometheus:
+    image: prom/prometheus:v3.1.0              # Apache-2.0
+    container_name: chibalete-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d   # retención acotada (no enterprise)
+      - --storage.tsdb.retention.size=2GB
+    ports:
+      - "127.0.0.1:9090:9090"     # UI/API — SOLO loopback del VPS
+    mem_limit: 512m
+
+volumes:
+  prometheus-data:
