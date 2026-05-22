@@ -1,0 +1,45 @@
+# .dockerignore — mantiene los build contexts de Docker reproducibles, livianos
+# y sin secretos. Aplica a Dockerfile.api y Dockerfile.front.
+#
+# NO excluir: server/, scripts/, package.json, package-lock.json ni el código
+# fuente del front (pages/, components/, etc.) — los Dockerfiles los necesitan.
+
+# ── Control de versiones / metadatos ───────────────────────────────────────
+.git
+.gitignore
+.github
+.githooks
+
+# ── Dependencias y artefactos de build (se generan DENTRO de la imagen) ─────
+**/node_modules
+dist
+dist-ssr
+
+# ── Contenido de runtime servido por la API, NO por el front ────────────────
+# nginx.prod.conf proxea `location /uploads/` → http://api. Embeber public/uploads
+# en la imagen front es peso muerto: ~1 GB que nginx nunca sirve y que rompe la
+# reproducibilidad (el tamaño dependería del estado del filesystem local).
+public/uploads
+
+# ── Datos locales, snapshots y paquetes — nunca parte de una imagen ─────────
+data
+data-critical
+_prod_snapshot_
+_api_snapshot_
+chibaleteplus
+deployment_package
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.log
+
+# ── Secretos / entorno local ────────────────────────────────────────────────
+.env
+.env.*
+
+# ── Misc dev ────────────────────────────────────────────────────────────────
+.vscode
+.idea
+.claude
+npm-debug.log*
