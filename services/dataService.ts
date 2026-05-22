@@ -148,7 +148,10 @@ class DataService {
      */
     private get adminWriteHeaders(): Record<string, string> {
         const userId = this.getSessionUserId();
-        return { 'x-user-id': userId };
+        // Resiliencia: sin sesión activa, devolver objeto vacío en lugar de
+        // un header `x-user-id: ''` ruidoso. El backend rechaza ambos por
+        // igual (401) — esto evita logs falsos durante el bootstrap pre-login.
+        return userId ? { 'x-user-id': userId } : {};
     }
 
     constructor() {
@@ -420,7 +423,11 @@ class DataService {
     private async initializeUsersAndGroupsFromApi() {
         try {
             // USERS
-            const usersRes = await fetch(`${this.apiUrl}/users`);
+            // v4.0.4 hotfix: el GET-bypass del backend fue cerrado en v4.0.3 →
+            // este fetch sin headers devuelve 401 → this.users queda vacío.
+            // adminWriteHeaders provee x-user-id del usuario logueado (resiliente
+            // a no-sesión); el backend valida principal activo, no rol admin.
+            const usersRes = await fetch(`${this.apiUrl}/users`, { headers: this.adminWriteHeaders });
             if (usersRes.ok) {
                 const rawUsers: any[] = await usersRes.json();
                 if (Array.isArray(rawUsers)) {
@@ -435,7 +442,7 @@ class DataService {
             }
 
             // GROUPS
-            const groupsRes = await fetch(`${this.apiUrl}/groups`);
+            const groupsRes = await fetch(`${this.apiUrl}/groups`, { headers: this.adminWriteHeaders });
             if (groupsRes.ok) {
                 const apiGroups: Group[] = await groupsRes.json();
                 if (Array.isArray(apiGroups)) {
@@ -451,7 +458,7 @@ class DataService {
             }
 
             // SCHOOLS
-            const schoolsRes = await fetch(`${this.apiUrl}/schools`);
+            const schoolsRes = await fetch(`${this.apiUrl}/schools`, { headers: this.adminWriteHeaders });
             if (schoolsRes.ok) {
                 const apiSchools: School[] = await schoolsRes.json();
                 if (Array.isArray(apiSchools)) {
@@ -502,7 +509,9 @@ class DataService {
      */
     async reloadUsers(): Promise<User[]> {
         try {
-            const res = await fetch(`${this.apiUrl}/users`);
+            // v4.0.4 hotfix: mismo motivo que initializeUsersAndGroupsFromApi —
+            // sin headers, el GET-bypass cerrado en v4.0.3 retorna 401.
+            const res = await fetch(`${this.apiUrl}/users`, { headers: this.adminWriteHeaders });
             if (!res.ok) {
                 console.warn(`[USERS_CACHE_REFRESH] failed status=${res.status}`);
                 return this.users;
@@ -4798,7 +4807,11 @@ class DataService {
 
     async getSchoolConfig(schoolName: string): Promise<SchoolConfig> {
         try {
-            const res = await fetch(`${this.apiUrl}/schools/${encodeURIComponent(schoolName)}/config`);
+            // v4.0.4 hotfix (5º fix): mismo patrón que initializeUsersAndGroupsFromApi —
+            // este GET sin headers devuelve 401 post-v4.0.3 (GET-bypass cerrado),
+            // dejando schoolConfigsCache vacío y degradando el access engine por org
+            // (getOrganizationAccess cae al fallback 'all' cuando el cache está frío).
+            const res = await fetch(`${this.apiUrl}/schools/${encodeURIComponent(schoolName)}/config`, { headers: this.adminWriteHeaders });
             if (res.ok) {
                 const config = await res.json();
                 // Fase E4: guardar con timestamp de inserción para TTL
