@@ -10,7 +10,7 @@
  *   1. Hook expone getStartDiagnostic(index): Record<string, any>.
  *   2. Snapshot incluye contentId, sessionKey, userId, index, currentIndex.
  *   3. Snapshot incluye hasActiveSentence, activeSentenceStatus, visualConfirmed.
- *   4. Snapshot incluye audioFailed, hasAudioUrl, canStartAudio.
+ *   4. Snapshot incluye audioFailed, hasAudioUrl.
  *   5. Snapshot incluye machineStatus, pendingTransition.
  *   6. Snapshot incluye currentSrc, currentPlayerReadyState, currentPlayerPaused.
  *   7. Snapshot incluye contentSession (para detectar libro stale).
@@ -69,12 +69,14 @@ if (!diagBody) {
     const body = diagBody[0];
 
     // M-5.4.6 (Phase 1.b.5) — 'visualConfirmed' eliminado del diagnostic.
+    // v4.0.2 — 'canStartAudio' eliminado del diagnostic: la función fue
+    // removida en la DEMOLITION M-5.4.6 y el campo quedó como referencia rota.
     const requiredFields = [
         'contentId', 'sessionKey', 'userId', 'index', 'currentIndex',
         'sentencesLength',
         'hasActiveSentence', 'activeSentenceIndex', 'activeSentenceStatus',
         'audioStarted', 'audioEnded', 'progressEligible',
-        'audioFailed', 'audioRetried', 'hasAudioUrl', 'canStartAudio',
+        'audioFailed', 'audioRetried', 'hasAudioUrl',
         'isPreparedForIndex',
         'machineStatus', 'committedIndex', 'visualIndex', 'audioIndex',
         'progressIndex', 'pendingTransition',

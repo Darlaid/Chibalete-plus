@@ -1,38 +1,58 @@
 # ─────────────────────────────────────────────────────────────
 # Dockerfile.api — Chibalete+ Backend API
 #
-# Node 20 Alpine — production dependencies only
+# Multi-stage (H-2 hardening):
+#   Stage 1 (builder) — compila node_modules (better-sqlite3 nativo) con el
+#                       toolchain python3/make/g++.
+#   Stage 2 (runtime) — imagen final SIN toolchain de build. El toolchain
+#                       (~313 MB) vive SOLO en el builder y se descarta.
+#
 # Entry point: server/server.js  (ESM, "type":"module")
 # ─────────────────────────────────────────────────────────────
 
-FROM node:20-alpine
+# ── Stage 1: builder ─────────────────────────────────────────
+FROM node:20-alpine AS builder
 
-# System deps for native modules:
-#   dumb-init    → proper signal handling for PID 1
-#   python3 make g++ → node-gyp compilation of better-sqlite3
-RUN apk add --no-cache dumb-init python3 make g++
+# Toolchain para node-gyp / better-sqlite3 — solo en el builder.
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# Install production deps only (layer cache)
-# npm install instead of npm ci to avoid lockfile platform mismatch (better-sqlite3 native)
+# npm install (NO npm ci): el package-lock.json se genera en el workstation
+# Windows y pinnea binarios/opcionales win32 → npm ci rompe el build alpine.
+# Ver docs/V4-API-HARDENING.md §3 (reproducibilidad).
 COPY package.json ./
 RUN npm install --omit=dev --prefer-offline
 
-# Strip build tooling after install: build deps + el CLI de npm.
-# El contenedor corre `node server/server.js` y NUNCA invoca npm en runtime
-# (verificado: sin spawn de npm en server/). Eliminar el npm bundled saca sus
-# dependencias vulnerables (cross-spawn / glob / minimatch / tar) del
-# filesystem de la imagen y reduce la superficie de ataque.
-RUN apk del python3 make g++ && \
-    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+# ── Stage 2: runtime ─────────────────────────────────────────
+FROM node:20-alpine AS runtime
 
-# Copy backend source and migration scripts
-COPY server/ ./server/
+# dumb-init → manejo correcto de señales para PID 1.
+RUN apk add --no-cache dumb-init
+
+WORKDIR /app
+
+# package.json en /app — Node lo necesita para resolver "type":"module" del
+# server.js (bind-mounteado en prod) y healthHandler lo usa como fallback de
+# versión. Sin él, server.js (ESM) no arranca.
+COPY package.json ./
+
+# node_modules ya compilado, traído del builder. builder y runtime comparten
+# EXACTAMENTE node:20-alpine → ABI musl/alpine compatible: el binario nativo
+# de better-sqlite3 es válido sin recompilar.
+COPY --from=builder /app/node_modules ./node_modules
+
+# Código backend + scripts de migración.
+COPY server/  ./server/
 COPY scripts/ ./scripts/
 
-# Bootstrap empty DB files — production data comes from Docker volumes.
-# In docker-compose.prod.yml, data-volume:/app/data overrides these on first run.
+# Quitar el CLI de npm: el container corre `node server/server.js` y NUNCA
+# invoca npm en runtime. Saca sus deps vulnerables del filesystem (superficie
+# de ataque). El toolchain de build ya quedó fuera (vive solo en el builder).
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
+# Bootstrap de DB vacías — en producción los bind mounts de /app/data las
+# sombrean. Presentes para que la imagen arranque también sin mounts.
 RUN mkdir -p /app/data && \
     echo '[]'                       > /app/data/users_db.json           && \
     echo '[]'                       > /app/data/content.json            && \
@@ -55,8 +75,17 @@ RUN mkdir -p /app/data && \
     echo '{"version":"0.1.0","apkUrl":"","forceUpdate":false,"minSupportedVersion":"0.1.0"}' \
                                     > /app/data/lu_config.json
 
-# Expose API port
+# Metadata de trazabilidad (la imagen viva actual no tiene labels).
+LABEL org.opencontainers.image.title="chibalete-api" \
+      org.opencontainers.image.version="v4.0.2-hardened"
+
 EXPOSE 3000
+
+# Healthcheck real — usa /api/health/ready (readiness multi-capa, NO liveness).
+# node -e + fetch nativo (node 20): sin curl, sin bash, sin scripts.
+# start-period cubre el boot (~10-15s); 3 fallos consecutivos → unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
 
 # Use dumb-init so Node receives SIGTERM correctly
 ENTRYPOINT ["dumb-init", "--"]

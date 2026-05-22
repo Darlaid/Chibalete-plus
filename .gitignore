@@ -52,10 +52,12 @@ dist-ssr/
 chibaleteplus/
 studio-editor-bi/
 
-# Deployment bundles
+# Deployment bundles / release artifacts (imágenes Docker exportadas)
 deployment_package/
 *.zip
 *.tar.gz
+*.tar
+*.tar.sha256
 
 # Runtime uploads
 public/uploads/

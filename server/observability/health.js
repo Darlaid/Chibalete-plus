@@ -48,6 +48,21 @@ export async function buildReadiness() {
         const freeMb = (s.bavail * s.bsize) / 1048576;
         return { ok: freeMb > 200, free_mb: Math.floor(freeMb), threshold_mb: 200 };
     });
+    // H-1 — mounts críticos accesibles. Chequeo BARATO: fs.accessSync, sin
+    // abrir DBs ni queries. Un bind mount inaccesible = backend NO listo.
+    // La presencia de los .db es informativa (la app los crea si faltan).
+    checks.mounts = await safe(async () => {
+        const dirs = { data: './data', data_critical: './data-critical', uploads: './public/uploads' };
+        const out = {};
+        let ok = true;
+        for (const [name, p] of Object.entries(dirs)) {
+            try { fs.accessSync(p, fs.constants.R_OK); out[name] = 'ok'; }
+            catch { out[name] = 'inaccessible'; ok = false; }
+        }
+        out.events_db   = fs.existsSync('./data-critical/events.db') ? 'present' : 'absent';
+        out.progress_db = fs.existsSync('./data/progress.db')        ? 'present' : 'absent';
+        return { ok, ...out };
+    });
     checks.identity_sqlite = await safe(checkIdentitySqlite);
     checks.flags = await safe(async () => ({
         ok: true,

@@ -7,16 +7,16 @@ import { useOffline } from '../context/OfflineContext';
 import { EditorialCover } from './editorial/EditorialCover';
 
 /**
- * Fase 4 — Editorial Cover System opt-in via localStorage flag.
- * Default OFF: ContentCard se renderiza exactamente igual que antes.
- * Cuando localStorage['EDITORIAL_COVER_SYSTEM']==='1', las portadas se
- * muestran respetando su aspect-ratio intrínseco (no más crop destructivo).
+ * Editorial Cover System — ON por defecto (v4.0.2).
+ * Las portadas se muestran respetando su aspect-ratio intrínseco, sin crop
+ * destructivo. Kill switch explícito: localStorage['EDITORIAL_COVER_SYSTEM']==='0'
+ * fuerza el render legacy (<img object-cover>).
  */
 function _editorialCoverEnabled(): boolean {
     try {
-        if (typeof window === 'undefined' || !window.localStorage) return false;
-        return window.localStorage.getItem('EDITORIAL_COVER_SYSTEM') === '1';
-    } catch { return false; }
+        if (typeof window === 'undefined' || !window.localStorage) return true;
+        return window.localStorage.getItem('EDITORIAL_COVER_SYSTEM') !== '0';
+    } catch { return true; }
 }
 
 interface ContentCardProps {
@@ -41,7 +41,7 @@ const ContentCard: React.FC<ContentCardProps> = ({ content, progress, onUpdatePr
   // If 100%, consider IT DONE (even if backend status lags) to hide overlay
   const isProcessing = content.status === 'procesando' && processingPercent < 100;
   const isFailed = content.status === 'error' || content.processingStatus?.status === 'failed';
-  // Fase 4 — opt-in al EditorialCover system. Default OFF (cero cambio prod).
+  // Editorial Cover System — ON por defecto. Kill switch: EDITORIAL_COVER_SYSTEM='0'.
   const useEditorial = _editorialCoverEnabled();
 
   return (

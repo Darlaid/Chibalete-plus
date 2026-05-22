@@ -3037,7 +3037,6 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             audioFailed:             isAudioFailed(index),
             audioRetried:            audioRetriedKeysRef.current.has(toChunkKey(index)),
             hasAudioUrl:             audioCache.current.has(toChunkKey(index)),
-            canStartAudio:           canStartAudio(index),
             isPreparedForIndex:      isPreparedForIndex(index),
             machineStatus:           m?.status ?? null,
             committedIndex:          m?.committedIndex ?? null,

@@ -117,13 +117,13 @@ ok('shapes map portrait 2/3',                     /portrait:[^;]*['"]\s*2\s*\/\s
 ok('shapes map landscape 3/2',                    /landscape:[^;]*['"]\s*3\s*\/\s*2/.test(src));
 ok('shapes map square 1/1',                       /square:[^;]*['"]\s*1\s*\/\s*1/.test(src));
 
-// ── §10: ContentCard opt-in flag ──────────────────────────────────────────
-section('[10] ContentCard opt-in via localStorage flag');
+// ── §10: ContentCard editorial flag ───────────────────────────────────────
+section('[10] ContentCard editorial cover flag (ON por defecto)');
 const cardSrc = fs.readFileSync(cardPath, 'utf8');
 ok('ContentCard importa EditorialCover',          /from\s+['"]\.\/editorial\/EditorialCover['"]/.test(cardSrc));
 ok('ContentCard tiene helper _editorialCoverEnabled', /_editorialCoverEnabled/.test(cardSrc));
 ok('flag key === EDITORIAL_COVER_SYSTEM',         /['"]EDITORIAL_COVER_SYSTEM['"]/.test(cardSrc));
-ok('flag default OFF — lee localStorage === "1"', /localStorage\.getItem\(['"]EDITORIAL_COVER_SYSTEM['"]\)\s*===\s*['"]1['"]/.test(cardSrc));
+ok('flag default ON — opt-out solo con localStorage === "0"', /localStorage\.getItem\(['"]EDITORIAL_COVER_SYSTEM['"]\)\s*!==\s*['"]0['"]/.test(cardSrc));
 
 // ── §11: ContentCard preserva path legacy cuando flag OFF ─────────────────
 section('[11] ContentCard preserva path legacy (no breaking change)');
