@@ -219,6 +219,36 @@ class DataService {
         return this.initializationPromise;
     }
 
+    /**
+     * v4.0.6 hotfix — race de inicialización auth → dataService.
+     *
+     * El singleton dataService construye en module-load (export const dataService = new DataService()),
+     * antes de que AuthProvider monte. Si en ese momento no hay sesión en localStorage
+     * (login fresh, post-logout, incógnito), initializeFromApi() + initializeUsersAndGroupsFromApi()
+     * corren con adminWriteHeaders={} → backend v4.0.3+ responde 401 → caches quedan vacíos
+     * (content, users, groups, schools). Sin manifest, VisorAlbum no encuentra el contenido
+     * y el audio nunca se solicita.
+     *
+     * AuthContext debe llamar a este método después de setUser():
+     *   - login() fresh
+     *   - initAuth() restore path (defensive — si el constructor init falló por cualquier razón)
+     *
+     * No-op si no hay sesión activa (defensive: no spamea fetches sin headers).
+     * Best-effort: errores se loggean pero no lanzan — los callers son flujos UI que no deben romperse.
+     */
+    public async refreshAuthenticatedState(): Promise<void> {
+        if (!this.getSessionUserId()) return;
+        try {
+            await Promise.all([
+                this.initializeFromApi(),
+                this.initializeUsersAndGroupsFromApi(),
+            ]);
+            console.log('[refreshAuthenticatedState] post-auth rehidratation complete');
+        } catch (e) {
+            console.warn('[refreshAuthenticatedState] failed', (e as Error)?.message);
+        }
+    }
+
 
     // Default admin creation removed for production cleanup
 

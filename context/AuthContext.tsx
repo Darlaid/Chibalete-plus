@@ -34,6 +34,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           if (userFromDb && userFromDb.roles && Array.isArray(userFromDb.roles)) {
              // Desbloquear UI inmediatamente con el usuario
              setUser(userFromDb);
+             // v4.0.6 hotfix — defensive: si el init constructor corrió SIN sesión válida
+             // (intermitencia red, race con localStorage, etc.) re-hidrata con headers ahora
+             // que sí hay session userId. No-op si caches ya están poblados de manera consistente.
+             dataService.refreshAuthenticatedState().catch(() => {});
              // Trigger background sync
              dataService.syncUserProgress(storedUserId);
              // Cargar acceso en background — no bloquea el render
@@ -93,6 +97,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     } else {
       sessionStorage.setItem('chibalete_user_id', userToLogin.id);
     }
+    // v4.0.6 hotfix — race auth → dataService:
+    // El singleton se construyó en module-load posiblemente SIN sesión activa
+    // (login fresh, post-logout, incógnito), por lo que content/users/groups/schools
+    // quedaron vacíos por 401. Ahora que setSesion ya escribió el x-user-id en storage,
+    // re-hidratamos con headers válidos — fire-and-forget, no bloquea la nav.
+    dataService.refreshAuthenticatedState().catch(() => {});
     // Cargar acceso en background — no bloquea la navegación
     dataService.preloadUserAccess(userToLogin.id)
       .catch(() => {})
