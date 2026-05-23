@@ -368,7 +368,11 @@ class DataService {
 
     private async initializeFromApi() {
         try {
-            const response = await fetch(`${this.apiUrl}/content`);
+            // v4.0.5 hotfix: mismo motivo que initializeUsersAndGroupsFromApi —
+            // sin headers, el GET-bypass cerrado en v4.0.3 retorna 401 y
+            // this.content queda vacío → VisorAlbum no encuentra el manifest
+            // del libro álbum → audio nunca se solicita.
+            const response = await fetch(`${this.apiUrl}/content`, { headers: this.adminWriteHeaders });
             if (response.ok) {
                 const apiContent = await response.json();
                 if (Array.isArray(apiContent) && apiContent.length > 0) {
@@ -385,7 +389,8 @@ class DataService {
 
         // Fase 7: Cargar bundles comerciales
         try {
-            const res = await fetch(`${this.apiUrl}/bundles`);
+            // v4.0.5 hotfix: defensivo — mismo patrón que /content.
+            const res = await fetch(`${this.apiUrl}/bundles`, { headers: this.adminWriteHeaders });
             if (res.ok) {
                 const data = await res.json();
                 if (Array.isArray(data)) this.bundles = data;
@@ -1986,7 +1991,9 @@ class DataService {
 
     async fetchUserContentAccess(userId: string): Promise<ResolvedAccessState | null> {
         try {
-            const res = await fetch(`${this.apiUrl}/access/by-user/${userId}`);
+            // v4.0.5 hotfix: sin headers, el GET-bypass cerrado retorna 401
+            // y la evaluación de acceso del usuario degrada al fallback.
+            const res = await fetch(`${this.apiUrl}/access/by-user/${userId}`, { headers: this.adminWriteHeaders });
             if (res.ok) {
                 return await res.json();
             }
@@ -4775,7 +4782,8 @@ class DataService {
     // --- SECTIONS & FILTERING ---
     async getSections(): Promise<Section[]> {
         try {
-            const res = await fetch(`${this.apiUrl}/sections`);
+            // v4.0.5 hotfix: defensivo — mismo patrón.
+            const res = await fetch(`${this.apiUrl}/sections`, { headers: this.adminWriteHeaders });
             return res.ok ? res.json() : [];
         } catch (e) {
             console.error('Error fetching sections:', e);
