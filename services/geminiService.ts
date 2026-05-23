@@ -298,9 +298,35 @@ export const generarAudioTTS = async (texto: string): Promise<string | undefined
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  try {
-    if (!ai) return undefined;
+  // v4.0.7 hotfix — backend-mediated fallback cuando VITE_GEMINI_API_KEY no está
+  // en el bundle (caso producción). El backend tiene /api/album/tts con cache
+  // persistente; devuelve { url, provider }. La URL se asigna directamente a
+  // audio.src — NarrativeAudioEngine detecta URL vs PCM por prefijo.
+  // Reutiliza dataService.apiUrl y dataService.getSessionUserId() para no
+  // hardcodear paths ni leer localStorage directamente.
+  if (!ai) {
+    try {
+      const userId = dataService.getSessionUserId();
+      if (!userId) return undefined;
+      const res = await fetch(`${dataService.apiUrl}/album/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+        body: JSON.stringify({ text: texto }),
+      });
+      if (!res.ok) return undefined;
+      const data = await res.json().catch(() => null);
+      if (data && typeof data.url === 'string' && data.url) {
+        setCached(cacheKey, data.url);
+        return data.url;
+      }
+      return undefined;
+    } catch (error) {
+      logAiError('generarAudioTTS:backend', error);
+      return undefined;
+    }
+  }
 
+  try {
     const response = await ai.models.generateContent({
       model: GEMINI_TTS,
       contents: [{ parts: [{ text: texto }] }],

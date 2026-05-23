@@ -497,18 +497,27 @@ export class NarrativeAudioEngine {
 
         this.onLoadingChange?.(true);
         try {
-            const pcm = await this._tts(region.text);
+            const ttsResult = await this._tts(region.text);
 
             // Guard: region changed while TTS was generating.
             // Store in cache regardless (avoids re-fetching if user returns),
             // but do not play it — the current region is already different.
-            if (!pcm) return;
+            if (!ttsResult) return;
 
-            const blobUrl = pcmToWavUrl(pcm);
-            this._blobUrls.add(blobUrl);
-            this._ttsCache.set(key, blobUrl);
+            // v4.0.7: el provider puede devolver URL del backend (cuando VITE_GEMINI_API_KEY
+            // no está en el bundle — caso producción) o PCM base64 (legacy Gemini local).
+            // Detectamos por prefijo. URLs van directo a audio.src sin pcmToWavUrl;
+            // solo blobs locales se trackean en _blobUrls para revoke en destroy().
+            let src: string;
+            if (ttsResult.startsWith('/') || ttsResult.startsWith('http://') || ttsResult.startsWith('https://')) {
+                src = ttsResult;
+            } else {
+                src = pcmToWavUrl(ttsResult);
+                this._blobUrls.add(src);
+            }
+            this._ttsCache.set(key, src);
 
-            if (gen === this._regionGen && !this._muted) await this._doPlay(blobUrl, gen);
+            if (gen === this._regionGen && !this._muted) await this._doPlay(src, gen);
         } catch {
             // TTS failure is non-fatal — viewer continues silently.
         } finally {

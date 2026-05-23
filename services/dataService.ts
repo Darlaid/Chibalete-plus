@@ -117,7 +117,9 @@ class DataService {
     private serverTimeOffset: number = 0;
     private serverTimeSynced: boolean = false;
 
-    private apiUrl = '/api';
+    // v4.0.7: promovido a public para que módulos hermanos (geminiService)
+    // reutilicen el mismo base path en lugar de hardcodear '/api/...'.
+    public apiUrl = '/api';
 
     private initializationPromise: Promise<void>;
 
@@ -126,7 +128,9 @@ class DataService {
      * AuthContext guarda en localStorage (remember=true) o sessionStorage (remember=false).
      * Devuelve string vacio si no hay sesion activa.
      */
-    private getSessionUserId(): string {
+    // v4.0.7: promovido a public para que módulos hermanos (geminiService)
+    // resuelvan el x-user-id sin leer localStorage directamente.
+    public getSessionUserId(): string {
         return localStorage.getItem('chibalete_user_id')
             ?? sessionStorage.getItem('chibalete_user_id')
             ?? '';
