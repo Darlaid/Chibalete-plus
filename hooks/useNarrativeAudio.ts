@@ -43,6 +43,16 @@ export interface NarrativeAudioControls {
      * Fire-and-forget; no-op if url is empty.
      */
     preloadAudio:   (url: string) => void;
+    /**
+     * M4 — Prefetch del audio TTS de una región sin reproducir.
+     *
+     * Llamar cuando una región entra en focus para calentar _ttsCache. Si
+     * playRegion ocurre en el mismo tick, comparte el promise via dedup
+     * interno (_ttsInFlight) → un solo POST /api/album/tts por (page, region).
+     *
+     * Fire-and-forget: errores se loguean, nunca se propagan a UI.
+     */
+    prefetchTTS:    (text: string | undefined, pageIdx: number, regionIdx: number) => void;
     /** True while region audio or TTS is playing. */
     isPlaying:      boolean;
     /** True while TTS is being generated for the current region. */
@@ -94,6 +104,13 @@ export function useNarrativeAudio(): NarrativeAudioControls {
     const replay          = useCallback(() => engineRef.current?.replay(), []);
     const setMuted        = useCallback((muted: boolean) => engineRef.current?.setMuted(muted), []);
     const preloadAudio    = useCallback((url: string) => engineRef.current?.preloadAudio(url), []);
+    const prefetchTTS     = useCallback(
+        (text: string | undefined, pageIdx: number, regionIdx: number) => {
+            // Fire-and-forget — el engine resuelve siempre (loguea errores en su catch).
+            engineRef.current?.prefetchTTS(text, pageIdx, regionIdx);
+        },
+        [],
+    );
     const clearAudioFailed = useCallback(() => setAudioFailed(false), []);
 
     return {
@@ -104,6 +121,7 @@ export function useNarrativeAudio(): NarrativeAudioControls {
         replay,
         setMuted,
         preloadAudio,
+        prefetchTTS,
         isPlaying,
         isLoadingAudio,
         audioFailed,

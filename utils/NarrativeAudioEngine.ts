@@ -176,6 +176,10 @@ export class NarrativeAudioEngine {
     private _tts:     TTSProvider;
     private _ttsCache = new Map<string, string>(); // `${pageIdx}-${regionIdx}` → blob URL
     private _blobUrls = new Set<string>();          // for cleanup
+    // M4: dedup de TTS in-flight por región. Tanto playRegion como prefetchTTS
+    // consultan/escriben este mapa antes de disparar el fetch — evita doble
+    // POST /api/album/tts cuando prefetch y play ocurren en el mismo tick.
+    private _ttsInFlight = new Map<string, Promise<string | undefined>>();
 
     // ── Web Audio (effects only) ──────────────────────────────────────
     private _ctx: AudioContext | null = null;
@@ -437,11 +441,38 @@ export class NarrativeAudioEngine {
             await this._region.play();
             // Success — drop any prior pending retry from a blocked attempt.
             this._regionPending = null;
-        } catch {
+        } catch (err) {
             // Autoplay blocked — unduck since nothing is playing.
             // Queue retry for next post-gesture call. The gen guard ensures
             // a stale pending is silently skipped if a newer playRegion runs.
             if (gen === this._regionGen) {
+                // M4: surface el bloqueo. Hasta ahora este catch era silencioso
+                // — el síntoma "voz no inicia en prod tras TTS cold" no dejaba
+                // huella en consola. La razón inferida cuando coincide con la
+                // política de autoplay es 'autoplay_blocked_after_tts'.
+                const e        = err as { name?: string; message?: string } | null;
+                const errName  = e?.name ?? null;
+                const errMsg   = e?.message ?? null;
+                const msgLower = (errMsg ?? '').toLowerCase();
+                const isAutoplay = errName === 'NotAllowedError'
+                    || msgLower.includes('autoplay')
+                    || msgLower.includes('user activation')
+                    || msgLower.includes('user didn');
+                // eslint-disable-next-line no-console
+                console.warn('[NarrativeAudio] _doPlay rejected', {
+                    reason:       isAutoplay ? 'autoplay_blocked_after_tts' : 'play_rejected',
+                    errName,
+                    errMessage:   errMsg,
+                    gen,
+                    srcTail:      typeof src === 'string' ? src.slice(-60) : null,
+                    readyState:   this._region.readyState,
+                    networkState: this._region.networkState,
+                    hasFocus:     (typeof document !== 'undefined'
+                                   && typeof document.hasFocus === 'function')
+                                   ? document.hasFocus()
+                                   : null,
+                    ts:           Date.now(),
+                });
                 this._unduck();
                 this._regionPending = { src, gen };
             }
@@ -497,32 +528,89 @@ export class NarrativeAudioEngine {
 
         this.onLoadingChange?.(true);
         try {
-            const ttsResult = await this._tts(region.text);
-
-            // Guard: region changed while TTS was generating.
-            // Store in cache regardless (avoids re-fetching if user returns),
-            // but do not play it — the current region is already different.
-            if (!ttsResult) return;
-
-            // v4.0.7: el provider puede devolver URL del backend (cuando VITE_GEMINI_API_KEY
-            // no está en el bundle — caso producción) o PCM base64 (legacy Gemini local).
-            // Detectamos por prefijo. URLs van directo a audio.src sin pcmToWavUrl;
-            // solo blobs locales se trackean en _blobUrls para revoke en destroy().
-            let src: string;
-            if (ttsResult.startsWith('/') || ttsResult.startsWith('http://') || ttsResult.startsWith('https://')) {
-                src = ttsResult;
-            } else {
-                src = pcmToWavUrl(ttsResult);
-                this._blobUrls.add(src);
-            }
-            this._ttsCache.set(key, src);
-
-            if (gen === this._regionGen && !this._muted) await this._doPlay(src, gen);
+            // M4: si un prefetch ya está en vuelo para esta región, esperamos
+            // ese mismo promise en lugar de disparar un POST duplicado a
+            // /api/album/tts. _runTTS popula _ttsCache al resolver.
+            const src = this._ttsInFlight.has(key)
+                ? await this._ttsInFlight.get(key)
+                : await this._beginTTS(region.text, key);
+            if (!src || gen !== this._regionGen) return;
+            if (!this._muted) await this._doPlay(src, gen);
         } catch {
             // TTS failure is non-fatal — viewer continues silently.
         } finally {
             if (gen === this._regionGen) this.onLoadingChange?.(false);
         }
+    }
+
+    /**
+     * M4 — prefetchTTS: calienta el cache TTS de una región sin reproducir.
+     *
+     * Diseño:
+     *   - Idempotente: si _ttsCache ya tiene la entrada o hay un fetch en vuelo,
+     *     no dispara nada nuevo.
+     *   - Fire-and-forget desde el caller (devuelve Promise<void> que resuelve
+     *     siempre, nunca rechaza — los errores se loguean controlados).
+     *   - Comparte _ttsInFlight con playRegion: ambos colaboran via el mismo
+     *     mapa de dedup. Si prefetchTTS lanza primero y playRegion entra después
+     *     con el mismo key, playRegion espera el mismo promise.
+     *   - NO toca _region, NO inicia audio.play(), NO afecta _regionPending
+     *     ni la generación _regionGen.
+     *
+     * Caller esperado: VisorAlbum dispara esto cuando una región entra a focus
+     * (en el mismo useEffect que ya hace playEffect + playRegion). El beneficio
+     * estructural es (a) dedup garantizado y (b) cache warming para visitas
+     * subsecuentes a la misma región dentro de la sesión.
+     */
+    async prefetchTTS(text: string | undefined, pageIdx: number, regionIdx: number): Promise<void> {
+        if (typeof text !== 'string' || text.trim().length === 0) return;
+        if (this._muted) return;
+        if (!Number.isInteger(pageIdx) || pageIdx < 0) return;
+        if (!Number.isInteger(regionIdx) || regionIdx < 0) return;
+        const key = `${pageIdx}-${regionIdx}`;
+        if (this._ttsCache.has(key)) return;
+        if (this._ttsInFlight.has(key)) return;
+        try {
+            await this._beginTTS(text, key);
+        } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn('[NarrativeAudio] prefetchTTS failed', {
+                pageIdx,
+                regionIdx,
+                error: (err as Error)?.message ?? String(err),
+            });
+        }
+    }
+
+    /**
+     * _beginTTS — helper privado: dispara _tts(text), convierte resultado
+     * (URL backend vs PCM base64) y popula _ttsCache. Registra el promise en
+     * _ttsInFlight durante su vida y lo limpia en finally.
+     *
+     * Compartido por playRegion y prefetchTTS para garantizar la propiedad de
+     * dedup: solo un POST /api/album/tts por (pageIdx, regionIdx) en vuelo.
+     */
+    private _beginTTS(text: string, key: string): Promise<string | undefined> {
+        const promise = (async (): Promise<string | undefined> => {
+            try {
+                const ttsResult = await this._tts(text);
+                if (!ttsResult) return undefined;
+                // v4.0.7: provider puede devolver URL backend o PCM base64 — detectar por prefijo.
+                let src: string;
+                if (ttsResult.startsWith('/') || ttsResult.startsWith('http://') || ttsResult.startsWith('https://')) {
+                    src = ttsResult;
+                } else {
+                    src = pcmToWavUrl(ttsResult);
+                    this._blobUrls.add(src);
+                }
+                this._ttsCache.set(key, src);
+                return src;
+            } finally {
+                this._ttsInFlight.delete(key);
+            }
+        })();
+        this._ttsInFlight.set(key, promise);
+        return promise;
     }
 
     stopRegion(): void { this._stopRegion(); }
@@ -961,6 +1049,10 @@ export class NarrativeAudioEngine {
         this._blobUrls.forEach(url => URL.revokeObjectURL(url));
         this._blobUrls.clear();
         this._ttsCache.clear();
+        // M4: limpiar dedup map — los promises pending caen al GC sin observers
+        // (sus resolves van a no-ops por gen mismatch, ya que _regionGen no se
+        // incrementa en destroy pero el engine entero se descarta).
+        this._ttsInFlight.clear();
         this._ctx?.close();
     }
 }

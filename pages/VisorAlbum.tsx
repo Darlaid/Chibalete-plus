@@ -765,16 +765,40 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
         audio.playAmbient(currentPage?.ambientAudioUrl, currentPage?.ambientAudioLoop !== false);
     }, [pageIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // ── M4.2: Album voice fast path ─────────────────────────────────────────
+    // Anticipa el TTS de la ventana actual (current + next) ante cambios de
+    // página, región, estado o ruta activa. _ttsInFlight + _ttsCache aseguran
+    // un solo POST /api/album/tts por (page, region) — los otros prefetch
+    // (focus useEffect y onClick early prefetch) hacen dedup transparente.
+    // El helper internamente filtra: no audioUrl explícito + texto válido + no
+    // muted. No-op fuera de overview/focus.
+    useEffect(() => {
+        prefetchAlbumVoiceWindow();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pageIndex, regionIndex, viewerState, activeRouteId]);
+
     // Region / state change → play narration (pre-recorded or TTS) + entry chime
     useEffect(() => {
         if (viewerState === 'focus' && currentRegion) {
+            // M4: prefetch TTS antes del playEffect — calienta _ttsCache para
+            // regiones cuya voz se resuelve vía /api/album/tts (sin audioUrl
+            // pre-grabado). En cold cache el TTS toma 3–8s en prod; si playRegion
+            // hace `await _tts(text)` después de ese tiempo, audio.play() cae
+            // fuera de la ventana de user-activation y el browser lo bloquea con
+            // NotAllowedError. El prefetch + dedup interno garantiza un solo POST
+            // a /api/album/tts y deja la entrada en _ttsCache para visitas
+            // subsecuentes a la misma región. No-op si la región tiene audioUrl
+            // explícito o si está muteada.
+            const effectiveAudioUrl = currentRegion.action?.audioUrl ?? currentRegion.audioUrl;
+            if (!effectiveAudioUrl && currentRegion.text) {
+                audio.prefetchTTS(currentRegion.text, pageIndex, regionIndex);
+            }
             audio.playEffect('region_enter');
             audio.playRegion(currentRegion, pageIndex, regionIndex);
 
             // @analytics: emit 'album_media_played' when region has pre-recorded audio.
             // Only fires for explicit audio sources (action.audioUrl or legacy audioUrl);
             // NOT fired for TTS (TTS playback is implicit from focus navigation events).
-            const effectiveAudioUrl = currentRegion.action?.audioUrl ?? currentRegion.audioUrl;
             if (effectiveAudioUrl) {
                 emit({
                     name:          'album_media_played',
@@ -1086,6 +1110,126 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
         }
     };
 
+    // ── M4.1: Early prefetch TTS desde input handlers ─────────────────────────
+    // Llamados ANTES de interaction.trigger en onClick/onKeyDown. Ganan hasta
+    // NARRATIVE_ADVANCE_DELAY_MS (270 ms) de head start sobre la ventana de
+    // user-activation del browser, reduciendo el riesgo de que audio.play()
+    // sea bloqueado tras un cold TTS. El prefetch en el useEffect de focus
+    // (Fase 4) se mantiene como red de seguridad para activaciones
+    // programáticas (challenge auto-advance, restauración de progreso). El
+    // engine deduplica vía _ttsInFlight, así que el segundo trigger es no-op.
+    const prefetchRegionAudio = (regionIdx: number) => {
+        if (regionIdx < 0) return;
+        const target = currentPage?.regions?.[regionIdx];
+        if (!target) return;
+        const effectiveAudioUrl = target.action?.audioUrl ?? target.audioUrl;
+        if (effectiveAudioUrl) return;                       // pre-recorded → no TTS path
+        if (!target.text || !target.text.trim()) return;     // sin texto → no TTS
+        audio.prefetchTTS(target.text, pageIndex, regionIdx);
+    };
+
+    // ── M4.2: Album voice fast path ────────────────────────────────────────────
+    // Warm a tiny TTS window so playRegion behaves closer to immersive mode.
+    // This avoids waiting for cold TTS during user playback.
+    //
+    // Window por estado (max 2 entradas):
+    //   overview → entry target (ruta-first si hay ruta, sino region[0]) + segunda
+    //              región del orden lógico (anticipa el segundo tap).
+    //   focus    → región actual (ya suele estar en _ttsCache) + próxima región
+    //              en orden lógico (ruta-aware).
+    //
+    // El engine deduplica vía _ttsInFlight; los disparos desde el useEffect de
+    // focus (Fase 4) y el early-prefetch onClick (Fase 4.1) NO generan POST
+    // duplicado. No-op silencioso en regiones con audioUrl explícito, sin texto,
+    // o si _muted está activo.
+    const prefetchAlbumVoiceWindow = () => {
+        if (!currentPage) return;
+        const regions = currentPage.regions ?? [];
+        if (regions.length === 0) return;
+
+        const indices: number[] = [];
+
+        if (viewerState === 'overview') {
+            // Entry target: ruta-first si la ruta está activa, sino region 0.
+            if (activeRoute) {
+                const firstId = activeRoute.regionIds[0];
+                const idx = regions.findIndex(r => r.id === firstId);
+                indices.push(idx >= 0 ? idx : 0);
+                if (activeRoute.regionIds.length > 1) {
+                    const secondId = activeRoute.regionIds[1];
+                    const sIdx = regions.findIndex(r => r.id === secondId);
+                    if (sIdx >= 0) indices.push(sIdx);
+                }
+            } else {
+                indices.push(0);
+                if (regions.length > 1) indices.push(1);
+            }
+        } else if (viewerState === 'focus') {
+            // Región actual (re-confirma cache; el useEffect de focus ya la
+            // dispara pero el dedup lo hace barato).
+            if (regionIndex >= 0 && regionIndex < regions.length) {
+                indices.push(regionIndex);
+            }
+            // Próxima región: orden de ruta si hay ruta, sino +1.
+            if (activeRoute) {
+                const currentId = currentRegion?.id ?? '';
+                const pos = activeRoute.regionIds.indexOf(currentId);
+                if (pos >= 0 && pos + 1 < activeRoute.regionIds.length) {
+                    const nextId = activeRoute.regionIds[pos + 1];
+                    const nIdx = regions.findIndex(r => r.id === nextId);
+                    if (nIdx >= 0) indices.push(nIdx);
+                }
+            } else if (regionIndex < regions.length - 1) {
+                indices.push(regionIndex + 1);
+            }
+        }
+        // challenge / complete: no prefetch — el flujo no requiere TTS inmediato.
+
+        // Dedup local por si hubo coincidencia (p.ej. región actual == próxima en bordes).
+        const unique = Array.from(new Set(indices));
+        for (const idx of unique) {
+            prefetchRegionAudio(idx);
+        }
+    };
+
+    // Refleja la decisión de handleAdvance: ¿cuál sería la próxima región en
+    // focus si el usuario avanza ahora? Devuelve -1 cuando el advance no
+    // resulta en una región nueva (challenge lock, fin de página, etc.).
+    // Conservador: si el state no encaja con un advance-to-region, no prefetch.
+    const earlyPrefetchAdvanceTarget = () => {
+        if (viewerState === 'challenge') return;             // handleAdvance early-returns
+        if (!currentPage) return;
+        const regions = currentPage.regions ?? [];
+        if (regions.length === 0) return;
+
+        let targetIdx = -1;
+        if (viewerState === 'overview') {
+            if (activeRoute) {
+                const firstId = activeRoute.regionIds[0];
+                const idx = regions.findIndex(r => r.id === firstId);
+                targetIdx = idx >= 0 ? idx : 0;
+            } else {
+                targetIdx = 0;
+            }
+        } else if (viewerState === 'focus') {
+            if (activeRoute) {
+                const currentId = currentRegion?.id ?? '';
+                const pos = activeRoute.regionIds.indexOf(currentId);
+                if (pos >= 0 && pos + 1 < activeRoute.regionIds.length) {
+                    const nextId = activeRoute.regionIds[pos + 1];
+                    const idx = regions.findIndex(r => r.id === nextId);
+                    if (idx >= 0) targetIdx = idx;
+                }
+                // Fin de ruta → handleAdvance goToNextPage(); sin target de región.
+            } else if (regionIndex < regions.length - 1) {
+                targetIdx = regionIndex + 1;
+            }
+            // Última región sin ruta → goToNextPage; sin target.
+        }
+        if (targetIdx < 0) return;
+        prefetchRegionAudio(targetIdx);
+    };
+
     // overview → focus → challenge → (auto-advance) → focus/next-page
     //
     // Route-aware: when activeRoute is set, "next region" follows the route's
@@ -1272,7 +1416,7 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (viewerState === 'challenge') return;
-            if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); interaction.trigger(handleAdvance); }
+            if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); earlyPrefetchAdvanceTarget(); interaction.trigger(handleAdvance); }
             else if (e.key === 'ArrowLeft') { e.preventDefault(); handleBack(); }
         };
         window.addEventListener('keydown', onKey);
@@ -1761,6 +1905,8 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
                         onClick={() => {
                             if (viewerState === 'overview') {
                                 if ((currentPage.regions?.length ?? 0) > 0) {
+                                    // M4.1 — early prefetch antes del 270 ms de interaction.trigger.
+                                    prefetchRegionAudio(0);
                                     // Entering focus is a reveal — pipe through narrative pipeline.
                                     interaction.trigger(() => {
                                         setViewerState('focus');
@@ -2209,6 +2355,8 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
                                     setActiveRouteId(route.id);
                                     const firstId  = route.regionIds[0];
                                     const firstIdx = currentPage.regions.findIndex(r => r.id === firstId);
+                                    // M4.1 — early prefetch antes del 270 ms de interaction.trigger.
+                                    prefetchRegionAudio(firstIdx >= 0 ? firstIdx : 0);
                                     interaction.trigger(() => {
                                         setViewerState('focus');
                                         setRegionIndex(firstIdx >= 0 ? firstIdx : 0);
@@ -2263,7 +2411,7 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
                     The ~270ms delay between tap and state change is intentional: it
                     creates anticipation before the zoom reveal. Back zone above remains
                     immediate (corrections must feel responsive). */}
-                <div className="w-[70%] h-full" onClick={() => interaction.trigger(handleAdvance)} />
+                <div className="w-[70%] h-full" onClick={() => { earlyPrefetchAdvanceTarget(); interaction.trigger(handleAdvance); }} />
             </div>
 
             {/* Mediator hint bubble — appears above Leo's button after dwell threshold.
