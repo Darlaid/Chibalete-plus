@@ -3,9 +3,14 @@ import { useNavigate, Link } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
-import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2, Glasses } from 'lucide-react';
-import { getOfflineTextEntry, saveOfflineText } from '../utils/offlineTextCache';
-import type { OfflineTextEntry } from '../utils/offlineTextCache';
+import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2, Glasses, Smartphone } from 'lucide-react';
+import {
+    getOfflineAssignment,
+    assignOfflineBook,
+    isActiveAssignment,
+    OfflineAssignmentError,
+    type OfflineAssignment,
+} from '../utils/offlineAssignmentClient';
 import StarRating from '../components/StarRating';
 import ContentCard from '../components/ContentCard';
 
@@ -18,10 +23,19 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
     const [showBioModal, setShowBioModal] = useState(false);
     const [progress, setProgress] = useState<any>(null);
 
-    // B5: Offline download state for accessible mode (texto_plano_url only).
-    type OfflineStatus = 'none' | 'this' | 'other' | 'downloading' | 'error' | 'quota';
-    const [offlineStatus, setOfflineStatus] = useState<OfflineStatus>('none');
-    const [offlineCachedEntry, setOfflineCachedEntry] = useState<OfflineTextEntry | null>(null);
+    // Fase 3 (botón "Disponible sin conexión"): el estado se deriva del backend
+    // (GET /api/offline/assignment), NO de localStorage. localStorage queda solo
+    // como cache de lectura web del VisorTexto, no como verdad del assignment.
+    type OfflineStatus =
+        | 'idle'                 // sin assignment activo
+        | 'loading'              // fetch GET en curso, o POST en curso
+        | 'assigned_current'     // este libro está asignado en backend
+        | 'assigned_other'       // hay otro libro asignado distinto
+        | 'error'                // error al consultar/asignar
+        | 'unauthenticated';     // sesión inválida — el caller deberá renovar
+    const [offlineStatus, setOfflineStatus] = useState<OfflineStatus>('loading');
+    const [offlineErrorMsg, setOfflineErrorMsg] = useState<string>('');
+    const [otherAssignment, setOtherAssignment] = useState<OfflineAssignment | null>(null);
 
     useEffect(() => {
         Promise.resolve(dataService.getContenidosHijos(content.id, user?.roles || [])).then(children => {
@@ -33,14 +47,41 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
             setProgress(prog);
             dataService.addToHistory(user.id, content.id);
         }
-        // B5: Check offline status on mount — derive from localStorage cache.
-        if (content.texto_plano_url) {
-            const entry = getOfflineTextEntry();
-            setOfflineCachedEntry(entry);
-            if (!entry) setOfflineStatus('none');
-            else if (entry.contentId === content.id) setOfflineStatus('this');
-            else setOfflineStatus('other');
+        // Fase 3: derivar estado del assignment desde el backend (fuente única de verdad).
+        // Solo aplica si el libro tiene texto plano (única condición que LU puede consumir hoy).
+        let cancelled = false;
+        if (content.texto_plano_url && user) {
+            setOfflineStatus('loading');
+            getOfflineAssignment()
+                .then(resp => {
+                    if (cancelled) return;
+                    if (!isActiveAssignment(resp)) {
+                        setOtherAssignment(null);
+                        setOfflineStatus('idle');
+                        return;
+                    }
+                    if (resp.contentId === content.id) {
+                        setOtherAssignment(null);
+                        setOfflineStatus('assigned_current');
+                    } else {
+                        setOtherAssignment(resp);
+                        setOfflineStatus('assigned_other');
+                    }
+                })
+                .catch((e: unknown) => {
+                    if (cancelled) return;
+                    const err = e as OfflineAssignmentError;
+                    if (err.reason === 'unauthenticated') {
+                        setOfflineStatus('unauthenticated');
+                    } else {
+                        setOfflineErrorMsg(err.serverMessage || 'No pudimos consultar tu asignación.');
+                        setOfflineStatus('error');
+                    }
+                });
+        } else {
+            setOfflineStatus('idle');
         }
+        return () => { cancelled = true; };
     }, [content.id, user]);
 
     const handleCommunityReviewSubmit = (e: React.FormEvent) => {
@@ -62,32 +103,67 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
         setReviewText('');
     };
 
-    // B5: Download the accessible text for offline reading.
-    // Only runs if content.texto_plano_url is set. Replaces any previous offline book.
-    const handleDownloadOffline = async () => {
+    /**
+     * Fase 3 — Asigna el libro a Chibalete LU vía backend.
+     *
+     * - NO descarga el texto en el navegador de Chibalete+ (eso lo hará LU al sincronizar).
+     * - NO toca localStorage / IndexedDB como fuente de verdad.
+     * - Si ya hay OTRO libro asignado, pide confirmación explícita antes de reemplazar.
+     * - Si el MISMO libro ya está asignado, no hace POST (estado ya es estable).
+     */
+    const handleAssignToLU = async () => {
         if (!content.texto_plano_url) return;
-        setOfflineStatus('downloading');
+
+        // Reemplazo: confirmar con el usuario antes de pisar el libro anterior.
+        if (offlineStatus === 'assigned_other' && otherAssignment) {
+            const prevTitle = otherAssignment.book?.title || 'el libro anterior';
+            const ok = window.confirm(
+                `Ya tienes "${prevTitle}" preparado para Chibalete LU. ` +
+                `Si continúas, será reemplazado por "${content.titulo}".\n\n¿Querés continuar?`
+            );
+            if (!ok) return;
+        }
+
+        setOfflineStatus('loading');
+        setOfflineErrorMsg('');
         try {
-            const res = await fetch(content.texto_plano_url);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const texto = await res.text();
-            const result = saveOfflineText({
-                contentId: content.id,
-                title: content.titulo,
-                autor: content.autor,
-                portada_url: content.portada_url,
-                texto,
-                language: 'es',
-                cachedAt: new Date().toISOString(),
-            });
-            if (result === 'quota') { setOfflineStatus('quota'); return; }
-            if (result === 'error') { setOfflineStatus('error'); return; }
-            const saved = getOfflineTextEntry();
-            setOfflineCachedEntry(saved);
-            setOfflineStatus('this');
+            const result = await assignOfflineBook(content.id);
+            // Backend devuelve el assignment ya persistido (atómico).
+            // Estado final: este libro pasa a ser el activo.
+            setOtherAssignment(null);
+            setOfflineStatus(result.contentId === content.id ? 'assigned_current' : 'assigned_other');
         } catch (e) {
-            console.error('[PaginaDetalleLibro] offline download failed:', e);
-            setOfflineStatus('error');
+            const err = e as OfflineAssignmentError;
+            console.warn('[PaginaDetalleLibro] assign offline failed:', err.reason, err.serverMessage);
+            switch (err.reason) {
+                case 'unauthenticated':
+                    setOfflineStatus('unauthenticated');
+                    setOfflineErrorMsg('Tu sesión expiró. Volvé a iniciar sesión.');
+                    break;
+                case 'forbidden_content':
+                    setOfflineStatus('error');
+                    setOfflineErrorMsg('No tenés acceso a este libro.');
+                    break;
+                case 'forbidden_user':
+                    setOfflineStatus('error');
+                    setOfflineErrorMsg('Tu cuenta no está activa.');
+                    break;
+                case 'content_not_found':
+                    setOfflineStatus('error');
+                    setOfflineErrorMsg('Este libro ya no está disponible.');
+                    break;
+                case 'invalid_body':
+                    setOfflineStatus('error');
+                    setOfflineErrorMsg('Solicitud inválida.');
+                    break;
+                case 'network':
+                    setOfflineStatus('error');
+                    setOfflineErrorMsg('Sin conexión. Probá de nuevo.');
+                    break;
+                default:
+                    setOfflineStatus('error');
+                    setOfflineErrorMsg(err.serverMessage || 'No pudimos asignar el libro.');
+            }
         }
     };
 
@@ -172,41 +248,59 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                             <div>{content.metricas.veces_leido} lecturas</div>
                         </div>
 
-                        {/* B5: Offline download button — only for books with accessible text */}
+                        {/* Fase 3: "Disponible sin conexión" → asigna en backend para que
+                            Chibalete LU lo descargue. NO descarga en este navegador.
+                            El copy enfatiza Chibalete LU para no confundir con offline web. */}
                         {content.texto_plano_url && (
-                            <div className="mt-4">
-                                {offlineStatus === 'this' ? (
-                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-green-500/20 border border-green-400/30 text-green-300 text-xs font-semibold">
-                                        <CheckCircle size={14} />
-                                        Disponible sin conexión
-                                    </div>
-                                ) : offlineStatus === 'downloading' ? (
+                            <div className="mt-4 space-y-2">
+                                {offlineStatus === 'loading' ? (
                                     <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white/10 border border-white/20 text-white/70 text-xs">
                                         <Loader2 size={14} className="animate-spin" />
-                                        Descargando...
+                                        Asignando…
                                     </div>
-                                ) : offlineStatus === 'quota' ? (
-                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-500/20 border border-red-400/30 text-red-300 text-xs">
+                                ) : offlineStatus === 'assigned_current' ? (
+                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-green-500/20 border border-green-400/30 text-green-300 text-xs font-semibold">
+                                        <CheckCircle size={14} />
+                                        Asignado para Chibalete LU
+                                    </div>
+                                ) : offlineStatus === 'assigned_other' ? (
+                                    <button
+                                        onClick={handleAssignToLU}
+                                        className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 text-amber-200 text-xs font-semibold transition-all"
+                                        title={otherAssignment?.book?.title
+                                            ? `Reemplazará "${otherAssignment.book.title}"`
+                                            : 'Reemplazará el libro anterior'}
+                                    >
+                                        <Smartphone size={14} />
+                                        Reemplazar libro de Chibalete LU
+                                    </button>
+                                ) : offlineStatus === 'unauthenticated' ? (
+                                    <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white/10 border border-white/20 text-white/60 text-xs">
                                         <WifiOff size={14} />
-                                        Sin espacio disponible
+                                        Iniciá sesión para enviar a Chibalete LU
                                     </div>
                                 ) : offlineStatus === 'error' ? (
-                                    <button onClick={handleDownloadOffline} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-500/20 border border-red-400/30 text-red-300 text-xs hover:bg-red-500/30 transition-colors">
-                                        <WifiOff size={14} />
-                                        Error — reintentar
+                                    <button
+                                        onClick={handleAssignToLU}
+                                        className="w-full flex flex-col items-center justify-center gap-1 px-3 py-2 rounded-xl bg-red-500/20 border border-red-400/30 text-red-300 text-xs hover:bg-red-500/30 transition-colors"
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <WifiOff size={14} />
+                                            Reintentar
+                                        </span>
+                                        {offlineErrorMsg && (
+                                            <span className="text-[10px] opacity-80 normal-case">{offlineErrorMsg}</span>
+                                        )}
                                     </button>
                                 ) : (
+                                    // idle
                                     <button
-                                        onClick={handleDownloadOffline}
+                                        onClick={handleAssignToLU}
                                         className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white/80 hover:text-white text-xs font-semibold transition-all"
-                                        title={offlineStatus === 'other' && offlineCachedEntry
-                                            ? `Reemplazará "${offlineCachedEntry.title}"`
-                                            : 'Guardar para leer sin internet'}
+                                        title="Enviar este libro a tu app Chibalete LU para leerlo sin conexión"
                                     >
-                                        <Download size={14} />
-                                        {offlineStatus === 'other'
-                                            ? 'Reemplazar libro offline'
-                                            : 'Guardar para leer offline'}
+                                        <Smartphone size={14} />
+                                        Preparar para Chibalete LU
                                     </button>
                                 )}
                             </div>

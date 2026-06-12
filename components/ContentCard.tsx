@@ -135,11 +135,16 @@ const ContentCard: React.FC<ContentCardProps> = ({ content, progress, onUpdatePr
               </div>
             )}
 
-            {isAvailableOffline && (
-              <div className="absolute top-2 right-2 bg-indigo-600/90 backdrop-blur-sm p-1.5 rounded-full text-white shadow-lg transform scale-90" title="Disponible sin conexión">
-                <Download size={12} />
-              </div>
-            )}
+            {/* Fase 3: badge "disponible sin conexión" desactivado.
+                Antes leía de OfflineContext (IndexedDB local, limit=3 PDFs) — un sistema
+                paralelo que no refleja el assignment del backend introducido en Fase 2.
+                El badge mentía: podía mostrar "descargado" para un libro que NO estaba
+                asignado a Chibalete LU, o no mostrarlo para uno que SÍ lo estaba.
+                Reactivación correcta requiere un AssignmentProvider global que cachee
+                GET /api/offline/assignment y exponga `isAssignedToLU(contentId)` — Fase 4.
+                Variable isAvailableOffline se mantiene declarada por compat con useOffline()
+                en Biblioteca.tsx. */}
+            {false && isAvailableOffline && null}
 
             {progress !== undefined && progress > 0 && progress < 100 && (
               <div className="absolute bottom-3 left-3 right-3 h-1.5 bg-gray-700/50 backdrop-blur-sm rounded-full overflow-hidden">
