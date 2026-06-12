@@ -22,6 +22,7 @@ import { shouldTriggerLeo } from '../utils/leoTriggerEngine';
 import type { LeoTriggerReason } from '../utils/leoTriggerEngine';
 import { derivePedagogicalStage, deriveInitialDifficulty } from '../utils/leoStage';
 import { getResumeToast } from '../utils/canonicalProgress';
+import { resolveImmersiveResumePosition } from '../utils/immersiveResume.mjs';
 // Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
 // Convive con analyticsService.track / usePlaybackAnalytics / pbLog. NO los reemplaza.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
@@ -459,6 +460,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const resumeToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // E: Stores whether the remote progress fetch adopted a newer server record this load.
     const fromRemoteProgressRef = useRef(false);
+    const [resumeReady, setResumeReady] = useState(false);
+    const resumeReadyRef = useRef(false);
+    const resolvedStartIndexRef = useRef(0);
+    const pendingPlayAfterResumeRef = useRef(false);
+    const remoteProgressPromiseRef = useRef<Promise<boolean> | null>(null);
+    const remoteProgressContentIdRef = useRef<string | null>(null);
     const [leoReaderProfile, setLeoReaderProfile] = useState<LeoReaderProfile | undefined>(
         user?.id ? dataService.getLeoReaderProfile(user.id) : undefined
     );
@@ -1261,6 +1268,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         const ac = new AbortController();
         const engine = new StartupEngine(content.id, content.texto_plano_url, ac.signal);
         engineRef.current = engine;
+        resumeReadyRef.current = false;
+        setResumeReady(false);
+        resolvedStartIndexRef.current = 0;
+        pendingPlayAfterResumeRef.current = false;
+        remoteProgressPromiseRef.current = null;
+        remoteProgressContentIdRef.current = content.id;
         immersiveLog('IMMERSIVE_INIT',  { contentId: content.id, userId: user?.id });
         immersiveLog('ENGINE_START',    { contentId: content.id, hasTextUrl: !!content.texto_plano_url });
 
@@ -1383,25 +1396,41 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
 
         isFirstContentRenderRef.current = false;
 
-        // E: Kick off remote progress fetch. Sentences load async from the engine,
-        // so this usually resolves before post-hydration fires (sentence build takes ~200-500ms).
-        // If it loses the race, post-hydration falls back to local progress — no harm done.
+        // E: Kick off remote progress fetch. Post-hydration awaits this promise
+        // before resolving the initial audio index, so TTS cannot start from 0
+        // while cross-device progress is still loading.
         if (user) {
             // Guard anti-stale: si el contentId cambió mientras esperamos la red,
             // no mutar fromRemoteProgressRef del nuevo contenido con datos del viejo.
             const reqContentId = content.id;
-            dataService.fetchAndMergeRemoteProgress(user.id, content.id)
+            remoteProgressPromiseRef.current = dataService.fetchAndMergeRemoteProgress(user.id, content.id)
                 .then(fromRemote => {
                     if (reqContentId !== analyticsContentIdRef.current) {
                         immersiveLog('GUARD_STALE_PROGRESS', {
                             reqContentId,
                             current: analyticsContentIdRef.current,
                         });
-                        return;
+                        return false;
                     }
                     fromRemoteProgressRef.current = fromRemote;
+                    // eslint-disable-next-line no-console
+                    console.log('[immersive-resume] progress loaded', {
+                        contentId: reqContentId,
+                        fromRemote,
+                    });
+                    return fromRemote;
                 })
-                .catch(() => {});
+                .catch(() => {
+                    // eslint-disable-next-line no-console
+                    console.warn('[immersive-resume] progress loaded', {
+                        contentId: reqContentId,
+                        fromRemote: false,
+                        error: 'remote_progress_unavailable',
+                    });
+                    return false;
+                });
+        } else {
+            remoteProgressPromiseRef.current = Promise.resolve(false);
         }
 
         return () => {
@@ -1412,92 +1441,139 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [content.id]);
 
-    // Post-hydration: resume progress + start audio (runs once per content load)
+    // Post-hydration: resolve progress + prepare audio (runs once per content load)
     useEffect(() => {
         // sentences.length <= 1 means we still have the placeholder
         if (sentences.length <= 1 || postHydrationDoneRef.current) return;
         postHydrationDoneRef.current = true;
 
-        let targetIndex = 0;
-        const isAutoTransition = autoPlayAfterTransitionRef.current;
-        autoPlayAfterTransitionRef.current = false;
+        let cancelled = false;
+        const runPostHydrationResume = async () => {
+            let targetIndex = 0;
+            let restoreSource: 'anchor' | 'sentence' | 'percentage' | 'none' | 'fallback_invalid' = 'none';
+            let restoreClamped = false;
+            const isAutoTransition = autoPlayAfterTransitionRef.current;
+            autoPlayAfterTransitionRef.current = false;
 
-        // On seamless transitions, always start from the beginning.
-        // On manual opens, resume from saved progress.
-        if (!isAutoTransition && user) {
-            const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
-            let restoreSource: 'anchor' | 'sentence' | 'percentage' | 'none' = 'none';
-            if (prog) {
-                const anchor = prog.canonicalProgress?.anchor;
-                const exactSentence = prog.canonicalProgress?.sentenceIndex;
-                const hasExactSentence = exactSentence !== undefined && exactSentence > 0;
-                const isLastImmersive =
-                    prog.canonicalProgress?.lastInteractedMode === 'immersive' ||
-                    prog.last_device_mode === 'immersive';
-
-                // E: Priority order for resume precision:
-                // 1. anchor.type='sentence' — explicit sentence anchor (most precise, immersive-saved)
-                // 2. sentenceIndex + last mode was immersive — legacy exact sentence (same precision)
-                // 3. globalPercentage fallback — cross-mode, cross-device
-                if (anchor?.type === 'sentence' && anchor.value > 0) {
-                    targetIndex = Math.min(anchor.value, sentences.length - 1);
-                    restoreSource = 'anchor';
-                } else if (hasExactSentence && isLastImmersive) {
-                    targetIndex = Math.min(exactSentence as number, sentences.length - 1);
-                    restoreSource = 'sentence';
-                } else if (prog.porcentaje > 0) {
-                    const resumeIdx = Math.floor((prog.porcentaje / 100) * sentences.length);
-                    targetIndex = Math.min(resumeIdx, sentences.length - 1);
-                    restoreSource = 'percentage';
+            // On seamless transitions, always start from the beginning.
+            // On manual opens, wait for remote progress and resume from saved progress.
+            if (!isAutoTransition && user) {
+                const progressPromise = remoteProgressContentIdRef.current === content.id
+                    ? remoteProgressPromiseRef.current
+                    : null;
+                if (progressPromise) {
+                    // eslint-disable-next-line no-console
+                    console.log('[immersive-tts] blocked until progress ready', {
+                        contentId: content.id,
+                        reason: 'initial_resume_resolution',
+                    });
+                    await progressPromise;
+                    if (cancelled) return;
                 }
+
+                const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
+                const resolved = resolveImmersiveResumePosition({
+                    progress: prog,
+                    totalSentences: sentences.length,
+                });
+                targetIndex = resolved.startIndex;
+                restoreSource = resolved.source;
+                restoreClamped = resolved.clamped;
+                if (resolved.source === 'fallback_invalid') {
+                    // eslint-disable-next-line no-console
+                    console.warn('[immersive-resume] fallback to index 0', {
+                        contentId: content.id,
+                        reason: 'invalid_progress',
+                    });
+                }
+                // eslint-disable-next-line no-console
+                console.log('[immersive-resume] resolved start index', {
+                    contentId: content.id,
+                    source: restoreSource,
+                    targetIndex,
+                    clamped: restoreClamped,
+                });
+                immersiveLog('PROGRESS_RESTORE', {
+                    contentId: content.id,
+                    userId: user.id,
+                    source: restoreSource,
+                    targetIndex,
+                    clamped: restoreClamped,
+                });
+                dataService.recordReaderOpen(user.id, content.id, 'inmersivo');
+                sessionStartRef.current = Date.now();
             }
-            immersiveLog('PROGRESS_RESTORE', {
+
+            resolvedStartIndexRef.current = targetIndex;
+
+            // Track session_start for both initial loads and seamless transitions
+            analyticsService.track({
+                event: 'session_start',
+                userId: analyticsUserIdRef.current,
                 contentId: content.id,
-                userId: user.id,
-                source: restoreSource,
-                targetIndex,
+                timestamp: Date.now(),
+                streak: rewardEngineRef.current?.getState().streak ?? 0,
+                level: rewardEngineRef.current?.getState().level ?? 1,
+                sessionDuration: 0,
+                isTransition: isAutoTransition,
             });
-            dataService.recordReaderOpen(user.id, content.id, 'inmersivo');
-            sessionStartRef.current = Date.now();
-        }
 
-        // Track session_start for both initial loads and seamless transitions
-        analyticsService.track({
-            event: 'session_start',
-            userId: analyticsUserIdRef.current,
-            contentId: content.id,
-            timestamp: Date.now(),
-            streak: rewardEngineRef.current?.getState().streak ?? 0,
-            level: rewardEngineRef.current?.getState().level ?? 1,
-            sessionDuration: 0,
-            isTransition: isAutoTransition,
-        });
-
-        // D/E: Resume toast — fires once when we actually resume (targetIndex > 0).
-        // Transitions always start from 0, so we skip them here.
-        if (!isAutoTransition && targetIndex > 0 && user) {
-            const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
-            if (prog) {
-                const lastMode = prog.canonicalProgress?.lastInteractedMode ?? prog.last_device_mode;
-                const fromRemote = fromRemoteProgressRef.current;
-                fromRemoteProgressRef.current = false; // consume once
-                const toast = getResumeToast(prog.porcentaje, lastMode, 'inmersivo', fromRemote);
-                if (toast) {
-                    setResumeToast(toast);
-                    if (resumeToastTimerRef.current) clearTimeout(resumeToastTimerRef.current);
-                    resumeToastTimerRef.current = setTimeout(() => setResumeToast(null), 5000);
+            // D/E: Resume toast — fires once when we actually resume (targetIndex > 0).
+            // Transitions always start from 0, so we skip them here.
+            if (!isAutoTransition && targetIndex > 0 && user) {
+                const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
+                if (prog) {
+                    const lastMode = prog.canonicalProgress?.lastInteractedMode ?? prog.last_device_mode;
+                    const fromRemote = fromRemoteProgressRef.current;
+                    fromRemoteProgressRef.current = false; // consume once
+                    const toast = getResumeToast(prog.porcentaje, lastMode, 'inmersivo', fromRemote);
+                    if (toast) {
+                        setResumeToast(toast);
+                        if (resumeToastTimerRef.current) clearTimeout(resumeToastTimerRef.current);
+                        resumeToastTimerRef.current = setTimeout(() => setResumeToast(null), 5000);
+                    }
                 }
             }
-        }
 
-        immersiveLog('PLAY', {
-            contentId: content.id,
-            userId: user?.id,
-            targetIndex,
-            isAutoTransition,
+            const shouldAutoPlay = isAutoTransition || pendingPlayAfterResumeRef.current;
+            pendingPlayAfterResumeRef.current = false;
+            immersiveLog('PLAY', {
+                contentId: content.id,
+                userId: user?.id,
+                targetIndex,
+                isAutoTransition,
+                resumeReady: false,
+                shouldAutoPlay,
+            });
+            // eslint-disable-next-line no-console
+            console.log('[immersive-tts] speak from index', {
+                contentId: content.id,
+                index: targetIndex,
+                autoPlay: shouldAutoPlay,
+            });
+            // forcePlay=true on transitions keeps the session uninterrupted.
+            // If the user tried to play while resume was pending, start from
+            // the resolved index, never from the default 0.
+            await pb.load(targetIndex, shouldAutoPlay);
+            if (cancelled) return;
+            resumeReadyRef.current = true;
+            setResumeReady(true);
+        };
+
+        runPostHydrationResume().catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn('[immersive-resume] fallback to index 0', {
+                contentId: content.id,
+                reason: err?.message ?? 'resume_exception',
+            });
+            resolvedStartIndexRef.current = 0;
+            resumeReadyRef.current = true;
+            setResumeReady(true);
         });
-        // forcePlay=true on transitions keeps the session uninterrupted
-        pb.load(targetIndex, isAutoTransition);
+
+        return () => {
+            cancelled = true;
+        };
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sentences.length]);
@@ -1609,6 +1685,16 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const startDiagnosticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const togglePlay = () => {
         if (pb.isPlaying)           { pb.pause(); return; }
+        if (!resumeReadyRef.current) {
+            pendingPlayAfterResumeRef.current = true;
+            // eslint-disable-next-line no-console
+            console.log('[immersive-tts] blocked until progress ready', {
+                contentId: content.id,
+                reason: 'user_play_before_resume_ready',
+                resolvedStartIndex: resolvedStartIndexRef.current,
+            });
+            return;
+        }
         // Schedule diagnostic
         if (startDiagnosticTimerRef.current) clearTimeout(startDiagnosticTimerRef.current);
         const targetIdx = pb.currentIndex;
@@ -1625,6 +1711,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             }
         }, 1500);
 
+        // eslint-disable-next-line no-console
+        console.log('[immersive-tts] speak from index', {
+            contentId: content.id,
+            index: pb.currentIndex,
+            via: pb.status === 'paused' ? 'resume' : 'load',
+        });
         if (pb.status === 'paused') pb.resume();
         else                        pb.load(pb.currentIndex, true);
     };
@@ -2818,9 +2910,10 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                         // QW-1: bloquear click mientras isHydrating. Evita el race donde el usuario
                         // dispara pb.load(0, true) antes de que post-hydration calcule targetIndex,
                         // lo que causaba el "reinicio del texto" al tocar play tempranamente.
-                        disabled={pb.status === 'loading' || isHydrating}
+                        disabled={pb.status === 'loading' || isHydrating || !resumeReady}
                         title={
                             isHydrating             ? 'Preparando lectura...' :
+                            !resumeReady            ? 'Restaurando progreso...' :
                             pb.status === 'error'   ? 'Sin audio — modo texto' :
                             pb.status === 'blocked' ? 'Toca para activar audio' : undefined
                         }
@@ -3004,6 +3097,16 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                                 });
                                 blockEngineRef.current?.startBlock(300_000);
                                 setSessionComplete(false);
+                                if (!resumeReadyRef.current) {
+                                    pendingPlayAfterResumeRef.current = true;
+                                    // eslint-disable-next-line no-console
+                                    console.log('[immersive-tts] blocked until progress ready', {
+                                        contentId: content.id,
+                                        reason: 'session_complete_resume_before_ready',
+                                        resolvedStartIndex: resolvedStartIndexRef.current,
+                                    });
+                                    return;
+                                }
                                 // Reanudar — pb.resume usa el path de bootstrap
                                 // si canStartAudio falla. NO usamos togglePlay
                                 // para evitar el branch load() innecesario.
