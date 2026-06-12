@@ -998,6 +998,13 @@ app.get('/api/server-time', (_req, res) => {
     res.json({ now: Date.now() });
 });
 
+// Endpoint público de configuración runtime para el frontend.
+// Solo expone valores no sensibles y mantiene fallback seguro si no hay env.
+app.get('/api/runtime-config', (_req, res) => {
+    const mediaBaseUrl = (process.env.MEDIA_BASE_URL || '').trim().replace(/\/+$/, '');
+    res.json({ mediaBaseUrl });
+});
+
 // --- ROUTES ---
 
 // Sprint 022 Fase 2B.4 — health endpoint enriquecido.

@@ -36,6 +36,7 @@ import type {
 } from '../types';
 import { persistenceService } from './persistenceService';
 import { isMediator, isAdmin, hasMediatorRole, hasAdminRole } from '../utils/permissions';
+import { resolveMediaUrl } from '../utils/mediaBaseUrl';
 // Sprint 021 Fase 2 — fuente única de verdad de membresía. Las mismas
 // helpers que importan server/groupMembershipService.js y
 // server/metricsService.js. Si la regla de membresía cambia, se cambia en
@@ -2183,7 +2184,7 @@ class DataService {
             const sentenceIndex = prog?.canonicalProgress?.sentenceIndex ?? 0;
             if (sentenceIndex === 0) return null;
 
-            const res = await fetch(`/uploads/audio/${contentId}/manifest.json`);
+            const res = await fetch(resolveMediaUrl(`/uploads/audio/${contentId}/manifest.json`));
             if (!res.ok) return null;
             const manifest = await res.json();
 

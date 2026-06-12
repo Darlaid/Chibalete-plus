@@ -16,6 +16,9 @@
  * can subscribe to the same instance or receive a reference to it.
  */
 
+// M3.1: resolveMediaUrl prefija con CDN si MEDIA_BASE_URL está set; sino no-op.
+import { resolveMediaUrl } from '../utils/mediaBaseUrl';
+
 // ---------------------------------------------------------------------------
 // TYPES — exported so the reader and future engines can share them
 // ---------------------------------------------------------------------------
@@ -136,14 +139,14 @@ export class StartupEngine {
 
   private async fetchManifest(): Promise<any> {
     try {
-      const res = await fetch(`/uploads/audio/${this.contentId}/manifest.json`, { signal: this.signal });
+      const res = await fetch(resolveMediaUrl(`/uploads/audio/${this.contentId}/manifest.json`), { signal: this.signal });
       return res.ok ? await res.json() : null;
     } catch { return null; }
   }
 
   private async fetchAnchors(): Promise<any> {
     try {
-      const res = await fetch(`/uploads/audio/${this.contentId}/anchors.json`, { signal: this.signal });
+      const res = await fetch(resolveMediaUrl(`/uploads/audio/${this.contentId}/anchors.json`), { signal: this.signal });
       if (!res.ok) {
         if (res.status === 404) {
           console.log(`[ANCHORS_404] contentId=${this.contentId}`);
@@ -272,7 +275,8 @@ export class StartupEngine {
 // ---------------------------------------------------------------------------
 
 export function prefetchImmersiveContent(contentId: string, textUrl?: string): void {
-  fetch(`/uploads/audio/${contentId}/manifest.json`).catch(() => {});
-  fetch(`/uploads/audio/${contentId}/anchors.json`).catch(() => {});
-  if (textUrl) fetch(textUrl).catch(() => {});
+  // M3.1: prefetch debe usar CDN si está activo, sino directo a VPS edge.
+  fetch(resolveMediaUrl(`/uploads/audio/${contentId}/manifest.json`)).catch(() => {});
+  fetch(resolveMediaUrl(`/uploads/audio/${contentId}/anchors.json`)).catch(() => {});
+  if (textUrl) fetch(resolveMediaUrl(textUrl)).catch(() => {});
 }

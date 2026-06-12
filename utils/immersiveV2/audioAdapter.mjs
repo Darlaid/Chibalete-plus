@@ -27,6 +27,8 @@
  * import.
  */
 
+// M3.1: prefija URLs con MEDIA_BASE_URL (CDN) si está configurado en runtime.
+import { resolveMediaUrl } from '../mediaBaseUrl.js';
 const MANIFEST_PREFIX = '/uploads/';
 const TTS_ENDPOINT    = '/api/tts';
 
@@ -421,7 +423,8 @@ async function tryManifest({ manifest, index, sessionId, fetcher, signal, onObje
             meta: { reason: 'unsafe_manifest_path', file } };
     }
 
-    const url = MANIFEST_PREFIX + file.replace(/^\/+/, '');
+    // M3.1: resolveMediaUrl prefija con CDN si MEDIA_BASE_URL está set; sino no-op.
+    const url = resolveMediaUrl(MANIFEST_PREFIX + file.replace(/^\/+/, ''));
     let res;
     try {
         res = await fetcher(url, { signal });

@@ -26,8 +26,11 @@
  * del body. Errores formales discriminados por `reason`.
  */
 
+// M3.1: prefija con MEDIA_BASE_URL si está set; sino mantiene path relativo.
+// Import dinámico para no romper tests legacy que loadean fetchImpl mockeado.
+import { resolveMediaUrl } from '../mediaBaseUrl.js';
 const MANIFEST_URL = (contentId) =>
-    `/uploads/audio/${encodeURIComponent(contentId)}/manifest.json`;
+    resolveMediaUrl(`/uploads/audio/${encodeURIComponent(contentId)}/manifest.json`);
 
 /**
  * loadManifest — fetch + normalize. Devuelve uno de:

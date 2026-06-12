@@ -39,6 +39,7 @@ import { executeSyncStrategy } from '../utils/syncStrategyExecutor.mjs';
 // BLOCKER FINAL V2 / TASK 2 — decisión pura del invariante de transición de
 // chunk. El hook USA esta misma función que los tests ejercen (no simulación).
 import { decideChunkTransition } from '../utils/gaplessChunkGuard.mjs';
+import { uploadsUrl } from '../utils/mediaBaseUrl';
 // F3 — state machine como gobierno observacional del runtime. La machine
 // recibe acciones reales (PREPARE_SENTENCE, AUDIO_STARTED, AUDIO_ENDED,
 // SENTENCE_COMPLETED, PAUSE, SKIP, CONTENT_CHANGE) y mantiene el
@@ -1362,7 +1363,8 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     entryShape:     mfEntry ? Object.keys(mfEntry) : null,
                 });
                 if (mf?.[key]) {
-                    const _trUrl = `/uploads/${mf[key].file}`;
+                    // M3.1: uploadsUrl prefija con CDN si MEDIA_BASE_URL set, sino mantiene /uploads/.
+                    const _trUrl = uploadsUrl(mf[key].file);
                     // eslint-disable-next-line no-console
                     console.log('[AUDIO_TRACE] manifest_fetch', {
                         sentenceIndex: index, chunkKey: key, fetchUrl: _trUrl,

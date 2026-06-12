@@ -9,6 +9,7 @@ import { ChevronLeft, Type, Volume2, VolumeX, Globe, Moon, Sun, Loader2, Ruler, 
 import { generarMicroResumenRecordatorio } from '../services/geminiService';
 import type { LeoSessionMemory } from '../services/geminiService';
 import { dataService } from '../services/dataService';
+import { resolveMediaUrl, uploadsUrl } from '../utils/mediaBaseUrl';
 import { shouldTriggerLeo } from '../utils/leoTriggerEngine';
 import type { LeoTriggerReason } from '../utils/leoTriggerEngine';
 import { deriveInitialDifficulty } from '../utils/leoStage';
@@ -655,7 +656,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             try {
                 // Try fetching manifest for default/Turbo mode
                 // Add timestamp to avoid caching issues during dev
-                const response = await fetch(`/uploads/audio/${content.id}/manifest.json?t=${Date.now()}`);
+                const response = await fetch(resolveMediaUrl(`/uploads/audio/${content.id}/manifest.json`) + `?t=${Date.now()}`);
                 if (response.ok) {
                     const data = await response.json();
                     setManifest(data);
@@ -755,7 +756,8 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             setAudioError('Archivo de audio no disponible en este punto. Intenta avanzar.');
             return;
         }
-        const url = `/uploads/${entry.file}`;
+        // M3.1: uploadsUrl prefija con CDN si MEDIA_BASE_URL set, sino mantiene /uploads/.
+        const url = uploadsUrl(entry.file);
         if (audioRef.current) {
             audioRef.current.src = url;
             audioRef.current.playbackRate = playbackSpeed;
