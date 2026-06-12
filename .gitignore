@@ -158,3 +158,4 @@ dummy_text.txt
 # JAMÁS debe quedar versionado: se regenera en cada deploy.
 # healthHandler.js lo lee si existe; si no, cae a env vars/package.json.
 server/.deploy-info
+.codex-freeze/
