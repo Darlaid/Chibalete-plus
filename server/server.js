@@ -102,6 +102,13 @@ import {
     getProgressCount,
     closeDb as closeProgressDb,
 } from './progressService.js';
+// Fase 2 — Offline Book Assignment (LU): SQLite-backed, 1 usuario = 1 libro.
+import {
+    getAssignment as getOfflineAssignment,
+    upsertAssignment as upsertOfflineAssignment,
+    deleteAssignment as deleteOfflineAssignment,
+} from './offlineAssignmentService.js';
+import { assignBookSchema } from './schemas/offline.schema.js';
 // Data Backbone v1 — capa de eventos unificada (Sprint Fase 0).
 // Convive en paralelo con analytics_db.json / playback_events.log / log() — dual-write,
 // no reemplaza a nadie en Fase 0.
@@ -2503,6 +2510,159 @@ app.post('/api/progress/:userId/:contentId/complete', requireProgressOwner, asyn
         res.status(500).json({ error: 'Failed to complete content' });
     }
 });
+// ------------------------------------
+
+// =====================================================================
+// FASE 2 — OFFLINE BOOK ASSIGNMENT
+// =====================================================================
+// Fuente única de verdad para "el libro offline asignado a un usuario".
+// Regla central: 1 usuario = máximo 1 libro offline. Enforcement a nivel
+// schema (PRIMARY KEY user_id en SQLite WAL). LU consume vía GET, asigna
+// vía POST cuando el usuario toca "Disponible sin conexión" en Chibalete+.
+//
+// Auth: requireUserAuth → x-user-id presente + usuario existe + cuenta activa.
+// Aislamiento: cada endpoint opera SOLO sobre el userId de la sesión.
+// No es posible consultar/asignar/borrar assignments de otro usuario.
+// =====================================================================
+
+/**
+ * Decide si el usuario puede acceder al libro para fines offline.
+ * Reutiliza canUserAccessContent (scope engine) + admin role check.
+ * Se evalúa en cada POST; no se cachea.
+ *
+ * Nota: canUserAccessContent se inicializa más adelante en este archivo
+ * (línea ~3300, `const { canUserAccessContent } = createAccessService(...)`).
+ * Funciona porque esta función se INVOCA en runtime cuando ya bootstrapeó.
+ *
+ * @returns {{ allowed: boolean, reason: string }}
+ */
+function evaluateOfflineAccess(user, content) {
+    const roles = user.roles || (user.role ? [user.role] : (user.rol ? [user.rol] : []));
+    if (roles.includes('administrador')) {
+        return { allowed: true, reason: 'admin_role' };
+    }
+    const scopeDecision = canUserAccessContent(user.id, content.id, content);
+    if (scopeDecision.allowed) {
+        return { allowed: true, reason: scopeDecision.reason || 'scope_engine' };
+    }
+    // legacyFallback === true en modo 'open' significa "sin reglas restrictivas".
+    if (scopeDecision.legacyFallback) {
+        return { allowed: true, reason: 'legacy_fallback_open' };
+    }
+    return { allowed: false, reason: scopeDecision.reason || 'no_access' };
+}
+
+/**
+ * Construye la respuesta enriquecida del assignment.
+ * Incluye metadata del libro (titulo, autor, portada, texto_plano_url) y
+ * el progreso actual del usuario sobre ese libro (si existe).
+ *
+ * Si assignment es null → devuelve { assignment: null } (formato estable).
+ *
+ * @param {object|null} assignment - record de offlineAssignmentService.getAssignment
+ * @returns {object}
+ */
+function buildOfflineAssignmentResponse(assignment) {
+    if (!assignment) return { assignment: null };
+
+    const contentList = readJSON(DB_FILE);
+    const content = contentList.find(c => c.id === assignment.contentId) || null;
+    const progress = getProgressItem(assignment.userId, assignment.contentId) || null;
+
+    return {
+        contentId:  assignment.contentId,
+        version:    assignment.version,
+        assignedAt: assignment.assignedAt,
+        updatedAt:  assignment.updatedAt,
+        book: content ? {
+            id:            content.id,
+            title:         content.titulo || content.title || null,
+            author:        content.autor || content.author || null,
+            coverUrl:      content.portada_url || null,
+            summary:       content.descripcion_corta || content.descripcion || null,
+            authorBio:     content.biografia_autor || null,
+            textoPlanoUrl: content.texto_plano_url || null,
+        } : null,
+        progress: progress ? {
+            percentage:        progress.canonicalProgress?.globalPercentage ?? null,
+            updatedAt:         progress.updatedAt,
+            isCompleted:       progress.isCompleted,
+            canonicalProgress: progress.canonicalProgress,
+        } : null,
+    };
+}
+
+// --- GET: consultar libro offline asignado al usuario autenticado ---
+app.get('/api/offline/assignment', requireUserAuth, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const assignment = getOfflineAssignment(userId);
+        log(`[OFFLINE] assignment_get userId=${userId} present=${!!assignment}`, 'ACCESS');
+        res.json(buildOfflineAssignmentResponse(assignment));
+    } catch (e) {
+        log(`[OFFLINE] GET error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'No se pudo obtener el assignment offline.' });
+    }
+});
+
+// --- POST: asignar libro offline (reemplaza el anterior si lo hay) ---
+app.post('/api/offline/assignment',
+    requireUserAuth,
+    validate({ body: assignBookSchema }),
+    (req, res) => {
+        try {
+            const userId = req.user.id;
+            const { contentId } = req.body;
+
+            // 1. Verificar que el contentId existe en el catálogo.
+            const contentList = readJSON(DB_FILE);
+            const content = contentList.find(c => c.id === contentId);
+            if (!content) {
+                log(`[OFFLINE] assignment_invalid_content userId=${userId} contentId=${contentId}`, 'ACCESS');
+                return res.status(404).json({ error: 'Contenido no encontrado.', reason: 'content_not_found' });
+            }
+
+            // 2. Verificar que el usuario tiene acceso al libro.
+            const access = evaluateOfflineAccess(req.user, content);
+            if (!access.allowed) {
+                log(`[OFFLINE] assignment_denied_access userId=${userId} contentId=${contentId} reason=${access.reason}`, 'ACCESS');
+                return res.status(403).json({ error: 'Sin acceso al contenido.', reason: access.reason });
+            }
+
+            // 3. Upsert atómico (reemplaza si difiere; idempotente si es el mismo).
+            const result = upsertOfflineAssignment(userId, contentId);
+
+            const auditType = result.sameAsBefore
+                ? 'assignment_get'
+                : result.replacedPrevious
+                    ? 'assignment_replaced'
+                    : 'assignment_created';
+            log(`[OFFLINE] ${auditType} userId=${userId} contentId=${contentId} version=${result.version} prev=${result.previousContentId ?? 'none'}`, 'ACCESS');
+
+            res.json(buildOfflineAssignmentResponse(result));
+        } catch (e) {
+            log(`[OFFLINE] POST error: ${e.message}`, 'ERROR');
+            res.status(500).json({ error: 'No se pudo asignar el libro offline.' });
+        }
+    }
+);
+
+// --- DELETE: eliminar el assignment del usuario (idempotente) ---
+app.delete('/api/offline/assignment', requireUserAuth, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const removed = deleteOfflineAssignment(userId);
+        log(`[OFFLINE] assignment_deleted userId=${userId} removed=${removed}`, 'ACCESS');
+        res.json({ assignment: null, removed });
+    } catch (e) {
+        log(`[OFFLINE] DELETE error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'No se pudo eliminar el assignment offline.' });
+    }
+});
+// =====================================================================
+// END FASE 2 — OFFLINE BOOK ASSIGNMENT
+// =====================================================================
+
 // ------------------------------------
 // --- SUBFASE 2.1: Cache de escuelas para resolución de organizationId ---
 // Se carga bajo demanda y se invalida al crear una escuela nueva.
