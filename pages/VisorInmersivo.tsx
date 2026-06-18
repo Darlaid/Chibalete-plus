@@ -463,6 +463,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const [resumeReady, setResumeReady] = useState(false);
     const resumeReadyRef = useRef(false);
     const resolvedStartIndexRef = useRef(0);
+    const resumePlaybackIndexRef = useRef(0);
+    const resumePlaybackPendingRef = useRef(false);
     const pendingPlayAfterResumeRef = useRef(false);
     const remoteProgressPromiseRef = useRef<Promise<boolean> | null>(null);
     const remoteProgressContentIdRef = useRef<string | null>(null);
@@ -1271,6 +1273,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         resumeReadyRef.current = false;
         setResumeReady(false);
         resolvedStartIndexRef.current = 0;
+        resumePlaybackIndexRef.current = 0;
+        resumePlaybackPendingRef.current = false;
         pendingPlayAfterResumeRef.current = false;
         remoteProgressPromiseRef.current = null;
         remoteProgressContentIdRef.current = content.id;
@@ -1505,6 +1509,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             }
 
             resolvedStartIndexRef.current = targetIndex;
+            resumePlaybackIndexRef.current = targetIndex;
 
             // Track session_start for both initial loads and seamless transitions
             analyticsService.track({
@@ -1537,6 +1542,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
 
             const shouldAutoPlay = isAutoTransition || pendingPlayAfterResumeRef.current;
             pendingPlayAfterResumeRef.current = false;
+            const shouldAnchorInitialPlayback = !isAutoTransition && targetIndex > 0;
+            resumePlaybackPendingRef.current = shouldAnchorInitialPlayback && !shouldAutoPlay;
             immersiveLog('PLAY', {
                 contentId: content.id,
                 userId: user?.id,
@@ -1544,6 +1551,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 isAutoTransition,
                 resumeReady: false,
                 shouldAutoPlay,
+                shouldAnchorInitialPlayback,
             });
             // eslint-disable-next-line no-console
             console.log('[immersive-tts] speak from index', {
@@ -1554,7 +1562,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             // forcePlay=true on transitions keeps the session uninterrupted.
             // If the user tried to play while resume was pending, start from
             // the resolved index, never from the default 0.
-            await pb.load(targetIndex, shouldAutoPlay);
+            await pb.load(targetIndex, shouldAutoPlay, {
+                anchorFirstAudio: shouldAnchorInitialPlayback && shouldAutoPlay,
+                reason: shouldAnchorInitialPlayback && shouldAutoPlay
+                    ? 'post_hydration_resume_autoplay'
+                    : 'post_hydration_resume_prepare',
+            });
             if (cancelled) return;
             resumeReadyRef.current = true;
             setResumeReady(true);
@@ -1567,6 +1580,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 reason: err?.message ?? 'resume_exception',
             });
             resolvedStartIndexRef.current = 0;
+            resumePlaybackIndexRef.current = 0;
+            resumePlaybackPendingRef.current = false;
             resumeReadyRef.current = true;
             setResumeReady(true);
         });
@@ -1695,9 +1710,22 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             });
             return;
         }
+        const clampPlaybackIndex = (idx: number): number => {
+            const max = Math.max(0, sentences.length - 1);
+            return Number.isFinite(idx) ? Math.max(0, Math.min(max, Math.floor(idx))) : 0;
+        };
+        const visualIndex = clampPlaybackIndex(pb.currentIndex);
+        const machineSnapshot = pb.getMachineSnapshot();
+        const activeSentenceIndex = clampPlaybackIndex(
+            Number(machineSnapshot?.buffer?.current?.index ?? visualIndex),
+        );
+        const isFirstPlayAfterResume = resumePlaybackPendingRef.current && resumePlaybackIndexRef.current > 0;
+        const audioStartIndex = isFirstPlayAfterResume
+            ? visualIndex
+            : pb.currentIndex;
         // Schedule diagnostic
         if (startDiagnosticTimerRef.current) clearTimeout(startDiagnosticTimerRef.current);
-        const targetIdx = pb.currentIndex;
+        const targetIdx = isFirstPlayAfterResume ? audioStartIndex : pb.currentIndex;
         startDiagnosticTimerRef.current = setTimeout(() => {
             startDiagnosticTimerRef.current = null;
             // Si en 1500ms no llegamos a 'playing', algo bloqueó.
@@ -1710,6 +1738,27 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 });
             }
         }, 1500);
+
+        if (isFirstPlayAfterResume) {
+            resumePlaybackPendingRef.current = false;
+            resumePlaybackIndexRef.current = audioStartIndex;
+            // eslint-disable-next-line no-console
+            console.log('[immersive-tts-resume] first play anchored', {
+                contentId: content.id,
+                visualIndex,
+                resolvedStartIndex: resolvedStartIndexRef.current,
+                audioStartIndex,
+                pbCurrentIndex: pb.currentIndex,
+                activeSentenceIndex,
+                indexMismatchResolved: activeSentenceIndex !== visualIndex,
+                via: 'load_anchor_first_audio',
+            });
+            void pb.load(audioStartIndex, true, {
+                anchorFirstAudio: true,
+                reason: 'first_play_after_resume',
+            });
+            return;
+        }
 
         // eslint-disable-next-line no-console
         console.log('[immersive-tts] speak from index', {

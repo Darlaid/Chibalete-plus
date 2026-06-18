@@ -52,7 +52,7 @@ ok('togglePlay bloquea TTS hasta progress ready',
    /if\s*\(\s*!resumeReadyRef\.current\s*\)\s*\{[\s\S]{0,450}?pendingPlayAfterResumeRef\.current\s*=\s*true[\s\S]{0,450}?\[immersive-tts\] blocked until progress ready[\s\S]{0,200}?return;/.test(visorSrc));
 
 ok('Intento de play pendiente reproduce desde targetIndex resuelto, no desde 0',
-   /const\s+shouldAutoPlay\s*=\s*isAutoTransition\s*\|\|\s*pendingPlayAfterResumeRef\.current[\s\S]{0,1200}?pb\.load\(targetIndex,\s*shouldAutoPlay\)/.test(visorSrc));
+   /const\s+shouldAutoPlay\s*=\s*isAutoTransition\s*\|\|\s*pendingPlayAfterResumeRef\.current[\s\S]{0,1600}?pb\.load\(targetIndex,\s*shouldAutoPlay/.test(visorSrc));
 
 ok('Logs incluyen resolved start index',
    /\[immersive-resume\] resolved start index/.test(visorSrc));

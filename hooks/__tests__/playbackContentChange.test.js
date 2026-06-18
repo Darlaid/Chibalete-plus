@@ -94,7 +94,7 @@ if (!resetBody) {
        /activePlayer\.current\s*=\s*['"]A['"]/.test(body));
 
     ok('reset() resetea currentIdxRef + sentenceStartTime',
-       /currentIdxRef\.current\s*=\s*0[\s\S]{0,300}?sentenceStartTimeRef\.current\s*=\s*0/.test(body));
+       /currentIdxRef\.current\s*=\s*0[\s\S]{0,600}?sentenceStartTimeRef\.current\s*=\s*0/.test(body));
 
     ok('reset() invalida standbyGenRef (cancela canplaythrough listeners)',
        /standbyGenRef\.current\+\+/.test(body));

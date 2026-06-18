@@ -137,7 +137,7 @@ ok('Segundo NotSupportedError loguea PB_AUDIO_UNRECOVERABLE',
 
 // Retry exitoso = primer fallo → load(index, true) → reload limpio
 ok('Primer NotSupportedError llama load(index, true) para retry',
-   /audioRetriedKeysRef\.current\.add\s*\(\s*key\s*\)[\s\S]{0,400}?load\s*\(\s*index,\s*true\s*\)/.test(hookSrc));
+   /audioRetriedKeysRef\.current\.add\s*\(\s*key\s*\)[\s\S]{0,600}?load\s*\(\s*index,\s*true\s*(?:,\s*\{[\s\S]{0,400}?\})?\s*\)/.test(hookSrc));
 
 // ───────────────────────────────────────────────────────────────────────────
 // 7. isAudioFailed bloquea pActive.play() en load(autoPlay) — pausa, no hardResync

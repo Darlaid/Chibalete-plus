@@ -136,6 +136,19 @@ export interface PlaybackContext {
     contentIdRef:      React.MutableRefObject<string>;
 }
 
+export interface PlaybackLoadOptions {
+    /**
+     * HF2: cuando el primer play viene de una posicion restaurada, el primer
+     * audio audible debe anclarse a la frase visual activa. En audio chunked,
+     * esto fuerza TTS por frase para no reproducir el chunk desde 0.
+     */
+    anchorFirstAudio?: boolean;
+    /** Fuerza TTS por frase, saltando manifest/cache de chunk. */
+    forceSentenceTts?: boolean;
+    /** Motivo corto para logs operativos. */
+    reason?: string;
+}
+
 // Tag para PlaybackEvent — añadimos audio_cache_invalidated cuando INV-9 detecta
 // un blob cacheado con duración sospechosa para wordCount visible.
 type _ExtraEvents = 'audio_cache_invalidated';
@@ -193,7 +206,7 @@ export interface ImmersivePlayback {
      */
     currentIndex: number;
     /** Carga un índice. autoPlay=true inicia reproducción inmediatamente. */
-    load:        (index: number, autoPlay?: boolean) => Promise<void>;
+    load:        (index: number, autoPlay?: boolean, options?: PlaybackLoadOptions) => Promise<void>;
     pause:       () => void;
     resume:      () => void;
     /** Salto explícito del usuario — siempre fuerza reproducción. */
@@ -373,6 +386,19 @@ export interface ImmersivePlayback {
 // ── Constantes ───────────────────────────────────────────────────────────────
 
 const PREFETCH_WINDOW = 5;
+const SENTENCE_TTS_CACHE_KEY_OFFSET = 1_000_000_000;
+
+function toSentenceTtsCacheKey(index: number): number {
+    return -(SENTENCE_TTS_CACHE_KEY_OFFSET + index);
+}
+
+function isSentenceTtsCacheKey(key: number): boolean {
+    return key <= -SENTENCE_TTS_CACHE_KEY_OFFSET;
+}
+
+function fromSentenceTtsCacheKey(key: number): number {
+    return -key - SENTENCE_TTS_CACHE_KEY_OFFSET;
+}
 
 // F10 — tiempo máximo que el hook espera por el ack visual del visor antes de
 // considerar fallido el primer play o el autoadvance. Debe ser >=
@@ -530,6 +556,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     const audioCache     = useRef(new Map<number, string>());
     const inFlight       = useRef(new Map<number, Promise<string | null>>());
     const abortCtrls     = useRef(new Map<number, AbortController>());
+    const sentenceTtsOverrideChunkKeyRef = useRef<number | null>(null);
+    const activeAudioFirstSpokenIndexRef = useRef<number | null>(null);
+    const activeAudioCacheKeyRef         = useRef<number | null>(null);
 
     // ── Cancellation token — previene ejecución de loads obsoletos ───────────
     const loadToken      = useRef(0);
@@ -1276,18 +1305,84 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         return map.length > 0 ? (map[si] ?? si) : si;
     };
 
+    const firstSentenceIndexForChunkKey = (chunkKey: number): number => {
+        const map = ctx.toChunkRef.current;
+        if (map.length === 0) return chunkKey;
+        const first = map.findIndex(k => k === chunkKey);
+        return first >= 0 ? first : chunkKey;
+    };
+
+    const resolveAudioUrlMode = (
+        index: number,
+        options: PlaybackLoadOptions = {},
+    ): { chunkKey: number; cacheKey: number; forceSentenceTts: boolean } => {
+        const chunkKey = toChunkKey(index);
+        const overrideChunkKey = sentenceTtsOverrideChunkKeyRef.current;
+        const forceSentenceTts = options.forceSentenceTts === true
+            || (options.anchorFirstAudio === true && chunkKey !== index)
+            || (overrideChunkKey !== null && overrideChunkKey === chunkKey);
+        return {
+            chunkKey,
+            cacheKey: forceSentenceTts ? toSentenceTtsCacheKey(index) : chunkKey,
+            forceSentenceTts,
+        };
+    };
+
+    const invalidateChunkAudioForResume = (index: number): boolean => {
+        const chunkKey = toChunkKey(index);
+        let invalidated = false;
+        const cachedUrl = audioCache.current.get(chunkKey);
+        if (cachedUrl) {
+            URL.revokeObjectURL(cachedUrl);
+            audioCache.current.delete(chunkKey);
+            cacheMetricsRef.current.evicted += 1;
+            cacheMetricsRef.current.revoked += 1;
+            invalidated = true;
+        }
+        const ctrl = abortCtrls.current.get(chunkKey);
+        if (ctrl) {
+            ctrl.abort('resume_audio_anchor');
+            abortCtrls.current.delete(chunkKey);
+            invalidated = true;
+        }
+        if (inFlight.current.delete(chunkKey)) {
+            invalidated = true;
+        }
+        if (invalidated) {
+            // eslint-disable-next-line no-console
+            console.log('[CACHE_ENTRY_EVICTED]', {
+                evicted: 1,
+                via: 'immersive_tts_resume_anchor',
+                key: chunkKey,
+                index,
+                totalEvicted: cacheMetricsRef.current.evicted,
+            });
+        }
+        return invalidated;
+    };
+
     // ── Cancelar fetches fuera de la ventana de reproducción ─────────────────
     const cancelStaleFetches = (index: number) => {
         const total = ctx.sentencesRef.current.length;
+        const lowerSentence = Math.max(0, index - 5);
+        const upperSentence = Math.min(total - 1, index + getAdaptivePrefetchWindow() + 2);
         const lower = toChunkKey(Math.max(0, index - 5));
         const upper = toChunkKey(Math.min(total - 1, index + getAdaptivePrefetchWindow() + 2));
         abortCtrls.current.forEach((ctrl, key) => {
+            if (isSentenceTtsCacheKey(key)) {
+                const sentenceIndex = fromSentenceTtsCacheKey(key);
+                if (sentenceIndex < lowerSentence || sentenceIndex > upperSentence) ctrl.abort('Jumped away');
+                return;
+            }
             if (key < lower || key > upper) ctrl.abort('Jumped away');
         });
     };
 
     // ── URL resolution: manifest → /api/tts → null ───────────────────────────
-    const getAudioUrl = useCallback(async (index: number): Promise<string | null> => {
+    const getAudioUrl = useCallback(async (
+        index: number,
+        options: PlaybackLoadOptions = {},
+    ): Promise<string | null> => {
         // ── [AUDIO_TRACE] TEMPORAL — M-2.6/2.7 audit. REMOVE AFTER FIX ──────
         const _trCid  = ctx.contentIdRef.current;
         const _trSess = contentSessionRef.current;
@@ -1314,22 +1409,25 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             return null;
         }
 
-        const key = toChunkKey(index);
+        const { chunkKey, cacheKey: key, forceSentenceTts } = resolveAudioUrlMode(index, options);
         const _trMap = ctx.toChunkRef.current;
         // eslint-disable-next-line no-console
         console.log('[AUDIO_TRACE] sentence_to_chunk', {
             sentenceIndex: index,
-            chunkKey:      key,
+            chunkKey,
+            cacheKey:      key,
             mapLen:        _trMap.length,
             mapHasIndex:   _trMap.length > index,
-            keyEqualsIndex: key === index,
+            keyEqualsIndex: chunkKey === index,
+            forceSentenceTts,
+            reason:        options.reason ?? null,
         });
 
         const cached = audioCache.current.get(key);
         if (cached) {
             cacheMetricsRef.current.reused++;  // M-5.4 metric
             // eslint-disable-next-line no-console
-            console.log('[AUDIO_TRACE] cache_hit', { sentenceIndex: index, chunkKey: key });
+            console.log('[AUDIO_TRACE] cache_hit', { sentenceIndex: index, chunkKey, cacheKey: key, forceSentenceTts });
             // eslint-disable-next-line no-console
             console.log('[CACHE_ENTRY_REUSED] reused=' + cacheMetricsRef.current.reused, { key });
             return cached;
@@ -1338,7 +1436,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         const existing = inFlight.current.get(key);
         if (existing) {
             // eslint-disable-next-line no-console
-            console.log('[AUDIO_TRACE] inflight_dedupe', { sentenceIndex: index, chunkKey: key });
+            console.log('[AUDIO_TRACE] inflight_dedupe', { sentenceIndex: index, chunkKey, cacheKey: key, forceSentenceTts });
             return existing;
         }
 
@@ -1350,11 +1448,13 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 // Nivel 1: audio pre-generado en el servidor (manifest)
                 const mf       = ctx.manifestRef.current;
                 const mfKeys   = mf ? Object.keys(mf).length : 0;
-                const mfEntry  = mf?.[key];
+                const mfEntry  = forceSentenceTts ? null : mf?.[chunkKey];
                 // eslint-disable-next-line no-console
                 console.log('[AUDIO_TRACE] manifest_lookup', {
                     sentenceIndex:  index,
-                    chunkKey:       key,
+                    chunkKey,
+                    cacheKey:       key,
+                    forceSentenceTts,
                     manifestNull:   mf === null || mf === undefined,
                     manifestKeys:   mfKeys,
                     manifestSample: mf ? Object.keys(mf).slice(0, 3) : null,
@@ -1362,12 +1462,12 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     entryFile:      mfEntry?.file ?? null,
                     entryShape:     mfEntry ? Object.keys(mfEntry) : null,
                 });
-                if (mf?.[key]) {
+                if (!forceSentenceTts && mf?.[chunkKey]) {
                     // M3.1: uploadsUrl prefija con CDN si MEDIA_BASE_URL set, sino mantiene /uploads/.
-                    const _trUrl = uploadsUrl(mf[key].file);
+                    const _trUrl = uploadsUrl(mf[chunkKey].file);
                     // eslint-disable-next-line no-console
                     console.log('[AUDIO_TRACE] manifest_fetch', {
-                        sentenceIndex: index, chunkKey: key, fetchUrl: _trUrl,
+                        sentenceIndex: index, chunkKey, cacheKey: key, fetchUrl: _trUrl,
                     });
                     const res = await fetch(_trUrl, { signal: abortCtrl.signal });
                     if (res.ok) {
@@ -1378,10 +1478,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                             // eslint-disable-next-line no-console
                             console.error('[AUDIO_TRACE] provider_fail', {
                                 provider: 'manifest', contentId: _trCid,
-                                sentenceIndex: index, chunkKey: key,
-                                reason: 'empty_blob', file: mf[key].file,
+                                sentenceIndex: index, chunkKey,
+                                reason: 'empty_blob', file: mf[chunkKey].file,
                             });
-                            log('manifest_fail', { index, key, reason: 'empty_blob' });
+                            log('manifest_fail', { index, key: chunkKey, reason: 'empty_blob' });
                             // No retornar null todavía — caer al nivel 2 (TTS on-demand)
                         } else {
                             const url = URL.createObjectURL(blob);
@@ -1390,7 +1490,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                             // eslint-disable-next-line no-console
                             console.log('[AUDIO_TRACE] provider_result', {
                                 provider: 'manifest', contentId: _trCid,
-                                sentenceIndex: index, chunkKey: key,
+                                sentenceIndex: index, chunkKey, cacheKey: key,
                                 hasUrl: true, urlType: typeof url, blobSize: blob.size,
                             });
                             // eslint-disable-next-line no-console
@@ -1401,10 +1501,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                         // eslint-disable-next-line no-console
                         console.error('[AUDIO_TRACE] provider_fail', {
                             provider: 'manifest', contentId: _trCid,
-                            sentenceIndex: index, chunkKey: key,
-                            reason: 'http_' + res.status, file: mf[key].file,
+                            sentenceIndex: index, chunkKey,
+                            reason: 'http_' + res.status, file: mf[chunkKey].file,
                         });
-                        log('manifest_fail', { index, key, status: res.status });
+                        log('manifest_fail', { index, key: chunkKey, status: res.status });
                         // Caer al nivel 2
                     }
                 }
@@ -1415,6 +1515,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 // eslint-disable-next-line no-console
                 console.log('[AUDIO_TRACE] tts_pre', {
                     sentenceIndex: index,
+                    chunkKey,
+                    cacheKey:      key,
+                    forceSentenceTts,
                     hasText:       !!txt,
                     textLen:       typeof txt === 'string' ? txt.length : 0,
                     userId,
@@ -1445,7 +1548,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 try {
                     // eslint-disable-next-line no-console
                     console.log('[AUDIO_TRACE] tts_fetch_start', {
-                        sentenceIndex: index, chars: txt.length,
+                        sentenceIndex: index, chars: txt.length, forceSentenceTts,
                     });
                     res = await fetch('/api/tts', {
                         method:  'POST',
@@ -1462,6 +1565,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 // eslint-disable-next-line no-console
                 console.log('[AUDIO_TRACE] tts_fetch_response', {
                     sentenceIndex: index,
+                    forceSentenceTts,
                     httpStatus:    res.status,
                     ok:            res.ok,
                     contentType:   _trCt,
@@ -1513,7 +1617,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                 // eslint-disable-next-line no-console
                 console.log('[AUDIO_TRACE] provider_result', {
                     provider: 'tts', contentId: _trCid,
-                    sentenceIndex: index,
+                    sentenceIndex: index, chunkKey, cacheKey: key, forceSentenceTts,
                     hasUrl: true, urlType: typeof url, blobSize: blob.size,
                 });
                 // eslint-disable-next-line no-console
@@ -1704,10 +1808,20 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         if (audioCache.current.size === 0) return;
         const currentIdx = currentIdxRef.current;
         const total  = ctx.sentencesRef.current.length;
+        const lowerSentence = Math.max(0, currentIdx - 20);
+        const upperSentence = Math.min(total - 1, currentIdx + 20);
         const lower  = toChunkKey(Math.max(0, currentIdx - 20));
         const upper  = toChunkKey(Math.min(total - 1, currentIdx + 20));
         const toDelete: number[] = [];
         audioCache.current.forEach((blobUrl, k) => {
+            if (isSentenceTtsCacheKey(k)) {
+                const sentenceIndex = fromSentenceTtsCacheKey(k);
+                if (sentenceIndex < lowerSentence || sentenceIndex > upperSentence) {
+                    URL.revokeObjectURL(blobUrl);
+                    toDelete.push(k);
+                }
+                return;
+            }
             if (k < lower || k > upper) { URL.revokeObjectURL(blobUrl); toDelete.push(k); }
         });
         toDelete.forEach(k => audioCache.current.delete(k));
@@ -1865,7 +1979,15 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     };
 
     // ── LOAD — entry point principal para cualquier cambio de índice ──────────
-    const load = useCallback(async (index: number, autoPlay = false): Promise<void> => {
+    const load = useCallback(async (
+        index: number,
+        autoPlay = false,
+        options: PlaybackLoadOptions = {},
+    ): Promise<void> => {
+        const { chunkKey: requestedChunkKey, cacheKey: requestedCacheKey, forceSentenceTts } =
+            resolveAudioUrlMode(index, options);
+        const isResumeAnchoredPlay = options.anchorFirstAudio === true || options.forceSentenceTts === true;
+        let resumeCacheInvalidated = false;
         // ── [M532_LOAD] TEMP DEBUG — borrar tras causa raíz identificada ────
         // Stack trace identifica EXACTAMENTE qué caller del visor o del hook
         // disparó este load — clave para detectar si pb.load se invoca múltiples
@@ -1874,6 +1996,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         console.log('[M532_LOAD] load_called', {
             index,
             autoPlay,
+            loadReason:    options.reason ?? null,
+            anchorFirstAudio: options.anchorFirstAudio === true,
+            forceSentenceTts,
             statusBefore: statusRef.current,
             contentId:    ctx.contentIdRef.current,
             currentIdx:   currentIdxRef.current,
@@ -1886,6 +2011,15 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         }
         if (index < 0 || index >= ctx.sentencesRef.current.length) {
             return;
+        }
+        if (forceSentenceTts) {
+            sentenceTtsOverrideChunkKeyRef.current = requestedChunkKey;
+            resumeCacheInvalidated = invalidateChunkAudioForResume(index);
+        } else if (
+            sentenceTtsOverrideChunkKeyRef.current !== null
+            && sentenceTtsOverrideChunkKeyRef.current !== requestedChunkKey
+        ) {
+            sentenceTtsOverrideChunkKeyRef.current = null;
         }
 
         // INV-15/16: load() es invocado por skip() y por load directo del visor.
@@ -1965,8 +2099,13 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             sessionId:     contentSessionRef.current,
             via:           'load',
             autoPlay,
+            forceSentenceTts,
+            reason:        options.reason ?? null,
         });
-        const url = await getAudioUrl(index);
+        const url = await getAudioUrl(index, {
+            forceSentenceTts,
+            reason: options.reason,
+        });
 
         // Si llegó una carga más reciente o el componente se desmontó, abortar silenciosamente
         if (token !== loadToken.current || ctx.unmountedRef.current) {
@@ -1992,6 +2131,31 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
         pActive.src          = url;
         pActive.playbackRate = ctx.speedRef.current;
+        activeAudioCacheKeyRef.current = requestedCacheKey;
+        activeAudioFirstSpokenIndexRef.current = forceSentenceTts
+            ? index
+            : firstSentenceIndexForChunkKey(requestedChunkKey);
+        if (isResumeAnchoredPlay) {
+            // eslint-disable-next-line no-console
+            console.log(
+                `[immersive-tts-resume] visualIndex=${index} ` +
+                `audioStartIndex=${index} ` +
+                `firstSpokenIndex=${activeAudioFirstSpokenIndexRef.current} ` +
+                `cacheInvalidated=${resumeCacheInvalidated}`,
+                {
+                    contentId: ctx.contentIdRef.current,
+                    visualIndex: index,
+                    audioStartIndex: index,
+                    firstSpokenIndex: activeAudioFirstSpokenIndexRef.current,
+                    chunkKey: requestedChunkKey,
+                    cacheKey: requestedCacheKey,
+                    forceSentenceTts,
+                    cacheInvalidated: resumeCacheInvalidated,
+                    reason: options.reason ?? null,
+                    sessionId: contentSessionRef.current,
+                },
+            );
+        }
         // M-5.4.6 (Case 1) — setIdx + PREPARE_SENTENCE ya se hicieron arriba
         // antes del fetch TTS. Acá sólo enlazamos audio src al index ya visible.
 
@@ -2110,7 +2274,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     } else if (e.name === 'NotSupportedError') {
                         // F12: blob corrupto/incompatible. Invalidar cache,
                         // marcar audioFailed si ya retrieó una vez. NO hardResync.
-                        const key = toChunkKey(index);
+                        const key = activeAudioCacheKeyRef.current ?? requestedCacheKey;
                         const cachedUrl = audioCache.current.get(key);
                         if (cachedUrl) { URL.revokeObjectURL(cachedUrl); audioCache.current.delete(key); }
                         log('autoplay_blocked' as any, { event: 'PB_AUDIO_PLAY_UNSUPPORTED', index, error: e.name });
@@ -2120,7 +2284,13 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                             log('autoplay_blocked' as any, { event: 'PB_AUDIO_RETRY_ATTEMPT', index });
                             ctx.onPlayChange.current(false);
                             // Reload limpio: cache invalidado fuerza re-fetch TTS fresh.
-                            load(index, true);
+                            load(index, true, {
+                                forceSentenceTts,
+                                anchorFirstAudio: options.anchorFirstAudio,
+                                reason: forceSentenceTts
+                                    ? 'resume_anchor_retry_after_unsupported'
+                                    : 'audio_retry_after_unsupported',
+                            });
                         } else {
                             // Segundo fallo → unrecoverable. Pausa controlada, no hardResync.
                             audioFailedKeysRef.current.add(key);
@@ -2140,7 +2310,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
         // Precargar el siguiente en el player en espera (no bloquea el path principal)
         if (token !== loadToken.current) return;
-        const nextUrl = await getAudioUrl(index + 1);
+        const nextUrl = await getAudioUrl(index + 1, {
+            reason: forceSentenceTts ? 'resume_sentence_tts_prefetch' : undefined,
+        });
         if (token !== loadToken.current || ctx.unmountedRef.current) return;
         if (nextUrl && pStandby) {
             pStandby.src          = nextUrl;
@@ -2485,6 +2657,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     load(nextIdx, true);
                     return;
                 }
+                const _nextAudioMode = resolveAudioUrlMode(nextIdx);
+                if (
+                    sentenceTtsOverrideChunkKeyRef.current !== null
+                    && _nextAudioMode.chunkKey !== sentenceTtsOverrideChunkKeyRef.current
+                ) {
+                    sentenceTtsOverrideChunkKeyRef.current = null;
+                }
+                activeAudioCacheKeyRef.current = _nextAudioMode.cacheKey;
+                activeAudioFirstSpokenIndexRef.current = _nextAudioMode.forceSentenceTts
+                    ? nextIdx
+                    : firstSentenceIndexForChunkKey(_nextAudioMode.chunkKey);
 
                 // BLOCKER M-5.4.3 — Instrumentación pre-play. Gapless es el
                 // tercer path (junto con load y resume) que reproduce audio.
@@ -2727,7 +2910,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         const idx = currentIdxRef.current;
 
         // Limpiar blob inválido del cache para que el siguiente intento haga fetch real
-        const key = toChunkKey(idx);
+        const key = activeAudioCacheKeyRef.current ?? toChunkKey(idx);
         const blobUrl = audioCache.current.get(key);
         if (blobUrl) {
             URL.revokeObjectURL(blobUrl);
@@ -2788,6 +2971,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
         activePlayer.current    = 'A';
         currentIdxRef.current   = 0;
+        sentenceTtsOverrideChunkKeyRef.current = null;
+        activeAudioFirstSpokenIndexRef.current = null;
+        activeAudioCacheKeyRef.current = null;
         standbyReadyRef.current = false;
         standbyGenRef.current++;          // invalida cualquier listener canplaythrough del ciclo anterior
         sentenceStartTimeRef.current = 0; // sin sesión activa — durationMs será null en el primer log

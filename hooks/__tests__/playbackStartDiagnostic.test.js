@@ -100,7 +100,7 @@ ok('Visor declara startDiagnosticTimerRef',
    /startDiagnosticTimerRef\s*=\s*useRef[\s\S]{0,150}?null/.test(visorSrc));
 
 ok('togglePlay schedulea setTimeout(1500)',
-   /togglePlay\s*=[\s\S]{0,1000}?setTimeout\s*\([\s\S]{0,500}?,\s*1500\s*\)/.test(visorSrc));
+   /togglePlay\s*=[\s\S]{0,2500}?setTimeout\s*\([\s\S]{0,500}?,\s*1500\s*\)/.test(visorSrc));
 
 ok('togglePlay limpia timer previo (clearTimeout) antes de schedule',
    /togglePlay\s*=[\s\S]{0,1500}?clearTimeout\s*\(\s*startDiagnosticTimerRef\.current/.test(visorSrc));
