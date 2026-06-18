@@ -400,6 +400,35 @@ function fromSentenceTtsCacheKey(key: number): number {
     return -key - SENTENCE_TTS_CACHE_KEY_OFFSET;
 }
 
+// ── HF3 — recuperación de audio en el primer TTS lento/grande ─────────────────
+// Timeout real para fallos genuinos, pero sin castigar textos largos sin reintento.
+const TTS_PRIMARY_TIMEOUT_MS = 20000;   // intento 1: frase completa
+const TTS_FALLBACK_TIMEOUT_MS = 15000;  // intento 2: unidad corta
+const TTS_FALLBACK_MAX_CHARS = 220;     // umbral de la unidad hablable de fallback
+
+// Devuelve la primera unidad hablable de `text`, acotada a `maxChars`, partiendo
+// por puntuación de frase/cláusula y, en último caso, por límite de palabra. Nunca
+// devuelve vacío si la entrada no lo está. Sin lookbehind (compat. Safari antiguo).
+function firstSpeakableUnit(text: string, maxChars: number): string {
+    const trimmed = (text ?? '').trim();
+    if (trimmed.length <= maxChars) return trimmed;
+    const tokens = trimmed.match(/[^.!?…;:\n]+[.!?…;:\n]*\s*/g) || [trimmed];
+    let unit = '';
+    for (const tk of tokens) {
+        if (unit && (unit + tk).length > maxChars) break;
+        unit += tk;
+        if (unit.length >= maxChars) break;
+    }
+    unit = unit.trim();
+    if (!unit || unit.length > maxChars) {
+        // Ninguna frontera de cláusula dentro del presupuesto → corte por palabra.
+        const head = trimmed.slice(0, maxChars);
+        const lastSpace = head.lastIndexOf(' ');
+        unit = (lastSpace > 0 ? head.slice(0, lastSpace) : head).trim();
+    }
+    return unit;
+}
+
 // F10 — tiempo máximo que el hook espera por el ack visual del visor antes de
 // considerar fallido el primer play o el autoadvance. Debe ser >=
 // M-5.4.6 — VISUAL_READY_TIMEOUT_MS conservada por compatibilidad con
@@ -617,6 +646,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     //   el mismo blob roto.
     const audioFailedKeysRef  = useRef(new Set<number>());
     const audioRetriedKeysRef = useRef(new Set<number>());
+    // HF3: keys cuyo audio se obtuvo vía fallback de unidad corta (primer TTS
+    //   lento/grande). Marca trazable; el url queda cacheado bajo `key` para que
+    //   re-llamadas hagan cache-hit en lugar de repetir el timeout primario.
+    const fallbackTtsKeysRef  = useRef(new Set<number>());
 
     // M-5.3.4: handle del executor de sincronización activo. Se spawnea cuando
     // pb.load arranca audio en chunked modes (perChunkWithAnchors / NoAnchors).
@@ -1533,95 +1566,185 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                     return null;
                 }
 
-                // Timeout de 20 s — el backend híbrido cae a Gemini cuando OpenAI
-                // falla (quota/auth/etc.), y Gemini tarda 4-10s en sentencias
-                // largas. 8s era demasiado tight y disparaba abort prematuro
-                // ANTES de recibir Response. Usar DOMException (no string) para
-                // que el catch identifique el abort por e.name='TimeoutError'
-                // en lugar de e=undefined ⇒ tts_fail con error/message undefined.
-                // try/finally garantiza clearTimeout incluso si fetch lanza antes de resolver.
-                const ttsTimeout = setTimeout(
-                    () => abortCtrl.abort(new DOMException('TTS request exceeded 20s timeout', 'TimeoutError')),
-                    20000
-                );
-                let res: Response;
-                try {
+                // ── HF3 — recuperación de audio cuando el primer TTS es lento/grande ──
+                // Antes: un único intento con abort duro a 20s. Si la primera frase de
+                // un libro sin manifest excedía el timeout (texto largo o backend frío
+                // — OpenAI quota → fallback Gemini lento), getAudioUrl devolvía null y
+                // load() marcaba "Sin audio" (PB_AUDIO_UNRECOVERABLE) SIN reintentar.
+                // Ahora: intento primario con la frase completa; si NO produce audio y
+                // la carga no fue cancelada externamente, reintentamos con una unidad
+                // hablable más corta (split por puntuación) bajo timeout propio. El
+                // timeout real se conserva: sólo si TAMBIÉN falla el fallback → null.
+
+                // Un intento de /api/tts con AbortController propio (timeout aislado)
+                // enlazado al abortCtrl del task: honra cancelaciones externas
+                // (jump/resume/unmount) sin envenenar el controller para el reintento.
+                const attemptTts = async (text: string, timeoutMs: number, attemptLabel: string): Promise<Response> => {
+                    const attemptCtrl = new AbortController();
+                    const onParentAbort = () => attemptCtrl.abort(abortCtrl.signal.reason);
+                    if (abortCtrl.signal.aborted) {
+                        attemptCtrl.abort(abortCtrl.signal.reason);
+                    } else {
+                        abortCtrl.signal.addEventListener('abort', onParentAbort, { once: true });
+                    }
+                    const timer = setTimeout(
+                        () => attemptCtrl.abort(new DOMException(`TTS request exceeded ${timeoutMs / 1000}s timeout`, 'TimeoutError')),
+                        timeoutMs,
+                    );
+                    try {
+                        // eslint-disable-next-line no-console
+                        console.log('[AUDIO_TRACE] tts_fetch_start', {
+                            sentenceIndex: index, chars: text.length, forceSentenceTts, attempt: attemptLabel,
+                        });
+                        return await fetch('/api/tts', {
+                            method:  'POST',
+                            headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+                            body:    JSON.stringify({ text }),
+                            signal:  attemptCtrl.signal,
+                        });
+                    } finally {
+                        clearTimeout(timer);
+                        abortCtrl.signal.removeEventListener('abort', onParentAbort);
+                    }
+                };
+
+                // Valida una Response de /api/tts y devuelve un object URL (o null si no
+                // es audio real). No cachea ni lanza: el caller decide cache/fallback.
+                const materializeTts = async (res: Response, attemptLabel: string): Promise<string | null> => {
+                    const ct   = res.headers.get('content-type') ?? '';
+                    const prov = res.headers.get('x-audio-provider') ?? null;
                     // eslint-disable-next-line no-console
-                    console.log('[AUDIO_TRACE] tts_fetch_start', {
-                        sentenceIndex: index, chars: txt.length, forceSentenceTts,
+                    console.log('[AUDIO_TRACE] tts_fetch_response', {
+                        sentenceIndex: index, forceSentenceTts, attempt: attemptLabel,
+                        httpStatus: res.status, ok: res.ok, contentType: ct, providerHdr: prov,
                     });
-                    res = await fetch('/api/tts', {
-                        method:  'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
-                        body:    JSON.stringify({ text: txt }),
-                        signal:  abortCtrl.signal,
+                    if (!res.ok) {
+                        // eslint-disable-next-line no-console
+                        console.error('[AUDIO_TRACE] provider_fail', {
+                            provider: 'tts', contentId: _trCid, sentenceIndex: index,
+                            reason: 'http_' + res.status, contentType: ct, attempt: attemptLabel,
+                        });
+                        log('tts_fail', { index, httpStatus: res.status, attempt: attemptLabel });
+                        return null;
+                    }
+                    if (abortCtrl.signal.aborted || ctx.unmountedRef.current) return null;
+                    // Validar Content-Type — el backend puede devolver JSON de error con status 200
+                    if (!ct.startsWith('audio/')) {
+                        // eslint-disable-next-line no-console
+                        console.error('[AUDIO_TRACE] provider_fail', {
+                            provider: 'tts', contentId: _trCid, sentenceIndex: index,
+                            reason: 'wrong_content_type', contentType: ct, attempt: attemptLabel,
+                        });
+                        log('tts_fail', { index, reason: 'wrong_content_type', contentType: ct, attempt: attemptLabel });
+                        return null;
+                    }
+                    const blob = await res.blob();
+                    if (abortCtrl.signal.aborted || ctx.unmountedRef.current) return null;
+                    if (blob.size === 0) {
+                        // eslint-disable-next-line no-console
+                        console.error('[AUDIO_TRACE] provider_fail', {
+                            provider: 'tts', contentId: _trCid, sentenceIndex: index,
+                            reason: 'empty_tts_blob', contentType: ct, attempt: attemptLabel,
+                        });
+                        log('blob_invalid', { index, reason: 'empty_tts_blob', attempt: attemptLabel });
+                        return null;
+                    }
+                    return URL.createObjectURL(blob);
+                };
+
+                let url: string | null = null;
+                let recoveredViaFallback = false;
+                let fallbackChars = 0;
+
+                // Intento primario — frase completa, timeout real.
+                try {
+                    const resPrimary = await attemptTts(txt, TTS_PRIMARY_TIMEOUT_MS, 'primary');
+                    url = await materializeTts(resPrimary, 'primary');
+                } catch (ePrimary: any) {
+                    if (abortCtrl.signal.aborted) {
+                        // Cancelación externa (jump/resume/unmount): no reintentar.
+                        // eslint-disable-next-line no-console
+                        console.log('[AUDIO_TRACE] aborted', {
+                            sentenceIndex: index,
+                            reason: abortCtrl.signal.reason?.message ?? abortCtrl.signal.reason ?? 'aborted',
+                            attempt: 'primary',
+                        });
+                        return null;
+                    }
+                    // Timeout (u otro fallo recuperable) del intento primario → fallback.
+                    // eslint-disable-next-line no-console
+                    console.warn('[AUDIO_TRACE] tts_timeout_retry', {
+                        sentenceIndex: index, chunkKey, cacheKey: key,
+                        reason: ePrimary?.name, message: ePrimary?.message,
                     });
-                } finally {
-                    clearTimeout(ttsTimeout);
                 }
 
-                const _trCt    = res.headers.get('content-type') ?? '';
-                const _trProv  = res.headers.get('x-audio-provider') ?? null;
+                // Fallback — sólo si el primario no produjo audio y la carga sigue viva.
+                // Recorta a una unidad hablable corta para que el TTS responda dentro del
+                // timeout y el usuario escuche desde la frase inicial real.
+                if (!url && !abortCtrl.signal.aborted && !ctx.unmountedRef.current) {
+                    const shortText = firstSpeakableUnit(txt, TTS_FALLBACK_MAX_CHARS);
+                    fallbackChars = shortText.length;
+                    // eslint-disable-next-line no-console
+                    console.log('[AUDIO_TRACE] fallback_sentence_tts', {
+                        sentenceIndex: index, chunkKey, cacheKey: key, forceSentenceTts: true,
+                        reason: 'first_play_after_resume',
+                    });
+                    // eslint-disable-next-line no-console
+                    console.log('[AUDIO_TRACE] fallback_text_length', {
+                        sentenceIndex: index, originalLen: txt.length, fallbackLen: fallbackChars,
+                        maxChars: TTS_FALLBACK_MAX_CHARS, truncated: fallbackChars < txt.length,
+                    });
+                    if (shortText) {
+                        try {
+                            const resFallback = await attemptTts(shortText, TTS_FALLBACK_TIMEOUT_MS, 'fallback');
+                            url = await materializeTts(resFallback, 'fallback');
+                            if (url) recoveredViaFallback = true;
+                        } catch (eFallback: any) {
+                            if (!abortCtrl.signal.aborted) {
+                                // eslint-disable-next-line no-console
+                                console.error('[AUDIO_TRACE] provider_fail', {
+                                    provider: 'tts', contentId: _trCid, sentenceIndex: index,
+                                    reason: eFallback?.name, message: eFallback?.message, attempt: 'fallback',
+                                });
+                                log('tts_fail', { index, error: eFallback?.name, message: eFallback?.message, attempt: 'fallback' });
+                            }
+                        }
+                    }
+                }
+
                 // eslint-disable-next-line no-console
-                console.log('[AUDIO_TRACE] tts_fetch_response', {
-                    sentenceIndex: index,
-                    forceSentenceTts,
-                    httpStatus:    res.status,
-                    ok:            res.ok,
-                    contentType:   _trCt,
-                    providerHdr:   _trProv,
+                console.log('[AUDIO_TRACE] getAudioUrl_result', {
+                    sentenceIndex: index, chunkKey, cacheKey: key,
+                    urlPresent: !!url, recoveredViaFallback,
                 });
 
-                if (!res.ok) {
-                    // eslint-disable-next-line no-console
-                    console.error('[AUDIO_TRACE] provider_fail', {
-                        provider: 'tts', contentId: _trCid,
-                        sentenceIndex: index,
-                        reason: 'http_' + res.status, contentType: _trCt,
-                    });
-                    log('tts_fail', { index, httpStatus: res.status });
-                    return null;
-                }
-                if (abortCtrl.signal.aborted || ctx.unmountedRef.current) return null;
-
-                // Validar Content-Type — el backend puede devolver JSON de error con status 200
-                if (!_trCt.startsWith('audio/')) {
-                    // eslint-disable-next-line no-console
-                    console.error('[AUDIO_TRACE] provider_fail', {
-                        provider: 'tts', contentId: _trCid,
-                        sentenceIndex: index,
-                        reason: 'wrong_content_type', contentType: _trCt,
-                    });
-                    log('tts_fail', { index, reason: 'wrong_content_type', contentType: _trCt });
+                if (!url) return null;
+                if (abortCtrl.signal.aborted || ctx.unmountedRef.current) {
+                    URL.revokeObjectURL(url);
                     return null;
                 }
 
-                const blob = await res.blob();
-                if (abortCtrl.signal.aborted || ctx.unmountedRef.current) return null;
-
-                // Validar que el blob tiene contenido real
-                if (blob.size === 0) {
-                    // eslint-disable-next-line no-console
-                    console.error('[AUDIO_TRACE] provider_fail', {
-                        provider: 'tts', contentId: _trCid,
-                        sentenceIndex: index,
-                        reason: 'empty_tts_blob', contentType: _trCt,
-                    });
-                    log('blob_invalid', { index, reason: 'empty_tts_blob' });
-                    return null;
-                }
-
-                const url = URL.createObjectURL(blob);
+                // Cachear bajo `key` (la clave que getAudioUrl consulta a la entrada) para
+                // que re-llamadas hagan cache-hit y NO repitan el timeout primario.
                 audioCache.current.set(key, url);
                 cacheMetricsRef.current.created++;  // M-5.4 metric
+                if (recoveredViaFallback) {
+                    fallbackTtsKeysRef.current.add(key);
+                    // eslint-disable-next-line no-console
+                    console.log('[PB_AUDIO_RECOVERED]', {
+                        sentenceIndex: index, chunkKey, cacheKey: key,
+                        via: 'fallback_sentence_tts', chars: fallbackChars,
+                    });
+                }
                 // eslint-disable-next-line no-console
                 console.log('[AUDIO_TRACE] provider_result', {
                     provider: 'tts', contentId: _trCid,
                     sentenceIndex: index, chunkKey, cacheKey: key, forceSentenceTts,
-                    hasUrl: true, urlType: typeof url, blobSize: blob.size,
+                    hasUrl: true, urlType: typeof url, recoveredViaFallback,
                 });
                 // eslint-disable-next-line no-console
-                console.log('[CACHE_ENTRY_CREATED] created=' + cacheMetricsRef.current.created, { key, blobSize: blob.size, via: 'tts' });
+                console.log('[CACHE_ENTRY_CREATED] created=' + cacheMetricsRef.current.created, { key, via: recoveredViaFallback ? 'tts_fallback' : 'tts' });
                 return url;
 
             } catch (e: any) {
@@ -2934,6 +3057,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         cacheInvalidatedKeysRef.current.clear();
         audioFailedKeysRef.current.clear();   // F12: reset cross-content
         audioRetriedKeysRef.current.clear();  // F12: reset cross-content
+        fallbackTtsKeysRef.current.clear();   // HF3: reset cross-content
         hardResyncAttemptsRef.current = 0;    // F19/Cambio C: reset cap por sesión
         loadToken.current++;
         contentSessionRef.current++;          // F15: invalida callbacks tardíos del libro anterior
