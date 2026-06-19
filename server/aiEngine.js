@@ -36,7 +36,11 @@ export const AI_CONFIG = {
     },
     maxRetries: 2,
     timeoutMs: 15000,
-    maxChunksPerJob: 500
+    maxChunksPerJob: 500,
+    // HF4B-2 — ventana de enfriamiento del circuit-breaker por proveedor:tarea.
+    // Tras un 429/quota/auth en el primary, se omite ese primary durante esta
+    // ventana y se salta directo al fallback. Auto half-open por tiempo.
+    breakerCooldownMs: 300000
 };
 
 // Initialize clients lazily
@@ -74,6 +78,82 @@ export const generateHash = (text, language = 'es', voice = 'default', provider 
     
     return crypto.createHash('md5').update(payload).digest('hex');
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF4B-2 — Provider circuit-breaker
+//
+// Cuando OpenAI TTS devuelve 429/quota/rate-limit/auth, no tiene sentido volver
+// a intentarlo en cada MISS de /api/tts: se pierden 3–5s en un round-trip que ya
+// se sabe que fallará. El breaker recuerda ese estado por `${provider}:${taskType}`
+// (p. ej. `openai:tts`) durante una ventana de enfriamiento y hace que
+// runHybridTask omita ese primary y salte directo al fallback (Gemini).
+//
+// Características:
+//   - Estado EN MEMORIA, por proceso (api_1 y api_2 aprenden por separado).
+//   - Scoped por provider:taskType → NO afecta `openai:chat`, `openai:text_light`,
+//     ni `gemini:tts`.
+//   - Half-open por tiempo: al expirar `openUntil`, isBreakerOpen() vuelve false y
+//     el siguiente request reintenta el primary (un "probe"). Si tiene éxito,
+//     closeBreaker() lo cierra; si vuelve a fallar por cuota, se re-abre.
+//   - Puramente aditivo: con el breaker cerrado, runHybridTask se comporta igual
+//     que antes de HF4B-2.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Estado del breaker: key → { openUntil:number, reason:string, openedAt:number }. */
+const _breakers = new Map();
+
+/** Construye la clave canónica del breaker. */
+export const _breakerKey = (provider, taskType) => `${provider}:${taskType}`;
+
+/**
+ * Clasifica un error/mensaje como "cuota/auth/rate-limit" (debe abrir breaker).
+ * Reconoce 401/403/429/quota/rate limit. NO reconoce timeouts, "No audio data",
+ * ni resets de red genéricos.
+ */
+export const isQuotaError = (messageOrError) => {
+    const msg = (messageOrError && typeof messageOrError === 'object')
+        ? (messageOrError.message ?? '')
+        : String(messageOrError ?? '');
+    const low = msg.toLowerCase();
+    return low.includes('401') || low.includes('403') || low.includes('429') ||
+           low.includes('quota') || low.includes('rate limit');
+};
+
+/** ¿El breaker para provider:taskType está abierto en este instante? */
+export const isBreakerOpen = (provider, taskType, now = Date.now()) => {
+    const entry = _breakers.get(_breakerKey(provider, taskType));
+    if (!entry) return false;
+    // Half-open por tiempo: ventana expirada → se considera cerrado (permite probe).
+    return entry.openUntil > now;
+};
+
+/** Abre (o renueva) el breaker para provider:taskType durante breakerCooldownMs. */
+export const tripBreaker = (provider, taskType, reason, now = Date.now()) => {
+    _breakers.set(_breakerKey(provider, taskType), {
+        openUntil: now + AI_CONFIG.breakerCooldownMs,
+        reason:    reason ?? 'unknown',
+        openedAt:  now,
+    });
+};
+
+/** Cierra el breaker para provider:taskType. Devuelve true si había uno registrado. */
+export const closeBreaker = (provider, taskType) => _breakers.delete(_breakerKey(provider, taskType));
+
+/** Snapshot del estado de todos los breakers (para observabilidad/health futuro). */
+export const getBreakerState = (now = Date.now()) =>
+    Array.from(_breakers.entries()).map(([key, e]) => {
+        const [provider, taskType] = key.split(':');
+        return {
+            key, provider, taskType,
+            open:     e.openUntil > now,
+            until:    new Date(e.openUntil).toISOString(),
+            reason:   e.reason,
+            openedAt: new Date(e.openedAt).toISOString(),
+        };
+    });
+
+/** Limpia todo el estado del breaker. SOLO para tests. */
+export const _resetBreakers = () => _breakers.clear();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // M-4.3.2 — PCM → WAV wrap (surgical fix audio_contract_failed)
@@ -290,31 +370,52 @@ export const runHybridTask = async (taskType, payload) => {
     // ── PRIMARY ────────────────────────────────────────────────────────────────
     let primaryError = null;
     let attempts = 0;
-    while (attempts < AI_CONFIG.maxRetries) {
-        try {
-            log(`[AI] PRIMARY task=${taskType} provider=${primaryOption.provider} model=${primaryOption.model}`);
-            const result = await executeWithProvider(primaryOption.provider, primaryOption.model, taskType, payload);
-            log(`[AI] PRIMARY success provider=${primaryOption.provider}`);
-            return result;
-        } catch (error) {
-            attempts++;
-            primaryError = error;
-            const msg = error.message ?? '';
-            log(`[AI] PRIMARY failed attempt=${attempts} error="${msg}"`);
+    // HF4B-2 — si el breaker de este primary está abierto, omitir el loop PRIMARY
+    // y saltar directo al FALLBACK (evita el probe de 3–5s a un proveedor degradado).
+    if (isBreakerOpen(primaryOption.provider, taskType)) {
+        const entry = _breakers.get(_breakerKey(primaryOption.provider, taskType));
+        log(`[AI] BREAKER skip-primary provider=${primaryOption.provider} task=${taskType} until=${new Date(entry.openUntil).toISOString()}`);
+        primaryError = new Error(`breaker_open (${entry.reason})`);
+    } else {
+        while (attempts < AI_CONFIG.maxRetries) {
+            try {
+                log(`[AI] PRIMARY task=${taskType} provider=${primaryOption.provider} model=${primaryOption.model}`);
+                const result = await executeWithProvider(primaryOption.provider, primaryOption.model, taskType, payload);
+                log(`[AI] PRIMARY success provider=${primaryOption.provider}`);
+                // HF4B-2 — éxito del primary → cerrar breaker si estaba registrado.
+                if (closeBreaker(primaryOption.provider, taskType)) {
+                    log(`[AI] BREAKER closed provider=${primaryOption.provider} task=${taskType}`);
+                }
+                return result;
+            } catch (error) {
+                attempts++;
+                primaryError = error;
+                const msg = error.message ?? '';
+                log(`[AI] PRIMARY failed attempt=${attempts} error="${msg}"`);
 
-            // No reintentar si la key no existe — el problema es de configuración
-            if (msg.includes('missing')) break;
+                // No reintentar si la key no existe — el problema es de configuración
+                if (msg.includes('missing')) break;
 
-            // No reintentar en errores definitivos de auth / quota
-            const low = msg.toLowerCase();
-            if (low.includes('401') || low.includes('403') || low.includes('429') ||
-                low.includes('quota') || low.includes('rate limit')) {
-                log(`[AI] PRIMARY abort — auth/quota error, no retry`);
-                break;
+                // No reintentar en errores definitivos de auth / quota
+                if (isQuotaError(msg)) {
+                    log(`[AI] PRIMARY abort — auth/quota error, no retry`);
+                    // HF4B-2 — abrir breaker para omitir este primary durante la ventana.
+                    const low = msg.toLowerCase();
+                    const reason = low.includes('429') ? '429'
+                        : low.includes('quota') ? 'quota'
+                        : low.includes('rate limit') ? 'rate_limit'
+                        : low.includes('403') ? '403'
+                        : low.includes('401') ? '401'
+                        : 'auth';
+                    tripBreaker(primaryOption.provider, taskType, reason);
+                    const entry = _breakers.get(_breakerKey(primaryOption.provider, taskType));
+                    log(`[AI] BREAKER open provider=${primaryOption.provider} task=${taskType} reason=${reason} cooldownMs=${AI_CONFIG.breakerCooldownMs} until=${new Date(entry.openUntil).toISOString()}`);
+                    break;
+                }
+
+                if (attempts >= AI_CONFIG.maxRetries) break;
+                await new Promise(r => setTimeout(r, 1000 * attempts));
             }
-
-            if (attempts >= AI_CONFIG.maxRetries) break;
-            await new Promise(r => setTimeout(r, 1000 * attempts));
         }
     }
 
