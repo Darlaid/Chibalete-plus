@@ -176,6 +176,7 @@ import { generateAudioForContent } from './ttsService.js';
 import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
+import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 
 // --- LOGGING HELPER ---
 const log = (msg, type = 'INFO') => {
@@ -6174,8 +6175,11 @@ app.post('/api/tts', requireUserAuth, ttsUserLimiter, async (req, res) => {
     await _ttsSemaphore.acquire();
     try {
         log(`[TTS] on-demand request userId=${userId} chars=${trimmed.length} active=${_ttsSemaphore.activeCount}`);
-        const result = await runHybridTask('tts', { text: trimmed, voice: 'alloy' });
-        recordTtsUsage(userId, trimmed.length, 'tts');
+        // HF4B-1 — cache persistente en disco antes de tocar cualquier provider.
+        // Contrato binario INTACTO: devuelve los bytes de audio, no una URL.
+        const result = await getOrGenerateImmersiveAudio(trimmed);
+        // Solo contabilizar generaciones reales (cache miss), igual que /api/album/tts.
+        if (!result.cached) recordTtsUsage(userId, trimmed.length, 'tts');
 
         // M-4.3.2 — usar el mimeType honesto que devolvió el engine:
         //   OpenAI → 'audio/mpeg' (MP3 real)
@@ -6188,7 +6192,8 @@ app.post('/api/tts', requireUserAuth, ttsUserLimiter, async (req, res) => {
         res.set('Content-Type', audioMime);
         res.set('Cache-Control', 'public, max-age=3600'); // 1h — mismo texto = mismo audio
         res.set('X-Audio-Provider', result.provider);    // 'openai' | 'gemini' — para normalización de volumen en frontend
-        res.send(result.data);
+        res.set('X-TTS-Cache', result.cached ? 'HIT' : 'MISS'); // HF4B-1 — diagnóstico no disruptivo
+        res.send(result.buffer);
     } catch (err) {
         log(`[TTS] on-demand error userId=${userId}: ${err.message}`, 'ERROR');
         // 503 — el cliente debe degradar a texto sin audio, no bloquear
