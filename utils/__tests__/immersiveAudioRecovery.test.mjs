@@ -22,6 +22,7 @@ import {
     canRetryAfterFailure,
     RECOVERABLE_REASONS,
     PERSISTENT_REASONS,
+    evaluateRecoveryCoherence,
 } from '../immersiveAudioRecovery.mjs';
 
 let pass = 0;
@@ -102,6 +103,68 @@ for (let i = 0; i < 5; i++) {
     if (canRetryAfterFailure('NotSupportedError', true) !== false) { loopGuardHolds = false; break; }
 }
 ok('persistente agotado: canRetryAfterFailure estable en false (no loop)', loopGuardHolds);
+
+// ───────────────────────────────────────────────────────────────────────────
+// 5. HF4A-R2 — evaluateRecoveryCoherence (regla rectora de triple coherencia)
+//    Estos casos modelan, a nivel de decisión PURA, los escenarios de race que
+//    el deploy fallido de HF4A no contemplaba.
+// ───────────────────────────────────────────────────────────────────────────
+console.log('\n[5] evaluateRecoveryCoherence — triple coherencia (token/índice/completion)');
+
+// Caso positivo: todo coherente → ok, reason 'coherent'. (HIT 200 sobre la
+// frase activa, generación vigente, sesión no completada → recuperar.)
+{
+    const r = evaluateRecoveryCoherence({
+        requestedIndex: 12, currentIndex: 12, token: 5, currentToken: 5, sessionCompleted: false,
+    });
+    ok('coherente (idx=idx, token=token, !completed) → ok', r.ok === true, JSON.stringify(r));
+    ok('coherente → reason "coherent"', r.reason === 'coherent');
+}
+
+// Caso 1 — navegación manual durante getAudioUrl pendiente: el índice se movió.
+{
+    const r = evaluateRecoveryCoherence({
+        requestedIndex: 12, currentIndex: 18, token: 5, currentToken: 5, sessionCompleted: false,
+    });
+    ok('índice movido (12→18) → NO ok', r.ok === false);
+    ok('índice movido → reason "index_moved"', r.reason === 'index_moved');
+}
+
+// Caso 2 — same-chunk: el token NO cambió (manualSentenceJump same-chunk no
+// bumpea loadToken) pero el índice SÍ. La triple coherencia lo detecta igual.
+{
+    const r = evaluateRecoveryCoherence({
+        requestedIndex: 12, currentIndex: 13, token: 7, currentToken: 7, sessionCompleted: false,
+    });
+    ok('same-chunk: token igual pero índice movido → NO ok (cubre hueco)', r.ok === false);
+    ok('same-chunk: reason "index_moved" pese a token vigente', r.reason === 'index_moved');
+}
+
+// Token stale — una carga más nueva invalidó la actual.
+{
+    const r = evaluateRecoveryCoherence({
+        requestedIndex: 12, currentIndex: 12, token: 5, currentToken: 6, sessionCompleted: false,
+    });
+    ok('token stale (5≠6) → NO ok', r.ok === false);
+    ok('token stale → reason "stale_token" (precede a índice/completion)', r.reason === 'stale_token');
+}
+
+// Caso 4 — completion: misma frase y token, pero la sesión ya terminó.
+{
+    const r = evaluateRecoveryCoherence({
+        requestedIndex: 12, currentIndex: 12, token: 5, currentToken: 5, sessionCompleted: true,
+    });
+    ok('sesión completada → NO ok', r.ok === false);
+    ok('sesión completada → reason "session_completed"', r.reason === 'session_completed');
+}
+
+// Orden de precedencia: token > índice > completion (todos rotos → gana token).
+{
+    const r = evaluateRecoveryCoherence({
+        requestedIndex: 12, currentIndex: 99, token: 1, currentToken: 2, sessionCompleted: true,
+    });
+    ok('precedencia: todo roto → reason "stale_token" (chequeo más barato primero)', r.reason === 'stale_token');
+}
 
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 if (fail > 0) process.exit(1);

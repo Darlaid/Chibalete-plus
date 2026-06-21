@@ -46,7 +46,7 @@ console.log('\n[0] helper + refs');
 
 ok('helper immersiveAudioRecovery.mjs existe', fs.existsSync(helperPath));
 ok('hook importa classifyAudioFailure + shouldClearFailure desde el helper .mjs',
-   /import\s*\{[\s\S]{0,160}?classifyAudioFailure[\s\S]{0,80}?shouldClearFailure[\s\S]{0,80}?\}\s*from\s*['"]\.\.\/utils\/immersiveAudioRecovery\.mjs['"]/.test(hookSrc));
+   /import\s*\{[\s\S]{0,160}?classifyAudioFailure[\s\S]{0,80}?shouldClearFailure[\s\S]{0,320}?\}\s*from\s*['"]\.\.\/utils\/immersiveAudioRecovery\.mjs['"]/.test(hookSrc));
 ok('declara audioFailureReasonsRef = useRef(new Map)',
    /audioFailureReasonsRef\s*=\s*useRef\s*\(\s*new\s+Map/.test(hookSrc));
 
@@ -178,6 +178,68 @@ ok('visor invoca pb.retryAudio() en error',
    /pb\.retryAudio\s*\(\s*\)/.test(visorSrc));
 ok('visor muestra "Preparando audio…" en loading',
    /Preparando audio/.test(visorSrc));
+
+// ───────────────────────────────────────────────────────────────────────────
+// 7. HF4A-R2 — triple coherencia (token/índice/completion) contra el race
+// ───────────────────────────────────────────────────────────────────────────
+console.log('\n[7] HF4A-R2 — guards de triple coherencia + descarte de tardíos');
+
+// Helper puro importado y usado por el hook (no simulación).
+ok('hook importa evaluateRecoveryCoherence del helper',
+   /import\s*\{[\s\S]{0,260}?evaluateRecoveryCoherence[\s\S]{0,80}?\}\s*from\s*['"]\.\.\/utils\/immersiveAudioRecovery\.mjs['"]/.test(hookSrc));
+ok('helper exporta evaluateRecoveryCoherence',
+   /export\s+function\s+evaluateRecoveryCoherence/.test(fs.readFileSync(helperPath, 'utf8')));
+
+// Eje completion: ref declarado + seteado en completion + reseteado en intención real.
+ok('declara sessionCompletedRef = useRef(false)',
+   /sessionCompletedRef\s*=\s*useRef\s*\(\s*false\s*\)/.test(hookSrc));
+ok('completion (session_completed) marca sessionCompletedRef = true',
+   /sessionCompletedRef\.current\s*=\s*true[\s\S]{0,400}?log\('session_completed'/.test(hookSrc));
+ok('load() resetea sessionCompletedRef = false (re-engagement / leer de nuevo)',
+   /=\s*\+\+loadToken\.current[\s\S]{0,900}?sessionCompletedRef\.current\s*=\s*false/.test(hookSrc));
+ok('manualSentenceJump resetea sessionCompletedRef = false (cubre same-chunk sin load)',
+   /manualSentenceJump\s*=\s*useCallback[\s\S]{0,2000}?sessionCompletedRef\.current\s*=\s*false/.test(hookSrc));
+ok('reset() limpia sessionCompletedRef (cross-content)',
+   /const\s+reset\s*=\s*useCallback[\s\S]{0,3600}?sessionCompletedRef\.current\s*=\s*false/.test(hookSrc));
+
+// Guard post-getAudioUrl: evalúa coherencia y descarta con PB_AUDIO_STALE_RESULT_DROPPED.
+ok('load() evalúa evaluateRecoveryCoherence tras getAudioUrl',
+   /const\s+url\s*=\s*await\s+getAudioUrl\(index[\s\S]{0,1500}?evaluateRecoveryCoherence\s*\(/.test(hookSrc));
+const staleDrops = hookSrc.match(/PB_AUDIO_STALE_RESULT_DROPPED/g) ?? [];
+ok('load() emite PB_AUDIO_STALE_RESULT_DROPPED en >=2 sitios (post_getAudioUrl + pre_spawn)',
+   staleDrops.length >= 2, `sitios=${staleDrops.length}`);
+ok('el drop registra reason del helper (index_moved/session_completed/stale_token)',
+   /event:\s*'PB_AUDIO_STALE_RESULT_DROPPED'[\s\S]{0,300}?reason:\s*_coh/.test(hookSrc));
+
+// ORDEN CRÍTICO: la coherencia se evalúa ANTES del manejo de !url y ANTES del
+// clear/spawn — para no contaminar estado de una frase abandonada. Se usan
+// literales únicos (robustos a espaciado).
+const idxCohPost   = hookSrc.indexOf("'post_getAudioUrl'");
+const idxNoUrl     = hookSrc.indexOf("'no_url_after_getAudioUrl'");
+const idxPreSpawn  = hookSrc.indexOf("'pre_spawn'");
+const idxClearR2   = hookSrc.indexOf("clearRecoverableFailure(index, 'valid_url')");
+ok('coherencia post-getAudioUrl precede al manejo de !url',
+   idxCohPost > 0 && idxNoUrl > 0 && idxCohPost < idxNoUrl, `coh@${idxCohPost} noUrl@${idxNoUrl}`);
+ok('revalidación pre-spawn precede al clear-on-valid-url',
+   idxPreSpawn > 0 && idxClearR2 > 0 && idxPreSpawn < idxClearR2,
+   `preSpawn@${idxPreSpawn} clear@${idxClearR2}`);
+
+// retryAudio: guard estricto de contexto + skip log.
+const retryBody2 = hookSrc.match(/const\s+retryAudio\s*=\s*useCallback[\s\S]+?\},\s*\[load\]\s*\)/);
+if (retryBody2) {
+    const rb = retryBody2[0];
+    ok('retryAudio: no-op si status !== error o sesión completada',
+       /statusRef\.current\s*!==\s*'error'\s*\|\|\s*sessionCompletedRef\.current/.test(rb));
+    ok('retryAudio: emite PB_AUDIO_RETRY_SKIPPED_STALE_CONTEXT al descartar',
+       /PB_AUDIO_RETRY_SKIPPED_STALE_CONTEXT/.test(rb));
+    // El guard debe estar ANTES de la limpieza del fallo y del load().
+    ok('retryAudio: guard de contexto precede al delete/load',
+       rb.indexOf('PB_AUDIO_RETRY_SKIPPED_STALE_CONTEXT') < rb.indexOf('audioFailedKeysRef.current.delete'));
+}
+
+// ensurePlayableAudio: el clear queda condicionado a índice vigente + no completed.
+ok('ensurePlayableAudio condiciona el clear a índice vigente y sesión no completada',
+   /index\s*===\s*currentIdxRef\.current\s*&&\s*!sessionCompletedRef\.current[\s\S]{0,120}?clearRecoverableFailure\s*\(\s*index\s*,\s*['"]valid_url['"]\s*\)/.test(hookSrc));
 
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 if (fail > 0) process.exit(1);

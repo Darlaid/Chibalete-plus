@@ -45,6 +45,8 @@ import { decideChunkTransition } from '../utils/gaplessChunkGuard.mjs';
 import {
     classifyAudioFailure,
     shouldClearFailure,
+    // HF4A-R2 — regla rectora de triple coherencia (token/índice/completion).
+    evaluateRecoveryCoherence,
 } from '../utils/immersiveAudioRecovery.mjs';
 import { uploadsUrl } from '../utils/mediaBaseUrl';
 // F3 — state machine como gobierno observacional del runtime. La machine
@@ -606,6 +608,14 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
 
     // ── Cancellation token — previene ejecución de loads obsoletos ───────────
     const loadToken      = useRef(0);
+
+    // HF4A-R2 — sesión completada (overlay "Lectura Completada"). Tercer eje de
+    // la triple coherencia: ningún resultado tardío de getAudioUrl ni reintento
+    // puede spawnear audio, limpiar fallo, avanzar o cambiar status si la sesión
+    // ya terminó. Se pone true en handleEnded (fin de contenido) y se resetea a
+    // false cuando hay intención REAL de leer: arranque de load() y navegación
+    // manual (re-engagement). reset() también lo limpia (cross-content).
+    const sessionCompletedRef = useRef(false);
 
     // ── Índice activo — ref para closures async, state para el visor ────────
     // setIdx() es el único punto de escritura — actualiza ref + state + callback.
@@ -2232,6 +2242,15 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         const token = ++loadToken.current;
         setStatus('loading');
 
+        // HF4A-R2 — intención REAL de leer: una nueva invocación de load() sale
+        // del estado "completado". Esto SOLO afecta a invocaciones nuevas: un
+        // load() stale ya ejecutó su prólogo en el pasado y NO vuelve a correr
+        // esta línea; si la sesión se completa durante su await, el guard
+        // post-getAudioUrl lo descartará igual. Permite que el "leer de nuevo"
+        // del overlay (pb.load) reactive la lectura, sin reabrir resultados
+        // tardíos.
+        sessionCompletedRef.current = false;
+
         // M-5.4.6 (Case 1) — VISUAL_INDEX_COMMITTED inmediato. El render NO
         // puede esperar a getAudioUrl. Antes: setIdx(index) corría DESPUÉS del
         // fetch TTS, lo que generaba black screen en restore (currentIndex
@@ -2292,6 +2311,39 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             return;
         }
 
+        // ── HF4A-R2 — TRIPLE COHERENCIA (post-getAudioUrl) ───────────────────
+        // El await de getAudioUrl pudo tardar (primer TTS lento). Antes de
+        // limpiar fallo, marcar, cambiar status, set src o reproducir, exigimos
+        // que el resultado tardío SIGA correspondiendo a la frase visual activa,
+        // a la generación vigente y a una sesión NO completada. Esto cierra el
+        // hueco same-chunk de manualSentenceJump: ese path mueve currentIdxRef
+        // (setIdx) SIN incrementar loadToken, por lo que el chequeo de token no
+        // basta — pero `index !== currentIdxRef.current` SÍ lo detecta. Si la
+        // sesión se completó durante el await, también descartamos. Se chequea
+        // ANTES del manejo de `!url` para no contaminar estado de una frase que
+        // el usuario ya abandonó.
+        const _coh = evaluateRecoveryCoherence({
+            requestedIndex:   index,
+            currentIndex:     currentIdxRef.current,
+            token,
+            currentToken:     loadToken.current,
+            sessionCompleted: sessionCompletedRef.current,
+        });
+        if (!_coh.ok) {
+            log('autoplay_blocked' as any, {
+                event:           'PB_AUDIO_STALE_RESULT_DROPPED',
+                index,
+                currentIndex:    currentIdxRef.current,
+                visualIndex:     currentIdxRef.current,
+                token,
+                loadToken:       loadToken.current,
+                sessionCompleted: sessionCompletedRef.current,
+                reason:          _coh.reason,
+                where:           'post_getAudioUrl',
+            });
+            return;
+        }
+
         const pActive  = activePlayer.current === 'A' ? audioRefA.current : audioRefB.current;
         const pStandby = activePlayer.current === 'A' ? audioRefB.current : audioRefA.current;
         if (!pActive || !pStandby) return;
@@ -2309,6 +2361,32 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             return;
         }
 
+        // ── HF4A-R2 — REVALIDACIÓN PRE-SPAWN (defensa en profundidad) ────────
+        // Aunque ya validamos tras getAudioUrl y no hay await intermedio, se
+        // revalida inmediatamente antes de limpiar/asignar src/reproducir. Barato
+        // y a prueba de futuros refactors que introduzcan asincronía aquí.
+        const _coh2 = evaluateRecoveryCoherence({
+            requestedIndex:   index,
+            currentIndex:     currentIdxRef.current,
+            token,
+            currentToken:     loadToken.current,
+            sessionCompleted: sessionCompletedRef.current,
+        });
+        if (!_coh2.ok) {
+            log('autoplay_blocked' as any, {
+                event:            'PB_AUDIO_STALE_RESULT_DROPPED',
+                index,
+                currentIndex:     currentIdxRef.current,
+                visualIndex:      currentIdxRef.current,
+                token,
+                loadToken:        loadToken.current,
+                sessionCompleted: sessionCompletedRef.current,
+                reason:           _coh2.reason,
+                where:            'pre_spawn',
+            });
+            return;
+        }
+
         // HF4A — CLEAR-ON-VALID-URL (fix central). Obtuvimos una URL válida
         // para `index`. Si ese índice había quedado marcado como fallido por un
         // motivo RECUPERABLE (no_url/timeout/abort — típicamente el primer TTS
@@ -2316,6 +2394,8 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         // pre_play_check para que NO se emita PB_AUDIO_UNRECOVERABLE sobre una
         // frase que ya tiene audio reproducible. Fallos persistentes
         // (NotSupportedError) NO se limpian acá — los protege audioRetriedKeysRef.
+        // HF4A-R2: la triple coherencia (arriba) garantiza que `index` es la
+        // frase visual vigente, así que el clear nunca afecta a otra frase.
         clearRecoverableFailure(index, 'valid_url');
 
         pActive.src          = url;
@@ -2706,6 +2786,11 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         if (nextIdx >= sentences.length) {
             // F3: cerrar la frase actual en la machine antes del fin de sesión.
             dispatchMachine({ type: MA.SENTENCE_COMPLETED, index: currentIdx });
+            // HF4A-R2 — marcar sesión completada ANTES de notificar fin: a partir
+            // de aquí, cualquier resultado tardío de getAudioUrl, autoadvance o
+            // retry queda descartado por la triple coherencia (eje completion).
+            // Se resetea solo con intención real de leer (load()/manualSentenceJump).
+            sessionCompletedRef.current = true;
             setStatus('paused');
             ctx.onPlayChange.current(false);
             ctx.onSessionEnd.current();
@@ -3178,6 +3263,8 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         // HF4A: reset cross-content del registro de motivos. Post-idle a
         // propósito (no altera la ventana textual que validan tests de reset).
         audioFailureReasonsRef.current.clear();
+        // HF4A-R2: nuevo contenido nunca arranca "completado".
+        sessionCompletedRef.current = false;
     }, []);
 
     // INV-14: getter para que el visor pueda bloquear PROGRESS_SAVE cuando hay
@@ -3488,6 +3575,13 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             return;
         }
 
+        // HF4A-R2 — navegar manualmente es re-engagement: la sesión deja de estar
+        // "completada". Se hace ANTES de bifurcar same-chunk vs cross-chunk para
+        // cubrir AMBOS paths (el same-chunk no llama load(), así que necesita su
+        // propio reset). Cualquier load() pendiente de un índice anterior será
+        // descartado por la triple coherencia (index_moved) tras setIdx(clamped).
+        sessionCompletedRef.current = false;
+
         // ── M-5.4.10 / TASK 3 — MANUAL NAV STRICT MODE ──────────────────────
         // El target ya es estricto: el visor pasa currentIndex ± 1; el clamp
         // solo limita los bordes [0, total-1]. Sin heurísticas, sin
@@ -3728,7 +3822,22 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         }
         // HF4A — URL válida: limpiar cualquier marca de fallo recuperable
         // previa de este índice antes de reportar ready.
-        clearRecoverableFailure(index, 'valid_url');
+        // HF4A-R2 — pero SOLO si seguimos en la frase visual vigente y la sesión
+        // no se completó durante el await. Si el visual cambió (el usuario navegó
+        // mientras getAudioUrl estaba pendiente), NO mutamos estado de una frase
+        // abandonada: la query sigue reportando ok (el audio existe) sin limpiar.
+        if (index === currentIdxRef.current && !sessionCompletedRef.current) {
+            clearRecoverableFailure(index, 'valid_url');
+        } else {
+            log('autoplay_blocked' as any, {
+                event:            'PB_AUDIO_STALE_RESULT_DROPPED',
+                index,
+                currentIndex:     currentIdxRef.current,
+                sessionCompleted: sessionCompletedRef.current,
+                reason:           index !== currentIdxRef.current ? 'index_moved' : 'session_completed',
+                where:            'ensurePlayableAudio_clear',
+            });
+        }
         log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY', index, source: wasCached ? 'cache' : 'tts' });
         return { ok: true, source: wasCached ? 'cache' : 'tts' };
     }, [getAudioUrl]);
@@ -3742,6 +3851,26 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     // auto-retry: este método sólo corre por gesto del usuario, sin loop.
     const retryAudio = useCallback((): void => {
         const index = currentIdxRef.current;
+        // ── HF4A-R2 — GUARD ESTRICTO DE CONTEXTO ─────────────────────────────
+        // El botón "Reintentar" sólo puede actuar sobre la frase visual vigente
+        // y en un estado recuperable. NO reintentar si:
+        //   - status no es 'error' (manual nav lo deja en 'paused'/'loading', y
+        //     un drop stale nunca lo deja en 'error' para un índice movido →
+        //     status==='error' garantiza que el error pertenece a `index`);
+        //   - la sesión está completada (overlay "Lectura Completada" activo).
+        // Como `index` se lee de currentIdxRef.current, idx===current es trivial;
+        // el chequeo real es status + completion. Esto evita spawnear audio de un
+        // índice obsoleto y que el retry reactive una sesión ya terminada.
+        if (statusRef.current !== 'error' || sessionCompletedRef.current) {
+            log('autoplay_blocked' as any, {
+                event:            'PB_AUDIO_RETRY_SKIPPED_STALE_CONTEXT',
+                index,
+                currentIndex:     currentIdxRef.current,
+                status:           statusRef.current,
+                sessionCompleted: sessionCompletedRef.current,
+            });
+            return;
+        }
         const key   = toChunkKey(index);
         const reason = audioFailureReasonsRef.current.get(key) ?? 'no_url';
         // Limpia el fallo recuperable del índice actual (no global).
@@ -3750,7 +3879,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             audioFailureReasonsRef.current.delete(key);
         }
         log('autoplay_blocked' as any, { event: 'PB_AUDIO_RETRY_MANUAL', index, reason });
-        // Vuelve al flujo normal de carga con reproducción.
+        // Vuelve al flujo normal de carga con reproducción. load() revalida la
+        // triple coherencia tras getAudioUrl y antes del spawn, así que aunque el
+        // contexto cambie durante su await, no reproducirá un índice obsoleto.
         void load(index, true, { reason: 'manual_retry' });
     }, [load]);
 

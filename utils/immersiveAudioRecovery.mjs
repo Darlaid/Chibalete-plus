@@ -137,3 +137,51 @@ export function canRetryAfterFailure(reason, alreadyRetried) {
     }
     return true;
 }
+
+/**
+ * @typedef {Object} RecoveryCoherence
+ * @property {boolean} ok
+ * @property {'coherent'|'stale_token'|'index_moved'|'session_completed'} reason
+ */
+
+/**
+ * HF4A-R2 — REGLA RECTORA DE TRIPLE COHERENCIA.
+ *
+ * Un resultado tardío de getAudioUrl (o un reintento manual) SÓLO puede
+ * limpiar el fallo, cambiar status, reproducir, avanzar o spawnear audio si las
+ * TRES condiciones se cumplen en el momento exacto de actuar:
+ *
+ *   1. token/generación vigente   — la carga no fue invalidada por otra más nueva;
+ *   2. índice solicitado === índice visual/current vigente — el usuario no navegó
+ *      a otra frase mientras la petición estaba pendiente (cubre el hueco
+ *      same-chunk de manualSentenceJump, que mueve currentIdxRef vía setIdx pero
+ *      no incrementa loadToken);
+ *   3. sesión NO completada — el overlay "Lectura Completada" no está activo.
+ *
+ * Decisión PURA para ser unit-testeable: el hook pasa sus refs como números/
+ * booleanos y actúa según `ok`. El `reason` permite logs precisos
+ * (PB_AUDIO_STALE_RESULT_DROPPED / PB_AUDIO_RETRY_SKIPPED_STALE_CONTEXT).
+ *
+ * El orden de chequeo es deliberado: token (lo más barato y frecuente) →
+ * índice → completion.
+ *
+ * @param {Object} p
+ * @param {number} p.requestedIndex  índice que la operación pretende reproducir/limpiar.
+ * @param {number} p.currentIndex    currentIdxRef.current al momento de actuar.
+ * @param {number} p.token           token capturado por la operación.
+ * @param {number} p.currentToken    loadToken.current al momento de actuar.
+ * @param {boolean} p.sessionCompleted  ¿la sesión llegó a "Lectura Completada"?
+ * @returns {RecoveryCoherence}
+ */
+export function evaluateRecoveryCoherence({
+    requestedIndex,
+    currentIndex,
+    token,
+    currentToken,
+    sessionCompleted,
+}) {
+    if (token !== currentToken)        return { ok: false, reason: 'stale_token' };
+    if (requestedIndex !== currentIndex) return { ok: false, reason: 'index_moved' };
+    if (sessionCompleted === true)     return { ok: false, reason: 'session_completed' };
+    return { ok: true, reason: 'coherent' };
+}
