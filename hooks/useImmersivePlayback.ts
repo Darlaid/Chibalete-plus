@@ -39,6 +39,13 @@ import { executeSyncStrategy } from '../utils/syncStrategyExecutor.mjs';
 // BLOCKER FINAL V2 / TASK 2 — decisión pura del invariante de transición de
 // chunk. El hook USA esta misma función que los tests ejercen (no simulación).
 import { decideChunkTransition } from '../utils/gaplessChunkGuard.mjs';
+// HF4A — clasificación pura recuperable/persistente + regla clear-on-valid-url.
+// El hook USA estas funciones; los tests (utils/__tests__/immersiveAudioRecovery
+// .test.mjs) ejercen el mismo código de decisión, no una simulación.
+import {
+    classifyAudioFailure,
+    shouldClearFailure,
+} from '../utils/immersiveAudioRecovery.mjs';
 import { uploadsUrl } from '../utils/mediaBaseUrl';
 // F3 — state machine como gobierno observacional del runtime. La machine
 // recibe acciones reales (PREPARE_SENTENCE, AUDIO_STARTED, AUDIO_ENDED,
@@ -330,6 +337,14 @@ export interface ImmersivePlayback {
      * Útil para que el visor o tests puedan consultar sin disparar play.
      */
     ensurePlayableAudio: (index: number) => Promise<{ ok: boolean; reason?: string; source?: 'cache' | 'tts' }>;
+    /**
+     * HF4A: reintento manual de audio para la frase ACTIVA. Limpia sólo el
+     * fallo RECUPERABLE del índice actual (no estados globales, no fallos
+     * persistentes) y re-invoca load() con autoPlay. Pensado para el botón
+     * "Reintentar" del visor cuando el status quedó en 'error'. Emite
+     * PB_AUDIO_RETRY_MANUAL. Sin auto-retry: sólo corre por gesto del usuario.
+     */
+    retryAudio: () => void;
     /**
      * F16: snapshot de diagnóstico universal cuando un play no inicia audio.
      * El visor lo dispara en setTimeout(1500ms) tras togglePlay si no llegó
@@ -646,6 +661,11 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     //   el mismo blob roto.
     const audioFailedKeysRef  = useRef(new Set<number>());
     const audioRetriedKeysRef = useRef(new Set<number>());
+    // HF4A: motivo del fallo registrado por cacheKey. Permite que
+    // clear-on-valid-url distinga recuperable ('no_url'/timeout) de persistente
+    // ('NotSupportedError') sin limpiar ciegamente blobs corruptos. Single
+    // source para shouldClearFailure(reason, hasValidUrl). Se limpia en reset().
+    const audioFailureReasonsRef = useRef(new Map<number, string>());
     // HF3: keys cuyo audio se obtuvo vía fallback de unidad corta (primer TTS
     //   lento/grande). Marca trazable; el url queda cacheado bajo `key` para que
     //   re-llamadas hagan cache-hit en lugar de repetir el timeout primario.
@@ -1338,6 +1358,32 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         return map.length > 0 ? (map[si] ?? si) : si;
     };
 
+    // ── HF4A — recovery de fallos de audio ───────────────────────────────────
+    // markAudioFailed: registra fallo + su motivo (recuperable vs persistente).
+    //   Único punto que escribe audioFailedKeysRef para que el motivo SIEMPRE
+    //   quede registrado y clear-on-valid-url pueda clasificar.
+    const markAudioFailed = (index: number, reason: string): void => {
+        const key = toChunkKey(index);
+        audioFailedKeysRef.current.add(key);
+        audioFailureReasonsRef.current.set(key, reason);
+    };
+
+    // clearRecoverableFailure: limpia la marca de fallo de un índice SOLO si el
+    //   fallo previo era recuperable (no_url/timeout/abort) — i.e. ahora hay una
+    //   URL válida y el blob no era de decode. NO limpia fallos persistentes
+    //   (NotSupportedError) para no loopear sobre blob corrupto: ahí manda la
+    //   protección de audioRetriedKeysRef. Devuelve true si limpió.
+    const clearRecoverableFailure = (index: number, via: string = 'valid_url'): boolean => {
+        const key = toChunkKey(index);
+        if (!audioFailedKeysRef.current.has(key)) return false;
+        const reason = audioFailureReasonsRef.current.get(key) ?? 'no_url';
+        if (!shouldClearFailure(reason, true)) return false;  // persistente → conservar
+        audioFailedKeysRef.current.delete(key);
+        audioFailureReasonsRef.current.delete(key);
+        log('autoplay_blocked' as any, { event: 'PB_AUDIO_FAILED_CLEARED', index, via, reason });
+        return true;
+    };
+
     const firstSentenceIndexForChunkKey = (chunkKey: number): number => {
         const map = ctx.toChunkRef.current;
         if (map.length === 0) return chunkKey;
@@ -1677,6 +1723,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                         sentenceIndex: index, chunkKey, cacheKey: key,
                         reason: ePrimary?.name, message: ePrimary?.message,
                     });
+                    // HF4A — UX honesta: el primer TTS está demorando. Señal
+                    // observacional para que el visor pueda comunicar "Audio
+                    // demorando…" en lugar de un silencio o falso "Sin audio".
+                    log('autoplay_blocked' as any, { event: 'PB_AUDIO_DELAYED', index, reason: ePrimary?.name ?? 'timeout' });
                 }
 
                 // Fallback — sólo si el primario no produjo audio y la carga sigue viva.
@@ -2225,6 +2275,12 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             forceSentenceTts,
             reason:        options.reason ?? null,
         });
+        // HF4A — UX honesta: si el audio NO está cacheado, vamos a generarlo
+        // ahora. Señalamos "preparando" para que el visor muestre estado de
+        // trabajo en curso en lugar de silencio o un "Sin audio" prematuro.
+        if (!audioCache.current.has(requestedCacheKey)) {
+            log('autoplay_blocked' as any, { event: 'PB_AUDIO_PREPARING', index, autoPlay, reason: options.reason ?? null });
+        }
         const url = await getAudioUrl(index, {
             forceSentenceTts,
             reason: options.reason,
@@ -2246,11 +2302,21 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             // antes de play() sin disparar hardResync. La frase sigue visible
             // en modo texto puro.
             audioFailedKeysRef.current.add(toChunkKey(index));
+            audioFailureReasonsRef.current.set(toChunkKey(index), 'no_url'); // HF4A: recuperable
             log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index, via: 'no_url_after_getAudioUrl' });
             setStatus('error');
             // M-5.4.6 (Case 1) — setIdx ya se ejecutó al inicio de load().
             return;
         }
+
+        // HF4A — CLEAR-ON-VALID-URL (fix central). Obtuvimos una URL válida
+        // para `index`. Si ese índice había quedado marcado como fallido por un
+        // motivo RECUPERABLE (no_url/timeout/abort — típicamente el primer TTS
+        // lento que el backend cacheó después), limpiamos la marca ANTES del
+        // pre_play_check para que NO se emita PB_AUDIO_UNRECOVERABLE sobre una
+        // frase que ya tiene audio reproducible. Fallos persistentes
+        // (NotSupportedError) NO se limpian acá — los protege audioRetriedKeysRef.
+        clearRecoverableFailure(index, 'valid_url');
 
         pActive.src          = url;
         pActive.playbackRate = ctx.speedRef.current;
@@ -2416,7 +2482,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                             });
                         } else {
                             // Segundo fallo → unrecoverable. Pausa controlada, no hardResync.
+                            // HF4A — motivo PERSISTENTE: el blob no decodifica.
+                            // clear-on-valid-url NO lo limpiará aunque haya URL.
                             audioFailedKeysRef.current.add(key);
+                            audioFailureReasonsRef.current.set(key, 'NotSupportedError');
                             setStatus('error');
                             ctx.onPlayChange.current(false);
                             log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index, error: e.name });
@@ -2870,7 +2939,10 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                                 ctx.onPlayChange.current(false);
                                 load(nextIdx, true);  // reload limpio fuerza re-fetch fresh
                             } else {
+                                // HF4A — motivo PERSISTENTE (decode). No se cura
+                                // por valid_url; lo protege audioRetriedKeysRef.
                                 audioFailedKeysRef.current.add(key);
+                                audioFailureReasonsRef.current.set(key, 'NotSupportedError');
                                 setStatus('error');
                                 ctx.onPlayChange.current(false);
                                 log('autoplay_blocked' as any, { event: 'PB_AUDIO_UNRECOVERABLE', index: nextIdx, via: 'gapless', error: e.name });
@@ -3103,6 +3175,9 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         sentenceStartTimeRef.current = 0; // sin sesión activa — durationMs será null en el primer log
         setCurrentIndex(0);
         setStatus('idle');
+        // HF4A: reset cross-content del registro de motivos. Post-idle a
+        // propósito (no altera la ventana textual que validan tests de reset).
+        audioFailureReasonsRef.current.clear();
     }, []);
 
     // INV-14: getter para que el visor pueda bloquear PROGRESS_SAVE cuando hay
@@ -3620,8 +3695,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     const ensurePlayableAudio = useCallback(async (index: number): Promise<{ ok: boolean; reason?: string; source?: 'cache' | 'tts' }> => {
         log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_CHECK', index });
         if (isAudioFailed(index)) {
-            log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_FAILED', index, reason: 'audio_failed_marked' });
-            return { ok: false, reason: 'audio_failed_marked' };
+            // HF4A — sólo bloqueamos de entrada si el fallo previo es
+            // PERSISTENTE (decode/NotSupportedError): tener una URL no cura un
+            // blob corrupto. Si el fallo era RECUPERABLE (no_url/timeout),
+            // NO cortamos acá — intentamos re-obtener la URL abajo; si llega
+            // válida, clear-on-valid-url limpia la marca y reportamos ok.
+            const failKey  = toChunkKey(index);
+            const failReason = audioFailureReasonsRef.current.get(failKey) ?? 'no_url';
+            if (classifyAudioFailure(failReason) === 'persistent') {
+                log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_FAILED', index, reason: 'audio_failed_marked' });
+                return { ok: false, reason: 'audio_failed_marked' };
+            }
         }
         const wasCached = audioCache.current.has(toChunkKey(index));
         // ── [AUDIO_TRACE] TEMPORAL — M-2.6/2.7. REMOVE AFTER FIX ────────────
@@ -3635,14 +3719,40 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         });
         const url = await getAudioUrl(index);
         if (!url) {
-            // getAudioUrl ya logueó tts_fail/manifest_fail. Marcar y reportar.
-            audioFailedKeysRef.current.add(toChunkKey(index));
+            // getAudioUrl ya logueó tts_fail/manifest_fail. Marcar (recuperable)
+            // y reportar. El motivo 'no_url' permite que un intento posterior
+            // con URL válida limpie la marca vía clear-on-valid-url.
+            markAudioFailed(index, 'no_url');
             log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY_FAILED', index, reason: 'no_url' });
             return { ok: false, reason: 'no_url' };
         }
+        // HF4A — URL válida: limpiar cualquier marca de fallo recuperable
+        // previa de este índice antes de reportar ready.
+        clearRecoverableFailure(index, 'valid_url');
         log('autoplay_blocked' as any, { event: 'PB_AUDIO_READY', index, source: wasCached ? 'cache' : 'tts' });
         return { ok: true, source: wasCached ? 'cache' : 'tts' };
     }, [getAudioUrl]);
+
+    // ── HF4A — reintento manual controlado ───────────────────────────────────
+    // Ruta de recuperación explícita del usuario para la frase ACTUAL. NO borra
+    // estados globales: limpia sólo el fallo RECUPERABLE del índice actual y
+    // vuelve a invocar load() con autoPlay. Si el fallo era persistente
+    // (NotSupportedError agotado) NO lo limpia — load() volverá a bloquear y la
+    // frase sigue honestamente en 'error' (no se oculta el fallo real). No hay
+    // auto-retry: este método sólo corre por gesto del usuario, sin loop.
+    const retryAudio = useCallback((): void => {
+        const index = currentIdxRef.current;
+        const key   = toChunkKey(index);
+        const reason = audioFailureReasonsRef.current.get(key) ?? 'no_url';
+        // Limpia el fallo recuperable del índice actual (no global).
+        if (classifyAudioFailure(reason) === 'recoverable') {
+            audioFailedKeysRef.current.delete(key);
+            audioFailureReasonsRef.current.delete(key);
+        }
+        log('autoplay_blocked' as any, { event: 'PB_AUDIO_RETRY_MANUAL', index, reason });
+        // Vuelve al flujo normal de carga con reproducción.
+        void load(index, true, { reason: 'manual_retry' });
+    }, [load]);
 
     // F5: helper read-only. Idéntica lógica a assertCanSaveProgress(buffer, index)
     // pero inline para no importar el módulo (la machine ya lo importó). Suma
@@ -3695,6 +3805,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
         getRuntimeDiagnostics,
         isAudioFailed,
         ensurePlayableAudio,
+        retryAudio,
         manualSentenceJump,
         getStartDiagnostic,
     };

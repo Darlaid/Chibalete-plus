@@ -2955,7 +2955,11 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 <div className="flex items-center gap-6 bg-neutral-900/80 backdrop-blur-xl border border-white/10 px-8 py-4 rounded-2xl shadow-2xl">
                     <button onClick={goToPreviousSentence} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ChevronLeft size={24} /></button>
                     <button
-                        onClick={togglePlay}
+                        // HF4A — en 'error' el botón es un REINTENTO controlado:
+                        // pb.retryAudio() limpia el fallo recuperable de la frase
+                        // actual y vuelve a cargar con autoPlay. Si el fallo es
+                        // real/persistente, el status vuelve a 'error' (honesto).
+                        onClick={pb.status === 'error' ? () => pb.retryAudio() : togglePlay}
                         // QW-1: bloquear click mientras isHydrating. Evita el race donde el usuario
                         // dispara pb.load(0, true) antes de que post-hydration calcule targetIndex,
                         // lo que causaba el "reinicio del texto" al tocar play tempranamente.
@@ -2963,20 +2967,20 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                         title={
                             isHydrating             ? 'Preparando lectura...' :
                             !resumeReady            ? 'Restaurando progreso...' :
-                            pb.status === 'error'   ? 'Sin audio — modo texto' :
+                            pb.status === 'error'   ? 'Audio no disponible — toca para reintentar' :
                             pb.status === 'blocked' ? 'Toca para activar audio' : undefined
                         }
                         className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-lg hover:scale-105 active:scale-95
                             ${pb.isPlaying       ? 'bg-white text-black' :
                               pb.status === 'loading' ? 'bg-indigo-400 text-white cursor-wait' :
-                              pb.status === 'error'   ? 'bg-gray-700 text-gray-400' :
+                              pb.status === 'error'   ? 'bg-amber-700 text-white' :
                               pb.status === 'blocked' ? 'bg-amber-600 text-white animate-pulse' :
                               'bg-indigo-600 text-white shadow-indigo-500/50'}`}
                     >
                         {pb.status === 'loading'
                             ? <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
                             : pb.status === 'error'
-                                ? <span className="text-xs font-bold leading-tight text-center px-1">Sin audio</span>
+                                ? <span className="text-xs font-bold leading-tight text-center px-1">Reintentar</span>
                                 : pb.status === 'blocked'
                                     ? <Play size={28} className="ml-1 fill-current" />
                                     : pb.isPlaying
@@ -2992,6 +2996,20 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                         <button onClick={() => { const i = SPEEDS.indexOf(playbackSpeed); if (i > 0) setPlaybackSpeed(SPEEDS[i - 1]); }} className="p-1 hover:bg-white/10 rounded-full"><Minus size={16} /></button>
                     </div>
                 </div>
+                {/* HF4A — leyenda honesta de estado de audio. Evita silencio:
+                    'loading' comunica trabajo en curso; 'error' invita a
+                    reintentar en vez de un "Sin audio" falso permanente. */}
+                {(pb.status === 'loading' || pb.status === 'error') && !isHydrating && resumeReady && (
+                    <div
+                        className="mt-3 text-center text-xs font-medium text-white/70"
+                        role="status"
+                        aria-live="polite"
+                    >
+                        {pb.status === 'loading'
+                            ? 'Preparando audio…'
+                            : 'Audio no disponible — toca Reintentar'}
+                    </div>
+                )}
             </div>
 
             {/* SETTINGS MENU */}
