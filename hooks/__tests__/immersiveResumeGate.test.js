@@ -48,8 +48,21 @@ ok('Índice resuelto se guarda en resolvedStartIndexRef',
 ok('Botón play queda bloqueado mientras resumeReady=false',
    /disabled=\{pb\.status === 'loading' \|\| isHydrating \|\| !resumeReady\}/.test(visorSrc));
 
-ok('togglePlay bloquea TTS hasta progress ready',
-   /if\s*\(\s*!resumeReadyRef\.current\s*\)\s*\{[\s\S]{0,450}?pendingPlayAfterResumeRef\.current\s*=\s*true[\s\S]{0,450}?\[immersive-tts\] blocked until progress ready[\s\S]{0,200}?return;/.test(visorSrc));
+// Verifica el gate real de togglePlay sin acoplarse al ancho exacto del bloque
+// (que creció en HF previos y usa saltos CRLF en Windows). Localiza el guard
+// y confirma que los tres pasos del bloqueo ocurren en orden antes del return:
+//   1. marca el play pendiente, 2. loggea el bloqueo, 3. retorna sin reproducir.
+function togglePlayGateOk(src) {
+    const guard = src.indexOf('if (!resumeReadyRef.current) {');
+    if (guard === -1) return false;
+    // Acota al cuerpo del if (hasta su return temprano) con un margen holgado.
+    const region = src.slice(guard, guard + 800);
+    const iPending = region.indexOf('pendingPlayAfterResumeRef.current = true');
+    const iLog = region.indexOf('[immersive-tts] blocked until progress ready');
+    const iReturn = region.indexOf('return;', iLog === -1 ? 0 : iLog);
+    return iPending > -1 && iLog > iPending && iReturn > iLog;
+}
+ok('togglePlay bloquea TTS hasta progress ready', togglePlayGateOk(visorSrc));
 
 ok('Intento de play pendiente reproduce desde targetIndex resuelto, no desde 0',
    /const\s+shouldAutoPlay\s*=\s*isAutoTransition\s*\|\|\s*pendingPlayAfterResumeRef\.current[\s\S]{0,1600}?pb\.load\(targetIndex,\s*shouldAutoPlay/.test(visorSrc));
