@@ -50,3 +50,17 @@ ignoreUntil = 2026-08-31
 id = "GHSA-45rx-2jwx-cxfr"
 reason = "Jaeger propagation is explicitly disabled; the application pins W3C Trace Context and Baggage, including when OTEL_PROPAGATORS requests jaeger. Removal requires the coordinated Sentry v10 and OpenTelemetry v2 migration."
 ignoreUntil = 2026-10-21
+
+# ── GHSA-8988-4f7v-96qf — @opentelemetry/core W3C Baggage parsing DoS (MODERATE) ─
+# El W3CBaggagePropagator de OTel 1.30.1 hace split del header `baggage` completo
+# sin acotar longitud total / número de miembros / tamaño por miembro (las
+# constantes W3C existen pero solo se usan al inyectar). server/observability/
+# otel.mjs envuelve la EXTRACCIÓN con esos límites (8192 bytes totales, 180
+# miembros, 4096 bytes/miembro, medidos en UTF-8) antes de delegar: un header
+# sobredimensionado o malformado devuelve contexto sin baggage, sin lanzar. El fix
+# oficial está en @opentelemetry/core 2.8.0+, inalcanzable mientras @sentry/node v8
+# fija OTel 1.x → migración coordinada Sentry v10 + OTel v2 (CHP-SEC-SENTRY-OTEL-01).
+[[IgnoredVulns]]
+id = "GHSA-8988-4f7v-96qf"
+reason = "W3C Baggage extraction is bounded in application code to 8192 bytes, 180 entries, and 4096 bytes per entry. Sentry v8 pins OpenTelemetry 1.x, which has no patched release for this advisory. Removal requires the coordinated Sentry v10 and OpenTelemetry v2 migration."
+ignoreUntil = 2026-10-21

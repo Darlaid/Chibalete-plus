@@ -29,6 +29,60 @@ if (ENABLED) {
         const { CompositePropagator, W3CTraceContextPropagator, W3CBaggagePropagator } =
             await import('@opentelemetry/core');
 
+        // ── Mitigación GHSA-8988-4f7v-96qf (@opentelemetry/core 1.x, MODERATE) ──
+        // El W3CBaggagePropagator 1.30.1 hace split del header `baggage` completo
+        // SIN acotar longitud total, número de miembros ni tamaño por miembro
+        // (las constantes W3C existen pero solo se usan al inyectar) → parsing no
+        // acotado. El fix oficial está en OTel 2.8+, inalcanzable mientras
+        // @sentry/node v8 fija OTel 1.x. Aquí envolvemos la EXTRACCIÓN con los
+        // mismos límites del spec W3C, medidos en bytes UTF-8, ANTES de split/join.
+        // Header sobredimensionado o malformado → contexto SIN baggage, sin lanzar
+        // ni registrar el contenido. La inyección y fields() se delegan intactos.
+        const BAGGAGE_HEADER = 'baggage';
+        const BAGGAGE_MAX_TOTAL_BYTES = 8192;   // BAGGAGE_MAX_TOTAL_LENGTH
+        const BAGGAGE_MAX_MEMBERS = 180;        // BAGGAGE_MAX_NAME_VALUE_PAIRS
+        const BAGGAGE_MAX_PER_MEMBER_BYTES = 4096; // BAGGAGE_MAX_PER_NAME_VALUE_PAIRS
+        const utf8 = (s) => Buffer.byteLength(s, 'utf8');
+        const boundedBaggagePropagator = (inner) => ({
+            fields: () => inner.fields(),
+            inject: (ctx, carrier, setter) => inner.inject(ctx, carrier, setter),
+            extract: (ctx, carrier, getter) => {
+                try {
+                    const raw = getter.get(carrier, BAGGAGE_HEADER);
+                    if (raw == null) return ctx;
+                    // 1) Tamaño total en bytes UTF-8 ANTES de join/split.
+                    let joined;
+                    if (Array.isArray(raw)) {
+                        let total = 0;
+                        for (const el of raw) {
+                            if (typeof el !== 'string') return ctx;
+                            total += utf8(el);
+                            if (total > BAGGAGE_MAX_TOTAL_BYTES) return ctx;
+                        }
+                        total += Math.max(0, raw.length - 1); // separadores ','
+                        if (total > BAGGAGE_MAX_TOTAL_BYTES) return ctx;
+                        joined = raw.join(',');
+                    } else if (typeof raw === 'string') {
+                        if (utf8(raw) > BAGGAGE_MAX_TOTAL_BYTES) return ctx;
+                        joined = raw;
+                    } else {
+                        return ctx;
+                    }
+                    if (joined.length === 0) return ctx;
+                    // 2) Nº de miembros y tamaño por miembro (ya acotado ≤8192 bytes).
+                    const members = joined.split(',');
+                    if (members.length > BAGGAGE_MAX_MEMBERS) return ctx;
+                    for (const m of members) {
+                        if (utf8(m) > BAGGAGE_MAX_PER_MEMBER_BYTES) return ctx;
+                    }
+                    // 3) Dentro de límites → delegar en el propagador W3C real.
+                    return inner.extract(ctx, carrier, getter);
+                } catch {
+                    return ctx; // nunca lanza; no registra el contenido del header
+                }
+            },
+        });
+
         const ratio = Number.parseFloat(process.env.OTEL_SAMPLE_RATIO ?? '0.05');
         const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://jaeger:4318';
 
@@ -50,7 +104,10 @@ if (ENABLED) {
             // el JaegerPropagator jamás se instancia ni queda activo. `uber-trace-id`
             // no es un field propagado; un header Jaeger no crea contexto.
             textMapPropagator: new CompositePropagator({
-                propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
+                propagators: [
+                    new W3CTraceContextPropagator(),
+                    boundedBaggagePropagator(new W3CBaggagePropagator()), // GHSA-8988 acotado
+                ],
             }),
             instrumentations: [getNodeAutoInstrumentations({
                 // Señal alta, ruido bajo: solo borde HTTP + framework.

@@ -99,6 +99,39 @@ try {
     }
     ok('5b) errorTracking exporta initErrorTracking', typeof et.initErrorTracking === 'function');
 
+    console.log('\n[7] baggage acotado (GHSA-8988): límites W3C en bytes UTF-8');
+    {
+        const getBag = (carrier) => api.propagation.getBaggage(api.propagation.extract(api.context.active(), carrier));
+        const buildBaggage = (members) => members.map((v, i) => `k${i}=${v}`).join(',');
+        const okBag = getBag({ baggage: 'a=1,b=2' });
+        ok('7a) baggage válido se extrae', !!okBag && okBag.getEntry('a')?.value === '1' && okBag.getEntry('b')?.value === '2');
+        let m0 = 'a'.repeat(4000), m1 = 'b'.repeat(4000);
+        let base = buildBaggage([m0, m1]);
+        let pad = 8192 - Buffer.byteLength(base + ',k2=', 'utf8');
+        const at8192 = base + ',k2=' + 'c'.repeat(pad);
+        ok('7b) baggage de exactamente 8192 bytes aceptado',
+            Buffer.byteLength(at8192, 'utf8') === 8192 && !!getBag({ baggage: at8192 }) && getBag({ baggage: at8192 }).getEntry('k0')?.value === m0);
+        const over = at8192 + 'x';
+        ok('7c) baggage de 8193 bytes rechazado', Buffer.byteLength(over, 'utf8') === 8193 && getBag({ baggage: over }) === undefined);
+        const many = Array.from({ length: 181 }, () => 'x').map((v, i) => `k${i}=${v}`).join(',');
+        ok('7d) 181 miembros rechazado (>180)', many.split(',').length === 181 && getBag({ baggage: many }) === undefined);
+        const bigMember = `k0=${'y'.repeat(4095)}`;
+        ok('7e) miembro > 4096 bytes rechazado', Buffer.byteLength(bigMember, 'utf8') > 4096 && Buffer.byteLength(bigMember, 'utf8') < 8192 && getBag({ baggage: bigMember }) === undefined);
+        const arrOk = getBag({ baggage: ['a=1', 'b=2'] });
+        ok('7f) carrier string[] válido aceptado', !!arrOk && arrOk.getEntry('a')?.value === '1');
+        const arrOver = getBag({ baggage: ['k0=' + 'a'.repeat(4093), 'k1=' + 'b'.repeat(4093)] });
+        ok('7g) carrier string[] sobredimensionado rechazado', arrOver === undefined);
+        const euro = '€'.repeat(1360);
+        const multi = [euro, euro, euro].map((v, i) => `k${i}=${v}`).join(',');
+        ok('7h) multibyte medido en bytes UTF-8 (rechazo por total)',
+            multi.length < 8192 && Buffer.byteLength(multi, 'utf8') > 8192 && getBag({ baggage: multi }) === undefined);
+        let threw = false;
+        try { getBag({ baggage: 12345 }); getBag({ baggage: { x: 1 } }); } catch { threw = true; }
+        ok('7i) forma inválida no lanza (contexto sin baggage)', !threw && getBag({ baggage: 12345 }) === undefined);
+        ok('7j) fields() sigue incluyendo baggage', api.propagation.fields().includes('baggage'));
+        ok('7k) baggage acotado operativo tras Sentry.init', !!getBag({ baggage: 'z=9' }) && getBag({ baggage: 'z=9' }).getEntry('z')?.value === '9');
+    }
+
     console.log('\n[6] collector ausente no derriba + shutdown limpio');
     ok('6a) proceso vivo con collector inexistente', true);
     // El SDK de otel.mjs registró SIGTERM/SIGINT; forzamos un flush/shutdown limpio del provider global.
