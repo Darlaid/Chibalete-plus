@@ -123,6 +123,8 @@ dummy_text.txt
 # Patrón `/scripts/*` (no trailing slash) permite negaciones; con `/scripts/`
 # git no descendía y bloqueaba re-incluir hijos.
 /scripts/*
+!/scripts/snapshot/
+!/scripts/snapshot/**
 
 # Sprint 022 Fase 2B.5/2B.7/2B.8 — scripts operacionales canónicos.
 # Estos SÍ se versionan: son la autoridad operacional de backup, deploy
