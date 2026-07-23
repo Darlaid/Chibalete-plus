@@ -32,7 +32,7 @@
  */
 
 import { init as initMetrics, computeStudentMetrics } from './metricsService.js';
-import { USERS_DB as _USERS_DB } from './config.js';
+import { USERS_DB as _USERS_DB, GROUPS_DB as _GROUPS_DB } from './config.js';
 import { getAllProgressAsMap } from './progressService.js';
 import fs from 'fs';
 import path from 'path';
@@ -42,10 +42,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 // DB paths — mirrors server.js loadAndInitMetrics, no dependency on server.js
-// _USERS_DB comes from ./config.js (canonical, env-overridable)
+// _USERS_DB y _GROUPS_DB vienen de ./config.js (canónicos, env-overridable)
 const _ANALYTICS_DB  = path.resolve(__dirname, '../data/analytics_db.json');
 const _LEO_MEMORY_DB = path.resolve(__dirname, '../data/leo_memory_db.json');
-const _GROUPS_DB     = path.resolve(__dirname, '../data/groups_db.json');
 
 // In-memory cache — avoids full metrics recomputation on every Leo message
 const _CACHE_TTL_MS  = 30_000; // 30 s: fresh enough for a reading session

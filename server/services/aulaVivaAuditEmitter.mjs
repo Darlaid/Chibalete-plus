@@ -54,10 +54,10 @@ import { fileURLToPath } from 'node:url';
 import { ulid } from '../ulid.js';
 import { recordCanonicalEvent } from './analyticsShadow.mjs';
 import { flags } from '../lib/flags.js';
+import { GROUPS_DB } from '../config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
-const GROUPS_DB  = path.resolve(__dirname, '..', '..', 'data', 'groups_db.json');
 
 function _log(msg, level = 'INFO') {
     // eslint-disable-next-line no-console

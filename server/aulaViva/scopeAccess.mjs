@@ -1,135 +1,76 @@
 /**
- * scopeAccess.mjs — PASO 7 §13.
+ * scopeAccess.mjs — CHP-ID-01 (antes PASO 7 §13).
  *
- * Validación de acceso a scopes institucionales SIN tocar el middleware
- * de auth global (regla del proyecto: no modificar auth). Esta capa se
- * llama DESPUÉS de `requireUserAuth` (que ya validó que el x-user-id
- * existe en users_db.json).
+ * Autorización de scopes institucionales consumiendo EXCLUSIVAMENTE el CIS
+ * (server/identity/cis.mjs — CHP-ADR-01 §I). Este módulo ya NO abre archivos
+ * de identidad ni conoce paths: la fuente de usuarios es config.USERS_DB y la
+ * de grupos config.GROUPS_DB, resueltas dentro del CIS (cierra STAT-03/SEC-03:
+ * el path hardcodeado al padrón obsoleto queda eliminado).
  *
- * Política:
- *   - Admin → acceso a TODOS los scopes.
- *   - Mediador / profesor → acceso a scope='user' SI el user es miembro de
- *     ALGÚN grupo donde el caller es mediador. Acceso a scope='group' SI
- *     el caller es mediador de ese grupo. Acceso a scope='school' SI
- *     coordina/media en ese school. Acceso a scope='club' análogo a group.
- *   - Lector (estudiante) → acceso solo a scope='user' con su propio id.
- *   - Default-deny: si no aplica ninguna regla → false.
+ * Se llama DESPUÉS de `requireUserAuth`. El header x-user-id sigue siendo un
+ * claim `legacy_asserted` (CHP-ADR-01 §G.13) verificado contra el canónico:
+ * NO es identidad criptográficamente verificada ni habilita CHP-VAL-ISO-01.
  *
- * Library scope: hoy no hay tabla; queda como "admin-only" hasta PASO 8.
+ * Política (sin cambios funcionales de fondo; ahora vía CIS):
+ *   - Admin → todos los scopes, por política declarada
+ *     `platform_admin_full_institutional_read` (CHP-ADR-01 §G.8).
+ *   - Mediador → scope 'user' si el target es miembro de algún grupo que
+ *     media; 'group'/'club' si media ese grupo; 'school' si media en esa
+ *     school; agregados ('all'/cohortes) por política `mediator_aggregate_read`.
+ *   - Lector → solo scope 'user' con su propio id.
+ *   - Default-deny.
  *
- * NUNCA lanza. Devuelve siempre boolean. Errores leídos como deny.
+ * Taxonomía fail-closed (CHP-ADR-01 §I-2) — sin catch-all silencioso:
+ *   401 identidad ausente o no demostrable · 403 principal sin autorización ·
+ *   503 canónico indisponible (IDENTITY_UNAVAILABLE, nunca presentado como 403
+ *   ni como false ordinario en los guards HTTP).
  */
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { authorizeScope, IdentityUnavailableError } from '../identity/cis.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USERS_PATH  = path.resolve(__dirname, '..', '..', 'data', 'users_db.json');
-const GROUPS_PATH = path.resolve(__dirname, '..', '..', 'data', 'groups_db.json');
-
-function readJsonSafe(p) {
-    try {
-        if (!fs.existsSync(p)) return [];
-        return JSON.parse(fs.readFileSync(p, 'utf8'));
-    } catch { return []; }
-}
-
-function getUser(userId) {
-    if (!userId) return null;
-    const users = readJsonSafe(USERS_PATH);
-    return (Array.isArray(users) ? users : []).find(u => u?.id === userId) || null;
-}
-
-function isAdmin(user) {
-    if (!user || !user.role) return false;
-    const r = String(user.role).toLowerCase();
-    return r === 'administrador' || r === 'admin';
-}
-function isMediator(user) {
-    if (!user || !user.role) return false;
-    const r = String(user.role).toLowerCase();
-    return r === 'profesor' || r === 'mediador' || r === 'teacher'
-        || r === 'librarian' || r === 'coordinator';
+/**
+ * Decisión tipificada de acceso a `(scope_type, scope_id)`.
+ * @returns {{decision:'allow'|'unauthenticated'|'forbidden'|'unavailable',
+ *            via?:string, cause?:string}}
+ */
+export function evaluateScopeAccess(callerId, scope_type, scope_id) {
+    return authorizeScope(callerId, scope_type, scope_id);
 }
 
 /**
- * Lista grupos donde el caller es mediador (groups.mediatorIds[] o
- * groups.mediatorId — soporta ambas formas históricas).
- */
-function listGroupsForMediator(callerId) {
-    const groups = readJsonSafe(GROUPS_PATH);
-    if (!Array.isArray(groups)) return [];
-    return groups.filter(g => {
-        if (!g) return false;
-        if (g.mediatorId === callerId) return true;
-        if (Array.isArray(g.mediatorIds) && g.mediatorIds.includes(callerId)) return true;
-        if (Array.isArray(g.mediadores) && g.mediadores.includes(callerId)) return true;
-        return false;
-    });
-}
-
-/**
- * Devuelve true si `callerId` puede acceder a `(scope_type, scope_id)`.
+ * @deprecated Compat legacy (boolean) — usar evaluateScopeAccess (decisión
+ * tipificada) o requireScopeAccess (mapeo HTTP 401/403/503).
+ *
+ * Contrato (CHP-ID-01-FIX-01 H2):
+ *   - allow determinable            → true
+ *   - deny/unauthenticated          → false
+ *   - IDENTITY_UNAVAILABLE          → LANZA IdentityUnavailableError (tipificado)
+ *   - error inesperado              → se propaga
+ * La indisponibilidad del canónico JAMÁS se colapsa a false (CHP-ADR-01 §I-2).
  */
 export function canAccessScope(callerId, scope_type, scope_id) {
-    try {
-        const caller = getUser(callerId);
-        if (!caller) return false;
-        if (isAdmin(caller)) return true;
-
-        const sid = String(scope_id || '');
-        switch (scope_type) {
-            case 'user': {
-                if (sid === callerId) return true;        // propio perfil
-                if (!isMediator(caller)) return false;
-                // mediador puede ver users de SUS grupos
-                const myGroups = listGroupsForMediator(callerId);
-                for (const g of myGroups) {
-                    const members = Array.isArray(g.memberIds) ? g.memberIds : [];
-                    if (members.includes(sid)) return true;
-                }
-                return false;
-            }
-            case 'group':
-            case 'club': {
-                if (!isMediator(caller)) return false;
-                const myGroups = listGroupsForMediator(callerId);
-                return myGroups.some(g => g.id === sid);
-            }
-            case 'school': {
-                if (!isMediator(caller)) return false;
-                const myGroups = listGroupsForMediator(callerId);
-                return myGroups.some(g => g.schoolId === sid);
-            }
-            case 'library': {
-                // No hay scope library funcional aún → admin-only.
-                return false;
-            }
-            case 'all': {
-                // Agregados globales: admin o mediator (lectura institucional anónima).
-                return isMediator(caller);
-            }
-            case 'intervention':
-            case 'risk':
-            case 'habit':
-            case 'modality':
-            case 'trajectory': {
-                // Agregados de cohorte tipo: lectura por mediadores/admin.
-                return isMediator(caller);
-            }
-            default:
-                return false;
-        }
-    } catch { return false; }
+    const d = evaluateScopeAccess(callerId, scope_type, scope_id);
+    if (d.decision === 'unavailable') {
+        throw new IdentityUnavailableError(d.cause ?? 'unavailable', { via: 'canAccessScope' });
+    }
+    return d.decision === 'allow';
 }
 
 /**
- * Middleware-helper para los handlers institucionales. Si NO autoriza,
- * responde 403 + reason y NO continúa.
+ * Middleware-helper para handlers institucionales. Si NO autoriza, responde
+ * con el status de la taxonomía y NO continúa.
  */
 export function requireScopeAccess(scope_type, scope_id, req, res) {
-    const callerId = req.headers['x-user-id'];
-    if (canAccessScope(callerId, scope_type, scope_id)) return true;
+    const callerId = req.headers['x-user-id']; // claim legacy_asserted (CHP-ADR-01 §G.13)
+    const d = evaluateScopeAccess(callerId, scope_type, scope_id);
+    if (d.decision === 'allow') return true;
+    if (d.decision === 'unavailable') {
+        res.status(503).json({ ok: false, error: 'identity_unavailable', cause: d.cause });
+        return false;
+    }
+    if (d.decision === 'unauthenticated') {
+        res.status(401).json({ ok: false, error: 'identity_not_established' });
+        return false;
+    }
     res.status(403).json({ ok: false, error: 'scope_access_denied',
                             scope_type, scope_id });
     return false;

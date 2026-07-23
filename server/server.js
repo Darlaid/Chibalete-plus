@@ -41,7 +41,7 @@ import {
     computeCourseMetrics,
     computeSchoolMetrics,
 } from './metricsService.js';
-import { UPLOADS_ROOT, USERS_DB } from './config.js';
+import { UPLOADS_ROOT, USERS_DB, GROUPS_DB } from './config.js';
 import { withUsersLock, withFileLock } from './usersLock.js';
 import {
     resolveSingleGroupForSchool,
@@ -531,8 +531,8 @@ if (!fs.existsSync(TEMP_DIR)) {
 }
 
 // --- DATABASE FILES ---
-// USERS_DB imported from ./config.js — do not redefine here.
-const GROUPS_DB = path.resolve(__dirname, '../data/groups_db.json');
+// USERS_DB and GROUPS_DB imported from ./config.js — do not redefine here
+// (CHP-ID-01-FIX-01 H1: única resolución en config.js).
 const PROGRESS_DB = path.resolve(__dirname, '../data/progress_db.json');
 const DB_FILE = path.resolve(__dirname, '../data/content.json');
 const SECTIONS_DB = path.resolve(__dirname, '../data/sections.json'); // Added likely missing definition based on context

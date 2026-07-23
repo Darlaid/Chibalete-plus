@@ -6,7 +6,7 @@
  *
  * Expone los datasets PASO 6 vía REST con:
  *   - requireUserAuth (inyectado)
- *   - canAccessScope (PASO 7 §13)
+ *   - evaluateScopeAccess (CHP-ID-01; antes canAccessScope, PASO 7 §13)
  *   - recovery-first (200 + stale shape ante error)
  *   - instrument() PASO 4 para slow log + dashboard latency
  *   - métricas PASO 7 (cardinalidad fija)
@@ -35,7 +35,7 @@ import * as cohorts from '../services/cohortBuilder.mjs';
 import * as reader from '../services/insightReader.mjs';
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
-import { canAccessScope } from './scopeAccess.mjs';
+import { evaluateScopeAccess } from './scopeAccess.mjs';
 import {
     outcomesViewsTotal, cohortViewsTotal, trajectoryViewsTotal,
     learningViewsTotal, comparativeQueriesTotal, scopeSwitchTotal,
@@ -62,8 +62,18 @@ function parseLimit(q) {
 }
 
 function requireScope(req, res, scope_type, scope_id) {
-    const callerId = req.headers['x-user-id'];
-    if (canAccessScope(callerId, scope_type, scope_id)) return true;
+    const callerId = req.headers['x-user-id']; // claim legacy_asserted (CHP-ADR-01 §G.13)
+    const d = evaluateScopeAccess(callerId, scope_type, scope_id);
+    if (d.decision === 'allow') return true;
+    if (d.decision === 'unavailable') {
+        // IDENTITY_UNAVAILABLE jamás se presenta como 403 (CHP-ADR-01 §I-2).
+        res.status(503).json({ ok: false, error: 'identity_unavailable', cause: d.cause });
+        return false;
+    }
+    if (d.decision === 'unauthenticated') {
+        res.status(401).json({ ok: false, error: 'identity_not_established' });
+        return false;
+    }
     res.status(403).json({ ok: false, error: 'scope_access_denied',
                             scope_type, scope_id });
     return false;

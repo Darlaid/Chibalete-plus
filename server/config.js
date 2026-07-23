@@ -34,3 +34,13 @@ export const UPLOADS_ROOT = process.env.UPLOADS_ROOT
 /** Archivo JSON que es la única fuente de verdad de usuarios del sistema. */
 export const USERS_DB = process.env.USERS_DB
     || path.resolve(__dirname, '../data/users_db.json');
+
+/**
+ * Archivo JSON que es la única fuente de verdad de grupos (course/club).
+ * Mismo default que server.js usa desde siempre; en producción el env puede
+ * sobreescribirlo igual que USERS_DB. Los readers de identidad/scope (CIS)
+ * deben resolver SIEMPRE vía esta constante, nunca por path hardcodeado
+ * (CHP-ADR-01 §G.4/§I-1).
+ */
+export const GROUPS_DB = process.env.GROUPS_DB
+    || path.resolve(__dirname, '../data/groups_db.json');

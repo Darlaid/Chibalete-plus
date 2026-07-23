@@ -27,9 +27,9 @@ import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs
 import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 import { cohortsBuilt } from '../observability/metrics.js';
+import { GROUPS_DB } from '../config.js';
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
-const GROUPS_DB_PATH = path.resolve(__dirname, '..', '..', 'data', 'groups_db.json');
 const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
     || path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
 
@@ -48,8 +48,8 @@ export function closeCohortEventsRaw() {
 
 function readGroupsDb() {
     try {
-        if (!fs.existsSync(GROUPS_DB_PATH)) return [];
-        const raw = fs.readFileSync(GROUPS_DB_PATH, 'utf8');
+        if (!fs.existsSync(GROUPS_DB)) return [];
+        const raw = fs.readFileSync(GROUPS_DB, 'utf8');
         const parsed = JSON.parse(raw);
         return Array.isArray(parsed) ? parsed : [];
     } catch { return []; }
