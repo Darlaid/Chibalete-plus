@@ -15,6 +15,20 @@
 # resp:Release Security Reviewer  rev:2026-08-31
 CVE-2026-44902
 
+# ── CVE-2026-59892 / GHSA-45rx-2jwx-cxfr — @opentelemetry/propagator-jaeger DoS (HIGH) ─
+# Paquete afectado: @opentelemetry/propagator-jaeger (≤2.8.0), transitivo de sdk-node.
+# DoS: un uber-trace-id / uberctx-* con percent-encoding malformado lanza URIError
+# no capturado y termina el proceso Node.
+# NO ALCANZABLE en Chibalete+: server/observability/otel.mjs fija el propagador a
+# W3C (CompositePropagator W3CTraceContext + W3CBaggage) vía textMapPropagator EXPLÍCITO;
+# el NodeSDK no consulta OTEL_PROPAGATORS y el JaegerPropagator jamás se instancia
+# (verificado: fields()=[traceparent,tracestate,baggage] incluso con OTEL_PROPAGATORS=jaeger).
+# review-by: 2026-10-21
+# deuda: migración coordinada Sentry v10 + OTel v2 (fix propagator-jaeger 2.9.0+ exige OTel v2;
+#        @sentry/node v8 fija OTel 1.x). Ver CHP-SEC-SENTRY-OTEL-01.
+# resp:Release Security Reviewer  rev:2026-10-21
+CVE-2026-59892
+
 # ── AVD-DS-0002 — Dockerfile sin instrucción USER (HIGH misconfig) ───────────
 # Dockerfile.api y Dockerfile.front no declaran USER → los contenedores corren
 # como root. RIESGO ACEPTADO temporalmente: el fix non-root NO es drop-in —

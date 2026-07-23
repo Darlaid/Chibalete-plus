@@ -22,15 +22,18 @@ if (ENABLED) {
         const { NodeSDK } = await import('@opentelemetry/sdk-node');
         const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-http');
         const { getNodeAutoInstrumentations } = await import('@opentelemetry/auto-instrumentations-node');
-        const { resourceFromAttributes } = await import('@opentelemetry/resources');
+        const { Resource } = await import('@opentelemetry/resources');
         const { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } = await import('@opentelemetry/semantic-conventions');
         const { ParentBasedSampler, TraceIdRatioBasedSampler } = await import('@opentelemetry/sdk-trace-base');
+        // Propagación FIJADA a W3C (core 1.x). Ver bloque textMapPropagator.
+        const { CompositePropagator, W3CTraceContextPropagator, W3CBaggagePropagator } =
+            await import('@opentelemetry/core');
 
         const ratio = Number.parseFloat(process.env.OTEL_SAMPLE_RATIO ?? '0.05');
         const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://jaeger:4318';
 
         const sdk = new NodeSDK({
-            resource: resourceFromAttributes({
+            resource: new Resource({
                 [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'chibalete-api',
                 [ATTR_SERVICE_VERSION]: process.env.CHIBALETE_RELEASE || 'unknown',
                 'service.instance.id': process.env.HOSTNAME || 'local',
@@ -38,6 +41,16 @@ if (ENABLED) {
             traceExporter: new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }),
             sampler: new ParentBasedSampler({
                 root: new TraceIdRatioBasedSampler(Number.isFinite(ratio) ? ratio : 0.05),
+            }),
+            // ── Propagación fijada a W3C Trace Context + Baggage ──────────────
+            // Se pasa `textMapPropagator` EXPLÍCITO al SDK: cuando está definido,
+            // NodeSDK lo usa y NO consulta la env `OTEL_PROPAGATORS`. Esto neutraliza
+            // GHSA-45rx-2jwx-cxfr / CVE-2026-59892 (DoS en JaegerPropagator vía
+            // `uber-trace-id`/`uberctx-*` malformado): aunque OTEL_PROPAGATORS=jaeger,
+            // el JaegerPropagator jamás se instancia ni queda activo. `uber-trace-id`
+            // no es un field propagado; un header Jaeger no crea contexto.
+            textMapPropagator: new CompositePropagator({
+                propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
             }),
             instrumentations: [getNodeAutoInstrumentations({
                 // Señal alta, ruido bajo: solo borde HTTP + framework.

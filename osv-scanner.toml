@@ -35,3 +35,18 @@ ignoreUntil = 2026-08-31
 id = "GHSA-w5hq-g745-h8pq"
 reason = "No alcanzable: uuid es dependencia transitiva (gaxios/OTEL-gcp en prod, cadena dev), con cero imports directos en Chibalete+; el path vulnerable (v3/v5/v6 con buf) no se invoca. Forzar uuid@11 por override rompería gaxios (ESM major). Revisar cuando OTEL/gaxios bumpen uuid."
 ignoreUntil = 2026-08-31
+
+# ── GHSA-45rx-2jwx-cxfr / CVE-2026-59892 — @opentelemetry/propagator-jaeger DoS (HIGH) ─
+# El JaegerPropagator lanza URIError no capturado ante un uber-trace-id / uberctx-*
+# con percent-encoding malformado, terminando el proceso Node. NO ALCANZABLE en
+# Chibalete+: server/observability/otel.mjs pasa un textMapPropagator EXPLÍCITO
+# (CompositePropagator W3CTraceContext + W3CBaggage) al NodeSDK, por lo que el SDK
+# NO consulta OTEL_PROPAGATORS y el JaegerPropagator jamás se instancia ni queda
+# activo — verificado: fields()=[traceparent,tracestate,baggage] incluso con
+# OTEL_PROPAGATORS=jaeger; uber-trace-id no es field ni crea contexto. propagator-jaeger
+# permanece solo como transitivo de sdk-node. El fix (2.9.0+) exige OTEL v2, acoplado
+# al major de @sentry/node (v8 fija OTEL 1.x) → migración coordinada Sentry v10 + OTel v2.
+[[IgnoredVulns]]
+id = "GHSA-45rx-2jwx-cxfr"
+reason = "Jaeger propagation is explicitly disabled; the application pins W3C Trace Context and Baggage, including when OTEL_PROPAGATORS requests jaeger. Removal requires the coordinated Sentry v10 and OpenTelemetry v2 migration."
+ignoreUntil = 2026-10-21
