@@ -13,6 +13,7 @@ import { validate } from './middleware/validate.js';
 import { loginSchema, resetRequestSchema, resetConfirmSchema } from './schemas/auth.schema.js';
 // P0.6 — access-log estructurado con request-id + redaction (capa incremental).
 import { httpLogger } from './lib/logger.js';
+import { createAdminAuth } from './lib/adminAuth.js';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -371,67 +372,34 @@ setInterval(async () => {
  * usuarios autenticados (un lector leyendo datos de otro vía estos GET) sigue
  * abierto y requiere un endurecimiento de rol posterior (P-follow-up).
  */
-const getRequestHasValidPrincipal = (req) => {
-    const SECRET = process.env.ADMIN_SECRET;
-    if (SECRET && req.headers['x-admin-secret'] === SECRET) return true;
-    const userId = req.headers['x-user-id'];
-    if (!userId) return false;
-    try {
-        const users = readJSON(USERS_DB);
-        const user = users.find(u => u.id === userId);
-        return !!(user && isUserActive(user));
-    } catch (_) { return false; }
-};
-
-const allowAuthenticatedGetOrReject = (req, res, next) => {
-    if (getRequestHasValidPrincipal(req)) return next();
-    log(`[GET_AUTH_REJECT] path=${req.path} ip=${req.ip} userId=${req.headers['x-user-id'] || 'none'}`, 'WARN');
-    return res.status(401).json({ error: 'No autorizado: se requiere sesión activa' });
-};
-
-const requireAdminAccess = (req, res, next) => {
-    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
-
-    const SECRET = process.env.ADMIN_SECRET;
-    if (!SECRET) {
-        log('ADMIN_SECRET no configurado — operación de escritura admin rechazada', 'ERROR');
-        return res.status(503).json({ error: 'Servidor mal configurado: ADMIN_SECRET ausente' });
-    }
-
-    // Opción A: admin secret (scripts, PM2, server-to-server)
-    if (req.headers['x-admin-secret'] === SECRET) return next();
-
-    // Opción B: usuario autenticado con rol administrador
-    const userId = req.headers['x-user-id'];
-    if (userId) {
-        const users = readJSON(USERS_DB);
-        const user = users.find(u => u.id === userId);
-        if (user && isUserActive(user)) {
-            const roles = Array.isArray(user.roles) ? user.roles : (user.rol ? [user.rol] : []);
-            if (roles.includes('administrador')) return next();
-        }
-    }
-
-    log(`requireAdminAccess denied: ip=${req.ip} userId=${req.headers['x-user-id'] || 'none'}`, 'WARN');
-    res.status(401).json({ error: 'Unauthorized: se requiere admin secret o sesión de administrador' });
-};
-
-const requireAuth = (req, res, next) => {
-    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
-    const authHeader = req.headers['x-admin-secret'];
-    const SECRET = process.env.ADMIN_SECRET;
-
-    if (!SECRET) {
-        log('ADMIN_SECRET no configurado — operación rechazada', 'ERROR');
-        return res.status(503).json({ error: 'Servidor mal configurado: ADMIN_SECRET ausente' });
-    }
-    if (authHeader === SECRET) {
-        next();
-    } else {
-        log(`Unauthorized access attempt from ${req.ip}. Received Secret length: ${authHeader?.length || 0}.`, 'WARN');
-        res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
-    }
-};
+// FILE-01B: el secreto administrativo se lee EXCLUSIVAMENTE desde
+// /app/secrets/admin_secret vía `headerMatchesAdminSecret` (helper file-only).
+// Ningún consumidor lee ya el secreto desde el entorno. La lectura es asíncrona,
+// sólo ocurre cuando hay un candidato x-admin-secret y falla cerrada.
+//
+// NOTA DE SEMÁNTICA (FILE-01B): el antiguo branch 503 de "secreto no configurado"
+// se retira necesariamente. No se lee el archivo sin candidato header, y no se
+// filtra la causa interna — un 503 por archivo ausente frente a un 401 por
+// secreto erróneo revelaría el estado del archivo. Por tanto, archivo
+// ausente/inválido se comporta como credencial inválida (mismo camino que un
+// secreto erróneo). El camino de sesión ordinaria (x-user-id) es idéntico al
+// anterior y NO se ve bloqueado por un fallo del helper.
+// FILE-01B-R1: los cuatro consumidores se construyen desde la factoría real en
+// server/lib/adminAuth.js (mismos símbolos que ejercen las pruebas HTTP). Los
+// thunks de sesión son perezosos: `readJSON` e `isUserActive` son const definidos
+// más abajo — capturarlos por closure (invocados en tiempo de request) evita la
+// TDZ y no altera el orden de inicialización productivo.
+const {
+    isAdminRequest,
+    getRequestHasValidPrincipal,
+    allowAuthenticatedGetOrReject,
+    requireAdminAccess,
+    requireAuth,
+} = createAdminAuth({
+    readUsers: () => readJSON(USERS_DB),
+    isUserActive: (user) => isUserActive(user),
+    log: (msg, type) => log(msg, type),
+});
 
 /**
  * Surgical Auth Fix Phase 5: 
@@ -2389,14 +2357,14 @@ const ensureLeoMemoryDbShape = (db) => {
 
 // 1. GET ALL PROGRESS POR USUARIO (Útil para Admin/Dashboard)
 // Auth: owner (mismo userId) OR admin secret OR rol administrador/mediador
-app.get('/api/progress/user/:userId', (req, res) => {
+app.get('/api/progress/user/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const users = readJSON(USERS_DB);
 
         const requester = resolveRequester(req, users);
         const isOwner = requester && requester.id === userId;
-        const isAdmin = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
         if (!isOwner && !isAdmin && !isMediator) {
             log(`GET progress/user denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
@@ -2416,14 +2384,14 @@ app.get('/api/progress/user/:userId', (req, res) => {
 
 // 2. GET SINGLE PROGRESS (Resolviendo colisión de rutas previa)
 // Auth: owner OR admin secret OR rol administrador/mediador
-app.get('/api/progress/item/:userId/:contentId', (req, res) => {
+app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const users = readJSON(USERS_DB);
 
         const requester = resolveRequester(req, users);
         const isOwner = requester && requester.id === userId;
-        const isAdmin = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
         if (!isOwner && !isAdmin && !isMediator) {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
@@ -7198,11 +7166,8 @@ function loadAndInitMetrics() {
 // METRICS AUTH HELPERS
 // ---------------------------------------------------------------------------
 
-/** True if the request carries a valid admin secret. */
-function isAdminRequest(req) {
-    const secret = process.env.ADMIN_SECRET;
-    return secret ? req.headers['x-admin-secret'] === secret : false;
-}
+// isAdminRequest se construye en la factoría createAdminAuth (arriba), junto con
+// los demás consumidores: Promise<boolean> file-only. TODO call site debe await.
 
 /**
  * Resolve the requesting user from x-user-id header.
@@ -7625,16 +7590,17 @@ function computeCourseDataWindow(studentBreakdown) {
 // Lists all schools with both stable schoolId (slug) and display schoolName.
 // Mediators see only schools of their assigned groups.
 // Requires: admin OR authenticated mediator/user.
-app.get('/api/metrics/schools', (req, res) => {
+app.get('/api/metrics/schools', async (req, res) => {
     const { groups, users } = loadAndInitMetrics();
     const requester = resolveRequester(req, users);
+    const adminAccess = await isAdminRequest(req);
 
-    if (!isAdminRequest(req) && !requester) {
+    if (!adminAccess && !requester) {
         return res.status(401).json({ error: 'Auth requerida' });
     }
 
     let relevantGroups = groups;
-    if (!isAdminRequest(req) && requester && isMediatorRole(requester)) {
+    if (!adminAccess && requester && isMediatorRole(requester)) {
         relevantGroups = groups.filter(g => isMediatorOfCourse(requester, g.id, groups));
     }
 
@@ -7656,13 +7622,13 @@ app.get('/api/metrics/schools', (req, res) => {
 // GET /api/metrics/student/:userId
 // Returns full structured metrics for a single student.
 // Requires: admin secret OR the student's own x-user-id.
-app.get('/api/metrics/student/:userId', (req, res) => {
+app.get('/api/metrics/student/:userId', async (req, res) => {
     const { userId }        = req.params;
     const { users }         = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
     const selfAccess        = requester?.id === userId;
 
-    if (!isAdminRequest(req) && !selfAccess) {
+    if (!(await isAdminRequest(req)) && !selfAccess) {
         return res.status(403).json({ error: 'Acceso denegado' });
     }
 
@@ -7756,11 +7722,11 @@ function collectSchoolUserIds(schoolName, groups) {
 // GET /api/metrics/course/:courseId
 // Returns aggregated structured metrics for a course.
 // Requires: admin secret OR mediator assigned to that course (x-user-id).
-app.get('/api/metrics/course/:courseId', (req, res) => {
+app.get('/api/metrics/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
-    const adminAccess       = isAdminRequest(req);
+    const adminAccess       = await isAdminRequest(req);
     const mediatorAccess    = requester && isMediatorRole(requester) &&
                               isMediatorOfCourse(requester, courseId, groups);
 
@@ -7808,8 +7774,8 @@ app.get('/api/metrics/course/:courseId', (req, res) => {
 // Accepts schoolId as either a slug ("colegio-chibalete") or original name.
 // Returns aggregated structured metrics for a school.
 // Requires: admin secret only.
-app.get('/api/metrics/school/:schoolId', (req, res) => {
-    if (!isAdminRequest(req)) {
+app.get('/api/metrics/school/:schoolId', async (req, res) => {
+    if (!(await isAdminRequest(req))) {
         return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
     }
     const { groups }     = loadAndInitMetrics();
@@ -7851,8 +7817,8 @@ app.get('/api/metrics/school/:schoolId', (req, res) => {
 //
 // Si events.db no existe o falla, responde con shape vacío + 200 (no 500).
 //
-app.get('/api/metrics/backbone', (req, res) => {
-    if (!isAdminRequest(req)) {
+app.get('/api/metrics/backbone', async (req, res) => {
+    if (!(await isAdminRequest(req))) {
         const { users } = loadAndInitMetrics();
         const requester = resolveRequester(req, users);
         if (!requester || !isMediatorRole(requester)) {
@@ -7910,8 +7876,8 @@ app.get('/api/metrics/backbone', (req, res) => {
 // Nunca 500. Si events.db falla, responde con shape vacío + 200.
 // Acceso: admin OR mediador autenticado (mismo gating que /api/metrics/backbone).
 //
-app.get('/api/metrics/funnels', (req, res) => {
-    if (!isAdminRequest(req)) {
+app.get('/api/metrics/funnels', async (req, res) => {
+    if (!(await isAdminRequest(req))) {
         const { users } = loadAndInitMetrics();
         const requester = resolveRequester(req, users);
         if (!requester || !isMediatorRole(requester)) {
@@ -7954,8 +7920,8 @@ app.get('/api/metrics/funnels', (req, res) => {
 // Acceso: admin OR mediador autenticado (mismo gating que funnels/backbone).
 // Nunca 500. Si el pipeline falla, responde con shape vacío.
 //
-app.get('/api/metrics/insights', (req, res) => {
-    if (!isAdminRequest(req)) {
+app.get('/api/metrics/insights', async (req, res) => {
+    if (!(await isAdminRequest(req))) {
         const { users } = loadAndInitMetrics();
         const requester = resolveRequester(req, users);
         if (!requester || !isMediatorRole(requester)) {
@@ -8017,8 +7983,8 @@ app.get('/api/metrics/insights', (req, res) => {
 // telemetría base sigue funcionando. Si insights.db falla, devolvemos
 // vacíos y log WARN.
 
-function requireAdminOrMediator(req, res) {
-    if (isAdminRequest(req)) return true;
+async function requireAdminOrMediator(req, res) {
+    if (await isAdminRequest(req)) return true;
     const { users } = loadAndInitMetrics();
     const requester = resolveRequester(req, users);
     if (!requester || !isMediatorRole(requester)) {
@@ -8028,8 +7994,8 @@ function requireAdminOrMediator(req, res) {
     return true;
 }
 
-app.post('/api/metrics/insights/snapshot', (req, res) => {
-    if (!requireAdminOrMediator(req, res)) return;
+app.post('/api/metrics/insights/snapshot', async (req, res) => {
+    if (!(await requireAdminOrMediator(req, res))) return;
     const body = req.body ?? {};
     const windowDays = (() => {
         const raw = typeof body.windowDays === 'number' ? body.windowDays : 30;
@@ -8064,8 +8030,8 @@ app.post('/api/metrics/insights/snapshot', (req, res) => {
     }
 });
 
-app.get('/api/metrics/insights/states', (req, res) => {
-    if (!requireAdminOrMediator(req, res)) return;
+app.get('/api/metrics/insights/states', async (req, res) => {
+    if (!(await requireAdminOrMediator(req, res))) return;
     try {
         ensureInsightsDbOpen();
         const filters = {
@@ -8104,8 +8070,8 @@ app.get('/api/metrics/insights/states', (req, res) => {
     }
 });
 
-app.post('/api/metrics/insights/:insightKey/ack', (req, res) => {
-    if (!requireAdminOrMediator(req, res)) return;
+app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
+    if (!(await requireAdminOrMediator(req, res))) return;
     const insightKey = String(req.params.insightKey ?? '');
     const actorId = (req.body && typeof req.body.actorId === 'string')
         ? req.body.actorId
@@ -8123,8 +8089,8 @@ app.post('/api/metrics/insights/:insightKey/ack', (req, res) => {
     }
 });
 
-app.post('/api/metrics/insights/:insightKey/dismiss', (req, res) => {
-    if (!requireAdminOrMediator(req, res)) return;
+app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
+    if (!(await requireAdminOrMediator(req, res))) return;
     const insightKey = String(req.params.insightKey ?? '');
     const days = (() => {
         const raw = (req.body && typeof req.body.days === 'number') ? req.body.days : 7;
@@ -8145,8 +8111,8 @@ app.post('/api/metrics/insights/:insightKey/dismiss', (req, res) => {
     }
 });
 
-app.get('/api/metrics/insights/notifications', (req, res) => {
-    if (!requireAdminOrMediator(req, res)) return;
+app.get('/api/metrics/insights/notifications', async (req, res) => {
+    if (!(await requireAdminOrMediator(req, res))) return;
     try {
         ensureInsightsDbOpen();
         const status = typeof req.query.status === 'string' ? req.query.status : 'pending';
@@ -8183,11 +8149,11 @@ function safeJsonParse(raw) {
 // GET /api/reports/course/:courseId
 // Report-ready version of course metrics. Adds reportMeta for direct rendering.
 // Requires: admin OR mediator assigned to that course.
-app.get('/api/reports/course/:courseId', (req, res) => {
+app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
-    const adminAccess       = isAdminRequest(req);
+    const adminAccess       = await isAdminRequest(req);
     const mediatorAccess    = requester && isMediatorRole(requester) &&
                               isMediatorOfCourse(requester, courseId, groups);
 
@@ -8226,8 +8192,8 @@ app.get('/api/reports/course/:courseId', (req, res) => {
 // GET /api/reports/school/:schoolId
 // Report-ready version of school metrics. Accepts slug or name.
 // Requires: admin secret only.
-app.get('/api/reports/school/:schoolId', (req, res) => {
-    if (!isAdminRequest(req)) {
+app.get('/api/reports/school/:schoolId', async (req, res) => {
+    if (!(await isAdminRequest(req))) {
         return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
     }
     const { groups }   = loadAndInitMetrics();
@@ -8568,13 +8534,13 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
 // GET /api/reading-progress/:userId
 // Returns computed ReadingProgress for every content this user has touched.
 // Auth: owner OR admin OR mediador
-app.get('/api/reading-progress/:userId', (req, res) => {
+app.get('/api/reading-progress/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const users = readJSON(USERS_DB);
         const requester  = resolveRequester(req, users);
         const isOwner    = requester?.id === userId;
-        const isAdmin    = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
         if (!isOwner && !isAdmin && !isMediator) {
             return res.status(403).json({ error: 'Acceso denegado' });
@@ -8606,13 +8572,13 @@ app.get('/api/reading-progress/:userId', (req, res) => {
 
 // GET /api/reading-progress/:userId/:contentId
 // Returns computed ReadingProgress for a single content.
-app.get('/api/reading-progress/:userId/:contentId', (req, res) => {
+app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const users = readJSON(USERS_DB);
         const requester  = resolveRequester(req, users);
         const isOwner    = requester?.id === userId;
-        const isAdmin    = isAdminRequest(req) || (requester && (requester.roles ?? []).includes('administrador'));
+        const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
         if (!isOwner && !isAdmin && !isMediator) {
             return res.status(403).json({ error: 'Acceso denegado' });
