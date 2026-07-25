@@ -1,0 +1,14 @@
+[Unit]
+Description=Chibalete+ uploads incremental backup, daily
+Documentation=file:/opt/chibalete-backup/README.md
+
+[Timer]
+# DEST_DECISION.md decision 4: uploads incremental diario.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=900
+Persistent=true
+AccuracySec=1min
+Unit=uploads-backup.service
+
+[Install]
+WantedBy=timers.target

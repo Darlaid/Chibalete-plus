@@ -1,0 +1,65 @@
+[Unit]
+Description=Chibalete+ structured backup (SQLite + JSON) to restic
+Documentation=file:/opt/chibalete-backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# El lock compartido /run/chibalete-backup/lock lo toma el propio runner con
+# flock(2). NO envolver aqui con flock(1): tomaria el mismo archivo desde otro
+# proceso y el runner se bloquearia contra si mismo.
+ExecStart=/usr/bin/python3 /opt/chibalete-backup/runners/structured_backup.py
+EnvironmentFile=/etc/chibalete-backup/backup.env
+
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+# --- Directorios ------------------------------------------------------------
+RuntimeDirectory=chibalete-backup
+RuntimeDirectoryMode=0700
+# ATENCION — por que data/ y data-critical/ NO pueden ir en ReadOnlyPaths:
+# un lector de una base SQLite en WAL necesita crear/actualizar el indice de
+# memoria compartida `<db>-shm` (y un `<db>-wal` de longitud cero si no hay).
+# ReadOnlyPaths monta en solo lectura a nivel de VFS, y eso lo aplica el kernel
+# aunque el proceso sea root: la captura fallaria con SQLITE_CANTOPEN.
+# El runner nunca escribe en los .db; solo SQLite toca sus propios sidecars.
+# Verificado en CHP-BACKUP-01B-1: los .db quedan byte-identicos.
+ReadWritePaths=/var/backups/chibalete-backup
+ReadWritePaths=/var/www/chibalete/data
+ReadWritePaths=/var/www/chibalete/data-critical
+# Los uploads no los toca este runner: se mantienen en solo lectura.
+ReadOnlyPaths=/var/www/chibalete/public/uploads
+
+# --- Hardening de proceso ---------------------------------------------------
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# --- Hardening de filesystem ------------------------------------------------
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+
+# --- Logs -------------------------------------------------------------------
+# El runner emite JSON de una linea con redaccion obligatoria: nunca imprime
+# credenciales ni la passphrase.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chibalete-backup-structured

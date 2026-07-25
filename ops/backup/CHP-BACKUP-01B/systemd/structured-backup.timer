@@ -1,0 +1,14 @@
+[Unit]
+Description=Chibalete+ structured backup every 6 hours
+Documentation=file:/opt/chibalete-backup/README.md
+
+[Timer]
+# DEST_DECISION.md decision 4: SQLite + JSON canonico cada 6 h.
+OnCalendar=*-*-* 00,06,12,18:00:00
+RandomizedDelaySec=300
+Persistent=true
+AccuracySec=1min
+Unit=structured-backup.service
+
+[Install]
+WantedBy=timers.target

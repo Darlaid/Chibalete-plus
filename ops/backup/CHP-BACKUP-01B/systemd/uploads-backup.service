@@ -1,0 +1,48 @@
+[Unit]
+Description=Chibalete+ uploads incremental backup to restic
+Documentation=file:/opt/chibalete-backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Los uploads van DIRECTOS a restic: no se copian localmente ni se empaquetan.
+ExecStart=/usr/bin/python3 /opt/chibalete-backup/runners/uploads_backup.py
+EnvironmentFile=/etc/chibalete-backup/backup.env
+
+# El primer snapshot recorre ~5.1 GB: margen amplio, deduplicado despues.
+TimeoutStartSec=14400
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+RuntimeDirectory=chibalete-backup
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/backups/chibalete-backup
+ReadOnlyPaths=/var/www/chibalete
+
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chibalete-backup-uploads

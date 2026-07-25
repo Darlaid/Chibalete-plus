@@ -1,0 +1,135 @@
+"""Inventario declarativo de stores (fuente: CHP-BACKUP-01A/BACKUP_INVENTORY.md).
+
+Anadir un store nuevo (p. ej. identity.db cuando `identity_sqlite` pase a
+`enabled`) es solo anadir una entrada aqui. Los runners no llevan rutas
+hardcodeadas.
+"""
+
+from dataclasses import dataclass, field
+
+# Base productiva. Los mounts host->contenedor del inventario §1 cuelgan de aqui.
+DEFAULT_BASE_DIR = "/var/www/chibalete"
+
+# Area de trabajo del runner: NUNCA dentro de /var/www/chibalete (design §7).
+DEFAULT_WORK_DIR = "/var/backups/chibalete-backup"
+
+# Identificador logico del host en los manifiestos. Deliberadamente logico:
+# no se emite el hostname real ni ningun dato de infraestructura innecesario.
+LOGICAL_HOST = "chibalete-prod"
+
+SENSITIVITY_STANDARD = "standard"
+SENSITIVITY_MINORS = "minors"
+
+RETENTION_STANDARD = "standard"
+RETENTION_NEEDS_LEGAL_REVIEW = "NEEDS_LEGAL_REVIEW"
+
+
+@dataclass(frozen=True)
+class SqliteStore:
+    logical_path: str  # ruta logica, relativa a la base: nunca absoluta interna
+    category: str  # CANON | PROJ
+    reconstructible: bool
+    required: bool = True  # False => ausencia tolerada (store futuro)
+
+
+@dataclass(frozen=True)
+class JsonStore:
+    logical_path: str
+    category: str  # CANON | CFG | PROJ
+    # Adaptador de conteo AGREGADO. None => no se emite ningun conteo.
+    # Regla §8 del diseno: los stores leo_* no llevan adaptador.
+    count_adapter: str | None = None
+    sensitivity: str = SENSITIVITY_STANDARD
+    retention_status: str = RETENTION_STANDARD
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class UploadsSource:
+    logical_path: str
+    required: bool = True
+
+
+# --- SQLite (inventario §2.1) -------------------------------------------------
+SQLITE_STORES: tuple[SqliteStore, ...] = (
+    SqliteStore("data-critical/events.db", "CANON", reconstructible=False),
+    SqliteStore("data/progress.db", "CANON", reconstructible=False),
+    SqliteStore("data/offline_assignments.db", "CANON", reconstructible=False),
+    SqliteStore("data-critical/insights.db", "PROJ", reconstructible=True),
+    # Futuro (inventario §2.4): entra automaticamente cuando exista el archivo.
+    SqliteStore("data-critical/identity.db", "CANON", reconstructible=False, required=False),
+)
+
+# --- JSON canonicos (inventario §2.2) ----------------------------------------
+JSON_STORES: tuple[JsonStore, ...] = (
+    JsonStore("data-critical/usuarios_colegios_oro.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/groups_db.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/access_db.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/schools_db.json", "CFG", count_adapter="root_len"),
+    JsonStore("data/sections.json", "CFG", count_adapter="root_len"),
+    JsonStore("data/school_configs.json", "CFG", count_adapter="root_len"),
+    JsonStore("data/content.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/content_db.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/user_audit_log.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/analytics_db.json", "PROJ", count_adapter="root_len"),
+    # leo_*: incluidos y cifrados por restic, SIN adaptador de conteo y
+    # etiquetados para revision legal (design §8).
+    JsonStore(
+        "data/leo_memory_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+    ),
+    JsonStore(
+        "data/leo_evidence_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+    ),
+    JsonStore(
+        "data/leo_interactions_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+    ),
+)
+
+# --- Uploads (inventario §1 mounts; §2.3) ------------------------------------
+# El mount host autoritativo es /var/www/chibalete/public/uploads -> /app/public/uploads.
+UPLOADS_SOURCES: tuple[UploadsSource, ...] = (
+    UploadsSource("public/uploads"),
+)
+
+# Sufijos que acompanan a una base SQLite en WAL y cuentan para el espacio.
+SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm")
+
+# Exclusiones del backup ordinario (design §3.4). Nunca entran al staging.
+EXCLUDED_NAME_PATTERNS = (
+    "*.bak.*",
+    "*.pre-*",
+    "*.corrupt.*",
+    "server.old-*",
+    "node_modules",
+    ".claude",
+    ".env",
+)
+
+
+def count_adapter(name: str | None):
+    """Devuelve el adaptador de conteo AGREGADO, o None si no hay ninguno.
+
+    Los adaptadores solo devuelven cardinalidades. Nunca devuelven valores,
+    claves de usuario ni fragmentos de contenido.
+    """
+    if name is None:
+        return None
+    if name == "root_len":
+        def _root_len(parsed):
+            if isinstance(parsed, (list, dict, str)):
+                return len(parsed)
+            return None
+        return _root_len
+    raise ValueError(f"adaptador de conteo desconocido: {name}")

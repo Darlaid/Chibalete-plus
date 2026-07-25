@@ -1,0 +1,49 @@
+[Unit]
+Description=Chibalete+ backup repository verification (non-destructive)
+Documentation=file:/opt/chibalete-backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Solo snapshots + check + lectura de manifiestos. NINGUNA unit de este
+# conjunto ejecuta forget, prune ni eliminacion de snapshots: la retencion
+# destructiva permanece bloqueada hasta CHP-BACKUP-01C GREEN.
+ExecStart=/usr/bin/python3 /opt/chibalete-backup/runners/verify_backup.py
+EnvironmentFile=/etc/chibalete-backup/backup.env
+
+TimeoutStartSec=7200
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+
+RuntimeDirectory=chibalete-backup
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/backups/chibalete-backup
+ReadOnlyPaths=/var/www/chibalete
+
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chibalete-backup-verify
