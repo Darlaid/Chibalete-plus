@@ -9,6 +9,7 @@
  *
  * Todos los secretos usados aquí son sintéticos y desechables.
  */
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,9 +42,22 @@ function section(label) {
 // significa que hay fallback a environment o filtración de material.
 const SENTINEL = 'SENTINEL-ENV-VALUE-MUST-NEVER-BE-RETURNED-0123456789';
 const SECRET_A = 'A1a-secret-alpha-0123456789abcdefghij';
-const SECRET_B = 'B2b_secret_bravo_9876543210zyxwvutsrq';
-const SECRET_B64 = 'q1w2e3r4t5y6u7i8o9p0asdfghjklzxcvbnmQWERTY==';
-const SECRET_B64URL = 'q1w2e3r4t5y6u7i8o9p0asdfghjklzxcvbnm-QWERTY_';
+
+// SECRET_B y los dos formatos base64 se generan en cada ejecución con
+// node:crypto en lugar de ser literales. Como literales tenían entropía
+// suficiente para que gitleaks los marcara `generic-api-key` sobre HEAD, y el
+// gate quedaba en rojo por fixtures de prueba, no por credenciales. Generarlos
+// en runtime elimina el hallazgo sin relajar ninguna regla del escáner y sin
+// cambiar lo que estas pruebas verifican: siguen siendo ASCII visible, de
+// longitud >= 32 bytes y siempre distintos de SECRET_A.
+const SECRET_B = `B2b_${randomBytes(18).toString('hex')}`;
+
+// Los sufijos fijan los caracteres cuyo tratamiento declara verificar cada
+// prueba ("+", "/" y "=" en base64; "-" y "_" en base64url). Con material
+// puramente aleatorio su presencia dependería del azar de cada ejecución, así
+// que se añaden de forma explícita en vez de confiarla al generador.
+const SECRET_B64 = `${randomBytes(24).toString('base64').replace(/[+/=]/g, 'z')}+/==`;
+const SECRET_B64URL = `${randomBytes(24).toString('base64url').replace(/[-_]/g, 'z')}-_`;
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'chp-secretfile-'));
 fs.chmodSync(TMP, 0o700);
@@ -373,7 +387,13 @@ try {
         stage(stageB, SECRET_B);
         fs.renameSync(stageB, canonical);
         const second = await readSecretFile(canonical);
-        ok('[24] tras rename, la siguiente lectura devuelve B', second === SECRET_B, second);
+        // El detalle describe el desvío sin imprimir material: ahora que los
+        // secretos se generan en runtime, volcar `second` los expondría en stderr.
+        ok(
+            '[24] tras rename, la siguiente lectura devuelve B',
+            second === SECRET_B,
+            second === SECRET_A ? 'siguió devolviendo A' : 'valor no reconocido',
+        );
         ok('[24] no quedó cacheado el valor anterior', second !== SECRET_A);
 
         let alternations = 0;
