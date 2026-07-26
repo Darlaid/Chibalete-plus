@@ -8,6 +8,15 @@ Uso en produccion (lo que ejecuta la unit systemd):
 
     structured_backup.py
 
+Provision (UNA sola vez, manual, nunca desde un timer):
+
+    structured_backup.py --initialize-empty-repository
+
+Ese flag es la autorizacion de primer `restic init`. Sin el, NINGUN destino
+vacio se inicializa —ni un prefijo S3 aprobado ni una ruta de filesystem—. No se
+persiste en ningun sitio ni se lee del entorno: la segunda ejecucion vuelve a
+encontrar el repositorio ya existente y no reinicializa.
+
 Los flags --config-dir/--base-dir/--work-dir/--lock-path existen para
 ejercitar el runner con rutas sinteticas en las pruebas. Las units NO los pasan.
 """
@@ -49,6 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-dir", default=DEFAULT_BASE_DIR, help=argparse.SUPPRESS)
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR, help=argparse.SUPPRESS)
     parser.add_argument("--lock-path", default=DEFAULT_LOCK_PATH, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--initialize-empty-repository",
+        action="store_true",
+        help=(
+            "AUTORIZACION MANUAL DE PROVISION: permite exactamente un "
+            "`restic init` si —y solo si— el destino esta demostrablemente "
+            "vacio (para S3, mediante el preflight firmado del prefijo "
+            "aprobado). NUNCA debe aparecer en un timer."
+        ),
+    )
     return parser
 
 
@@ -68,7 +87,9 @@ def run(args) -> int:
     with SharedLock(args.lock_path):
         check_capacity(args.work_dir, estimate, log)
         restic = Restic(config, log)
-        state = restic.ensure_repository()
+        state = restic.ensure_repository(
+            initialize_empty_repository=args.initialize_empty_repository
+        )
         log.info("repository_ready", state=state)
 
         with StagingArea(args.work_dir) as staging:

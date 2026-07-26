@@ -4,20 +4,34 @@
 Ejecutar SIEMPRE dentro del toolchain Linux aislado (ver ../README.md):
 restic real, red deshabilitada, fixtures y passphrases sinteticas.
 
-Cubre los 24 casos obligatorios y los 16 escenarios de integracion con restic.
+Cubre los 24 casos obligatorios, los escenarios de integracion con restic, el
+preflight S3 firmado (P01-P28) y el cierre del auto-init local (L01-L08).
 Las pruebas ejercitan comportamiento real: nada se sustituye por inspeccion de
-texto salvo los dos barridos estaticos explicitamente marcados como
+texto salvo los barridos estaticos explicitamente marcados como
 complementarios.
+
+Desde CHP-BACKUP-01B-1-R3A ningun runner ordinario inicializa un destino vacio
+—ni S3 ni filesystem—: los casos historicos que dependian del auto-init local
+provisionan el repositorio explicitamente con `Env.provision_repository()`, que
+es lo que hace la orden manual de provision.
 """
 
+import ast
+import datetime
+import hashlib
+import hmac
+import http.server
 import json
 import os
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UNIT_DIR = os.path.dirname(HERE)
@@ -32,7 +46,9 @@ from chibalete_backup import errors  # noqa: E402
 from chibalete_backup.config import load_config  # noqa: E402
 from chibalete_backup.locking import SharedLock, StagingArea  # noqa: E402
 from chibalete_backup.manifest import audit_manifest  # noqa: E402
+from chibalete_backup import s3_preflight  # noqa: E402
 from chibalete_backup.restic import Restic  # noqa: E402
+from chibalete_backup.s3_preflight import RemoteState, ScopeVerdict  # noqa: E402
 from chibalete_backup.safelog import SafeLogger  # noqa: E402
 from chibalete_backup.sqlite_capture import capture_sqlite, source_journal_mode  # noqa: E402
 
@@ -77,7 +93,7 @@ class Env:
             **config_kw,
         )
 
-    def run(self, runner: str, extra=None, timeout: int = 600, expect=None):
+    def run(self, runner: str, extra=None, timeout: int = 600, expect=None, env=None):
         cmd = [
             sys.executable,
             os.path.join(RUNNERS_DIR, runner),
@@ -89,7 +105,12 @@ class Env:
             cmd += ["--base-dir", self.base]
         if extra:
             cmd += extra
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        child_env = None
+        if env:
+            child_env = dict(os.environ)
+            child_env.update(env)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              env=child_env)
         if expect is not None and proc.returncode != expect:
             raise AssertionError(
                 f"{runner} rc={proc.returncode} (esperado {expect}); stderr={proc.stderr[-500:]}"
@@ -112,6 +133,19 @@ class Env:
     def restic(self):
         cfg = load_config(self.config_dir)
         return Restic(cfg, SafeLogger("test", "test", stream=open(os.devnull, "w")))
+
+    def provision_repository(self):
+        """Provision manual del repositorio, como la orden de provision real.
+
+        Desde CHP-BACKUP-01B-1-R3A ningun runner ordinario puede inicializar un
+        destino vacio —tampoco de filesystem—, asi que los casos historicos que
+        antes se apoyaban en el auto-init deben provisionar explicitamente. Se
+        usa `ensure_repository` directamente para no crear un snapshot y no
+        alterar los conteos que esos casos verifican.
+        """
+        restic = self.restic()
+        assert restic.ensure_repository(initialize_empty_repository=True) == "initialized"
+        return restic
 
     def snapshots(self, tag=None):
         return self.restic().snapshots(tag=tag)
@@ -306,6 +340,7 @@ def test_insufficient_inodes():
 @case("07", "ejecucion concurrente rechazada por el lock compartido")
 def test_concurrency():
     env = Env("c07")
+    env.provision_repository()
     with SharedLock(env.lock):
         proc = env.run("structured_backup.py", expect=errors.LockBusy.exit_code)
         assert "lock" in proc.stderr, proc.stderr
@@ -344,6 +379,7 @@ def test_sqlite_valid():
 @case("09", "SQLite corrupta: falla cerrado y descarta la copia")
 def test_sqlite_corrupt():
     env = Env("c09")
+    env.provision_repository()
     corrupt = os.path.join(env.base, "data/progress.db")
     with open(corrupt, "wb") as handle:
         handle.write(b"NO-SOY-UNA-BASE-SQLITE" * 100)
@@ -418,6 +454,7 @@ def test_sqlite_wal_concurrent():
 @case("11", "JSON valido: hash, conteo agregado y captura")
 def test_json_valid():
     env = Env("c11")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     manifest = env.manifests()[-1]
     by_path = {s["logical_path"]: s for s in manifest["stores"]}
@@ -431,6 +468,7 @@ def test_json_valid():
 @case("12", "JSON invalido: falla ANTES de restic")
 def test_json_invalid():
     env = Env("c12")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     before = len(env.snapshots())
     target = os.path.join(env.base, "data/content.json")
@@ -449,6 +487,7 @@ def test_json_invalid():
 @case("13", "uploads vacios")
 def test_uploads_empty():
     env = Env("c13", uploads_files=0)
+    env.provision_repository()
     env.run("uploads_backup.py", expect=0)
     manifest = env.manifests()[-1]
     assert manifest["uploads_file_count"] == 0, manifest
@@ -459,6 +498,7 @@ def test_uploads_empty():
 @case("14", "uploads multiples, sin copia local")
 def test_uploads_multiple():
     env = Env("c14", uploads_files=8)
+    env.provision_repository()
     env.run("uploads_backup.py", expect=0)
     manifest = env.manifests()[-1]
     assert manifest["uploads_file_count"] == 8, manifest
@@ -480,6 +520,7 @@ def test_uploads_multiple():
 @case("15", "segunda ejecucion sin cambios")
 def test_second_run_no_changes():
     env = Env("c15")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     before = fixtures.snapshot_tree(env.base)
     env.run("structured_backup.py", expect=0)
@@ -491,6 +532,7 @@ def test_second_run_no_changes():
 @case("16", "cambio parcial y deduplicacion real de restic")
 def test_partial_change_dedup():
     env = Env("c16", uploads_files=10)
+    env.provision_repository()
     first = Env.backup_summary(env.run("uploads_backup.py", expect=0))
     assert first["files_new"] == 10, first
 
@@ -520,6 +562,7 @@ def test_partial_change_dedup():
 @case("17", "leo_* incluidos, etiquetados y sin exposicion")
 def test_leo_no_exposure():
     env = Env("c17")
+    env.provision_repository()
     proc = env.run("structured_backup.py", expect=0)
     manifest = env.manifests()[-1]
     leo = [s for s in manifest["stores"] if "leo_" in s["logical_path"]]
@@ -552,6 +595,7 @@ def test_interruption():
 
     # 18b — SIGTERM real a mitad de staging.
     env2 = Env("c18b")
+    env2.provision_repository()
     inflate_db(os.path.join(env2.base, "data-critical/events.db"), 120000)
     proc = env2.popen("structured_backup.py")
     seen = False
@@ -576,7 +620,13 @@ def test_interruption():
 def test_restic_error():
     fill_filesystem(FULLFS)
     env = Env("c19", repository=os.path.join(FULLFS, "repo"))
-    proc = env.run("structured_backup.py", expect=errors.ResticError.exit_code)
+    # Sin autorizacion ni siquiera se intenta el init: bloquea antes.
+    env.run("structured_backup.py", expect=errors.RepositoryInitNotAuthorized.exit_code)
+    assert not os.path.isdir(os.path.join(env.repo, "data")), "se creo un repositorio"
+    # Con la autorizacion de provision se llega al `restic init` real, que
+    # falla por ENOSPC: es el error de restic que este caso debe propagar.
+    proc = env.run("structured_backup.py", extra=["--initialize-empty-repository"],
+                   expect=errors.ResticError.exit_code)
     assert "restic" in proc.stderr, proc.stderr
     assert env.staging_dirs() == [], "staging no limpiado tras error de restic"
 
@@ -584,6 +634,7 @@ def test_restic_error():
 @case("20", "limpieza posterior al error, sin borrar fuentes ni repositorio")
 def test_cleanup_after_error():
     env = Env("c20")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     snaps_before = len(env.snapshots())
     sources_before = fixtures.snapshot_tree(env.base)
@@ -608,6 +659,7 @@ def test_cleanup_after_error():
 @case("21", "ausencia total de forget/prune/eliminacion")
 def test_no_destructive():
     env = Env("c21")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     restic = env.restic()
     for args in (
@@ -663,6 +715,7 @@ def test_no_destructive():
 @case("22", "ausencia de secretos en stdout/stderr")
 def test_no_secret_leak():
     env = Env("c22")
+    env.provision_repository()
     outputs = []
     outputs.append(env.run("structured_backup.py", expect=0))
     outputs.append(env.run("uploads_backup.py", expect=0))
@@ -682,6 +735,7 @@ def test_no_secret_leak():
 @case("23", "cero modificacion de las fuentes")
 def test_sources_untouched():
     env = Env("c23")
+    env.provision_repository()
     before = fixtures.snapshot_tree(env.base)
     modes_before = {
         rel: source_journal_mode(os.path.join(env.base, rel))
@@ -705,6 +759,7 @@ def test_sources_untouched():
 @case("24", "idempotencia de ejecuciones repetidas")
 def test_idempotency():
     env = Env("c24")
+    env.provision_repository()
     for _ in range(3):
         env.run("structured_backup.py", expect=0)
         env.run("uploads_backup.py", expect=0)
@@ -728,7 +783,8 @@ def test_idempotency():
 def test_integration_core():
     env = Env("i1", uploads_files=5)
     assert not os.path.exists(env.repo)
-    env.run("structured_backup.py", expect=0)  # 1 init + 2 structured
+    # 1 init: SOLO con la autorizacion manual de provision + 2 structured.
+    env.run("structured_backup.py", extra=["--initialize-empty-repository"], expect=0)
     assert os.path.isdir(os.path.join(env.repo, "data")), "restic init no creo el repositorio"
     env.run("uploads_backup.py", expect=0)  # 3 uploads
     snaps = env.snapshots()  # 4 snapshots
@@ -743,6 +799,7 @@ def test_integration_core():
 @case("I2", "integracion: passphrase incorrecta falla cerrado y no destruye")
 def test_integration_wrong_passphrase():
     env = Env("i2")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     config_before = fixtures.snapshot_tree(env.repo)
 
@@ -762,17 +819,22 @@ def test_integration_wrong_passphrase():
 def test_integration_missing_repo():
     env = Env("i3")
     assert not os.path.exists(env.repo)
-    env.run("structured_backup.py", expect=0)
+    # Sin autorizacion el destino inexistente NO se inicializa.
+    env.run("structured_backup.py", expect=errors.RepositoryInitNotAuthorized.exit_code)
+    assert not os.path.exists(env.repo), "se creo el repositorio sin autorizacion"
+    # Con autorizacion, si.
+    env.run("structured_backup.py", extra=["--initialize-empty-repository"], expect=0)
     assert os.path.isdir(os.path.join(env.repo, "data"))
 
     env2 = Env("i3b", repository="/proc/imposible/repo")
-    proc = env2.run("structured_backup.py")
+    proc = env2.run("structured_backup.py", extra=["--initialize-empty-repository"])
     assert proc.returncode != 0, "una ruta de repositorio imposible debe fallar"
 
 
 @case("I4", "integracion: manifiesto viaja dentro del snapshot")
 def test_integration_manifest_in_snapshot():
     env = Env("i4")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     snaps = env.snapshots(tag="structured")
     assert len(snaps) == 1
@@ -792,6 +854,7 @@ def test_integration_manifest_in_snapshot():
 @case("I5", "integracion: verify no destructivo detecta repositorio sano")
 def test_integration_verify():
     env = Env("i5")
+    env.provision_repository()
     env.run("structured_backup.py", expect=0)
     env.run("uploads_backup.py", expect=0)
     proc = env.run("verify_backup.py", expect=0)
@@ -851,6 +914,967 @@ def test_systemd_units():
     assert "*-*-* 03:30:00" in uploads
     verify = open(os.path.join(SYSTEMD_DIR, "backup-verify.timer"), encoding="utf-8").read()
     assert "Sun " in verify
+
+
+# --------------------------------------------------------------------------
+# Preflight S3 (CHP-BACKUP-01B-1-R3) — servidor sintetico y utilidades
+# --------------------------------------------------------------------------
+#
+# Todo lo que sigue es OFFLINE y sobre loopback: un servidor HTTP local que
+# imita ListObjectsV2 y los errores de S3. Cero red real, cero Backblaze, cero
+# credenciales reales. Las credenciales son sinteticas y solo se usan para
+# firmar contra el servidor local.
+
+S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+# Host con la forma del endpoint aprobado. Se mantiene separado del path para
+# no producir la cadena `<endpoint>/<bucket>` que el barrido de fugas persigue.
+B2_HOST_SHAPE = "s3.us-west-004.backblazeb2.com"
+B2_REGION_SHAPE = "us-west-004"
+
+SYNTHETIC_BUCKET = "chp-backups-synthetic"
+SYNTHETIC_KEY_ID = "005synthetickeyid0000000"
+SYNTHETIC_SECRET = "synthetic-secret-key-value-000000"
+
+
+def _list_xml(keys, prefix: str = "restic-prod/") -> bytes:
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<ListBucketResult xmlns="{S3_NS}">',
+        f"<Name>{SYNTHETIC_BUCKET}</Name><Prefix>{prefix}</Prefix>",
+        f"<KeyCount>{len(keys)}</KeyCount><MaxKeys>2</MaxKeys>",
+        "<IsTruncated>false</IsTruncated>",
+    ]
+    for key in keys:
+        parts.append(f"<Contents><Key>{key}</Key><Size>1</Size></Contents>")
+    parts.append("</ListBucketResult>")
+    return "".join(parts).encode("utf-8")
+
+
+def _error_xml(code: str, message: str = "synthetic") -> bytes:
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f"<Error><Code>{code}</Code><Message>{message}</Message>"
+        "<RequestId>synthetic-request</RequestId>"
+        "<HostId>synthetic-host</HostId></Error>"
+    ).encode("utf-8")
+
+
+class _S3StubHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):  # silencio: la salida de la suite es el reporte
+        pass
+
+    def log_error(self, *args):
+        pass
+
+    def _handle(self):
+        server = self.server
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        prefix = (query.get("prefix") or [""])[0]
+        is_list = query.get("list-type") == ["2"]
+        auth = self.headers.get("Authorization", "")
+        server.seen.append({
+            "method": self.command,
+            "path": parsed.path,
+            "prefix": prefix,
+            "is_list": is_list,
+            # Se registra SOLO si la cabecera existe y su algoritmo; jamas su valor.
+            "authorized": bool(auth),
+            "auth_algorithm": auth.split(" ", 1)[0] if auth else "",
+        })
+        status, body, delay = server.scenario(prefix, is_list, self.command)
+        if delay:
+            time.sleep(delay)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    do_GET = _handle
+    do_HEAD = _handle
+    do_PUT = _handle
+    do_POST = _handle
+    do_DELETE = _handle
+
+
+class S3Stub:
+    """Servidor S3 sintetico en loopback. Se cierra al salir del contexto."""
+
+    def __init__(self, scenario):
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _S3StubHandler)
+        self.httpd.scenario = scenario
+        self.httpd.seen = []
+        self.httpd.daemon_threads = True
+        # Un cliente que abandona (timeout, TLS) rompe la escritura: es parte
+        # de la prueba, no un fallo del servidor. No debe ensuciar el reporte.
+        self.httpd.handle_error = lambda request, client_address: None
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=10)
+        return False
+
+    @property
+    def port(self) -> int:
+        return self.httpd.server_address[1]
+
+    @property
+    def seen(self) -> list:
+        return self.httpd.seen
+
+    def repository(self, bucket: str = SYNTHETIC_BUCKET, prefix: str = "restic-prod") -> str:
+        return f"s3:http://127.0.0.1:{self.port}/{bucket}/{prefix}"
+
+    def target(self, bucket: str = SYNTHETIC_BUCKET, prefix: str = "restic-prod"):
+        return s3_preflight.parse_target({
+            "RESTIC_REPOSITORY": self.repository(bucket, prefix),
+            "AWS_DEFAULT_REGION": "synthetic-region-000",
+            "AWS_ACCESS_KEY_ID": SYNTHETIC_KEY_ID,
+            "AWS_SECRET_ACCESS_KEY": SYNTHETIC_SECRET,
+        })
+
+
+# Respuesta a todo lo que NO sea ListObjectsV2 (p. ej. el GET de `config` que
+# hace restic): la clave no existe. Asi el destino se lee como "sin repositorio"
+# y la decision recae, como debe, en el listado firmado.
+NO_SUCH_KEY = (404, _error_xml("NoSuchKey"), 0.0)
+
+
+def scenario_static(status: int, body: bytes, delay: float = 0.0):
+    def handler(prefix, is_list, method):
+        return (status, body, delay) if is_list else NO_SUCH_KEY
+    return handler
+
+
+def scenario_prefix_aware(approved_response, control_response):
+    """Respuesta distinta para el prefijo aprobado y para el de control."""
+    def handler(prefix, is_list, method):
+        if not is_list:
+            return NO_SUCH_KEY
+        if prefix.startswith(s3_preflight.APPROVED_PREFIX):
+            return approved_response
+        return control_response
+    return handler
+
+
+class ScriptedRestic(Restic):
+    """Restic real salvo `cat config` e `init`, que se guionizan.
+
+    Permite ejercitar la clasificacion y el contrato de primer init contra el
+    servidor S3 sintetico sin necesitar un repositorio restic remoto. La
+    allowlist, el guard y toda la logica de `ensure_repository` son los reales.
+    """
+
+    def __init__(self, config, cat_rc: int = 1, cat_stderr: str = "", s3_timeout=2.0):
+        super().__init__(config, SafeLogger("test", "s3", stream=open(os.devnull, "w")),
+                         s3_timeout=s3_timeout)
+        self.cat_rc = cat_rc
+        self.cat_stderr = cat_stderr
+        self.init_calls = 0
+
+    def run(self, args, check: bool = True):
+        self._guard(args)
+        if args[:2] == ["cat", "config"]:
+            return subprocess.CompletedProcess(args, self.cat_rc, "", self.cat_stderr)
+        if args[0] == "init":
+            self.init_calls += 1
+            self.cat_rc = 0  # tras un init correcto el repositorio es legible
+            return subprocess.CompletedProcess(args, 0, "created restic repository", "")
+        return super().run(args, check=check)
+
+
+def s3_config(name: str, repository: str):
+    """Configuracion valida (root:root 0400) apuntando a `repository`."""
+    root = fresh(name)
+    config_dir = os.path.join(root, "etc")
+    fixtures.build_config(config_dir, repository=repository,
+                          access_key=SYNTHETIC_KEY_ID, secret_key=SYNTHETIC_SECRET)
+    return load_config(config_dir)
+
+
+def parse_env(repository: str, **overrides) -> dict:
+    env = {
+        "RESTIC_REPOSITORY": repository,
+        "AWS_DEFAULT_REGION": B2_REGION_SHAPE,
+        "AWS_ACCESS_KEY_ID": SYNTHETIC_KEY_ID,
+        "AWS_SECRET_ACCESS_KEY": SYNTHETIC_SECRET,
+    }
+    env.update(overrides)
+    return {k: v for k, v in env.items() if v is not None}
+
+
+def approved_repository(bucket: str = SYNTHETIC_BUCKET, prefix: str = "restic-prod") -> str:
+    """`s3:https://<endpoint aprobado>/<bucket>/<prefijo>` sin literal contiguo."""
+    return "s3:https://" + B2_HOST_SHAPE + "/" + bucket + "/" + prefix
+
+
+EMPTY_OK = (200, _list_xml([]), 0.0)
+DENIED_403 = (403, _error_xml("AccessDenied"), 0.0)
+
+
+# --------------------------------------------------------------------------
+# Casos P01-P28 — contrato de estados, preflight S3 y primer init
+# --------------------------------------------------------------------------
+
+@case("P01", "repositorio existente: sin preflight S3 y sin init")
+def test_p_existing_repository():
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub:
+        config = s3_config("p01", stub.repository())
+        restic = ScriptedRestic(config, cat_rc=0)
+        assert restic.repository_state() is RemoteState.EXISTING_REPOSITORY
+        assert restic.ensure_repository() == "existing"
+        assert restic.init_calls == 0, "no debe inicializarse un repositorio existente"
+        assert stub.seen == [], "con `cat config` correcto no se consulta S3"
+
+
+@case("P02", "prefijo aprobado vacio: clasificacion por listado firmado")
+def test_p_empty_prefix():
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+        assert result.state is RemoteState.EMPTY_APPROVED_PREFIX, result.state
+        assert result.object_count == 0
+        assert len(stub.seen) == 1, stub.seen
+        request = stub.seen[0]
+        assert request["method"] == "GET", "el preflight solo lee"
+        assert request["is_list"], "debe usarse ListObjectsV2"
+        assert request["prefix"] == "restic-prod/", request
+        assert request["authorized"], "la peticion debe ir firmada"
+        assert request["auth_algorithm"] == "AWS4-HMAC-SHA256", request
+
+
+@case("P03", "prefijo vacio SIN autorizacion: bloqueo y cero init")
+def test_p_empty_without_authorization():
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub:
+        config = s3_config("p03", stub.repository())
+        restic = ScriptedRestic(config)
+        assert restic.repository_state() is RemoteState.EMPTY_APPROVED_PREFIX
+        try:
+            restic.ensure_repository()
+            raise AssertionError("un prefijo vacio no puede inicializarse sin autorizacion")
+        except errors.RepositoryInitNotAuthorized as exc:
+            assert "autorizacion manual de provision" in str(exc), str(exc)
+        assert restic.init_calls == 0
+        assert not any(r["method"] != "GET" for r in stub.seen), "no debe escribirse nada"
+
+
+@case("P04", "prefijo vacio CON autorizacion: exactamente un init verificado")
+def test_p_empty_with_authorization():
+    scenario = scenario_prefix_aware(approved_response=EMPTY_OK, control_response=DENIED_403)
+    with S3Stub(scenario) as stub:
+        config = s3_config("p04", stub.repository())
+        restic = ScriptedRestic(config)
+        assert restic.ensure_repository(initialize_empty_repository=True) == "initialized"
+        assert restic.init_calls == 1, "debe ejecutarse exactamente un init"
+        # Se comprobo el alcance de la clave ANTES de inicializar.
+        control = [r for r in stub.seen if not r["prefix"].startswith("restic-prod")]
+        assert control, "no se verifico el alcance de la credencial"
+        assert all(r["method"] == "GET" for r in stub.seen)
+
+
+@case("P05", "segunda ejecucion tras el init: idempotente, sin reinicializar")
+def test_p_second_run_after_init():
+    scenario = scenario_prefix_aware(approved_response=EMPTY_OK, control_response=DENIED_403)
+    with S3Stub(scenario) as stub:
+        config = s3_config("p05", stub.repository())
+        restic = ScriptedRestic(config)
+        assert restic.ensure_repository(initialize_empty_repository=True) == "initialized"
+        requests_after_init = len(stub.seen)
+        # Segunda ejecucion, incluso repitiendo la autorizacion.
+        assert restic.ensure_repository(initialize_empty_repository=True) == "existing"
+        assert restic.init_calls == 1, "la autorizacion no puede reinicializar"
+        assert len(stub.seen) == requests_after_init, "no debe repetirse el preflight"
+        # Y una ejecucion ordinaria (sin autorizacion) tampoco reinicializa.
+        assert restic.ensure_repository() == "existing"
+        assert restic.init_calls == 1
+
+
+@case("P06", "objetos ajenos bajo el prefijo: bloqueo")
+def test_p_foreign_objects():
+    body = _list_xml(["restic-prod/documento-ajeno.txt", "restic-prod/otro.bin"])
+    with S3Stub(scenario_static(200, body)) as stub:
+        config = s3_config("p06", stub.repository())
+        restic = ScriptedRestic(config)
+        assert restic.repository_state() is RemoteState.FOREIGN_OBJECTS_PRESENT
+        try:
+            restic.ensure_repository(initialize_empty_repository=True)
+            raise AssertionError("no se puede inicializar sobre objetos ajenos")
+        except errors.RepositoryUnknownError as exc:
+            assert "no es un repositorio restic identificable" in str(exc)
+        assert restic.init_calls == 0
+
+
+@case("P07", "restos de init parcial: bloqueo, no se reinicia encima")
+def test_p_partial_init_leftovers():
+    body = _list_xml(["restic-prod/keys/8f3a", "restic-prod/data/00/deadbeef"])
+    with S3Stub(scenario_static(200, body)) as stub:
+        config = s3_config("p07", stub.repository())
+        # `cat config` falla: el config no llego a escribirse (init interrumpido).
+        restic = ScriptedRestic(config, cat_stderr="Fatal: config does not exist")
+        assert restic.repository_state() is RemoteState.FOREIGN_OBJECTS_PRESENT
+        try:
+            restic.ensure_repository(initialize_empty_repository=True)
+            raise AssertionError("un init parcial no puede sobrescribirse")
+        except errors.RepositoryUnknownError:
+            pass
+        assert restic.init_calls == 0
+
+
+@case("P08", "credenciales invalidas: ACCESS_DENIED, nunca vacio")
+def test_p_invalid_credentials():
+    body = _error_xml("InvalidAccessKeyId")
+    with S3Stub(scenario_static(403, body)) as stub:
+        config = s3_config("p08", stub.repository())
+        restic = ScriptedRestic(config)
+        assert restic.repository_state() is RemoteState.ACCESS_DENIED
+        try:
+            restic.ensure_repository(initialize_empty_repository=True)
+            raise AssertionError("una credencial invalida debe bloquear")
+        except errors.S3PreflightError as exc:
+            assert exc.exit_code == 24
+            assert "denegacion de acceso" in str(exc)
+        assert restic.init_calls == 0
+
+
+@case("P09", "acceso denegado al prefijo: bloqueo")
+def test_p_access_denied():
+    with S3Stub(scenario_static(*DENIED_403)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+        assert result.state is RemoteState.ACCESS_DENIED
+        assert result.error_code == "AccessDenied"
+    # Tambien por status, aunque el cuerpo no traiga codigo reconocible.
+    with S3Stub(scenario_static(401, b"")) as stub2:
+        result2 = s3_preflight.probe_approved_prefix(stub2.target(), timeout=5)
+        assert result2.state is RemoteState.ACCESS_DENIED, result2.state
+
+
+@case("P10", "bucket inexistente: BUCKET_NOT_FOUND")
+def test_p_bucket_not_found():
+    body = _error_xml("NoSuchBucket")
+    with S3Stub(scenario_static(404, body)) as stub:
+        config = s3_config("p10", stub.repository())
+        restic = ScriptedRestic(config)
+        assert restic.repository_state() is RemoteState.BUCKET_NOT_FOUND
+        try:
+            restic.ensure_repository(initialize_empty_repository=True)
+            raise AssertionError("un bucket inexistente debe bloquear")
+        except errors.S3PreflightError as exc:
+            assert "no existe" in str(exc)
+
+
+@case("P11", "endpoint incorrecto: redireccion y host no aprobado")
+def test_p_endpoint_mismatch():
+    body = _error_xml("PermanentRedirect")
+    with S3Stub(scenario_static(301, body)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+        assert result.state is RemoteState.ENDPOINT_OR_REGION_MISMATCH, result.state
+    # Y antes de la red: un endpoint fuera del destino aprobado no se contacta.
+    for bad in ("s3:https://s3.amazonaws.com" + "/" + SYNTHETIC_BUCKET + "/restic-prod",
+                "s3:https://evil.example.net" + "/" + SYNTHETIC_BUCKET + "/restic-prod"):
+        try:
+            s3_preflight.parse_target(parse_env(bad))
+            raise AssertionError(f"endpoint no aprobado aceptado: {bad}")
+        except errors.ConfigError as exc:
+            assert "aprobado" in str(exc) or "region" in str(exc), str(exc)
+
+
+@case("P12", "region incorrecta: rechazo local y error remoto")
+def test_p_region_mismatch():
+    # Local: el host declara una region y AWS_DEFAULT_REGION dice otra.
+    try:
+        s3_preflight.parse_target(
+            parse_env(approved_repository(), AWS_DEFAULT_REGION="eu-central-003")
+        )
+        raise AssertionError("region incoherente aceptada")
+    except errors.ConfigError as exc:
+        assert "region" in str(exc), str(exc)
+    # Remoto: S3 responde con el error tipico de firma en region equivocada.
+    body = _error_xml("AuthorizationHeaderMalformed")
+    with S3Stub(scenario_static(400, body)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+        assert result.state is RemoteState.ENDPOINT_OR_REGION_MISMATCH, result.state
+
+
+@case("P13", "timeout del preflight: NETWORK_OR_TLS_ERROR, jamas vacio")
+def test_p_timeout():
+    with S3Stub(scenario_static(200, _list_xml([]), delay=1.5)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=0.3)
+        assert result.state is RemoteState.NETWORK_OR_TLS_ERROR, result.state
+        assert result.object_count is None
+    # Puerto cerrado: conexion rechazada.
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    dead_port = closed.getsockname()[1]
+    closed.close()
+    target = s3_preflight.parse_target(parse_env(
+        f"s3:http://127.0.0.1:{dead_port}/{SYNTHETIC_BUCKET}/restic-prod"
+    ))
+    assert s3_preflight.probe_approved_prefix(target, timeout=2).state is (
+        RemoteState.NETWORK_OR_TLS_ERROR
+    )
+
+
+@case("P14", "TLS invalido: NETWORK_OR_TLS_ERROR")
+def test_p_tls_error():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                continue
+            try:
+                # Texto plano en respuesta a un ClientHello: handshake imposible.
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        target = s3_preflight.parse_target(parse_env(
+            f"s3:https://127.0.0.1:{port}/{SYNTHETIC_BUCKET}/restic-prod"
+        ))
+        result = s3_preflight.probe_approved_prefix(target, timeout=5)
+        assert result.state is RemoteState.NETWORK_OR_TLS_ERROR, result.state
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        listener.close()
+
+
+@case("P15", "XML malformado o inesperado: UNKNOWN_REMOTE_STATE")
+def test_p_malformed_xml():
+    for body in (b"<ListBucketResult><Contents>", b"no-soy-xml", b"",
+                 b'<?xml version="1.0"?><OtraCosa/>'):
+        with S3Stub(scenario_static(200, body)) as stub:
+            result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+            assert result.state is RemoteState.UNKNOWN_REMOTE_STATE, (body, result.state)
+    # KeyCount incoherente con el numero de objetos enumerados.
+    inconsistent = _list_xml([]).replace(
+        b"<IsTruncated>false</IsTruncated>",
+        b"<IsTruncated>false</IsTruncated><Contents><Key>x</Key></Contents>",
+    )
+    with S3Stub(scenario_static(200, inconsistent)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+        assert result.state is RemoteState.UNKNOWN_REMOTE_STATE, result.state
+
+
+@case("P16", "respuesta 5xx: UNKNOWN_REMOTE_STATE y bloqueo")
+def test_p_server_error():
+    for status in (500, 502, 503):
+        with S3Stub(scenario_static(status, _error_xml("InternalError"))) as stub:
+            config = s3_config(f"p16-{status}", stub.repository())
+            restic = ScriptedRestic(config)
+            assert restic.repository_state() is RemoteState.UNKNOWN_REMOTE_STATE, status
+            try:
+                restic.ensure_repository(initialize_empty_repository=True)
+                raise AssertionError(f"{status} debe bloquear")
+            except errors.S3PreflightError:
+                pass
+            assert restic.init_calls == 0
+
+
+@case("P17", "listado fuera del prefijo denegado (403): alcance restringido")
+def test_p_scope_restricted():
+    scenario = scenario_prefix_aware(approved_response=EMPTY_OK, control_response=DENIED_403)
+    with S3Stub(scenario) as stub:
+        verdict = s3_preflight.probe_scope_restriction(stub.target(), timeout=5)
+        assert verdict is ScopeVerdict.RESTRICTED, verdict
+        probe = stub.seen[-1]
+        assert probe["method"] == "GET", "la sonda de alcance solo lista"
+        assert probe["prefix"].startswith(s3_preflight.SCOPE_PROBE_PREFIX), probe
+        assert not probe["prefix"].startswith(s3_preflight.APPROVED_PREFIX)
+
+
+@case("P18", "listado fuera del prefijo permitido (200): credencial demasiado amplia")
+def test_p_scope_overbroad():
+    # El prefijo de control responde 200: la clave lista fuera de restic-prod/.
+    scenario = scenario_prefix_aware(approved_response=EMPTY_OK,
+                                     control_response=(200, _list_xml([], "otro/"), 0.0))
+    with S3Stub(scenario) as stub:
+        assert s3_preflight.probe_scope_restriction(stub.target(), timeout=5) is (
+            ScopeVerdict.OVERBROAD
+        )
+        config = s3_config("p18", stub.repository())
+        restic = ScriptedRestic(config)
+        try:
+            restic.ensure_repository(initialize_empty_repository=True)
+            raise AssertionError("una credencial demasiado amplia debe bloquear el init")
+        except errors.OverbroadCredentialError as exc:
+            assert exc.exit_code == 25
+            assert "fuera del prefijo aprobado" in str(exc)
+        assert restic.init_calls == 0, "no se inicializa con una clave sobre-permisiva"
+    # Y cualquier resultado ambiguo tambien bloquea.
+    scenario_amb = scenario_prefix_aware(approved_response=EMPTY_OK,
+                                         control_response=(500, _error_xml("InternalError"), 0.0))
+    with S3Stub(scenario_amb) as stub2:
+        assert s3_preflight.probe_scope_restriction(stub2.target(), timeout=5) is (
+            ScopeVerdict.AMBIGUOUS
+        )
+        config2 = s3_config("p18b", stub2.repository())
+        restic2 = ScriptedRestic(config2)
+        try:
+            restic2.ensure_repository(initialize_empty_repository=True)
+            raise AssertionError("un alcance ambiguo debe bloquear")
+        except errors.OverbroadCredentialError:
+            pass
+        assert restic2.init_calls == 0
+
+
+@case("P19", "el listado se dirige EXACTAMENTE al bucket configurado")
+def test_p_bucket_binding():
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub:
+        s3_preflight.probe_approved_prefix(stub.target(bucket="otro-bucket"), timeout=5)
+        assert stub.seen[-1]["path"] == "/otro-bucket", stub.seen[-1]
+        s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+        assert stub.seen[-1]["path"] == f"/{SYNTHETIC_BUCKET}", stub.seen[-1]
+    # La firma cubre el bucket: cambiarlo cambia la peticion canonica.
+    now = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+    query = {"list-type": "2", "max-keys": "2", "prefix": "restic-prod/"}
+    a = s3_preflight.build_signed_request(
+        s3_preflight.parse_target(parse_env(approved_repository(bucket="bucket-a"))), query, now)
+    b = s3_preflight.build_signed_request(
+        s3_preflight.parse_target(parse_env(approved_repository(bucket="bucket-b"))), query, now)
+    assert a["signature"] != b["signature"], "la firma no cubre el bucket"
+
+
+@case("P20", "prefijo distinto del aprobado: rechazo local")
+def test_p_prefix_binding():
+    for bad_prefix in ("restic-dev", "restic-prod-2", "otro", "restic_prod"):
+        try:
+            s3_preflight.parse_target(parse_env(approved_repository(prefix=bad_prefix)))
+            raise AssertionError(f"prefijo no aprobado aceptado: {bad_prefix}")
+        except errors.ConfigError as exc:
+            assert "prefijo no aprobado" in str(exc), str(exc)
+    # Tampoco se admite bucket sin prefijo, ni prefijos anidados.
+    for bad in ("s3:https://" + B2_HOST_SHAPE + "/" + SYNTHETIC_BUCKET,
+                "s3:https://" + B2_HOST_SHAPE + "/" + SYNTHETIC_BUCKET + "/restic-prod/sub"):
+        try:
+            s3_preflight.parse_target(parse_env(bad))
+            raise AssertionError(f"destino mal formado aceptado: {bad}")
+        except errors.ConfigError:
+            pass
+    # El aprobado si se acepta.
+    target = s3_preflight.parse_target(parse_env(approved_repository()))
+    assert target.prefix == s3_preflight.APPROVED_PREFIX
+    assert target.bucket == SYNTHETIC_BUCKET
+    assert target.scheme == "https"
+
+
+@case("P21", "secretos ausentes: el preflight no se intenta siquiera")
+def test_p_missing_secrets():
+    for missing in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"):
+        env = parse_env(approved_repository(), **{missing: None})
+        try:
+            s3_preflight.parse_target(env)
+            raise AssertionError(f"configuracion sin {missing} aceptada")
+        except errors.ConfigError:
+            pass
+    # Sin esquema explicito tampoco: no se adivina el endpoint.
+    for bad in ("s3:" + B2_HOST_SHAPE + "/b/restic-prod",
+                "s3:ftp://" + B2_HOST_SHAPE + "/b/restic-prod",
+                "s3:https://user:pass@" + B2_HOST_SHAPE + "/b/restic-prod"):
+        try:
+            s3_preflight.parse_target(parse_env(bad))
+            raise AssertionError(f"destino aceptado sin validar: {bad}")
+        except errors.ConfigError:
+            pass
+
+
+@case("P22", "secreto vacio: rechazo antes de firmar")
+def test_p_empty_secret():
+    for empty in ("", "   "):
+        for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+            try:
+                s3_preflight.parse_target(parse_env(approved_repository(), **{key: empty}))
+                raise AssertionError(f"{key} vacio aceptado")
+            except errors.ConfigError as exc:
+                assert "credenciales" in str(exc), str(exc)
+    # HTTP en claro contra un host real: rechazado (solo loopback lo admite).
+    try:
+        s3_preflight.parse_target(parse_env("s3:http://" + B2_HOST_SHAPE + "/b/restic-prod"))
+        raise AssertionError("transporte en claro aceptado contra un host real")
+    except errors.ConfigError as exc:
+        assert "HTTPS" in str(exc), str(exc)
+
+
+@case("P23", "sanitizacion: ni cuerpos ni stderr crudos salen del preflight")
+def test_p_sanitization():
+    leak = "keyID-005SECRETO y endpoint interno backup.interno.example"
+    body = _error_xml("AccessDenied", message=leak)
+    with S3Stub(scenario_static(403, body)) as stub:
+        result = s3_preflight.probe_approved_prefix(stub.target(), timeout=5)
+    rendered = json.dumps(result.as_log_fields()) + repr(result) + (result.detail or "")
+    for needle in ("SECRETO", "backup.interno.example", "synthetic-request", "synthetic-host"):
+        assert needle not in rendered, f"fuga en la salida del preflight: {needle}"
+    assert result.error_code == "AccessDenied"
+    # Un <Code> con forma sospechosa no se propaga.
+    weird = b'<?xml version="1.0"?><Error><Code>algo raro con espacios</Code></Error>'
+    assert s3_preflight.classify_list_response(403, weird).error_code is None
+
+    # El stderr de restic se reduce a una etiqueta de un conjunto cerrado.
+    labels = set()
+    samples = {
+        "wrong password for repository": "wrong_password",
+        "Fatal: config does not exist": "config_absent",
+        "AccessDenied: 403": "access_denied",
+        "NoSuchBucket: the bucket does not exist": "bucket_not_found",
+        "PermanentRedirect": "endpoint_mismatch",
+        "dial tcp 10.0.0.1:443: i/o timeout": "network_error",
+        "ciphertext verification failed": "repository_corrupt",
+        "": "no_output",
+        "algo completamente distinto": "unclassified",
+    }
+    for stderr, expected in samples.items():
+        label = s3_preflight.classify_restic_stderr(stderr)
+        assert label == expected, (stderr, label, expected)
+        labels.add(label)
+        # La etiqueta es un identificador cerrado, no una copia del stderr.
+        assert label.replace("_", "").isalpha() and len(label) <= 32, label
+        assert "10.0.0.1" not in label and "443" not in label
+    assert len(labels) == len(set(samples.values()))
+    # Y un listado vacio contradicho por restic no puede clasificarse como vacio.
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub2:
+        config = s3_config("p23", stub2.repository())
+        restic = ScriptedRestic(config, cat_stderr="wrong password for repository")
+        assert restic.repository_state() is RemoteState.UNKNOWN_REMOTE_STATE
+
+
+@case("P24", "las units systemd no pueden autorizar el primer init")
+def test_p_units_have_no_authorization():
+    for name in sorted(os.listdir(SYSTEMD_DIR)):
+        text = open(os.path.join(SYSTEMD_DIR, name), encoding="utf-8").read()
+        assert "--initialize-empty-repository" not in text, f"{name} autoriza el init"
+        assert "initialize_empty_repository" not in text, f"{name} autoriza el init"
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("ExecStart="):
+                assert "--" not in line.split("=", 1)[1], f"{name}: ExecStart con flags: {line}"
+    # Tampoco por variable de entorno heredada: la autorizacion es solo un flag
+    # `store_true` sin default externo.
+    parser_source = open(os.path.join(RUNNERS_DIR, "structured_backup.py"), encoding="utf-8").read()
+    assert '"--initialize-empty-repository",\n        action="store_true",' in parser_source, (
+        "la autorizacion debe ser un flag store_true explicito"
+    )
+    assert "os.environ" not in parser_source, "la autorizacion no puede leerse del entorno"
+    assert "os.getenv" not in parser_source
+    # Los otros dos runners ni siquiera exponen la autorizacion.
+    for runner in ("uploads_backup.py", "verify_backup.py"):
+        source = open(os.path.join(RUNNERS_DIR, runner), encoding="utf-8").read()
+        assert "initialize_empty_repository" not in source, f"{runner} no debe poder inicializar"
+
+
+@case("P25", "prohibicion de init automatico: runners reales contra destino s3:")
+def test_p_no_automatic_init():
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub:
+        env = Env("p25", repository=stub.repository())
+        # Runner estructurado SIN el flag: bloquea con codigo 23.
+        proc = env.run("structured_backup.py", timeout=300,
+                       expect=errors.RepositoryInitNotAuthorized.exit_code)
+        assert "STOP — BACKUP-01B FIRST INIT NOT AUTHORIZED" in proc.stderr, proc.stderr
+        # Runner de uploads: ni siquiera acepta la autorizacion.
+        env.run("uploads_backup.py", timeout=300,
+                expect=errors.RepositoryInitNotAuthorized.exit_code)
+        rejected = env.run("uploads_backup.py", extra=["--initialize-empty-repository"],
+                           timeout=300)
+        assert rejected.returncode == 2, "el flag no debe existir en uploads_backup.py"
+        # Nada se escribio en el destino: restic solo leyo (GET/HEAD) y el
+        # preflight solo listo. Ningun PUT/POST/DELETE llego al bucket.
+        methods = {r["method"] for r in stub.seen}
+        assert methods <= {"GET", "HEAD"}, methods
+        assert any(r["is_list"] and r["prefix"] == "restic-prod/" for r in stub.seen), (
+            "no se ejecuto el preflight firmado del prefijo aprobado"
+        )
+
+
+@case("P26", "el preflight no introduce ninguna ruta destructiva")
+def test_p_no_destructive_path():
+    path = os.path.join(RUNNERS_DIR, "chibalete_backup", "s3_preflight.py")
+    source = open(path, encoding="utf-8").read()
+
+    # Dependencias REALES (no menciones en prosa): solo stdlib, cero SDK.
+    allowed = {
+        "enum", "hashlib", "hmac", "http.client", "re", "socket", "ssl",
+        "urllib.parse", "xml.etree.ElementTree", "datetime", ".errors",
+    }
+    imported = set()
+    for node in ast.walk(ast.parse(source, path)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add("." * node.level + (node.module or ""))
+    assert imported <= allowed, f"dependencias no permitidas en s3_preflight.py: {imported - allowed}"
+    for banned in ("boto3", "botocore", "subprocess", "os"):
+        assert banned not in imported, f"s3_preflight.py importa {banned}"
+
+    # Y solo emite lecturas: un unico GET, ningun verbo de escritura.
+    verbs = {node.args[0].value for node in ast.walk(ast.parse(source, path))
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "request"
+             and node.args and isinstance(node.args[0], ast.Constant)}
+    assert verbs == {"GET"}, f"el preflight emite verbos distintos de GET: {verbs}"
+    assert source.count("conn.request(") == 1, "solo debe existir un punto de salida HTTP"
+    # La allowlist de restic sigue rechazando todo lo destructivo.
+    with S3Stub(scenario_static(*EMPTY_OK)) as stub:
+        config = s3_config("p26", stub.repository())
+        restic = ScriptedRestic(config)
+        for args in (["forget"], ["prune"], ["rm"], ["unlock"], ["init", "--prune"]):
+            try:
+                restic.run(args)
+                raise AssertionError(f"no se rechazo: restic {' '.join(args)}")
+            except errors.DestructiveCommandRejected:
+                pass
+        assert restic.init_calls == 0
+
+
+@case("P27", "SigV4: peticion canonica, cadena a firmar y firma deterministicas")
+def test_p_sigv4_vectors():
+    target = s3_preflight.parse_target(parse_env(approved_repository()))
+    now = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+    query = {"list-type": "2", "max-keys": "2", "prefix": "restic-prod/"}
+    signed = s3_preflight.build_signed_request(target, query, now)
+
+    empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    expected_canonical = "\n".join([
+        "GET",
+        "/" + SYNTHETIC_BUCKET,
+        "list-type=2&max-keys=2&prefix=restic-prod%2F",
+        "host:" + B2_HOST_SHAPE,
+        "x-amz-content-sha256:" + empty_hash,
+        "x-amz-date:20260102T030405Z",
+        "",
+        "host;x-amz-content-sha256;x-amz-date",
+        empty_hash,
+    ])
+    assert signed["canonical_request"] == expected_canonical, repr(signed["canonical_request"])
+
+    expected_sts = "\n".join([
+        "AWS4-HMAC-SHA256",
+        "20260102T030405Z",
+        "20260102/" + B2_REGION_SHAPE + "/s3/aws4_request",
+        hashlib.sha256(expected_canonical.encode("utf-8")).hexdigest(),
+    ])
+    assert signed["string_to_sign"] == expected_sts, repr(signed["string_to_sign"])
+
+    # Cadena de derivacion recalculada de forma independiente en la prueba.
+    def mac(key, msg):
+        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+    derived = mac(("AWS4" + SYNTHETIC_SECRET).encode("utf-8"), "20260102")
+    derived = mac(derived, B2_REGION_SHAPE)
+    derived = mac(derived, "s3")
+    derived = mac(derived, "aws4_request")
+    expected_signature = hmac.new(derived, expected_sts.encode("utf-8"), hashlib.sha256).hexdigest()
+    assert signed["signature"] == expected_signature, signed["signature"]
+    assert len(signed["signature"]) == 64
+
+    # Determinismo con reloj fijo y variacion con reloj distinto.
+    assert s3_preflight.build_signed_request(target, query, now)["signature"] == expected_signature
+    other = datetime.datetime(2026, 1, 2, 3, 4, 6, tzinfo=datetime.timezone.utc)
+    assert s3_preflight.build_signed_request(target, query, other)["signature"] != expected_signature
+
+
+@case("P28", "SigV4: cabecera presente y secreto ausente de todo el material")
+def test_p_sigv4_no_secret_leak():
+    target = s3_preflight.parse_target(parse_env(approved_repository()))
+    now = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+    signed = s3_preflight.build_signed_request(
+        target, {"list-type": "2", "max-keys": "2", "prefix": "restic-prod/"}, now)
+
+    authorization = signed["headers"]["Authorization"]
+    assert authorization.startswith("AWS4-HMAC-SHA256 Credential=")
+    assert "SignedHeaders=host;x-amz-content-sha256;x-amz-date" in authorization
+    assert f"Credential={SYNTHETIC_KEY_ID}/20260102/{B2_REGION_SHAPE}/s3/aws4_request" in authorization
+
+    material = "".join([
+        signed["canonical_request"], signed["string_to_sign"],
+        signed["signature"], signed["path"], authorization,
+        repr(target), json.dumps(target.redacted_summary()),
+    ])
+    assert SYNTHETIC_SECRET not in material, "el secreto aparece en el material de firma"
+    # El keyID viaja en Credential (lo exige SigV4) pero no en repr ni resumen.
+    assert SYNTHETIC_KEY_ID not in repr(target)
+    assert SYNTHETIC_KEY_ID not in json.dumps(target.redacted_summary())
+    assert SYNTHETIC_SECRET not in repr(target)
+
+
+# --------------------------------------------------------------------------
+# Casos L01-L08 — cierre del auto-init local (CHP-BACKUP-01B-1-R3A)
+# --------------------------------------------------------------------------
+#
+# La autorizacion manual es UNIFORME: un destino de filesystem vacio se trata
+# exactamente igual que un prefijo S3 aprobado y vacio.
+
+# Nombres plausibles que NUNCA deben autorizar un init desde el entorno.
+FORBIDDEN_AUTH_ENVVARS = (
+    "INITIALIZE_EMPTY_REPOSITORY",
+    "CHP_INITIALIZE_EMPTY_REPOSITORY",
+    "initialize_empty_repository",
+    "RESTIC_INIT",
+    "ALLOW_INIT",
+    "BACKUP_ALLOW_INIT",
+    "CHIBALETE_ALLOW_INIT",
+)
+
+
+@case("L01", "filesystem vacio SIN autorizacion: mismo bloqueo que S3")
+def test_l_local_empty_without_authorization():
+    env = Env("l01")
+    restic = env.restic()
+    assert restic.repository_state() is RemoteState.EMPTY_LOCAL_DIRECTORY
+    try:
+        restic.ensure_repository()
+        raise AssertionError("un destino local vacio no puede inicializarse sin autorizacion")
+    except errors.RepositoryInitNotAuthorized as exc:
+        assert exc.exit_code == 23
+        assert "autorizacion manual de provision" in str(exc), str(exc)
+    assert not os.path.exists(env.repo), "se creo el repositorio sin autorizacion"
+    # Un directorio existente pero vacio se comporta igual.
+    os.makedirs(env.repo, exist_ok=True)
+    assert restic.repository_state() is RemoteState.EMPTY_LOCAL_DIRECTORY
+    try:
+        restic.ensure_repository()
+        raise AssertionError("un directorio vacio no puede inicializarse sin autorizacion")
+    except errors.RepositoryInitNotAuthorized:
+        pass
+    assert os.listdir(env.repo) == [], "el destino fue tocado"
+
+
+@case("L02", "filesystem vacio CON autorizacion: un init verificado")
+def test_l_local_empty_with_authorization():
+    env = Env("l02")
+    restic = env.restic()
+    assert restic.ensure_repository(initialize_empty_repository=True) == "initialized"
+    assert os.path.isdir(os.path.join(env.repo, "data")), "restic init no creo el repositorio"
+    # Verificacion posterior obligatoria: el destino queda legible.
+    assert restic.repository_state() is RemoteState.EXISTING_REPOSITORY
+
+
+@case("L03", "segunda ejecucion local: idempotente, sin reinicializar")
+def test_l_local_second_run():
+    env = Env("l03")
+    env.provision_repository()
+    after_init = fixtures.snapshot_tree(env.repo)
+    assert after_init, "el repositorio quedo vacio tras el init"
+
+    # Con autorizacion repetida: no reinicializa.
+    assert env.restic().ensure_repository(initialize_empty_repository=True) == "existing"
+    # Y sin autorizacion: tampoco falla ni reinicializa.
+    assert env.restic().ensure_repository() == "existing"
+    assert fixtures.snapshot_tree(env.repo) == after_init, "el repositorio fue reinicializado"
+
+    # Los runners ordinarios operan con normalidad sobre el repo ya provisto.
+    env.run("structured_backup.py", expect=0)
+    env.run("structured_backup.py", expect=0)
+    assert len(env.snapshots(tag="structured")) == 2
+
+
+@case("L04", "structured_backup.py sin flag no inicializa un backend local")
+def test_l_structured_runner_blocks():
+    env = Env("l04")
+    proc = env.run("structured_backup.py", expect=errors.RepositoryInitNotAuthorized.exit_code)
+    assert "STOP — BACKUP-01B FIRST INIT NOT AUTHORIZED" in proc.stderr, proc.stderr
+    assert not os.path.exists(env.repo), "el runner creo el repositorio sin autorizacion"
+    assert env.staging_dirs() == [], "staging huerfano tras el bloqueo"
+    # Ni siquiera repitiendo la ejecucion (no hay marca persistente que ceda).
+    env.run("structured_backup.py", expect=errors.RepositoryInitNotAuthorized.exit_code)
+    assert not os.path.exists(env.repo)
+
+
+@case("L05", "uploads_backup.py no puede inicializar ni acepta la autorizacion")
+def test_l_uploads_runner_blocks():
+    env = Env("l05")
+    proc = env.run("uploads_backup.py", expect=errors.RepositoryInitNotAuthorized.exit_code)
+    assert "STOP — BACKUP-01B FIRST INIT NOT AUTHORIZED" in proc.stderr, proc.stderr
+    assert not os.path.exists(env.repo)
+    # El flag no existe en este runner: argparse lo rechaza.
+    rejected = env.run("uploads_backup.py", extra=["--initialize-empty-repository"])
+    assert rejected.returncode == 2, rejected.returncode
+    assert "unrecognized arguments" in rejected.stderr, rejected.stderr
+    assert not os.path.exists(env.repo)
+    # Provisto el repositorio, el runner funciona con normalidad.
+    env.provision_repository()
+    env.run("uploads_backup.py", expect=0)
+
+
+@case("L06", "verify_backup.py nunca inicializa nada")
+def test_l_verify_runner_never_inits():
+    env = Env("l06")
+    proc = env.run("verify_backup.py", expect=errors.ResticError.exit_code)
+    assert not os.path.exists(env.repo), "verify creo el repositorio"
+    assert "--initialize-empty-repository" not in proc.stdout + proc.stderr
+    rejected = env.run("verify_backup.py", extra=["--initialize-empty-repository"])
+    assert rejected.returncode == 2, "verify no debe aceptar la autorizacion"
+    assert not os.path.exists(env.repo)
+
+
+@case("L07", "ninguna unit systemd puede introducir la autorizacion")
+def test_l_units_cannot_authorize():
+    for name in sorted(os.listdir(SYSTEMD_DIR)):
+        text = open(os.path.join(SYSTEMD_DIR, name), encoding="utf-8").read()
+        assert "initialize" not in text.lower(), f"{name} menciona la autorizacion"
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("#") or not line:
+                continue
+            key, _, value = line.partition("=")
+            # Ninguna inyeccion directa de entorno hacia el runner.
+            assert key not in ("Environment", "PassEnvironment"), f"{name}: {line}"
+            # El unico archivo de entorno admitido es el contrato aprobado.
+            if key == "EnvironmentFile":
+                assert value == "/etc/chibalete-backup/backup.env", f"{name}: {line}"
+            if key == "ExecStart":
+                argv = line.split("=", 1)[1].split()
+                assert len(argv) == 2, f"{name}: ExecStart con argumentos extra: {line}"
+                assert argv[0] == "/usr/bin/python3", line
+                assert argv[1].endswith(".py"), line
+
+    # Ese EnvironmentFile tampoco puede colar una autorizacion: el parser de
+    # backup.env rechaza cualquier clave fuera de la lista permitida.
+    for smuggled in FORBIDDEN_AUTH_ENVVARS:
+        env = Env(f"l07-{smuggled.lower()}", uploads_files=0, extra_lines=(f"{smuggled}=1",))
+        proc = env.run("structured_backup.py", expect=errors.ConfigError.exit_code)
+        assert "no permitida" in proc.stderr, proc.stderr
+
+
+@case("L08", "ninguna variable de entorno autoriza el primer init")
+def test_l_no_environment_authorization():
+    env = Env("l08")
+    for name in FORBIDDEN_AUTH_ENVVARS:
+        for value in ("1", "true", "yes"):
+            proc = env.run("structured_backup.py", env={name: value},
+                           expect=errors.RepositoryInitNotAuthorized.exit_code)
+            assert "STOP — BACKUP-01B FIRST INIT NOT AUTHORIZED" in proc.stderr, (name, value)
+            assert not os.path.exists(env.repo), f"{name}={value} autorizo un init"
+    # Todas a la vez tampoco.
+    proc = env.run("structured_backup.py",
+                   env={n: "1" for n in FORBIDDEN_AUTH_ENVVARS},
+                   expect=errors.RepositoryInitNotAuthorized.exit_code)
+    assert not os.path.exists(env.repo)
+    # El codigo tampoco consulta el entorno para decidirlo.
+    for module in (os.path.join(RUNNERS_DIR, "structured_backup.py"),
+                   os.path.join(RUNNERS_DIR, "chibalete_backup", "restic.py")):
+        source = open(module, encoding="utf-8").read()
+        assert "os.environ" not in source and "os.getenv" not in source, module
 
 
 # --------------------------------------------------------------------------

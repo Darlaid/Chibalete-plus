@@ -123,7 +123,7 @@ else
   fail "invocacion destructiva detectada: $DESTRUCTIVE"
 fi
 
-step "7. Suite funcional (24 casos + integracion restic)"
+step "7. Suite funcional (24 obligatorios + integracion restic + preflight S3 + cierre de init)"
 if python3 "$UNIT_DIR/tests/test_suite.py"; then
   pass "suite funcional GREEN"
 else

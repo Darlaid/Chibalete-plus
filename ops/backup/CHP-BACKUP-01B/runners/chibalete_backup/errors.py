@@ -53,3 +53,30 @@ class RepositoryUnknownError(PreflightError):
 
 class SourceMissingError(PreflightError):
     exit_code = 19
+
+
+class RepositoryInitNotAuthorized(PreflightError):
+    """El destino esta vacio pero nadie autorizo el primer `init`.
+
+    Es el estado normal de los timers: solo la orden manual de provision
+    (`--initialize-empty-repository`) puede inicializar un repositorio, y la
+    regla es identica para S3 y para un backend de filesystem.
+    """
+
+    exit_code = 23
+    stop_condition = "STOP — BACKUP-01B FIRST INIT NOT AUTHORIZED"
+
+
+class S3PreflightError(PreflightError):
+    """El preflight S3 no pudo demostrar que el destino sea utilizable."""
+
+    exit_code = 24
+    stop_condition = "STOP — BACKUP-01B S3 PREFLIGHT BLOCKED"
+
+
+class OverbroadCredentialError(PreflightError):
+    """La credencial puede listar fuera del prefijo aprobado (o no se pudo
+    demostrar que no pueda). No se inicializa nada con una clave asi."""
+
+    exit_code = 25
+    stop_condition = "STOP — BACKUP-01B OVERBROAD CREDENTIAL"

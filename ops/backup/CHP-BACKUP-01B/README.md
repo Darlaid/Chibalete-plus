@@ -28,14 +28,16 @@ CHP-BACKUP-01B/
 │       ├── sqlite_capture.py    Online Backup API
 │       ├── json_capture.py      copia atómica + validación
 │       ├── manifest.py          manifiesto versionado y auditado
-│       ├── restic.py            allowlist NO destructiva
+│       ├── restic.py            allowlist NO destructiva + contrato de estados
+│       ├── s3_preflight.py      preflight S3 firmado (SigV4) y fail-closed
 │       ├── safelog.py           logging con redacción obligatoria
 │       ├── stores.py            inventario declarativo de stores
 │       └── errors.py            errores tipados y códigos de salida
 ├── systemd/                     6 units (no instaladas, no activadas)
 └── tests/
     ├── fixtures.py              generadores 100% sintéticos
-    ├── test_suite.py            24 casos obligatorios + integración restic
+    ├── test_suite.py            66 casos (24 obligatorios + integración restic
+    │                            + 28 de preflight S3 + 8 de cierre del init)
     └── run_all.sh               orquestador de validación
 ```
 
@@ -111,7 +113,110 @@ los pasan** y quedan ocultos de la ayuda.
 | 19 | ruta fuente obligatoria ausente |
 | 21 | verificación: RPO excedido o sin snapshots |
 | 22 | verificación: manifiesto inválido |
+| 23 | prefijo aprobado vacío y **primer init no autorizado** (estado normal de los timers) |
+| 24 | preflight S3 bloqueado (acceso, bucket, endpoint/región, red/TLS, estado desconocido) |
+| 25 | la credencial puede listar fuera del prefijo aprobado, o su alcance no se pudo demostrar |
 | 130 | interrumpido (SIGTERM/SIGINT), con limpieza completada |
+
+## 4-bis. Preflight S3 y primer `restic init` (CHP-BACKUP-01B-1-R3)
+
+`restic cat config` contra un backend remoto no distingue «prefijo vacío» de
+«acceso denegado», «bucket inexistente» o «endpoint equivocado». Con esa
+ambigüedad el destino quedaba siempre en `unknown` y **un prefijo S3 vacío no
+podía inicializarse nunca**. Se resuelve con evidencia positiva, no con texto.
+
+### Contrato de estados (`s3_preflight.RemoteState`)
+
+| Estado | Cómo se determina | Efecto |
+|---|---|---|
+| `EXISTING_REPOSITORY` | `restic cat config` termina con rc 0 | continúa, sin init |
+| `EMPTY_APPROVED_PREFIX` | **solo** ListObjectsV2 firmado con `KeyCount == 0` bajo `restic-prod/` | init **si** hay autorización manual |
+| `FOREIGN_OBJECTS_PRESENT` | hay ≥1 objeto y no hay repositorio legible (incluye restos de init parcial) | bloquea (18) |
+| `ACCESS_DENIED` | 401/403 o `AccessDenied`/`InvalidAccessKeyId`/`SignatureDoesNotMatch` | bloquea (24) |
+| `BUCKET_NOT_FOUND` | 404 o `NoSuchBucket` | bloquea (24) |
+| `ENDPOINT_OR_REGION_MISMATCH` | 3xx, `PermanentRedirect`, `AuthorizationHeaderMalformed`… | bloquea (24) |
+| `NETWORK_OR_TLS_ERROR` | timeout, conexión rechazada, fallo TLS | bloquea (24) |
+| `INVALID_LOCAL_CONFIGURATION` | endpoint/región/bucket/prefijo no coinciden con el destino aprobado | bloquea (10) |
+| `UNKNOWN_REMOTE_STATE` | XML ilegible o incoherente, 5xx, otro backend remoto, contradicción con restic | bloquea (24) |
+| `EMPTY_LOCAL_DIRECTORY` | backend de **filesystem** vacío o inexistente | init **si** hay autorización manual |
+
+Reglas duras:
+
+- `EMPTY_APPROVED_PREFIX` **solo** puede proceder del listado S3 autenticado.
+  Ningún mensaje de `stderr` de restic puede producirlo. El `stderr` se reduce a
+  una etiqueta de un conjunto cerrado (`wrong_password`, `config_absent`,
+  `access_denied`, …) y se usa únicamente para **contradecir** un «vacío»
+  sospechoso, nunca para afirmarlo.
+- Cualquier anomalía de autorización, bucket, endpoint, red, TLS, XML o 5xx es
+  bloqueante. No hay ruta que la convierta en «vacío».
+- El preflight valida **antes de tocar la red**: HTTPS obligatorio (el texto
+  plano solo se admite contra loopback literal, para el servidor sintético de
+  las pruebas), endpoint S3-compatible de la región declarada, bucket exacto y
+  prefijo exactamente `restic-prod`.
+- Solo stdlib (`hashlib`, `hmac`, `http.client`, `ssl`, `urllib`, `xml`). Sin
+  boto3, awscli, rclone, s3cmd ni mc. Las credenciales viajan únicamente en la
+  cabecera `Authorization` (AWS Signature V4): nunca en argv, nunca en archivos
+  temporales, nunca en logs. Del preflight solo sale una estructura sanitizada
+  (estado, status HTTP y un `<Code>` con forma validada): jamás el cuerpo.
+- El preflight emite **un solo GET** (`ListObjectsV2`). No escribe, no borra y
+  no crea objetos, tampoco en la sonda de alcance.
+
+### Autorización de primer init (uniforme para S3 y filesystem)
+
+**Ningún backend se autoinicializa.** La autorización manual
+`--initialize-empty-repository` es obligatoria tanto para
+`EMPTY_APPROVED_PREFIX` como para `EMPTY_LOCAL_DIRECTORY`: no existe ninguna
+ruta —ni de configuración accidental de filesystem en producción— que permita
+un `init` sin ella.
+
+El primer `restic init` exige, **simultáneamente**:
+
+1. configuración local que coincide exactamente con el destino aprobado;
+2. destino demostrablemente vacío (para S3, `EMPTY_APPROVED_PREFIX` probado por
+   el listado firmado);
+3. ausencia de objetos ajenos;
+4. **solo S3**: credencial que **no** puede listar fuera de `restic-prod/`
+   (sonda de listado contra un prefijo de control inexistente: 401/403 ⇒ PASS;
+   200 ⇒ BLOCK; cualquier otra cosa ⇒ BLOCK);
+5. la autorización manual `--initialize-empty-repository`;
+6. ejecución desde la orden manual de provisión, nunca desde un timer.
+
+Tras el init se vuelve a ejecutar `restic cat config` y se exige
+`EXISTING_REPOSITORY`. **La autorización no se persiste en ningún sitio y no se
+lee del entorno**: es un flag `store_true` y nada más. Una segunda ejecución
+encuentra el repositorio existente y no reinicializa.
+
+Solo `structured_backup.py` expone el flag. `uploads_backup.py` y
+`verify_backup.py` no pueden inicializar nada y rechazan el flag con código 2.
+Las tres units systemd invocan su `ExecStart` **sin flags** y no declaran
+`Environment=`, `EnvironmentFile=` ni `PassEnvironment=` (verificado por
+prueba).
+
+### Comandos exactos de la futura unidad de provisión
+
+```bash
+# 1. Provisión manual, UNA sola vez, con /etc/chibalete-backup ya instalado:
+/usr/bin/python3 /opt/chibalete-backup/runners/structured_backup.py \
+    --initialize-empty-repository
+
+# 2. Confirmar idempotencia: la segunda ejecución NO reinicializa.
+/usr/bin/python3 /opt/chibalete-backup/runners/structured_backup.py
+
+# 3. Solo después: habilitar los timers.
+```
+
+Salidas esperadas del paso 1: `0` (init hecho y verificado) · `23` (falta la
+autorización) · `24` (preflight bloqueado) · `25` (credencial demasiado amplia)
+· `18` (objetos ajenos) · `10` (destino no aprobado).
+
+### Rollback local
+
+Los cambios de esta unidad son locales y no están commiteados:
+
+```bash
+git checkout -- ops/backup/CHP-BACKUP-01B/
+rm -f ops/backup/CHP-BACKUP-01B/runners/chibalete_backup/s3_preflight.py
+```
 
 ## 5. Prohibiciones implementadas (no solo documentadas)
 
@@ -127,6 +232,7 @@ los pasan** y quedan ocultos de la ayuda.
 - **Cero mutación de datos fuente.** Los `.db`, los JSON y los uploads quedan
   byte-idénticos (ver §6).
 - **Cero secretos en logs, manifiestos o stdout/stderr.**
+- **Cero init automático, para cualquier backend.** Ver §4-bis.
 
 ## 6. Hallazgo relevante: SQLite en WAL y `ReadOnlyPaths`
 
