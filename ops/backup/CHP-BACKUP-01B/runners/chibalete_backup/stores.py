@@ -95,6 +95,52 @@ JSON_STORES: tuple[JsonStore, ...] = (
         sensitivity=SENSITIVITY_MINORS,
         retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
     ),
+    # --- Omitidos hasta CHP-BACKUP-01D (VPS-STORAGE-AUDIT-01) -----------------
+    # Los siete archivos siguientes existen en produccion y son leidos por el
+    # servidor, pero quedaron fuera del inventario original. Se anaden como
+    # stores INDEPENDIENTES: ninguno sustituye, fusiona ni canoniza a otro.
+    #
+    # En particular `data/users_db.json` NO reemplaza a
+    # `data-critical/usuarios_colegios_oro.json` (la fuente que resuelve
+    # USERS_DB): son dos archivos distintos con censos distintos y ambos se
+    # respaldan por separado. Resolver esa divergencia es otra unidad.
+    JsonStore("data/users_db.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/progress_db.json", "CANON", count_adapter="root_len"),
+    JsonStore("data/lu_config.json", "CFG", count_adapter="root_len"),
+    # Potencialmente asociados a menores: sin adaptador de conteo y marcados
+    # para revision legal, igual que los stores leo_* (design §8).
+    JsonStore(
+        "data/leo_profile_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+    ),
+    JsonStore(
+        "data/interventions_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+    ),
+    JsonStore(
+        "data/submissions_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+    ),
+    # Copia historica de identidad: se respalda tal cual, sin conteo (no aporta
+    # nada contar un volcado congelado) y marcada para revision legal porque su
+    # retencion no tiene dueno definido. `required=False`: si algun dia se
+    # retira de produccion, su ausencia NO debe romper el backup.
+    JsonStore(
+        "data/users_db.backup.1773870779.json",
+        "CANON",
+        count_adapter=None,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+        required=False,
+    ),
 )
 
 # --- Uploads (inventario §1 mounts; §2.3) ------------------------------------

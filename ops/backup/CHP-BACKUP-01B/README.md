@@ -36,8 +36,9 @@ CHP-BACKUP-01B/
 ├── systemd/                     6 units (no instaladas, no activadas)
 └── tests/
     ├── fixtures.py              generadores 100% sintéticos
-    ├── test_suite.py            66 casos (24 obligatorios + integración restic
-    │                            + 28 de preflight S3 + 8 de cierre del init)
+    ├── test_suite.py            80 casos (24 obligatorios + integración restic
+    │                            + 28 de preflight S3 + 8 de cierre del init
+    │                            + 14 de los stores JSON omitidos)
     └── run_all.sh               orquestador de validación
 ```
 
@@ -217,6 +218,63 @@ Los cambios de esta unidad son locales y no están commiteados:
 git checkout -- ops/backup/CHP-BACKUP-01B/
 rm -f ops/backup/CHP-BACKUP-01B/runners/chibalete_backup/s3_preflight.py
 ```
+
+## 4-ter. Inventario de stores (CHP-BACKUP-01D)
+
+> **Estado: IMPLEMENTED LOCALLY — NOT DEPLOYED.** Producción sigue ejecutando los
+> artefactos de `ec625b3`, que respaldan 17 stores. Este inventario ampliado
+> **no está desplegado** y sólo entra en vigor con CHP-BACKUP-01D-R2.
+
+**4 SQLite + 20 JSON = 24 stores.**
+
+`VPS-STORAGE-AUDIT-01` encontró siete JSON que producción lee pero el inventario
+original no respaldaba. Se añaden como stores **independientes**:
+
+| Store | Categoría | Conteo | Sensibilidad / retención | Requerido |
+|---|---|---|---|---|
+| `data/users_db.json` | CANON | `root_len` | standard | sí |
+| `data/progress_db.json` | CANON | `root_len` | standard | sí |
+| `data/lu_config.json` | CFG | `root_len` | standard | sí |
+| `data/leo_profile_db.json` | CANON | — | minors · `NEEDS_LEGAL_REVIEW` | sí |
+| `data/interventions_db.json` | CANON | — | minors · `NEEDS_LEGAL_REVIEW` | sí |
+| `data/submissions_db.json` | CANON | — | minors · `NEEDS_LEGAL_REVIEW` | sí |
+| `data/users_db.backup.1773870779.json` | CANON | — | `NEEDS_LEGAL_REVIEW` | **no** |
+
+La copia histórica es `required=False`: si algún día se retira de producción, su
+ausencia no debe romper el backup. Los tres marcados `minors` no llevan
+adaptador de conteo, igual que los `leo_*` (design §8).
+
+**Ninguno sustituye, fusiona ni canoniza a otro.** En particular
+`data/users_db.json` **no reemplaza** a `data-critical/usuarios_colegios_oro.json`
+—la fuente que resuelve `USERS_DB`—: son archivos distintos con censos distintos
+y ambos se respaldan por separado. **La divergencia entre ambos (496 vs 646
+registros, y el hardcodeo de `scopeAccess.mjs`) queda explícitamente sin
+resolver**: es una unidad aparte.
+
+`data/bundles_db.json` está referenciado por el código pero **no existe en
+disco**. No se crea, no se respalda y no entra en este inventario: queda
+registrado como deuda separada.
+
+### Preservación byte a byte
+
+`capture_json` copia los bytes crudos (temporal + `os.replace`), valida
+parseando **la copia** y nunca escribe el resultado parseado. Se comprueba que
+`sha256(fuente) == sha256(staging) == sha256(manifiesto)` sobre fixtures con
+formato indentado, compacto, `{}`, `[]`, sin newline final, UTF-8 no ASCII, LF y
+CRLF. No se reordena, reindenta, reserializa ni reencoda nada.
+
+### Seguridad de rutas
+
+`preflight.resolve_sources` valida ahora, para **todos** los stores, antes de
+tocar nada: ruta no absoluta, no symlink, archivo regular y contención dentro
+del árbol de origen (`realpath`). Además `assert_store_inventory_sane()` rechaza
+`logical_path` duplicado y **basename duplicado**, porque el staging nombra cada
+copia con `basename(logical_path)` y dos rutas distintas con el mismo nombre se
+pisarían silenciosamente. Cualquiera de esos fallos aborta con código 11, antes
+de restic.
+
+El cap diario de descarga de Backblaze es un asunto **independiente** de este
+cambio y sigue abierto.
 
 ## 5. Prohibiciones implementadas (no solo documentadas)
 

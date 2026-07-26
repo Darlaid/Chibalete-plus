@@ -36,6 +36,44 @@ JSON_FIXTURES = {
     "data/leo_interactions_db.json": [{"turn": i} for i in range(15)],
 }
 
+# Los siete stores anadidos en CHP-BACKUP-01D se escriben como BYTES LITERALES,
+# no con json.dump, para poder demostrar preservacion byte a byte con formas
+# deliberadamente distintas: formateado, compacto, vacio, sin newline final,
+# UTF-8 no ASCII, LF y CRLF. Todo el contenido es inventado.
+RAW_JSON_FIXTURES = {
+    # formateado (indent 2), UTF-8 no ASCII, LF, con newline final
+    "data/users_db.json": (
+        '[\n'
+        '  {\n'
+        '    "id": "sintetico-1",\n'
+        '    "nombre_completo": "Nombre Sintético Ñandú",\n'
+        '    "roles": ["lector"]\n'
+        '  },\n'
+        '  {\n'
+        '    "id": "sintetico-2",\n'
+        '    "nombre_completo": "Otro Sintético",\n'
+        '    "roles": ["mediador"]\n'
+        '  }\n'
+        ']\n'
+    ).encode("utf-8"),
+    # compacto, SIN newline final
+    "data/progress_db.json": b'[{"u":"sintetico-1","p":10},{"u":"sintetico-2","p":20},{"u":"s3","p":0}]',
+    # objeto con CRLF y newline final
+    "data/lu_config.json": b'{\r\n  "version": "0.0.0-sintetica",\r\n  "enabled": false\r\n}\r\n',
+    # objeto vacio valido: NO debe descartarse por tener pocos bytes
+    "data/leo_profile_db.json": b"{}",
+    # array vacio valido con newline final
+    "data/interventions_db.json": b"[]\n",
+    # array vacio de 2 bytes, la forma real en produccion
+    "data/submissions_db.json": b"[]",
+    # copia historica: formateada, UTF-8, sin newline final
+    "data/users_db.backup.1773870779.json": (
+        '[\n'
+        '  {"id": "historico-1", "nombre_completo": "Registro Histórico"}\n'
+        ']'
+    ).encode("utf-8"),
+}
+
 UPLOADS_REL = "public/uploads"
 
 
@@ -60,6 +98,14 @@ def build_base(base_dir: str, uploads_files: int = 6, upload_size: int = 20000) 
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle)
+
+    # Bytes literales: se escriben en binario para que ni el modo texto ni la
+    # plataforma alteren los finales de linea.
+    for rel, raw in RAW_JSON_FIXTURES.items():
+        path = os.path.join(base_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(raw)
 
     uploads_dir = os.path.join(base_dir, UPLOADS_REL)
     os.makedirs(uploads_dir, exist_ok=True)

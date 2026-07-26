@@ -46,24 +46,84 @@ def _size_if_exists(path: str) -> int:
         return 0
 
 
+def assert_store_inventory_sane() -> None:
+    """Valida el inventario declarativo ANTES de tocar el filesystem.
+
+    Dos invariantes que, de romperse, causarian perdida silenciosa de datos:
+
+      - `logical_path` duplicado: el mismo store se respaldaria dos veces y el
+        manifiesto quedaria ambiguo;
+      - `basename` duplicado: el staging nombra cada copia con
+        `basename(logical_path)`, asi que dos rutas distintas con el mismo
+        nombre de archivo se PISARIAN en el staging y una de las dos se
+        perderia sin error.
+    """
+    for kind, inventory in (("SQLite", SQLITE_STORES), ("JSON", JSON_STORES)):
+        seen_paths: dict[str, int] = {}
+        seen_names: dict[str, str] = {}
+        for store in inventory:
+            if store.logical_path in seen_paths:
+                raise PreflightError(
+                    f"inventario {kind} invalido: logical_path duplicado "
+                    f"{store.logical_path!r}"
+                )
+            seen_paths[store.logical_path] = 1
+            name = os.path.basename(store.logical_path)
+            if name in seen_names:
+                raise PreflightError(
+                    f"inventario {kind} invalido: dos stores comparten el nombre "
+                    f"de archivo {name!r} ({seen_names[name]} y {store.logical_path}); "
+                    "se pisarian en el staging"
+                )
+            seen_names[name] = store.logical_path
+
+
+def _resolve_safe(base_dir: str, logical_path: str, what: str) -> str | None:
+    """Devuelve la ruta fuente validada, o None si no existe.
+
+    Fail-closed ante todo lo que no sea un archivo regular contenido en la base:
+    symlinks, dispositivos, FIFOs y rutas que escapen del arbol aprobado.
+    """
+    if os.path.isabs(logical_path):
+        raise PreflightError(f"{what} declara una ruta absoluta: {logical_path}")
+
+    base_real = os.path.realpath(base_dir)
+    path = os.path.join(base_dir, logical_path)
+
+    if not os.path.lexists(path):
+        return None
+
+    if os.path.islink(path):
+        raise PreflightError(f"{what} es un symlink; se exige archivo regular: {logical_path}")
+
+    real = os.path.realpath(path)
+    if real != base_real and not real.startswith(base_real + os.sep):
+        raise PreflightError(f"{what} escapa del arbol de origen aprobado: {logical_path}")
+
+    if not os.path.isfile(path):
+        raise PreflightError(f"{what} no es un archivo regular: {logical_path}")
+
+    return path
+
+
 def resolve_sources(base_dir: str) -> dict:
     """Resuelve rutas fuente y verifica las obligatorias."""
+    assert_store_inventory_sane()
+
     sqlite_paths = []
     for store in SQLITE_STORES:
-        path = os.path.join(base_dir, store.logical_path)
-        exists = os.path.exists(path)
-        if not exists and store.required:
+        path = _resolve_safe(base_dir, store.logical_path, "base SQLite")
+        if path is None and store.required:
             raise SourceMissingError(f"base SQLite obligatoria ausente: {store.logical_path}")
-        if exists:
+        if path is not None:
             sqlite_paths.append((store, path))
 
     json_paths = []
     for store in JSON_STORES:
-        path = os.path.join(base_dir, store.logical_path)
-        exists = os.path.exists(path)
-        if not exists and store.required:
+        path = _resolve_safe(base_dir, store.logical_path, "store JSON")
+        if path is None and store.required:
             raise SourceMissingError(f"store JSON obligatorio ausente: {store.logical_path}")
-        if exists:
+        if path is not None:
             json_paths.append((store, path))
 
     uploads_paths = []

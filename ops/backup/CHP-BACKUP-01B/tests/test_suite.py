@@ -18,6 +18,7 @@ es lo que hace la orden manual de provision.
 
 import ast
 import datetime
+import glob
 import hashlib
 import hmac
 import http.server
@@ -566,7 +567,8 @@ def test_leo_no_exposure():
     proc = env.run("structured_backup.py", expect=0)
     manifest = env.manifests()[-1]
     leo = [s for s in manifest["stores"] if "leo_" in s["logical_path"]]
-    assert len(leo) == 3, f"se esperaban 3 stores leo_*, hay {len(leo)}"
+    # 3 originales + leo_profile_db.json, anadido en CHP-BACKUP-01D.
+    assert len(leo) == 4, f"se esperaban 4 stores leo_*, hay {len(leo)}"
     for store in leo:
         assert store["sensitivity"] == "minors", store
         assert store["retention_status"] == "NEEDS_LEGAL_REVIEW", store
@@ -1715,6 +1717,358 @@ def test_p_sigv4_no_secret_leak():
     assert SYNTHETIC_KEY_ID not in repr(target)
     assert SYNTHETIC_KEY_ID not in json.dumps(target.redacted_summary())
     assert SYNTHETIC_SECRET not in repr(target)
+
+
+# --------------------------------------------------------------------------
+# Casos D01-D14 — stores JSON omitidos (CHP-BACKUP-01D-R1)
+# --------------------------------------------------------------------------
+#
+# Los siete archivos que produccion lee pero el inventario original no
+# respaldaba. Se anaden como stores independientes: ninguno sustituye ni
+# fusiona a otro, y en particular users_db.json NO reemplaza a
+# usuarios_colegios_oro.json.
+
+NUEVOS_STORES = (
+    "data/users_db.json",
+    "data/progress_db.json",
+    "data/lu_config.json",
+    "data/leo_profile_db.json",
+    "data/interventions_db.json",
+    "data/submissions_db.json",
+    "data/users_db.backup.1773870779.json",
+)
+
+STORES_PREVIOS = (
+    "data-critical/events.db", "data/progress.db", "data/offline_assignments.db",
+    "data-critical/insights.db",
+    "data-critical/usuarios_colegios_oro.json", "data/groups_db.json",
+    "data/access_db.json", "data/schools_db.json", "data/sections.json",
+    "data/school_configs.json", "data/content.json", "data/content_db.json",
+    "data/user_audit_log.json", "data/analytics_db.json",
+    "data/leo_memory_db.json", "data/leo_evidence_db.json",
+    "data/leo_interactions_db.json",
+)
+
+# Los tres nuevos que van marcados como potencialmente asociados a menores.
+NUEVOS_MINORS = ("data/leo_profile_db.json", "data/interventions_db.json",
+                 "data/submissions_db.json")
+
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@case("D01", "inventario: 4 SQLite + 20 JSON = 24 stores")
+def test_d_inventario():
+    from chibalete_backup import stores as S
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+    assert len(json_paths) == 20, f"se esperaban 20 JSON declarados, hay {len(json_paths)}"
+    assert len(set(json_paths)) == 20, "hay logical_path duplicados"
+    required_sqlite = [s for s in S.SQLITE_STORES if s.required]
+    assert len(required_sqlite) == 4, required_sqlite
+    for lp in NUEVOS_STORES:
+        assert json_paths.count(lp) == 1, f"{lp} debe aparecer exactamente una vez"
+    for lp in STORES_PREVIOS:
+        assert lp in json_paths or lp in sqlite_paths, f"store previo perdido: {lp}"
+
+    env = Env("d01")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert len(manifest["stores"]) == 24, f"se esperaban 24 stores, hay {len(manifest['stores'])}"
+    kinds = {}
+    for s in manifest["stores"]:
+        kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
+    assert kinds == {"sqlite": 4, "json": 20}, kinds
+    for lp in NUEVOS_STORES:
+        assert paths.count(lp) == 1, f"{lp} no aparece exactamente una vez en el manifiesto"
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+
+
+@case("D02", "preservacion byte a byte: fuente == staging == manifiesto")
+def test_d_byte_preservation():
+    from chibalete_backup.json_capture import capture_json
+    from chibalete_backup import stores as S
+    env = Env("d02")
+    log = SafeLogger("t", "t", stream=open(os.devnull, "w"))
+    by_path = {s.logical_path: s for s in S.JSON_STORES}
+
+    # 1) capture_json no transforma un solo byte, en las 7 formas distintas.
+    for lp in NUEVOS_STORES:
+        src = os.path.join(env.base, lp)
+        dest = os.path.join(env.work, "bp-" + os.path.basename(lp))
+        raw_before = open(src, "rb").read()
+        result = capture_json(by_path[lp], src, dest, log)
+        raw_after = open(dest, "rb").read()
+        assert raw_before == raw_after, f"{lp}: los bytes cambiaron en la copia"
+        assert open(src, "rb").read() == raw_before, f"{lp}: la FUENTE fue modificada"
+        assert result["sha256"] == sha256_file(src) == sha256_file(dest), f"{lp}: sha256 divergente"
+        assert result["bytes"] == len(raw_before) == os.path.getsize(src), lp
+
+    # Formas concretas realmente ejercitadas por los fixtures.
+    def raw(rel):
+        return open(os.path.join(env.base, rel), "rb").read()
+
+    assert raw("data/submissions_db.json") == b"[]", "array vacio de 2 bytes"
+    assert raw("data/leo_profile_db.json") == b"{}", "objeto vacio"
+    assert b"\r\n" in raw("data/lu_config.json"), "CRLF preservado"
+    assert b"\r" not in raw("data/users_db.json"), "LF puro preservado"
+    assert not raw("data/progress_db.json").endswith(b"\n"), "sin newline final"
+    assert raw("data/interventions_db.json").endswith(b"\n"), "con newline final"
+    assert not raw("data/users_db.backup.1773870779.json").endswith(b"\n"), "sin newline final"
+    assert any(b > 127 for b in raw("data/users_db.json")), "UTF-8 no ASCII presente"
+
+    # 2) el manifiesto del runner lleva el sha256 de la fuente, para los 20 JSON.
+    env2 = Env("d02b")
+    env2.provision_repository()
+    before = fixtures.snapshot_tree(env2.base)
+    env2.run("structured_backup.py", expect=0)
+    manifest = env2.manifests()[-1]
+    for store in manifest["stores"]:
+        if store["kind"] != "json":
+            continue
+        src = os.path.join(env2.base, store["logical_path"])
+        assert store["sha256"] == sha256_file(src), f"{store['logical_path']}: hash != fuente"
+        assert store["bytes"] == os.path.getsize(src)
+    assert_sources_untouched(before, fixtures.snapshot_tree(env2.base), "backup con 24 stores")
+
+
+@case("D03", "fail-closed: store nuevo obligatorio ausente")
+def test_d_missing_required():
+    env = Env("d03")
+    env.provision_repository()
+    os.unlink(os.path.join(env.base, "data/users_db.json"))
+    proc = env.run("structured_backup.py", expect=errors.SourceMissingError.exit_code)
+    assert "data/users_db.json" in proc.stderr, proc.stderr
+    assert len(env.snapshots(tag="structured")) == 0, "no debe crearse snapshot"
+
+
+@case("D04", "fail-closed: JSON invalido en un store nuevo, antes de restic")
+def test_d_invalid_json():
+    env = Env("d04")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    before = len(env.snapshots())
+    with open(os.path.join(env.base, "data/lu_config.json"), "w", encoding="utf-8") as handle:
+        handle.write('{"roto": ')
+    proc = env.run("structured_backup.py", expect=errors.JsonInvalidError.exit_code)
+    assert "data/lu_config.json" in proc.stderr, proc.stderr
+    assert len(env.snapshots()) == before, "no debe crearse snapshot con JSON invalido"
+    assert env.staging_dirs() == [], "staging no limpiado"
+
+
+@case("D05", "fail-closed: symlink rechazado")
+def test_d_symlink_rejected():
+    env = Env("d05")
+    target = os.path.join(env.base, "data/interventions_db.json")
+    os.unlink(target)
+    os.symlink(os.path.join(env.base, "data/access_db.json"), target)
+    proc = env.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "symlink" in proc.stderr, proc.stderr
+    assert not os.path.exists(env.repo), "no debe crearse repositorio"
+
+
+@case("D06", "fail-closed: escape del arbol de origen")
+def test_d_path_escape():
+    from chibalete_backup.preflight import _resolve_safe
+    from chibalete_backup import errors as E
+    env = Env("d06")
+    outside = os.path.join(env.root, "fuera.json")
+    with open(outside, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    try:
+        _resolve_safe(env.base, "../fuera.json", "store JSON")
+        raise AssertionError("una ruta con .. que escapa debe rechazarse")
+    except E.PreflightError as exc:
+        assert "escapa" in str(exc), str(exc)
+    try:
+        _resolve_safe(env.base, "/etc/passwd", "store JSON")
+        raise AssertionError("una ruta absoluta debe rechazarse")
+    except E.PreflightError as exc:
+        assert "absoluta" in str(exc), str(exc)
+    # Un symlink que apunta fuera tambien se rechaza (por ser symlink).
+    link = os.path.join(env.base, "data/submissions_db.json")
+    os.unlink(link)
+    os.symlink(outside, link)
+    try:
+        _resolve_safe(env.base, "data/submissions_db.json", "store JSON")
+        raise AssertionError("symlink hacia fuera debe rechazarse")
+    except E.PreflightError:
+        pass
+
+
+@case("D07", "fail-closed: archivo no regular (FIFO)")
+def test_d_not_regular():
+    env = Env("d07")
+    target = os.path.join(env.base, "data/lu_config.json")
+    os.unlink(target)
+    os.mkfifo(target)
+    proc = env.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "no es un archivo regular" in proc.stderr, proc.stderr
+
+
+@case("D08", "fail-closed: logical_path duplicado en el inventario")
+def test_d_duplicate_logical_path():
+    from chibalete_backup import preflight, stores as S
+    original = S.JSON_STORES
+    try:
+        S.JSON_STORES = original + (S.JsonStore("data/users_db.json", "CANON"),)
+        preflight.JSON_STORES = S.JSON_STORES
+        try:
+            preflight.assert_store_inventory_sane()
+            raise AssertionError("un logical_path duplicado debe rechazarse")
+        except errors.PreflightError as exc:
+            assert "duplicado" in str(exc), str(exc)
+    finally:
+        S.JSON_STORES = original
+        preflight.JSON_STORES = original
+    preflight.assert_store_inventory_sane()
+
+
+@case("D09", "fail-closed: dos stores con el mismo nombre de archivo se pisarian")
+def test_d_duplicate_basename():
+    from chibalete_backup import preflight, stores as S
+    original = S.JSON_STORES
+    try:
+        # Ruta distinta, MISMO basename: en el staging una sobrescribiria a la otra.
+        preflight.JSON_STORES = original + (S.JsonStore("data-critical/users_db.json", "CANON"),)
+        try:
+            preflight.assert_store_inventory_sane()
+            raise AssertionError("un basename duplicado debe rechazarse")
+        except errors.PreflightError as exc:
+            assert "mismo nombre de archivo" in str(exc) or "pisarian" in str(exc), str(exc)
+    finally:
+        preflight.JSON_STORES = original
+    # El inventario real esta sano: 20 basenames unicos.
+    nombres = [os.path.basename(s.logical_path) for s in S.JSON_STORES]
+    assert len(set(nombres)) == len(nombres) == 20, nombres
+
+
+@case("D10", "privacidad: sin contenido, correos ni conteos individualizables")
+def test_d_privacy():
+    env = Env("d10")
+    env.provision_repository()
+    proc = env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    by_path = {s["logical_path"]: s for s in manifest["stores"]}
+
+    for lp in NUEVOS_MINORS:
+        s = by_path[lp]
+        assert s["sensitivity"] == "minors", s
+        assert s["retention_status"] == "NEEDS_LEGAL_REVIEW", s
+        assert "aggregate_count" not in s, f"conteo individualizable en {lp}"
+    hist = by_path["data/users_db.backup.1773870779.json"]
+    assert hist["retention_status"] == "NEEDS_LEGAL_REVIEW", hist
+    assert "aggregate_count" not in hist, "la copia historica no debe llevar conteo"
+    # Los operativos si llevan conteo agregado (cardinalidad, no contenido).
+    assert by_path["data/users_db.json"]["aggregate_count"] == 2
+    assert by_path["data/progress_db.json"]["aggregate_count"] == 3
+    assert by_path["data/lu_config.json"]["aggregate_count"] == 2
+
+    # Cadenas que SOLO existen dentro del contenido de los siete archivos.
+    blob = json.dumps(manifest) + proc.stdout + proc.stderr
+    for needle in ("Sintético", "Ñandú", "Histórico", "sintetico-1", "historico-1",
+                   "nombre_completo", "0.0.0-sintetica", "mediador", '"roles"'):
+        assert needle not in blob, f"posible fuga de contenido: {needle}"
+    assert audit_manifest(manifest) == []
+    for label in ("passphrase", "access_key", "secret_key"):
+        assert env.secrets[label] not in blob
+
+
+@case("D11", "compatibilidad: manifiestos de 17 stores siguen siendo validos")
+def test_d_backward_compatible_manifest():
+    env = Env("d11")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    nuevo = env.manifests()[-1]
+
+    # Manifiesto "historico" con el contrato anterior: 17 stores, sin los nuevos.
+    antiguo = json.loads(json.dumps(nuevo))
+    antiguo["stores"] = [s for s in nuevo["stores"] if s["logical_path"] in STORES_PREVIOS]
+    antiguo["run_id"] = "structured-20260101T000000Z-historico"
+    assert len(antiguo["stores"]) == 17, len(antiguo["stores"])
+    assert audit_manifest(antiguo) == [], "un manifiesto anterior debe seguir siendo apto"
+    assert antiguo["schema_version"] == nuevo["schema_version"] == 1, "el schema no cambia"
+
+    # verify_backup lee ambos sin romperse.
+    mdir = os.path.join(env.work, "manifests")
+    with open(os.path.join(mdir, antiguo["run_id"] + ".json"), "w", encoding="utf-8") as handle:
+        json.dump(antiguo, handle)
+    env.run("uploads_backup.py", expect=0)
+    proc = env.run("verify_backup.py", expect=0)
+    assert '"manifests_verified"' in proc.stdout
+    checked = [json.loads(l) for l in proc.stdout.splitlines()
+               if l.startswith("{") and '"manifests_verified"' in l][-1]
+    assert checked["checked"] == 3, checked
+    assert checked["problems"] == 0, checked
+
+
+@case("D12", "compatibilidad: restore de un snapshot con 24 stores")
+def test_d_restore_24_stores():
+    env = Env("d12")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+              if os.path.isdir(p)][0]
+    man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
+    assert len(man["stores"]) == 24, len(man["stores"])
+    jdir = os.path.join(staged, "json")
+    restaurados = sorted(os.listdir(jdir))
+    assert len(restaurados) == 20, restaurados
+    for lp in NUEVOS_STORES:
+        name = os.path.basename(lp)
+        assert name in restaurados, f"{name} no se restauro"
+        assert sha256_file(os.path.join(jdir, name)) == sha256_file(os.path.join(env.base, lp)), (
+            f"{lp}: el restore no es byte-identico a la fuente")
+
+
+@case("D13", "el store opcional ausente no rompe el backup")
+def test_d_optional_absent():
+    env = Env("d13")
+    env.provision_repository()
+    os.unlink(os.path.join(env.base, "data/users_db.backup.1773870779.json"))
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert "data/users_db.backup.1773870779.json" not in paths
+    assert len(manifest["stores"]) == 23, len(manifest["stores"])
+    for lp in STORES_PREVIOS:
+        assert lp in paths
+
+
+@case("D14", "users_db.json y usuarios_colegios_oro.json coexisten sin fusionarse")
+def test_d_no_merge():
+    env = Env("d14")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    by_path = {s["logical_path"]: s for s in manifest["stores"]}
+    a = by_path["data/users_db.json"]
+    b = by_path["data-critical/usuarios_colegios_oro.json"]
+    assert a["sha256"] != b["sha256"], "son archivos distintos: no deben compartir hash"
+    assert a["bytes"] != b["bytes"]
+    assert a["aggregate_count"] != b["aggregate_count"], "censos distintos, conteos distintos"
+    assert a["sha256"] == sha256_file(os.path.join(env.base, "data/users_db.json"))
+    assert b["sha256"] == sha256_file(os.path.join(env.base, "data-critical/usuarios_colegios_oro.json"))
+    # Ninguno se canoniza sobre el otro: ambos siguen en disco sin tocar.
+    assert os.path.exists(os.path.join(env.base, "data/users_db.json"))
+    assert os.path.exists(os.path.join(env.base, "data-critical/usuarios_colegios_oro.json"))
 
 
 # --------------------------------------------------------------------------
