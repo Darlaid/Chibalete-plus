@@ -64,3 +64,26 @@ ignoreUntil = 2026-10-21
 id = "GHSA-8988-4f7v-96qf"
 reason = "W3C Baggage extraction is bounded in application code to 8192 bytes, 180 entries, and 4096 bytes per entry. Sentry v8 pins OpenTelemetry 1.x, which has no patched release for this advisory. Removal requires the coordinated Sentry v10 and OpenTelemetry v2 migration."
 ignoreUntil = 2026-10-21
+
+# ── GHSA-qwww-vcr4-c8h2 — react-router: CSRF bypass en modo RSC (HIGH 7.1) ────
+# Afecta react-router >=7.12.0; la única versión corregida es 8.3.0 (no hay
+# backport en la línea 7.x). El advisory es EXCLUSIVO del modo RSC: la acción se
+# ejecuta antes de devolver el 400.
+# NO ALCANZABLE con la arquitectura desplegada hoy — verificado sobre contenido
+# tracked en CHP-SEC-DEPS-01B: Chibalete+ es una SPA de cliente montada con
+# ReactDOM.createRoot (cero hydrateRoot), enruta con HashRouter y <Routes>/<Route
+# element> declarativos, y no usa data router (cero RouterProvider,
+# createBrowserRouter, useLoaderData, useActionData, useFetcher, errorElement).
+# No hay RSC, SSR, server actions, Flight ni turbo-stream, y Dockerfile.front
+# sirve dist/ estático desde nginx:1.27-alpine, sin proceso Node en runtime: no
+# existe servidor que pueda ejecutar acciones RSC. Esto NO afirma que la
+# vulnerabilidad no exista, sino que hoy no tiene ruta de explotación aquí.
+# La corrección real es migrar a react-router 8.3.0, lo que exige unidad propia:
+# sustituir los imports de react-router-dom (sin línea 8.x) por react-router en
+# 32 archivos, React/React-DOM >=19.2.7 y Node >=22.22.0 en ambos Dockerfiles.
+# REEVALUACIÓN OBLIGATORIA antes del vencimiento: si aparece RSC, SSR, data
+# router o server actions, esta excepción deja de ser válida de inmediato.
+[[IgnoredVulns]]
+id = "GHSA-qwww-vcr4-c8h2"
+reason = "Advisory limited to React Router RSC mode. Chibalete+ is a client-only SPA (ReactDOM.createRoot without hydration, HashRouter, declarative Routes/Route, no data router, loaders or actions) with no RSC, SSR or server actions, served as static assets by nginx, so the vulnerable path is not reachable in the deployed architecture. Not a claim that the flaw is absent. Fixing it requires migrating to react-router 8.3.0 in a dedicated unit: react-router-dom has no 8.x line, so 32 files must import react-router directly, plus React >=19.2.7 and Node >=22.22.0 in both Dockerfiles. Must be re-evaluated before the expiry date, and immediately if RSC, SSR or a data router is introduced."
+ignoreUntil = 2026-09-30
