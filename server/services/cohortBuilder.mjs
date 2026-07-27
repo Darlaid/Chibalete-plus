@@ -5,7 +5,7 @@
  * global). Cohort types soportados HOY:
  *
  *   group:<groupId>          → groups_db.json memberIds[]
- *   school:<schoolId>        → grupos schoolId === X → ∪ memberIds[]
+ *   school:<organizationId>  → grupos con esa organización → ∪ memberIds[]
  *   club:<groupId>           → groups con type='club'
  *   intervention:<type>      → distinct student_ids con esa intervention_type
  *   risk:<rule_id>           → users con risk activo de ese tipo
@@ -64,15 +64,18 @@ function resolveGroup(scopeId) {
     return { users: Array.isArray(g.memberIds) ? g.memberIds : [],
              note: `group ${g.name || g.id} type=${g.type}` };
 }
+// CHP-ID-GROUPS-RECON-01B: la cohorte institucional se resuelve por
+// `organizationId`, la única autoridad. Antes leía el campo legacy de escuela
+// del grupo, que ningún grupo tiene: la cohorte quedaba silenciosamente vacía.
 function resolveSchool(scopeId) {
     const groups = readGroupsDb();
     const set = new Set();
     for (const g of groups) {
-        if (g.schoolId === scopeId && Array.isArray(g.memberIds)) {
+        if (g.organizationId === scopeId && Array.isArray(g.memberIds)) {
             for (const u of g.memberIds) set.add(u);
         }
     }
-    return { users: [...set], note: `school ${scopeId}` };
+    return { users: [...set], note: `organization ${scopeId}` };
 }
 function resolveClub(scopeId) {
     const groups = readGroupsDb();
@@ -217,7 +220,7 @@ export function runOnce(opts = {}) {
             if (!g?.id) continue;
             targets.push({ cohort_type: g.type === 'club' ? 'club' : 'group',
                            scope_id: g.id });
-            if (g.schoolId) targets.push({ cohort_type: 'school', scope_id: g.schoolId });
+            if (g.organizationId) targets.push({ cohort_type: 'school', scope_id: g.organizationId });
         }
         // 2. Cohortes derivadas globales
         targets.push({ cohort_type: 'habit', scope_id: 'high_continuity' });

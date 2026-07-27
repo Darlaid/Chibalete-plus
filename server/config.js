@@ -237,3 +237,15 @@ export const USERS_DB = assertCanonicalUsersDb().path;
  */
 export const GROUPS_DB = process.env.GROUPS_DB
     || path.resolve(__dirname, '../data/groups_db.json');
+
+/**
+ * Registro institucional (CHP-ID-GROUPS-RECON-01B).
+ *
+ * `schools_db.json` es la lista de organizaciones REGISTRADAS. Es la que
+ * convierte un `organizationId` en autoridad: un grupo solo tiene scope
+ * institucional si su `organizationId` aparece aquí. Sin registro no hay scope,
+ * y jamás se deriva la organización del nombre del colegio en tiempo de
+ * autorización.
+ */
+export const SCHOOLS_DB = process.env.SCHOOLS_DB
+    || path.resolve(__dirname, '../data/schools_db.json');

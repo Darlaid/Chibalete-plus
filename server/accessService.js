@@ -55,8 +55,12 @@ export function createAccessService({ readJSON, log, normalizeUser, normalizeGro
         );
         const resolvedGroupIds = [...new Set(userGroups.map(g => g.id))];
 
-        // Organización del usuario (organizationId moderno o colegio legacy)
-        const organizationId = user.organizationId || user.colegio;
+        // CHP-ID-GROUPS-RECON-01B: `organizationId` es la única autoridad de
+        // organización. Antes se caía al string `colegio`, de modo que una regla
+        // podía aplicar por coincidencia de nombre. En producción hay 0 reglas
+        // con scope 'organization', así que retirar el fallback no cambia
+        // ninguna decisión vigente; sí cierra la vía textual.
+        const organizationId = user.organizationId || null;
 
         const accessRules = readJSON(ACCESS_DB);
         const now = Date.now();
@@ -77,7 +81,7 @@ export function createAccessService({ readJSON, log, normalizeUser, normalizeGro
 
             if (rule.scope === 'user'         && rule.scopeId === userId)                  { applies = true; via = `user(${userId})`; }
             if (rule.scope === 'group'         && resolvedGroupIds.includes(rule.scopeId)) { applies = true; via = `group(${rule.scopeId})`; }
-            if (rule.scope === 'organization'  && rule.scopeId === organizationId)         { applies = true; via = `org(${rule.scopeId})`; }
+            if (rule.scope === 'organization'  && organizationId && rule.scopeId === organizationId) { applies = true; via = `org(${rule.scopeId})`; }
 
             if (applies) {
                 appliedRules.push(rule.id);

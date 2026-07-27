@@ -180,24 +180,28 @@ console.log('\n[C] Cero referencias runtime a data/users_db.json');
 console.log('\n[D] CIS y scopeAccess leen el canónico');
 {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'idcanon_cis_'));
-    const CANON  = path.join(tmpDir, 'usuarios_colegios_oro.json');
-    const GROUPS = path.join(tmpDir, 'groups_db.json');
-    const DECOY  = path.join(tmpDir, 'users_db.json'); // señuelo estilo legacy
+    const CANON   = path.join(tmpDir, 'usuarios_colegios_oro.json');
+    const GROUPS  = path.join(tmpDir, 'groups_db.json');
+    const SCHOOLS = path.join(tmpDir, 'schools_db.json');
+    const DECOY   = path.join(tmpDir, 'users_db.json'); // señuelo estilo legacy
 
     fs.writeFileSync(CANON, JSON.stringify([
         { id: 'u_canon_admin', roles: ['administrador'] },
         { id: 'u_canon_med',   roles: ['mediador'] },
     ]), 'utf8');
+    // CHP-ID-GROUPS-RECON-01B: la autoridad es organizationId registrado.
     fs.writeFileSync(GROUPS, JSON.stringify([
-        { id: 'g1', school: 'Colegio Uno', schoolId: 'sch_1', mediatorIds: ['u_canon_med'] },
+        { id: 'g1', school: 'Colegio Uno', organizationId: 'sch_1', mediatorIds: ['u_canon_med'] },
     ]), 'utf8');
+    fs.writeFileSync(SCHOOLS, JSON.stringify([{ id: 'sch_1', name: 'Colegio Uno' }]), 'utf8');
     fs.writeFileSync(DECOY, JSON.stringify([
         { id: 'u_legacy_only_admin', roles: ['administrador'] },
     ]), 'utf8');
 
-    const prevU = process.env.USERS_DB, prevG = process.env.GROUPS_DB;
-    process.env.USERS_DB  = CANON;
-    process.env.GROUPS_DB = GROUPS;
+    const prevU = process.env.USERS_DB, prevG = process.env.GROUPS_DB, prevS = process.env.SCHOOLS_DB;
+    process.env.USERS_DB   = CANON;
+    process.env.GROUPS_DB  = GROUPS;
+    process.env.SCHOOLS_DB = SCHOOLS;
 
     const cis = await import('../identity/cis.mjs?canon=cis');
     const scopeAccess = await import('../aulaViva/scopeAccess.mjs?canon=cis');
@@ -217,6 +221,7 @@ console.log('\n[D] CIS y scopeAccess leen el canónico');
 
     if (prevU === undefined) delete process.env.USERS_DB; else process.env.USERS_DB = prevU;
     if (prevG === undefined) delete process.env.GROUPS_DB; else process.env.GROUPS_DB = prevG;
+    if (prevS === undefined) delete process.env.SCHOOLS_DB; else process.env.SCHOOLS_DB = prevS;
     fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 

@@ -18,10 +18,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shadoweq_'));
-const USERS_TMP  = path.join(tmpDir, 'usuarios_colegios_oro.json');
-const GROUPS_TMP = path.join(tmpDir, 'groups_db.json');
-process.env.USERS_DB  = USERS_TMP;
-process.env.GROUPS_DB = GROUPS_TMP;
+const USERS_TMP   = path.join(tmpDir, 'usuarios_colegios_oro.json');
+const GROUPS_TMP  = path.join(tmpDir, 'groups_db.json');
+const SCHOOLS_TMP = path.join(tmpDir, 'schools_db.json');
+process.env.USERS_DB   = USERS_TMP;
+process.env.GROUPS_DB  = GROUPS_TMP;
+process.env.SCHOOLS_DB = SCHOOLS_TMP;
 
 // Matriz deliberadamente heterogénea: roles en `roles[]`, en `role` y en `rol`;
 // mediación por mediatorId / mediatorIds / mediadores; miembros por memberIds,
@@ -42,25 +44,40 @@ const USERS = [
     { id: 'u_fb_multi',  roles: ['lector'], colegio: 'Escuela Multi' },
     { id: 'u_norole',    nombre_completo: 'Sin rol' },
     { id: 'u_weirdrole', roles: ['bibliotecario_jefe'] },
+    { id: 'u_lt1', roles: ['lector'], _loadtest_marker: true },   // sintéticos: marcan g_synth
+    { id: 'u_lt2', roles: ['lector'], _loadtest_marker: true },
 ];
+// CHP-ID-GROUPS-RECON-01B: `organizationId` es la autoridad y solo vale si está
+// registrado. Se incluyen a propósito grupos ACTIVE_REAL, históricos (sin
+// organización o con una no registrada) y sintéticos (miembros loadtest).
 const GROUPS = [
-    { id: 'g_a',  school: 'Escuela A',     schoolId: 'sch_a',  mediatorIds: ['u_med_arr'], memberIds: ['u_stu_member'], studentIds: ['u_stu_student'] },
-    { id: 'g_b',  school: 'Escuela B',     schoolId: 'sch_b',  mediatorId: 'u_med_prof' },
-    { id: 'g_c',  school: 'Escuela C',     schoolId: 'sch_c',  mediadores: ['u_med_rol'] },
-    { id: 'g_mono', school: 'Escuela Mono', schoolId: 'sch_mono', mediatorIds: ['u_med_arr'] },
-    { id: 'g_m1', school: 'Escuela Multi', schoolId: 'sch_multi', mediatorIds: ['u_med_prof'] },
-    { id: 'g_m2', school: 'Escuela Multi', schoolId: 'sch_multi', mediatorIds: [] },
-    { id: 'g_noschool', mediatorIds: ['u_med_arr'] },
+    { id: 'g_a',  school: 'Escuela A',     organizationId: 'sch_a',  mediatorIds: ['u_med_arr'], memberIds: ['u_stu_member'], studentIds: ['u_stu_student'] },
+    { id: 'g_b',  school: 'Escuela B',     organizationId: 'sch_b',  mediatorId: 'u_med_prof' },
+    { id: 'g_c',  school: 'Escuela C',     organizationId: 'sch_c',  mediadores: ['u_med_rol'] },
+    { id: 'g_mono', school: 'Escuela Mono', organizationId: 'sch_mono', mediatorIds: ['u_med_arr'] },
+    { id: 'g_m1', school: 'Escuela Multi', organizationId: 'sch_multi', mediatorIds: ['u_med_prof'] },
+    { id: 'g_m2', school: 'Escuela Multi', organizationId: 'sch_multi', mediatorIds: [] },
+    { id: 'g_noschool', mediatorIds: ['u_med_arr'] },                                   // histórico
+    { id: 'g_unreg', school: 'Escuela X', organizationId: 'sch_no_registrada', mediatorIds: ['u_med_arr'] },
+    { id: 'g_synth', organizationId: 'lt-org', mediatorIds: ['u_med_arr'], memberIds: ['u_lt1', 'u_lt2'] },
+];
+// `sch_c` y `sch_no_registrada` quedan fuera del registro a propósito.
+const SCHOOLS = [
+    { id: 'sch_a', name: 'Escuela A' },
+    { id: 'sch_b', name: 'Escuela B' },
+    { id: 'sch_mono', name: 'Escuela Mono' },
+    { id: 'sch_multi', name: 'Escuela Multi' },
 ];
 
-fs.writeFileSync(USERS_TMP,  JSON.stringify(USERS),  'utf8');
-fs.writeFileSync(GROUPS_TMP, JSON.stringify(GROUPS), 'utf8');
+fs.writeFileSync(USERS_TMP,   JSON.stringify(USERS),   'utf8');
+fs.writeFileSync(GROUPS_TMP,  JSON.stringify(GROUPS),  'utf8');
+fs.writeFileSync(SCHOOLS_TMP, JSON.stringify(SCHOOLS), 'utf8');
 
 const cis = await import('../../server/identity/cis.mjs');
 const shadow = await import('../shadow-scope-compare.mjs');
 const gm = await import('../../utils/groupMembership.mjs');
 
-const decideB = shadow.makeModelB(USERS, GROUPS, gm);
+const decideB = shadow.makeModelB(USERS, GROUPS, gm, SCHOOLS);
 
 let pass = 0, fail = 0;
 const ok = (label, cond, hint = '') => cond

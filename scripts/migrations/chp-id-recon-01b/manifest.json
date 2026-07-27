@@ -1,0 +1,159 @@
+{
+  "unit": "CHP-ID-GROUPS-RECON-01B-R1",
+  "version": 1,
+  "status": ["HUMAN_APPROVED_POLICY", "DRY_RUN_ONLY", "NOT_APPLIED"],
+  "title": "Saneamiento institucional previo al despliegue de identidad",
+  "generatedFrom": {
+    "environment": "production",
+    "container": "chibalete_api_1",
+    "readOnlyAuditDate": "2026-07-27",
+    "note": "Todos los conteos y hashes provienen de lecturas read-only. Este manifiesto no se ha aplicado."
+  },
+
+  "expectedInputs": {
+    "data/schools_db.json": {
+      "sha256": "7b7f269ff50e320e9f703c0c9b01ef6cd608642354c3767b03c18980ceef9e17",
+      "bytes": 366,
+      "records": 3
+    },
+    "data/groups_db.json": {
+      "sha256": "870b4bfbe0f35ed046723ba0ea823d5a5d1c410fc6ae0df28b67cd22c0ae79a0",
+      "bytes": 36812,
+      "records": 20
+    },
+    "data-critical/usuarios_colegios_oro.json": {
+      "sha256": "43cf26f27c8c925393790e1f943152b2699c5fbd4d4759834d28916f7f4eb7ea",
+      "bytes": 332197,
+      "records": 646
+    }
+  },
+
+  "operations": [
+    {
+      "id": "OP-A-EXTERNADO-REGISTRO",
+      "decision": "D6",
+      "file": "data/schools_db.json",
+      "kind": "append",
+      "rationale": "Externado es una institución real con 2 mediadores. Sin registro, su organizationId no puede conceder scope.",
+      "guard": {
+        "uniqueByIdAbsent": "school-externado",
+        "uniqueByNameCaseInsensitiveAbsent": "Externado",
+        "expectedRecordsBefore": 3
+      },
+      "record": {
+        "id": "school-externado",
+        "name": "Externado",
+        "createdAt": "2026-07-27T00:00:00.000Z"
+      },
+      "idNote": "Id estable y explícito, NO derivado de la hora de ejecución. POST /api/schools acepta un id explícito (server.js: `if (!newSchool.id)`), así que el formato es compatible; se aparta a propósito de la convención school-<epoch> porque el manifiesto debe ser reproducible byte a byte.",
+      "expectedRecordsAfter": 4
+    },
+
+    {
+      "id": "OP-B-EXTERNADO-MEDIADORES",
+      "decision": "D6",
+      "file": "data-critical/usuarios_colegios_oro.json",
+      "kind": "setFieldWhere",
+      "rationale": "Los 2 mediadores de Externado no tienen organizationId. Sin él no pertenecen a la institución bajo el contrato canónico.",
+      "selector": {
+        "field": "colegio",
+        "equals": "Externado",
+        "andFieldAbsent": "organizationId"
+      },
+      "set": { "organizationId": "school-externado" },
+      "guard": {
+        "expectedMatches": 2,
+        "expectedRolesAggregate": { "mediador": 2 },
+        "mustNotTouchOtherFields": true
+      },
+      "fieldsChanged": ["organizationId"],
+      "fieldsUnchanged": [
+        "id", "email", "nombre_completo", "nombre_usuario", "password", "roles",
+        "colegio", "curso", "accountStatus", "mediatorKind", "avatar_url",
+        "bio_corta", "libros_leidos", "nivel_lectura", "seguidores", "seguidos",
+        "social_connections", "groupIds"
+      ],
+      "note": "No se crea ningún grupo para Externado (D6). El scope institucional de sus mediadores requerirá además un grupo ACTIVE_REAL, decisión posterior."
+    },
+
+    {
+      "id": "OP-C-GRUPO-101-ID",
+      "decision": "D3",
+      "file": "data/groups_db.json",
+      "kind": "setFieldWhere",
+      "rationale": "El registro carece de `id`, así que no tiene clave estable y rompe cualquier iteración de grupos. Se le asigna un id explícito y se conserva; queda fuera del scope institucional por no tener organizationId registrado.",
+      "selector": {
+        "fieldAbsent": "id",
+        "and": { "name": "Grupo 101", "school": "Colegio Test" }
+      },
+      "set": { "id": "group-historical-grupo-101" },
+      "guard": {
+        "expectedMatches": 1,
+        "idMustNotCollide": "group-historical-grupo-101",
+        "selectorMustNotUseArrayPosition": true
+      },
+      "fieldsChanged": ["id"],
+      "fieldsUnchanged": ["name", "school", "grade", "teacherId", "studentIds", "memberIds"],
+      "resultingClassification": "HISTORICAL_OUT_OF_SCOPE",
+      "note": "No se crea la institución `Colegio Test` (D3). El id elegido no sugiere un grupo activo."
+    }
+  ],
+
+  "explicitlyNotDone": [
+    {
+      "decision": "D1",
+      "statement": "Los 10 grupos FilBo 2027–2037 NO se borran, NO se mapean a FilBo 2026 y NO se crean sus instituciones. Sus 17 usuarios NO se reasignan, desactivan ni modifican.",
+      "affectedGroups": 10,
+      "affectedUsers": 17
+    },
+    {
+      "decision": "D2",
+      "statement": "Los 4 grupos de `Colegio Chibalete` NO se borran y su institución NO se registra.",
+      "affectedGroups": 4
+    },
+    {
+      "decision": "D4",
+      "statement": "`lt-org` NO se registra como institución y sus 400 usuarios sintéticos NO se purgan.",
+      "affectedGroups": 1,
+      "affectedUsers": 400
+    },
+    {
+      "decision": "D5",
+      "statement": "NO se añade ni materializa ningún campo `schoolId`. `organizationId` es la única autoridad."
+    },
+    {
+      "decision": "D7",
+      "statement": "Los 2 lectores reales de FilBo 2026 sin grupo NO se asignan automáticamente a ninguno.",
+      "affectedUsers": 2
+    },
+    {
+      "decision": "clasificación",
+      "statement": "La clasificación ACTIVE_REAL / HISTORICAL_OUT_OF_SCOPE / SYNTHETIC_OUT_OF_SCOPE NO se persiste: se deriva en runtime desde organizationId + registro + marcador sintético. Cero campos nuevos escritos."
+    }
+  ],
+
+  "invariants": [
+    "El número de registros de groups_db.json no cambia (20 antes, 20 después).",
+    "El número de registros del padrón de usuarios no cambia (646 antes, 646 después).",
+    "schools_db.json pasa de 3 a 4 registros; ningún registro existente se modifica.",
+    "Ningún usuario cambia de colegio, groupIds, roles, accountStatus ni password.",
+    "Ningún grupo cambia de nombre, school, grade, type, miembros ni mediadores.",
+    "Ningún campo se elimina de ningún registro.",
+    "No se escribe `schoolId` en ninguna parte.",
+    "El orden de los arrays se preserva; ningún registro se reordena.",
+    "Segunda ejecución = cero cambios (idempotente por guardas de postcondición)."
+  ],
+
+  "rollback": {
+    "strategy": "byte-a-byte",
+    "requirement": "El apply debe copiar cada archivo de entrada a <archivo>.pre-CHP-ID-RECON-01B antes de escribir, y el rollback restaura esos bytes exactos.",
+    "verification": "sha256 del archivo restaurado == sha256 declarado en expectedInputs."
+  },
+
+  "applyPreconditions": [
+    "BACKUP GATE GREEN con evidencia explícita.",
+    "sha256 de los 3 archivos idéntico a expectedInputs (si difieren, STOP).",
+    "Aprobación humana explícita registrada.",
+    "Ejecución con --apply, que no es el modo por defecto."
+  ]
+}

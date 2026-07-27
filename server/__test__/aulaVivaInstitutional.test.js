@@ -38,9 +38,10 @@ fs.mkdirSync(dataDir, { recursive: true });
 // CHP-ID-CANON-01B — inyección explícita del padrón de fixtures ANTES de los
 // imports: config.js resuelve USERS_DB/GROUPS_DB en import-time. NODE_ENV=test
 // es lo único que habilita el override, y solo hacia un directorio temporal.
-process.env.NODE_ENV  = 'test';
-process.env.USERS_DB  = path.join(dataDir, 'usuarios_colegios_oro.json');
-process.env.GROUPS_DB = path.join(dataDir, 'groups_db.json');
+process.env.NODE_ENV   = 'test';
+process.env.USERS_DB   = path.join(dataDir, 'usuarios_colegios_oro.json');
+process.env.GROUPS_DB  = path.join(dataDir, 'groups_db.json');
+process.env.SCHOOLS_DB = path.join(dataDir, 'schools_db.json');
 
 // Importes después de setear env
 const eventsService = await import('../eventsService.js');
@@ -110,11 +111,16 @@ function req(server, method, path, opts = {}) {
 // sobrescribía `data/users_db.json` y `data/groups_db.json` reales y los
 // restauraba desde un backup en memoria: ese hack existía porque scopeAccess
 // leía un path hardcodeado. Ya no: cero escrituras sobre stores reales.
-const FIXTURE_USERS  = process.env.USERS_DB;
-const FIXTURE_GROUPS = process.env.GROUPS_DB;
-function installFixture(users, groups) {
-    fs.writeFileSync(FIXTURE_USERS,  JSON.stringify(users),  'utf8');
-    fs.writeFileSync(FIXTURE_GROUPS, JSON.stringify(groups), 'utf8');
+const FIXTURE_USERS   = process.env.USERS_DB;
+const FIXTURE_GROUPS  = process.env.GROUPS_DB;
+const FIXTURE_SCHOOLS = process.env.SCHOOLS_DB;
+function installFixture(users, groups, schools = [
+    { id: 'school_uno',  name: 'Colegio Uno' },
+    { id: 'school_otro', name: 'Colegio Otro' },
+]) {
+    fs.writeFileSync(FIXTURE_USERS,   JSON.stringify(users),   'utf8');
+    fs.writeFileSync(FIXTURE_GROUPS,  JSON.stringify(groups),  'utf8');
+    fs.writeFileSync(FIXTURE_SCHOOLS, JSON.stringify(schools), 'utf8');
 }
 
 function seedEvent(evs) {
@@ -150,10 +156,11 @@ try {
         { id: 'u_student',   role: 'lector',        name: 'Estudiante A' },
         { id: 'u_stranger',  role: 'lector',        name: 'Estudiante X' },
     ];
+    // CHP-ID-GROUPS-RECON-01B: `organizationId` registrado es la autoridad.
     const GROUPS = [
-        { id: 'g_7A', name: '7A', type: 'course', schoolId: 'school_uno',
+        { id: 'g_7A', name: '7A', type: 'course', organizationId: 'school_uno',
           mediatorIds: ['u_mediator'], memberIds: ['u_student'] },
-        { id: 'g_otro', name: '8B', type: 'course', schoolId: 'school_otro',
+        { id: 'g_otro', name: '8B', type: 'course', organizationId: 'school_otro',
           mediatorIds: ['u_mediator_otro'], memberIds: ['u_stranger'] },
     ];
     installFixture(USERS, GROUPS);

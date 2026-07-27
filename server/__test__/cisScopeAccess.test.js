@@ -18,12 +18,14 @@ import { fileURLToPath } from 'node:url';
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cis_'));
 const USERS_TMP    = path.join(tmpDir, 'canon_users.json');
 const GROUPS_TMP   = path.join(tmpDir, 'canon_groups.json');
+const SCHOOLS_TMP  = path.join(tmpDir, 'canon_schools.json');
 const OBSOLETE_TMP = path.join(tmpDir, 'obsolete_users_decoy.json'); // señuelo ≠ canónico
 // CHP-ID-CANON-01B — NODE_ENV=test es lo único que habilita el override de
 // USERS_DB, y solo hacia un fixture dentro de un directorio temporal.
-process.env.NODE_ENV  = 'test';
-process.env.USERS_DB  = USERS_TMP;
-process.env.GROUPS_DB = GROUPS_TMP;
+process.env.NODE_ENV   = 'test';
+process.env.USERS_DB   = USERS_TMP;
+process.env.GROUPS_DB  = GROUPS_TMP;
+process.env.SCHOOLS_DB = SCHOOLS_TMP;
 
 const USERS = [
     { id: 'u_admin',   roles: ['administrador'], kind: 'real' },
@@ -36,23 +38,38 @@ const USERS = [
     { id: 'u_fb_casi', roles: ['lector'], colegio: 'Escuela  Fallback' },// nombre "parecido" (doble espacio)
     { id: 'u_dd',      roles: ['lector'], colegio: 'Escuela Doble' },    // escuela multi-grupo → sin fallback
     { id: 'u_hm',      roles: ['lector'], colegio: 'Escuela Homónima' }, // dos instituciones mismo nombre
+    { id: 'u_hist',    roles: ['lector'] },                              // miembro de un grupo histórico
     { id: 'u_k1',      roles: ['lector'], kind: 'REAL' },                // kind inválido (mayúsculas)
     { id: 'u_k2',      roles: ['lector'], kind: 42 },                    // kind inválido (número)
     { id: 'u_k3',      roles: ['lector'], kind: 'bot' },                 // kind inválido (valor ajeno)
 ];
+// CHP-ID-GROUPS-RECON-01B: la autoridad es `organizationId`, y solo cuenta si
+// está REGISTRADO en schools_db. `school` se conserva como etiqueta legacy para
+// probar precisamente que ya no concede nada.
 const GROUPS = [
-    { id: 'g_A',  school: 'Escuela Uno',      schoolId: 'school_1',  mediatorIds: ['u_med'], memberIds: ['u_stu'], studentIds: ['u_stu'] },
-    { id: 'g_B',  school: 'Escuela Dos',      schoolId: 'school_2',  mediatorIds: ['u_med'], memberIds: [] },
-    { id: 'g_FB', school: 'Escuela Fallback', schoolId: 'school_fb', mediatorIds: ['u_med'] },
-    { id: 'g_D1', school: 'Escuela Doble',    schoolId: 'school_d',  mediatorIds: ['u_med'] },
-    { id: 'g_D2', school: 'Escuela Doble',    schoolId: 'school_d',  mediatorIds: [] },
-    // Homónimos: dos INSTITUCIONES distintas (schoolId) con el mismo nombre → fallback deshabilitado
-    { id: 'g_H1', school: 'Escuela Homónima', schoolId: 'inst_HA', mediatorIds: ['u_med'] },
-    { id: 'g_H2', school: 'Escuela Homónima', schoolId: 'inst_HB', mediatorIds: [] },
+    { id: 'g_A',  school: 'Escuela Uno',      organizationId: 'school_1',  mediatorIds: ['u_med'], memberIds: ['u_stu'], studentIds: ['u_stu'] },
+    { id: 'g_B',  school: 'Escuela Dos',      organizationId: 'school_2',  mediatorIds: ['u_med'], memberIds: [] },
+    { id: 'g_FB', school: 'Escuela Fallback', organizationId: 'school_fb', mediatorIds: ['u_med'] },
+    { id: 'g_D1', school: 'Escuela Doble',    organizationId: 'school_d',  mediatorIds: ['u_med'] },
+    { id: 'g_D2', school: 'Escuela Doble',    organizationId: 'school_d',  mediatorIds: [] },
+    // Homónimos: dos ORGANIZACIONES distintas con el mismo nombre visible.
+    { id: 'g_H1', school: 'Escuela Homónima', organizationId: 'inst_HA', mediatorIds: ['u_med'] },
+    { id: 'g_H2', school: 'Escuela Homónima', organizationId: 'inst_HB', mediatorIds: [] },
+    // Histórico: media un grupo SIN organización registrada → jamás da scope.
+    { id: 'g_HIST', school: 'Escuela Uno', mediatorIds: ['u_med'], memberIds: ['u_hist'] },
+];
+// Registro institucional: `school_fb` y `inst_HB` quedan deliberadamente FUERA
+// para probar ORGANIZATION_NOT_REGISTERED.
+const SCHOOLS = [
+    { id: 'school_1',  name: 'Escuela Uno' },
+    { id: 'school_2',  name: 'Escuela Dos' },
+    { id: 'school_d',  name: 'Escuela Doble' },
+    { id: 'inst_HA',   name: 'Escuela Homónima' },
 ];
 function writeFixtures() {
-    fs.writeFileSync(USERS_TMP,  JSON.stringify(USERS),  'utf8');
-    fs.writeFileSync(GROUPS_TMP, JSON.stringify(GROUPS), 'utf8');
+    fs.writeFileSync(USERS_TMP,   JSON.stringify(USERS),   'utf8');
+    fs.writeFileSync(GROUPS_TMP,  JSON.stringify(GROUPS),  'utf8');
+    fs.writeFileSync(SCHOOLS_TMP, JSON.stringify(SCHOOLS), 'utf8');
 }
 writeFixtures();
 // Señuelo obsoleto TEMPORAL: un admin que solo existe fuera del canónico.
@@ -195,8 +212,8 @@ try {
     console.log('\n[8] multi-membership = unión; rol global no amplía');
     {
         const scope = cis.resolveScope('u_med');
-        ok('8a) unión de schools por membership',
-            scope.schoolIds.includes('school_1') && scope.schoolIds.includes('school_2'));
+        ok('8a) unión de organizaciones por membership',
+            scope.organizationIds.includes('school_1') && scope.organizationIds.includes('school_2'));
         ok('8b) ambas schools accesibles',
             evaluate('u_med', 'school', 'school_1').decision === 'allow' &&
             evaluate('u_med', 'school', 'school_2').decision === 'allow');
@@ -210,25 +227,42 @@ try {
             typeof cis.PLATFORM_POLICIES.platform_admin_full_institutional_read === 'string');
     }
 
-    console.log('\n[9] fallback legacy: nunca cross-institución, homónimos ni identidad sustituta (H4-4..6)');
+    console.log('\n[9] CHP-ID-GROUPS-RECON-01B: cero autorización basada en texto');
     {
-        ok('9a) fallback mono-grupo: u_fb es miembro de g_FB',
-            evaluate('u_med', 'user', 'u_fb').decision === 'allow');
-        const mfb = cis.getMemberships('u_fb');
-        ok('9b) membership u_fb vía legacy_colegio_fallback',
-            mfb.some(m => m.groupId === 'g_FB' && m.via === 'legacy_colegio_fallback'));
-        ok('9c) colegio distinto NO entra por fallback',
+        // El fallback legacy por nombre de colegio ERA autorización textual.
+        // Ahora no existe en ninguna decisión de scope.
+        ok('9a) el colegio ya NO convierte a nadie en miembro',
+            evaluate('u_med', 'user', 'u_fb').decision === 'forbidden');
+        ok('9b) getMemberships no emite ninguna vía legacy_colegio_fallback',
+            cis.getMemberships('u_fb').every(m => m.via === 'explicit'));
+        ok('9c) colegio distinto tampoco entra',
             evaluate('u_med', 'user', 'u_fb_otro').decision === 'forbidden');
-        ok('9d) escuela multi-grupo: fallback NO se activa (ambigüedad → deny)',
+        ok('9d) escuela multi-grupo sigue denegando',
             evaluate('u_med', 'user', 'u_dd').decision === 'forbidden');
-        ok('9e) fallback no sustituye identidad ausente',
+        ok('9e) identidad ausente no se sustituye por texto',
             evaluate('u_ghost_fb', 'user', 'u_fb').decision === 'unauthenticated');
-        ok('9f) dos instituciones HOMÓNIMAS → fallback deshabilitado (H4-4)',
+        ok('9f) instituciones homónimas no comparten scope',
             evaluate('u_med', 'user', 'u_hm').decision === 'forbidden' &&
             cis.getMemberships('u_hm').length === 0);
-        ok('9g) nombre solo "parecido" (espacios) NO matchea (H4-5)',
+        ok('9g) nombre solo "parecido" no matchea',
             cis.getMemberships('u_fb_casi').every(m => m.groupId !== 'g_FB') &&
             evaluate('u_med', 'user', 'u_fb_casi').decision === 'forbidden');
+        ok('9h) organización NO registrada → ORGANIZATION_NOT_REGISTERED',
+            evaluate('u_med', 'school', 'school_fb').cause === 'ORGANIZATION_NOT_REGISTERED');
+        ok('9i) grupo cuya organización no está registrada no da scope',
+            evaluate('u_med', 'group', 'g_FB').decision === 'forbidden' &&
+            evaluate('u_med', 'group', 'g_FB').cause === 'ORGANIZATION_NOT_REGISTERED');
+        ok('9j) grupo histórico (sin organizationId) no da scope',
+            evaluate('u_med', 'group', 'g_HIST').cause === 'GROUP_HISTORICAL');
+        ok('9k) mediar un grupo histórico no da visibilidad sobre sus miembros',
+            evaluate('u_med', 'user', 'u_hist').decision === 'forbidden');
+        ok('9l) el scope activo excluye los grupos fuera de scope',
+            !cis.resolveScope('u_med').mediatorGroupIds.includes('g_FB') &&
+            !cis.resolveScope('u_med').mediatorGroupIds.includes('g_HIST'));
+        ok('9m) scope_id que es un NOMBRE de colegio nunca autoriza',
+            evaluate('u_med', 'school', 'Escuela Uno').cause === 'ORGANIZATION_NOT_REGISTERED');
+        ok('9n) alias `organization` se comporta igual que `school`',
+            evaluate('u_med', 'organization', 'school_1').decision === 'allow');
     }
 
     console.log('\n[10] kind: real | synthetic | unknown (H4-7/8)');

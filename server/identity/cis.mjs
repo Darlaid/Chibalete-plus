@@ -34,17 +34,24 @@
  * con el contrato previo de scopeAccess).
  */
 import fs from 'node:fs';
-import { USERS_DB, GROUPS_DB } from '../config.js';
+import { USERS_DB, GROUPS_DB, SCHOOLS_DB } from '../config.js';
 import {
     getExplicitGroupMembers,
-    applyLegacyColegioFallback,
     getGroupMembers,
 } from '../../utils/groupMembership.mjs';
+import {
+    GROUP_CLASS,
+    SCOPE_REASON,
+    registeredOrganizationIds,
+    classifyGroup,
+} from './organizationScope.mjs';
 import { tryIdentitySqliteRead, markJsonRead } from '../db/identityReadFacade.js';
 
 // Mapa de paths para la fachada de cutover (accessDb fuera del alcance de
 // esta unidad). Mismos valores que usa el resto del server vía config.
 const FACADE_PATHS = Object.freeze({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: null });
+
+export { GROUP_CLASS, SCOPE_REASON };
 
 /** Error tipificado: el canónico no permite decidir. Mapea a 503, nunca a 403. */
 export class IdentityUnavailableError extends Error {
@@ -157,50 +164,67 @@ export function getPrincipal(principalId) {
 }
 
 /**
- * Memberships activas del principal (unión de canales explícitos canónicos;
- * el fallback legacy por colegio se conserva SOLO donde ya operaba: canales
- * explícitos vacíos + escuela mono-grupo — utils/groupMembership.mjs).
- * @returns {Array<{groupId, schoolId, role:'mediator'|'member', via}>}
+ * Contexto de clasificación institucional: el registro de organizaciones y el
+ * índice de usuarios necesarios para decidir ACTIVE_REAL / HISTORICAL /
+ * SYNTHETIC sin recurrir a ningún texto.
+ * @throws {IdentityUnavailableError} si el registro no permite decidir.
+ */
+function organizationContext(users) {
+    const schools = readIdentityArray(SCHOOLS_DB, 'schools');
+    return {
+        registeredOrgIds: registeredOrganizationIds(schools),
+        usersById: new Map((users || []).filter(u => u?.id).map(u => [u.id, u])),
+    };
+}
+
+/**
+ * Memberships del principal, por canales EXPLÍCITOS del grupo únicamente.
+ *
+ * CHP-ID-GROUPS-RECON-01B: el fallback legacy por nombre de colegio queda fuera
+ * de toda decisión de scope — era autorización basada en texto. Cada membership
+ * declara además la clasificación del grupo y su `organizationId`, que es la
+ * única autoridad institucional (ya no existe `schoolId`).
+ *
+ * @returns {Array<{groupId, organizationId, groupClass, role:'mediator'|'member', via}>}
  * @throws {IdentityUnavailableError}
  */
 export function getMemberships(principalId) {
     if (typeof principalId !== 'string' || principalId.length === 0) return [];
     const users  = readIdentityArray(USERS_DB, 'users');
     const groups = readIdentityArray(GROUPS_DB, 'groups');
+    const ctx    = organizationContext(users);
     const list = [];
     for (const g of groups) {
-        if (!g || !g.id) continue; // dato sucio (grupo sin id) — inalcanzable, igual que en la lógica canónica
+        if (!g || !g.id) continue; // grupo sin id: sin clave estable, nunca sostiene scope
+        const cls = classifyGroup(g, ctx);
+        const base = { groupId: g.id, organizationId: cls.organizationId, groupClass: cls.class };
         if (isMediatorOfGroup(g, principalId)) {
-            list.push({ groupId: g.id, schoolId: g.schoolId ?? null, role: 'mediator', via: 'explicit' });
+            list.push({ ...base, role: 'mediator', via: 'explicit' });
         }
-        const explicit = getExplicitGroupMembers(g, users);
-        if (explicit.has(principalId)) {
-            list.push({ groupId: g.id, schoolId: g.schoolId ?? null, role: 'member', via: 'explicit' });
-        } else if (explicit.size === 0) {
-            const fb = applyLegacyColegioFallback(g, users, groups);
-            if (fb.used && fb.matched.has(principalId)) {
-                list.push({ groupId: g.id, schoolId: g.schoolId ?? null, role: 'member', via: 'legacy_colegio_fallback' });
-            }
+        if (getExplicitGroupMembers(g, users).has(principalId)) {
+            list.push({ ...base, role: 'member', via: 'explicit' });
         }
     }
     return list;
 }
 
 /**
- * Scope institucional del principal = UNIÓN explícita de sus memberships
- * (multi-membership de diseño). Los roles de plataforma NO aparecen aquí:
- * solo amplían acceso vía PLATFORM_POLICIES en authorizeScope.
+ * Scope institucional del principal = UNIÓN de sus memberships, restringida a
+ * grupos ACTIVE_REAL. Los históricos y los sintéticos no aportan scope aunque
+ * el principal los medie. Los roles de plataforma NO aparecen aquí: solo
+ * amplían acceso vía PLATFORM_POLICIES en authorizeScope.
  * @throws {IdentityUnavailableError}
  */
 export function resolveScope(principalId) {
     const memberships = getMemberships(principalId);
     const mediatorGroupIds = new Set();
     const memberGroupIds   = new Set();
-    const schoolIds        = new Set();
+    const organizationIds  = new Set();
     for (const m of memberships) {
+        if (m.groupClass !== GROUP_CLASS.ACTIVE_REAL) continue;
         if (m.role === 'mediator') {
             mediatorGroupIds.add(m.groupId);
-            if (m.schoolId) schoolIds.add(m.schoolId);
+            if (m.organizationId) organizationIds.add(m.organizationId);
         } else {
             memberGroupIds.add(m.groupId);
         }
@@ -208,7 +232,7 @@ export function resolveScope(principalId) {
     return {
         mediatorGroupIds: [...mediatorGroupIds],
         memberGroupIds:   [...memberGroupIds],
-        schoolIds:        [...schoolIds],
+        organizationIds:  [...organizationIds],
     };
 }
 
@@ -249,29 +273,61 @@ export function authorizeScope(principalId, scope_type, scope_id) {
                 if (!principal.mediatorRole) return { decision: 'forbidden', cause: 'not_a_mediator' };
                 const users  = readIdentityArray(USERS_DB, 'users');
                 const groups = readIdentityArray(GROUPS_DB, 'groups');
+                const ctx    = organizationContext(users);
+                let sawOutOfScopeGroup = null;
                 for (const g of groups) {
                     if (!g || !g.id || !isMediatorOfGroup(g, principal.id)) continue;
-                    const members = getGroupMembers(g, users, { allGroups: groups });
+                    const cls = classifyGroup(g, ctx);
+                    if (cls.class !== GROUP_CLASS.ACTIVE_REAL) {
+                        sawOutOfScopeGroup = cls.reason ?? SCOPE_REASON.GROUP_NOT_IN_ACTIVE_SCOPE;
+                        continue; // un grupo fuera de scope no da visibilidad sobre nadie
+                    }
+                    // Sin fallback por nombre de colegio: solo pertenencia explícita.
+                    const members = getGroupMembers(g, users, {
+                        allGroups: groups, useLegacyColegioFallback: false,
+                    });
                     if (members.includes(sid)) {
                         return { decision: 'allow', via: 'mediator_of_member_group' };
                     }
                 }
-                return { decision: 'forbidden', cause: 'target_not_in_mediated_groups' };
+                return {
+                    decision: 'forbidden',
+                    cause: sawOutOfScopeGroup ?? 'target_not_in_mediated_groups',
+                };
             }
             case 'group':
             case 'club': {
                 if (!principal.mediatorRole) return { decision: 'forbidden', cause: 'not_a_mediator' };
                 const scope = resolveScope(principal.id);
-                return scope.mediatorGroupIds.includes(sid)
-                    ? { decision: 'allow', via: 'mediator_of_group' }
-                    : { decision: 'forbidden', cause: 'not_mediator_of_group' };
+                if (scope.mediatorGroupIds.includes(sid)) {
+                    return { decision: 'allow', via: 'mediator_of_group' };
+                }
+                // Diagnóstico tipificado: distingue "no lo medias" de "lo medias
+                // pero ese grupo está fuera del scope activo".
+                const groups = readIdentityArray(GROUPS_DB, 'groups');
+                const target = groups.find(g => g?.id === sid);
+                if (target && isMediatorOfGroup(target, principal.id)) {
+                    const users = readIdentityArray(USERS_DB, 'users');
+                    const cls = classifyGroup(target, organizationContext(users));
+                    return { decision: 'forbidden',
+                             cause: cls.reason ?? SCOPE_REASON.GROUP_NOT_IN_ACTIVE_SCOPE };
+                }
+                return { decision: 'forbidden', cause: 'not_mediator_of_group' };
             }
-            case 'school': {
+            case 'school':
+            case 'organization': {
+                // El scope institucional se identifica SIEMPRE por organizationId
+                // registrado. Un nombre de colegio nunca es un scope_id válido.
                 if (!principal.mediatorRole) return { decision: 'forbidden', cause: 'not_a_mediator' };
+                const users = readIdentityArray(USERS_DB, 'users');
+                const { registeredOrgIds } = organizationContext(users);
+                if (!registeredOrgIds.has(sid)) {
+                    return { decision: 'forbidden', cause: SCOPE_REASON.ORGANIZATION_NOT_REGISTERED };
+                }
                 const scope = resolveScope(principal.id);
-                return scope.schoolIds.includes(sid)
-                    ? { decision: 'allow', via: 'mediator_in_school' }
-                    : { decision: 'forbidden', cause: 'not_mediator_in_school' };
+                return scope.organizationIds.includes(sid)
+                    ? { decision: 'allow', via: 'mediator_in_organization' }
+                    : { decision: 'forbidden', cause: SCOPE_REASON.ORGANIZATION_MISMATCH };
             }
             case 'library': {
                 // Sin scope library funcional aún → admin-only (política arriba).

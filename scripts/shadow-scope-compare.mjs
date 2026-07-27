@@ -88,9 +88,39 @@ export function makeModelA(users, groups) {
 
 // ── MODELO B — réplica de la capa de decisión del CIS ───────────────────────
 
-export function makeModelB(users, groups, groupMembership) {
+export function makeModelB(users, groups, groupMembership, schools = []) {
     const { getGroupMembers } = groupMembership;
     const byId = new Map((users || []).filter(u => u?.id).map(u => [u.id, u]));
+
+    // CHP-ID-GROUPS-RECON-01B — organizationId registrado es la única autoridad.
+    const registeredOrgIds = new Set((Array.isArray(schools) ? schools : [])
+        .filter(s => s && typeof s.id === 'string' && s.id.trim())
+        .map(s => s.id.trim()));
+    const declaredMembers = (g) => [...new Set([
+        ...(Array.isArray(g?.memberIds) ? g.memberIds : []),
+        ...(Array.isArray(g?.studentIds) ? g.studentIds : []),
+    ])];
+    const isSyntheticGroup = (g) => {
+        const ids = declaredMembers(g);
+        if (ids.length === 0) return false;
+        let resolved = 0;
+        for (const id of ids) {
+            const u = byId.get(id);
+            if (!u) continue;
+            resolved++;
+            if (!u._loadtest_marker) return false;
+        }
+        return resolved > 0;
+    };
+    const classOf = (g) => {
+        if (!g || typeof g.id !== 'string' || !g.id) return 'HISTORICAL_OUT_OF_SCOPE';
+        const org = typeof g.organizationId === 'string' && g.organizationId.trim()
+            ? g.organizationId.trim() : null;
+        if (org && registeredOrgIds.has(org)) return 'ACTIVE_REAL';
+        if (isSyntheticGroup(g)) return 'SYNTHETIC_OUT_OF_SCOPE';
+        return 'HISTORICAL_OUT_OF_SCOPE';
+    };
+    const orgOf = (g) => (classOf(g) === 'ACTIVE_REAL' ? g.organizationId.trim() : null);
 
     const rolesOf = (u) => {
         const out = new Set();
@@ -118,15 +148,16 @@ export function makeModelB(users, groups, groupMembership) {
         };
     };
     const scopeOf = (id) => {
-        const mediatorGroupIds = new Set(), schoolIds = new Set();
+        const mediatorGroupIds = new Set(), organizationIds = new Set();
         for (const g of groups || []) {
-            if (!g?.id) continue;
+            if (!g?.id || classOf(g) !== 'ACTIVE_REAL') continue;
             if (isMediatorOfGroup(g, id)) {
                 mediatorGroupIds.add(g.id);
-                if (g.schoolId) schoolIds.add(g.schoolId);
+                const org = orgOf(g);
+                if (org) organizationIds.add(org);
             }
         }
-        return { mediatorGroupIds, schoolIds };
+        return { mediatorGroupIds, organizationIds };
     };
 
     return function decideB(callerId, scope_type, scope_id) {
@@ -143,12 +174,16 @@ export function makeModelB(users, groups, groupMembership) {
             case 'user': {
                 if (sid === principal.id) return { allow: true, reason: 'self' };
                 if (!principal.mediatorRole) return { allow: false, reason: 'not_a_mediator' };
+                let outOfScope = null;
                 for (const g of groups || []) {
                     if (!g?.id || !isMediatorOfGroup(g, principal.id)) continue;
-                    const members = getGroupMembers(g, users, { allGroups: groups, warnFn: () => {} });
+                    if (classOf(g) !== 'ACTIVE_REAL') { outOfScope = classOf(g); continue; }
+                    const members = getGroupMembers(g, users, {
+                        allGroups: groups, useLegacyColegioFallback: false, warnFn: () => {},
+                    });
                     if (members.includes(sid)) return { allow: true, reason: 'mediator_of_member_group' };
                 }
-                return { allow: false, reason: 'target_not_in_mediated_groups' };
+                return { allow: false, reason: outOfScope ?? 'target_not_in_mediated_groups' };
             }
             case 'group':
             case 'club': {
@@ -157,11 +192,15 @@ export function makeModelB(users, groups, groupMembership) {
                     ? { allow: true, reason: 'mediator_of_group' }
                     : { allow: false, reason: 'not_mediator_of_group' };
             }
-            case 'school': {
+            case 'school':
+            case 'organization': {
                 if (!principal.mediatorRole) return { allow: false, reason: 'not_a_mediator' };
-                return scopeOf(principal.id).schoolIds.has(sid)
-                    ? { allow: true, reason: 'mediator_in_school' }
-                    : { allow: false, reason: 'not_mediator_in_school' };
+                if (!registeredOrgIds.has(sid)) {
+                    return { allow: false, reason: 'ORGANIZATION_NOT_REGISTERED' };
+                }
+                return scopeOf(principal.id).organizationIds.has(sid)
+                    ? { allow: true, reason: 'mediator_in_organization' }
+                    : { allow: false, reason: 'ORGANIZATION_MISMATCH' };
             }
             case 'library':
                 return { allow: false, reason: 'library_admin_only' };
@@ -217,7 +256,7 @@ function argOf(flag, fallback) {
     return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
-export async function runComparison({ legacyPath, oroPath, groupsPath, membershipPath }) {
+export async function runComparison({ legacyPath, oroPath, groupsPath, membershipPath, schoolsPath }) {
     const fs = await import('node:fs');
     const gm = await import(membershipPath);
 
@@ -225,9 +264,10 @@ export async function runComparison({ legacyPath, oroPath, groupsPath, membershi
     const legacyUsers = read(legacyPath);
     const oroUsers    = read(oroPath);
     const groups      = read(groupsPath);
+    const schools     = schoolsPath ? read(schoolsPath) : [];
 
     const decideA = makeModelA(legacyUsers, groups);
-    const decideB = makeModelB(oroUsers, groups, gm);
+    const decideB = makeModelB(oroUsers, groups, gm, schools);
 
     const oroById = new Map(oroUsers.filter(u => u?.id).map(u => [u.id, u]));
     const rolesOf = (u) => {
@@ -354,6 +394,7 @@ if (isMain && process.argv.includes('--run')) {
         oroPath:        argOf('--oro',    '/app/data-critical/usuarios_colegios_oro.json'),
         groupsPath:     argOf('--groups', '/app/data/groups_db.json'),
         membershipPath: argOf('--membership', '/app/utils/groupMembership.mjs'),
+        schoolsPath:    argOf('--schools', '/app/data/schools_db.json'),
     });
     console.log(JSON.stringify(out, null, 2));
 }

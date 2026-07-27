@@ -251,6 +251,82 @@ identificador institucional para esos 15 grupos. **No bloquea** el despliegue de
 identidad (el shadow comparison mostró que ese scope hoy tampoco autoriza a
 nadie), pero sí bloquea dar por bueno el aislamiento por institución.
 
+## 3.e Contrato institucional: `organizationId` (CHP-ID-GROUPS-RECON-01B-R1)
+
+**`organizationId` es la única autoridad institucional.** No existe ni se
+materializa `schoolId`. El nombre del colegio (`group.school`, `user.colegio`)
+no concede absolutamente nada en tiempo de autorización.
+
+### Clasificación operativa — sin campo nuevo
+
+`server/identity/organizationScope.mjs` deriva la clase de cada grupo de
+contratos que ya existen, en vez de abrir una segunda base de autoridad:
+
+| Clase | Criterio |
+|---|---|
+| `ACTIVE_REAL` | `organizationId` presente **y registrado** en `schools_db.json` |
+| `SYNTHETIC_OUT_OF_SCOPE` | el grupo tiene miembros y **todos** los que resuelven llevan `_loadtest_marker` |
+| `HISTORICAL_OUT_OF_SCOPE` | todo lo demás: sin `organizationId`, con uno no registrado, o sin `id` |
+
+Un grupo histórico no puede ganar scope por coincidencia textual: haría falta
+registrar la institución **y** asignarle el `organizationId`, dos actos humanos
+deliberados. Un grupo vacío nunca se clasifica sintético (la vacuidad se rechaza
+explícitamente).
+
+### Qué cambió en el CIS
+
+- El scope se expresa en `organizationIds`; `resolveScope().schoolIds` ya no existe.
+- Solo los grupos `ACTIVE_REAL` aportan scope: mediar un histórico o un sintético
+  no da visibilidad sobre sus miembros.
+- **Se retiró el fallback legacy por nombre de colegio** de toda decisión de
+  scope: era autorización basada en texto.
+- `school` y `organization` son el mismo scope y exigen un `organizationId`
+  registrado; un nombre nunca es un `scope_id` válido.
+- Motivos tipificados: `ORGANIZATION_NOT_REGISTERED`, `GROUP_HISTORICAL`,
+  `GROUP_SYNTHETIC`, `ORGANIZATION_MISMATCH`, `GROUP_NOT_IN_ACTIVE_SCOPE`.
+- `cohortBuilder.mjs` resolvía la cohorte institucional por el campo legacy de
+  escuela, que ningún grupo tiene: quedaba silenciosamente vacía. Ahora usa
+  `organizationId`.
+- `accessService` dejó de caer al string `colegio` como identificador de
+  organización (0 reglas productivas con scope `organization`, así que ninguna
+  decisión vigente cambia).
+
+### Único límite texto → id, y está en escritura
+
+`normalizeUser`/`normalizeGroup` (`server.js`) resuelven `organizationId` desde
+`colegio`/`school` por **coincidencia exacta contra el registro** al crear o
+editar. Es el acto de registro, ocurre una vez y persiste el id; la autorización
+nunca vuelve a tocar texto. Se conserva porque es el camino por el que un grupo
+de una institución registrada obtiene su `organizationId`.
+
+## 3.f Manifiesto de saneamiento — preparado, NO aplicado
+
+`scripts/migrations/chp-id-recon-01b/` — estado `HUMAN_APPROVED_POLICY` ·
+`DRY_RUN_ONLY` · `NOT_APPLIED`.
+
+| Operación | Decisión | Efecto |
+|---|---|---|
+| `OP-A-EXTERNADO-REGISTRO` | D6 | alta de `{id: school-externado, name: Externado}` en `schools_db.json` |
+| `OP-B-EXTERNADO-MEDIADORES` | D6 | `organizationId` a los 2 mediadores cuyo `colegio` es `Externado` |
+| `OP-C-GRUPO-101-ID` | D3 | `id: group-historical-grupo-101` al grupo sin clave |
+
+Ids **fijos y explícitos**, no derivados de la hora de ejecución; el selector de
+Grupo 101 no depende de la posición del array. Verificado read-only contra
+producción: ninguno colisiona, y no existe otra institución llamada `Externado`.
+
+Declarado explícitamente como **no hecho**: los 10 grupos FilBo 2027–2037 y sus
+17 usuarios no se tocan ni se mapean a FilBo 2026 (D1); `Colegio Chibalete` (D2)
+y `Colegio Test` (D3) no se registran; `lt-org` y sus 400 usuarios sintéticos no
+se tocan (D4); no se escribe `schoolId` (D5); los 2 lectores de FilBo 2026 sin
+grupo no se asignan (D7); la clasificación **no se persiste**.
+
+`migrate.mjs` es dry-run por defecto: `--apply` exige el flag explícito,
+evidencia de BACKUP GATE GREEN y que el sha256 de las 3 entradas coincida
+exactamente con el manifiesto. No sigue symlinks, rechaza path escapes, valida
+schema, respalda antes de escribir, usa temporal + rename atómico, y una segunda
+ejecución produce cero cambios. **No conoce ninguna ruta productiva**: `--root`
+es obligatorio.
+
 ## 4. Deuda abierta
 
 - **CHP-ID-01 no está desplegado.** En producción, `scopeAccess.mjs` todavía

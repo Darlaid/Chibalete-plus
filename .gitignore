@@ -157,6 +157,12 @@ dummy_text.txt
 !/scripts/typecheck-baseline.mjs
 !/scripts/typecheck-baseline.txt
 
+# CHP-ID-GROUPS-RECON-01B — manifiesto de saneamiento y su migrador dry-run.
+# Se versionan: son el expediente aprobado que un apply futuro debe ejecutar
+# byte a byte, y el test versionado reconMigration.test.mjs depende de ellos.
+!/scripts/migrations/
+!/scripts/migrations/**
+
 # Audit / diagnostic scripts — READ-ONLY, sin escritura en producción.
 # Reusables vía stdin pipe (no requieren despliegue en el VPS). NO integrados
 # al pipeline de deploy ni a cron — se ejecutan manualmente cuando hace falta.
