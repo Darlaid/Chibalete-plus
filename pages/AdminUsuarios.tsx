@@ -4,6 +4,27 @@ import { dataService } from '../services/dataService';
 import { isMediator, isAdmin } from '../utils/permissions';
 import type { User, Group, SchoolConfig, Content } from '../types';
 
+/**
+ * CHP-ID-CANON-01A — traduce los códigos de error del backend a algo accionable
+ * para el administrador. Nunca se muestra el payload ni datos del usuario.
+ */
+const describeUserSaveError = (err: any): string => {
+    switch (err?.code) {
+        case 'AMBIGUOUS_GROUP':
+            return 'Este colegio tiene varios grupos. Selecciona explícitamente el curso o club del estudiante.';
+        case 'GROUP_REQUIRED':
+            return 'Falta el grupo: todo estudiante debe pertenecer a un curso o club para aparecer en Aula Viva.';
+        case 'GROUP_NOT_FOUND':
+            return 'El grupo seleccionado ya no existe. Recarga la página y vuelve a elegirlo.';
+        case 'GROUP_SCHOOL_MISMATCH':
+            return 'El grupo seleccionado pertenece a otra institución.';
+        case 'DUPLICATE_USER':
+            return 'Ya existe un usuario con ese email.';
+        default:
+            return err?.message || 'No se pudo guardar el usuario. Intenta de nuevo.';
+    }
+};
+
 const AdminUsuarios: React.FC = () => {
     const [activeTab, setActiveTab] = useState<'gestion' | 'carga'>('gestion');
 
@@ -31,6 +52,10 @@ const AdminUsuarios: React.FC = () => {
 
     const [isUserModalOpen, setIsUserModalOpen] = useState(false);
     const [editingUser, setEditingUser] = useState<Partial<User> | null>(null);
+    // CHP-ID-CANON-01A — el guardado de usuario ya no usa alert() con el error
+    // técnico crudo del backend; se muestra inline y traducido.
+    const [userSaveMsg, setUserSaveMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [isSavingUser, setIsSavingUser] = useState(false);
 
     const [isSchoolModalOpen, setIsSchoolModalOpen] = useState(false);
     const [schoolNameInput, setSchoolNameInput] = useState('');
@@ -77,6 +102,16 @@ const AdminUsuarios: React.FC = () => {
     // managers: usuarios con rol mediador o administrador. Usados para asignar mediadores a grupos.
     const managers = schoolUsers.filter(u => isMediator(u) || isAdmin(u));
     const filteredGroups = schoolGroups.filter(g => groupTypeFilter === 'all' || (g.type || 'course') === groupTypeFilter);
+
+    // CHP-ID-CANON-01A — contrato de grupos en el formulario de usuario.
+    // Un estudiante (lector) debe llegar al backend con un groupId explícito:
+    // sin eso el backend tendría que inferir el grupo desde el nombre de la
+    // institución, que es justo lo que produce AMBIGUOUS_GROUP cuando el
+    // colegio tiene más de un grupo. Mediadores y administradores conservan el
+    // contrato actual: el grupo es opcional.
+    const editingUserIsLector = (editingUser?.roles || []).includes('lector');
+    const userNeedsGroup = editingUserIsLector;
+    const userHasGroup   = (editingUser?.groupIds || []).length > 0;
 
     // --- HANDLERS FOR CSV ---
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -275,7 +310,8 @@ const AdminUsuarios: React.FC = () => {
 
     // --- HANDLERS FOR USERS ---
     const handleCreateUser = () => {
-        setEditingUser({ nombre_completo: '', email: '', password: 'chibalete123', roles: ['lector'], colegio: selectedSchool });
+        setEditingUser({ nombre_completo: '', email: '', password: 'chibalete123', roles: ['lector'], colegio: selectedSchool, groupIds: [] });
+        setUserSaveMsg(null);
         setIsUserModalOpen(true);
     };
 
@@ -300,6 +336,7 @@ const AdminUsuarios: React.FC = () => {
         }
         const fresh = dataService.getUsuarioById(user.id) ?? user;
         setEditingUser({ ...fresh });
+        setUserSaveMsg(null);
         setIsUserModalOpen(true);
     };
 
@@ -311,10 +348,28 @@ const AdminUsuarios: React.FC = () => {
     };
 
     const handleSaveUser = async () => {
-        if (!editingUser || !editingUser.nombre_completo || !editingUser.email) return;
+        if (!editingUser || !editingUser.nombre_completo || !editingUser.email) {
+            setUserSaveMsg({ type: 'error', text: 'Nombre completo y email son obligatorios.' });
+            return;
+        }
+
+        // CHP-ID-CANON-01A — el grupo se elige explícitamente; el formulario no
+        // puede enviar una creación de estudiante que el backend tendría que
+        // resolver adivinando desde el texto de curso/colegio.
+        if (userNeedsGroup && !userHasGroup) {
+            setUserSaveMsg({
+                type: 'error',
+                text: schoolGroups.length === 0
+                    ? 'Este colegio todavía no tiene grupos. Crea el curso o club antes de registrar estudiantes.'
+                    : 'Selecciona el curso o club al que pertenece el estudiante.',
+            });
+            return;
+        }
 
         const userData = { ...editingUser, colegio: selectedSchool }; // Force school context
 
+        setIsSavingUser(true);
+        setUserSaveMsg(null);
         try {
             if (editingUser.id) {
                 await dataService.updateUser(editingUser.id, userData);
@@ -325,7 +380,9 @@ const AdminUsuarios: React.FC = () => {
             if (selectedSchool) setSchoolUsers(dataService.getUsuariosByColegio(selectedSchool));
             refreshData(); // In case a new school was involved
         } catch (err: any) {
-            alert(`Error al guardar usuario: ${err?.message || 'Intenta de nuevo.'}`);
+            setUserSaveMsg({ type: 'error', text: describeUserSaveError(err) });
+        } finally {
+            setIsSavingUser(false);
         }
     };
 
@@ -1062,6 +1119,9 @@ const AdminUsuarios: React.FC = () => {
                                     ))}
                                 </div>
                             </div>
+                            {/* CHP-ID-CANON-01A — `curso` es una etiqueta descriptiva del
+                                perfil, NO la autoridad de membresía. Quien decide el grupo
+                                es el selector de abajo (groupId). */}
                             <div>
                                 <label className="block text-sm font-medium mb-1">Curso / Grado (Opcional - Texto)</label>
                                 <input
@@ -1069,19 +1129,33 @@ const AdminUsuarios: React.FC = () => {
                                     value={editingUser?.curso || ''}
                                     onChange={e => setEditingUser(prev => ({ ...prev!, curso: e.target.value }))}
                                     placeholder="Ej. 10B"
-                                    className="w-full p-2 border border-gray-300 rounded-lg dark:bg-gray-700 dark:border-gray-600 mb-2"
+                                    className="w-full p-2 border border-gray-300 rounded-lg dark:bg-gray-700 dark:border-gray-600 mb-1"
                                 />
+                                <p className="text-xs text-gray-500">
+                                    Etiqueta informativa del perfil. La pertenencia real se define en el selector de grupo.
+                                </p>
                             </div>
 
-                            {/* GROUP SELECTOR FOR TEACHERS/MEDIATORS */}
-                            {(isMediator(editingUser) || isAdmin(editingUser)) && (
-                                <div className="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg border border-gray-200 dark:border-gray-600">
+                            {/* GROUP SELECTOR — obligatorio para estudiantes (CHP-ID-CANON-01A),
+                                opcional para mediadores/administradores (contrato sin cambios). */}
+                            {(userNeedsGroup || isMediator(editingUser) || isAdmin(editingUser)) && (
+                                <div className={`p-4 rounded-lg border ${
+                                    userNeedsGroup && !userHasGroup
+                                        ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700'
+                                        : 'bg-gray-50 dark:bg-gray-700/50 border-gray-200 dark:border-gray-600'
+                                }`}>
                                     <label className="block text-sm font-bold mb-2 flex items-center">
                                         <Users size={16} className="mr-2 text-indigo-500" />
-                                        Asignar Grupos (Mediador)
+                                        {userNeedsGroup ? 'Curso o Club del Estudiante (obligatorio)' : 'Asignar Grupos (Mediador)'}
                                     </label>
                                     <div className="max-h-40 overflow-y-auto space-y-2">
-                                        {schoolGroups.length === 0 && <p className="text-xs text-gray-400 font-italic">No hay grupos creados en este colegio.</p>}
+                                        {schoolGroups.length === 0 && (
+                                            <p className="text-xs text-gray-500 italic">
+                                                {userNeedsGroup
+                                                    ? 'Este colegio todavía no tiene grupos. Crea primero el curso o club en la pestaña de grupos.'
+                                                    : 'No hay grupos creados en este colegio.'}
+                                            </p>
+                                        )}
                                         {schoolGroups.map(group => (
                                             <div key={group.id} className="flex items-center">
                                                 <input
@@ -1107,7 +1181,9 @@ const AdminUsuarios: React.FC = () => {
                                         ))}
                                     </div>
                                     <p className="text-xs text-gray-500 mt-2">
-                                        Selecciona los grupos que este mediador podrá gestionar.
+                                        {userNeedsGroup
+                                            ? 'Elige el grupo al que pertenece. Sin esta selección no se puede crear el estudiante: el sistema no adivina el grupo a partir del texto de curso.'
+                                            : 'Selecciona los grupos que este mediador podrá gestionar.'}
                                     </p>
                                 </div>
                             )}
@@ -1134,10 +1210,31 @@ const AdminUsuarios: React.FC = () => {
                                 </div>
                             )}
 
+                            {userSaveMsg && (
+                                <div
+                                    role="alert"
+                                    className={`px-4 py-2.5 rounded-lg text-sm font-semibold flex items-center gap-2 ${
+                                        userSaveMsg.type === 'success'
+                                            ? 'bg-green-50 text-green-700 border border-green-200 dark:bg-green-900/20 dark:text-green-400 dark:border-green-800'
+                                            : 'bg-red-50 text-red-700 border border-red-200 dark:bg-red-900/20 dark:text-red-400 dark:border-red-800'
+                                    }`}
+                                >
+                                    {userSaveMsg.type === 'success'
+                                        ? <Check size={16} className="flex-shrink-0" />
+                                        : <AlertCircle size={16} className="flex-shrink-0" />}
+                                    {userSaveMsg.text}
+                                </div>
+                            )}
+
                             <div className="pt-4 flex justify-end gap-3 mt-4">
-                                <button onClick={() => setIsUserModalOpen(false)} className="px-4 py-2 text-gray-600 font-medium">Cancelar</button>
-                                <button onClick={handleSaveUser} className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700">
-                                    {editingUser?.id ? 'Actualizar Usuario' : 'Crear Usuario'}
+                                <button onClick={() => { setIsUserModalOpen(false); setUserSaveMsg(null); }} className="px-4 py-2 text-gray-600 font-medium">Cancelar</button>
+                                <button
+                                    onClick={handleSaveUser}
+                                    disabled={isSavingUser || (userNeedsGroup && !userHasGroup)}
+                                    title={userNeedsGroup && !userHasGroup ? 'Selecciona el curso o club del estudiante' : undefined}
+                                    className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {isSavingUser ? 'Guardando…' : (editingUser?.id ? 'Actualizar Usuario' : 'Crear Usuario')}
                                 </button>
                             </div>
                         </div>

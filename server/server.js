@@ -42,10 +42,12 @@ import {
     computeCourseMetrics,
     computeSchoolMetrics,
 } from './metricsService.js';
-import { UPLOADS_ROOT, USERS_DB, GROUPS_DB } from './config.js';
+import { UPLOADS_ROOT, USERS_DB, GROUPS_DB, isLegacyNonCanonicalUsersDb } from './config.js';
 import { withUsersLock, withFileLock } from './usersLock.js';
 import {
-    resolveSingleGroupForSchool,
+    findGroupsForSchool,
+    groupChoice,
+    validateExplicitGroupIds,
     addUserIdToGroup,
     addGroupIdToUser,
     removeUserIdFromGroup,
@@ -573,10 +575,29 @@ log(`Progress DB: ${PROGRESS_DB}`);
 
 // HARDENING — USERS_DB must exist. Never create it silently in another path.
 // If the file is missing, the server cannot operate safely. Fail fast with a clear message.
+//
+// CHP-ID-CANON-01A: el canónico es data-critical/usuarios_colegios_oro.json.
+// NO existe fallback al padrón LEGACY_NON_CANONICAL (ver server/config.js): si
+// el canónico falta, se aborta en vez de resolver identidad sobre otro padrón.
 if (!fs.existsSync(USERS_DB)) {
     log(`FATAL: Users DB no encontrado en: ${USERS_DB}`, 'ERROR');
-    log(`FATAL: Verifique que USERS_DB env var apunta al archivo correcto o que el archivo existe.`, 'ERROR');
+    log(`FATAL: El padrón canónico es data-critical/usuarios_colegios_oro.json.`, 'ERROR');
+    log(`FATAL: En dev local, define USERS_DB (env o .env) apuntando a tu padrón de desarrollo.`, 'ERROR');
+    log(`FATAL: El padrón legacy NO se usa como fallback automático.`, 'ERROR');
     process.exit(1);
+}
+
+// CHP-ID-CANON-01A — el padrón legacy conserva un solo uso legítimo: seed de
+// desarrollo local, y solo si el desarrollador lo pide EXPLÍCITAMENTE por
+// USERS_DB. Nunca puede gobernar producción, y nunca de forma silenciosa.
+if (isLegacyNonCanonicalUsersDb(USERS_DB)) {
+    if (process.env.NODE_ENV === 'production') {
+        log(`FATAL: USERS_DB apunta al padrón LEGACY_NON_CANONICAL en producción.`, 'ERROR');
+        log(`FATAL: El único padrón válido es data-critical/usuarios_colegios_oro.json.`, 'ERROR');
+        process.exit(1);
+    }
+    log(`[CONFIG] AVISO: USERS_DB apunta al padrón LEGACY_NON_CANONICAL (seed dev).`, 'WARN');
+    log(`[CONFIG] Es un padrón obsoleto y casi disjunto del canónico. Solo para desarrollo local.`, 'WARN');
 }
 
 // HARDENING — UPLOADS_ROOT must exist.
@@ -2788,15 +2809,18 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
     let resolvedGroupIds  = Array.isArray(groupIds) ? groupIds.filter(g => typeof g === 'string' && g) : [];
     if (isLectorInvite && resolvedGroupIds.length === 0) {
         if (colegio) {
+            // CHP-ID-CANON-01A — mismo contrato que POST /api/users: con varias
+            // coincidencias se devuelve 409 + opciones, nunca la primera.
             const groupsAll = readJSON(GROUPS_DB) || [];
-            const r = resolveSingleGroupForSchool(colegio, groupsAll);
-            if (r.error === GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP) {
-                return res.status(400).json({
-                    error: GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP,
-                    message: `La institución "${colegio}" tiene varios grupos. Especifica groupIds explícitamente.`,
+            const matches = findGroupsForSchool(colegio, groupsAll);
+            if (matches.length > 1) {
+                return res.status(409).json({
+                    error:   GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP,
+                    message: `La institución "${colegio}" tiene ${matches.length} grupos. Selecciona el grupo y envía groupIds.`,
+                    choices: matches.map(groupChoice),
                 });
             }
-            if (r.groupId) resolvedGroupIds = [r.groupId];
+            if (matches.length === 1) resolvedGroupIds = [matches[0].id];
         }
     }
     if (isLectorInvite && resolvedGroupIds.length === 0) {
@@ -3126,8 +3150,16 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     const VALID_ACCOUNT_STATUSES = ['active', 'invited', 'disabled'];
     if (!VALID_ACCOUNT_STATUSES.includes(newUser.accountStatus)) newUser.accountStatus = 'active';
 
-    // GROUP_REQUIRED guard — análogo a /api/invite-user. Lectores requieren
-    // groupIds explícito o resolución vía single-group school desde `colegio`.
+    // CONTRATO DE GRUPOS (CHP-ID-CANON-01A).
+    //
+    // La autoridad es el `groupId` estable, nunca el texto libre de `curso` ni
+    // el nombre visible de la institución. Compatibilidad legacy acotada: si el
+    // caller no envía groupIds y la institución tiene EXACTAMENTE un grupo, se
+    // resuelve; con varios se responde 409 AMBIGUOUS_GROUP con las opciones para
+    // que el cliente elija. Nunca se toma el primer resultado.
+    //
+    // La validación de los groupIds explícitos (existencia + pertenencia a la
+    // institución) ocurre DENTRO del lock, antes de cualquier escritura.
     const isLectorCreate = newUser.roles.includes('lector');
     let resolvedGroupIds = Array.isArray(newUser.groupIds)
         ? newUser.groupIds.filter(g => typeof g === 'string' && g)
@@ -3135,14 +3167,15 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     if (isLectorCreate && resolvedGroupIds.length === 0) {
         if (newUser.colegio) {
             const groupsAll = readJSON(GROUPS_DB) || [];
-            const r = resolveSingleGroupForSchool(newUser.colegio, groupsAll);
-            if (r.error === GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP) {
-                return res.status(400).json({
-                    error: GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP,
-                    message: `La institución "${newUser.colegio}" tiene varios grupos. Especifica groupIds explícitamente.`,
+            const matches = findGroupsForSchool(newUser.colegio, groupsAll);
+            if (matches.length > 1) {
+                return res.status(409).json({
+                    error:   GROUP_MEMBERSHIP_ERR.AMBIGUOUS_GROUP,
+                    message: `La institución "${newUser.colegio}" tiene ${matches.length} grupos. Selecciona el grupo y envía groupIds.`,
+                    choices: matches.map(groupChoice),
                 });
             }
-            if (r.groupId) resolvedGroupIds = [r.groupId];
+            if (matches.length === 1) resolvedGroupIds = [matches[0].id];
         }
     }
     if (isLectorCreate && resolvedGroupIds.length === 0) {
@@ -3169,6 +3202,13 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
             if (users.some(u => normalizeEmail(u.email) === normalizedEmail)) { conflict = { conflict: 'dup_email' }; return; }
             if (users.some(u => u.id === userToSave.id))                      { conflict = { conflict: 'dup_id' };    return; }
 
+            // CHP-ID-CANON-01A — validar groupIds ANTES de mutar nada: un
+            // groupId inexistente o de otra institución aborta la creación
+            // completa. Se hace dentro del lock para que el store de grupos
+            // leído sea el mismo que se escribirá (sin ventana de carrera).
+            const gv = validateExplicitGroupIds(resolvedGroupIds, groups, userToSave.colegio);
+            if (!gv.ok) { conflict = { conflict: 'group', ...gv }; return; }
+
             // Mutación in-memory primero, escritura después: groups → user.
             let groupsTouched = false;
             for (const gid of resolvedGroupIds) {
@@ -3182,6 +3222,18 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     }, 'groupsLock');
     if (conflict?.conflict === 'dup_email') return res.status(409).json({ error: 'El email ya está registrado' });
     if (conflict?.conflict === 'dup_id')    return res.status(409).json({ error: 'El ID de usuario ya existe' });
+    if (conflict?.conflict === 'group') {
+        if (conflict.error === GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND) {
+            return res.status(400).json({
+                error:   GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND,
+                message: `groupIds inexistentes: ${conflict.missing.join(', ')}`,
+            });
+        }
+        return res.status(400).json({
+            error:   GROUP_MEMBERSHIP_ERR.GROUP_SCHOOL_MISMATCH,
+            message: `Los grupos ${conflict.foreign.join(', ')} no pertenecen a la institución "${userToSave.colegio}".`,
+        });
+    }
 
     log(`User created: ${userToSave.email} (${userToSave.id})`, 'ACCESS');
     writeAuditLog({

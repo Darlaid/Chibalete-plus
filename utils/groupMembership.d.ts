@@ -13,6 +13,7 @@ export const ERR: Readonly<{
   USER_NOT_FOUND:  'USER_NOT_FOUND';
   GROUP_NOT_FOUND: 'GROUP_NOT_FOUND';
   AMBIGUOUS_GROUP: 'AMBIGUOUS_GROUP';
+  GROUP_SCHOOL_MISMATCH: 'GROUP_SCHOOL_MISMATCH';
 }>;
 
 /** Forma mínima de un usuario que la lógica de membresía necesita leer. */
@@ -95,6 +96,34 @@ export function resolveSingleGroupForSchool(
   schoolNameOrSlug: string,
   groups: readonly MembershipGroup[],
 ): ResolveSchoolResult;
+
+/** CHP-ID-CANON-01A — todos los grupos de una institución (para mostrar opciones). */
+export function findGroupsForSchool(
+  schoolNameOrSlug: string,
+  groups: readonly MembershipGroup[],
+): MembershipGroup[];
+
+export interface GroupChoice {
+  id:    string | null;
+  name:  string | null;
+  grade: string | null;
+  type:  string;
+}
+/** CHP-ID-CANON-01A — proyección sin PII de un grupo, para respuestas 409. */
+export function groupChoice(group: MembershipGroup | null | undefined): GroupChoice;
+
+export interface ValidateGroupIdsResult {
+  ok:      boolean;
+  error:   typeof ERR[keyof typeof ERR] | null;
+  missing: string[];
+  foreign: string[];
+}
+/** CHP-ID-CANON-01A — valida groupIds explícitos: existencia + institución. */
+export function validateExplicitGroupIds(
+  groupIds:   readonly string[] | null | undefined,
+  groups:     readonly MembershipGroup[],
+  schoolName: string | null | undefined,
+): ValidateGroupIdsResult;
 
 export interface IntegrityIssue {
   type:

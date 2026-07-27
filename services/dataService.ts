@@ -872,7 +872,7 @@ class DataService {
         let created = 0;
         let duplicates = 0;
 
-        // Procesar de a uno con await para evitar escrituras concurrentes en users_db.json
+        // Procesar de a uno con await para evitar escrituras concurrentes en el padrón canónico
         for (const u of newUsers) {
             try {
                 // DT-05: 'profesor' eliminado del modelo. Safety net: mapear → 'mediador' si llega de CSV legacy.
@@ -1040,11 +1040,26 @@ class DataService {
         });
 
         if (!response.ok) {
-            if (response.status === 409) {
-                throw new Error('El usuario ya existe (Email o ID duplicado).');
+            // CHP-ID-CANON-01A — el backend usa 409 para dos cosas distintas:
+            // duplicado (email/id) y AMBIGUOUS_GROUP. Colapsar todo 409 a
+            // "el usuario ya existe" ocultaba el error real de grupo, así que
+            // primero se lee el cuerpo y se despacha por código.
+            const body = await response.json().catch(() => ({} as any));
+            const code = typeof body?.error === 'string' ? body.error : '';
+            if (code === 'AMBIGUOUS_GROUP' || code === 'GROUP_REQUIRED'
+                || code === 'GROUP_NOT_FOUND' || code === 'GROUP_SCHOOL_MISMATCH') {
+                throw Object.assign(
+                    new Error(body?.message || code),
+                    { code, choices: Array.isArray(body?.choices) ? body.choices : [] },
+                );
             }
-            const error = await response.json().catch(() => ({}));
-            throw new Error(error.error || 'Failed to create user on server');
+            if (response.status === 409) {
+                throw Object.assign(
+                    new Error('El usuario ya existe (Email o ID duplicado).'),
+                    { code: 'DUPLICATE_USER' },
+                );
+            }
+            throw new Error(body?.message || body?.error || 'Failed to create user on server');
         }
 
         // Server truth: el backend devuelve el user normalizado vía

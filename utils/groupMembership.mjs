@@ -33,10 +33,13 @@ export const READER_ROLE = 'lector';
 
 /** Códigos de error públicos del servicio (estables para clientes). */
 export const ERR = Object.freeze({
-    GROUP_REQUIRED:   'GROUP_REQUIRED',
-    USER_NOT_FOUND:   'USER_NOT_FOUND',
-    GROUP_NOT_FOUND:  'GROUP_NOT_FOUND',
-    AMBIGUOUS_GROUP:  'AMBIGUOUS_GROUP',
+    GROUP_REQUIRED:      'GROUP_REQUIRED',
+    USER_NOT_FOUND:      'USER_NOT_FOUND',
+    GROUP_NOT_FOUND:     'GROUP_NOT_FOUND',
+    AMBIGUOUS_GROUP:     'AMBIGUOUS_GROUP',
+    // CHP-ID-CANON-01A — groupId válido pero de otra institución que la del
+    // usuario que se está creando/editando.
+    GROUP_SCHOOL_MISMATCH: 'GROUP_SCHOOL_MISMATCH',
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -281,11 +284,69 @@ export function unionGroupMemberIds(group) {
  */
 export function resolveSingleGroupForSchool(schoolNameOrSlug, groups) {
     if (!schoolNameOrSlug) return { groupId: null, error: ERR.GROUP_REQUIRED };
-    const key = norm(schoolNameOrSlug);
-    const matches = (groups || []).filter(g => g?.school && norm(g.school) === key);
+    const matches = findGroupsForSchool(schoolNameOrSlug, groups);
     if (matches.length === 0) return { groupId: null, error: ERR.GROUP_REQUIRED };
     if (matches.length > 1)   return { groupId: null, error: ERR.AMBIGUOUS_GROUP };
     return { groupId: matches[0].id, error: null };
+}
+
+/**
+ * CHP-ID-CANON-01A — todos los grupos de una institución, por nombre de school.
+ *
+ * Existe para que el caller pueda MOSTRAR las opciones cuando el payload legacy
+ * (texto libre de institución, sin groupId) es ambiguo, en vez de elegir el
+ * primer resultado. Nunca ordena ni prioriza: devuelve los matches tal cual
+ * aparecen en el store.
+ */
+export function findGroupsForSchool(schoolNameOrSlug, groups) {
+    if (!schoolNameOrSlug) return [];
+    const key = norm(schoolNameOrSlug);
+    return arr(groups).filter(g => g?.school && norm(g.school) === key);
+}
+
+/**
+ * CHP-ID-CANON-01A — proyección mínima y sin PII de un grupo, para devolverla
+ * como opciones seleccionables en la respuesta 409 AMBIGUOUS_GROUP.
+ */
+export function groupChoice(group) {
+    return {
+        id:    group?.id ?? null,
+        name:  group?.name ?? null,
+        grade: group?.grade ?? null,
+        type:  group?.type || 'course',
+    };
+}
+
+/**
+ * CHP-ID-CANON-01A — contrato nuevo de grupos para creación/edición de usuario.
+ *
+ * Valida una lista EXPLÍCITA de groupIds contra el store de grupos:
+ *   - cada groupId debe existir            → si no, GROUP_NOT_FOUND
+ *   - cada grupo debe ser de la institución → si no, GROUP_SCHOOL_MISMATCH
+ *
+ * `schoolName` es el nombre de institución del usuario (modelo actual: campo
+ * `colegio`, string). Si el caller no aporta institución no se puede verificar
+ * pertenencia y se omite esa comprobación (no se inventa una regla nueva).
+ *
+ * Devuelve `{ ok, error, missing, foreign }` — NUNCA lanza y NUNCA muta.
+ */
+export function validateExplicitGroupIds(groupIds, groups, schoolName) {
+    const ids = arr(groupIds).filter(g => typeof g === 'string' && g);
+    if (ids.length === 0) return { ok: true, error: null, missing: [], foreign: [] };
+
+    const byId    = new Map(arr(groups).filter(g => g?.id).map(g => [g.id, g]));
+    const missing = ids.filter(id => !byId.has(id));
+    if (missing.length > 0) {
+        return { ok: false, error: ERR.GROUP_NOT_FOUND, missing, foreign: [] };
+    }
+
+    const key = norm(schoolName);
+    if (!key) return { ok: true, error: null, missing: [], foreign: [] };
+    const foreign = ids.filter(id => norm(byId.get(id).school) !== key);
+    if (foreign.length > 0) {
+        return { ok: false, error: ERR.GROUP_SCHOOL_MISMATCH, missing: [], foreign };
+    }
+    return { ok: true, error: null, missing: [], foreign: [] };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
