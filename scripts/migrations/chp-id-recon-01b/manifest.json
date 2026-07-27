@@ -1,15 +1,21 @@
 {
   "unit": "CHP-ID-GROUPS-RECON-01B-R1",
   "version": 1,
-  "status": ["HUMAN_APPROVED_POLICY", "DRY_RUN_ONLY", "NOT_APPLIED"],
+  "status": [
+    "HUMAN_APPROVED_POLICY",
+    "DRY_RUN_ONLY",
+    "NOT_APPLIED",
+    "REBASED_AFTER_LEGITIMATE_USER_CREATION"
+  ],
   "title": "Saneamiento institucional previo al despliegue de identidad",
   "generatedFrom": {
     "environment": "production",
     "container": "chibalete_api_1",
     "readOnlyAuditDate": "2026-07-27",
-    "note": "Todos los conteos y hashes provienen de lecturas read-only. Este manifiesto no se ha aplicado."
+    "note": "Todos los conteos y hashes provienen de lecturas read-only. Este manifiesto no se ha aplicado.",
+    "rebasedAt": "2026-07-27 (post alta legítima)",
+    "rebaseNote": "Rebase autorizado por decisión humana (CHP-ID-METRICS-DEPLOY-01A-R1). Solo se regeneraron expectedInputs. Las tres operaciones no cambian."
   },
-
   "expectedInputs": {
     "data/schools_db.json": {
       "sha256": "7b7f269ff50e320e9f703c0c9b01ef6cd608642354c3767b03c18980ceef9e17",
@@ -17,17 +23,16 @@
       "records": 3
     },
     "data/groups_db.json": {
-      "sha256": "870b4bfbe0f35ed046723ba0ea823d5a5d1c410fc6ae0df28b67cd22c0ae79a0",
-      "bytes": 36812,
+      "sha256": "8766da5ea05544a851f323a1eaec8f65d071a80a886d6dcd7853c479533208c8",
+      "bytes": 36868,
       "records": 20
     },
     "data-critical/usuarios_colegios_oro.json": {
-      "sha256": "43cf26f27c8c925393790e1f943152b2699c5fbd4d4759834d28916f7f4eb7ea",
-      "bytes": 332197,
-      "records": 646
+      "sha256": "33377e4acc2df2059e2113d6535966b339fa35636e7488038e337d989be85e39",
+      "bytes": 333011,
+      "records": 647
     }
   },
-
   "operations": [
     {
       "id": "OP-A-EXTERNADO-REGISTRO",
@@ -48,7 +53,6 @@
       "idNote": "Id estable y explícito, NO derivado de la hora de ejecución. POST /api/schools acepta un id explícito (server.js: `if (!newSchool.id)`), así que el formato es compatible; se aparta a propósito de la convención school-<epoch> porque el manifiesto debe ser reproducible byte a byte.",
       "expectedRecordsAfter": 4
     },
-
     {
       "id": "OP-B-EXTERNADO-MEDIADORES",
       "decision": "D6",
@@ -60,22 +64,41 @@
         "equals": "Externado",
         "andFieldAbsent": "organizationId"
       },
-      "set": { "organizationId": "school-externado" },
+      "set": {
+        "organizationId": "school-externado"
+      },
       "guard": {
         "expectedMatches": 2,
-        "expectedRolesAggregate": { "mediador": 2 },
+        "expectedRolesAggregate": {
+          "mediador": 2
+        },
         "mustNotTouchOtherFields": true
       },
-      "fieldsChanged": ["organizationId"],
+      "fieldsChanged": [
+        "organizationId"
+      ],
       "fieldsUnchanged": [
-        "id", "email", "nombre_completo", "nombre_usuario", "password", "roles",
-        "colegio", "curso", "accountStatus", "mediatorKind", "avatar_url",
-        "bio_corta", "libros_leidos", "nivel_lectura", "seguidores", "seguidos",
-        "social_connections", "groupIds"
+        "id",
+        "email",
+        "nombre_completo",
+        "nombre_usuario",
+        "password",
+        "roles",
+        "colegio",
+        "curso",
+        "accountStatus",
+        "mediatorKind",
+        "avatar_url",
+        "bio_corta",
+        "libros_leidos",
+        "nivel_lectura",
+        "seguidores",
+        "seguidos",
+        "social_connections",
+        "groupIds"
       ],
       "note": "No se crea ningún grupo para Externado (D6). El scope institucional de sus mediadores requerirá además un grupo ACTIVE_REAL, decisión posterior."
     },
-
     {
       "id": "OP-C-GRUPO-101-ID",
       "decision": "D3",
@@ -84,21 +107,34 @@
       "rationale": "El registro carece de `id`, así que no tiene clave estable y rompe cualquier iteración de grupos. Se le asigna un id explícito y se conserva; queda fuera del scope institucional por no tener organizationId registrado.",
       "selector": {
         "fieldAbsent": "id",
-        "and": { "name": "Grupo 101", "school": "Colegio Test" }
+        "and": {
+          "name": "Grupo 101",
+          "school": "Colegio Test"
+        }
       },
-      "set": { "id": "group-historical-grupo-101" },
+      "set": {
+        "id": "group-historical-grupo-101"
+      },
       "guard": {
         "expectedMatches": 1,
         "idMustNotCollide": "group-historical-grupo-101",
         "selectorMustNotUseArrayPosition": true
       },
-      "fieldsChanged": ["id"],
-      "fieldsUnchanged": ["name", "school", "grade", "teacherId", "studentIds", "memberIds"],
+      "fieldsChanged": [
+        "id"
+      ],
+      "fieldsUnchanged": [
+        "name",
+        "school",
+        "grade",
+        "teacherId",
+        "studentIds",
+        "memberIds"
+      ],
       "resultingClassification": "HISTORICAL_OUT_OF_SCOPE",
       "note": "No se crea la institución `Colegio Test` (D3). El id elegido no sugiere un grupo activo."
     }
   ],
-
   "explicitlyNotDone": [
     {
       "decision": "D1",
@@ -129,31 +165,45 @@
     {
       "decision": "clasificación",
       "statement": "La clasificación ACTIVE_REAL / HISTORICAL_OUT_OF_SCOPE / SYNTHETIC_OUT_OF_SCOPE NO se persiste: se deriva en runtime desde organizationId + registro + marcador sintético. Cero campos nuevos escritos."
+    },
+    {
+      "decision": "rebase-01A-R1",
+      "statement": "El usuario nuevo (647) y su membresía NO se revierten, NO se excluyen y NO se alteran. El rebase solo regeneró hashes y conteos de entrada.",
+      "affectedUsers": 1
     }
   ],
-
   "invariants": [
     "El número de registros de groups_db.json no cambia (20 antes, 20 después).",
-    "El número de registros del padrón de usuarios no cambia (646 antes, 646 después).",
+    "El número de registros del padrón de usuarios no cambia (647 antes, 647 después).",
     "schools_db.json pasa de 3 a 4 registros; ningún registro existente se modifica.",
     "Ningún usuario cambia de colegio, groupIds, roles, accountStatus ni password.",
     "Ningún grupo cambia de nombre, school, grade, type, miembros ni mediadores.",
     "Ningún campo se elimina de ningún registro.",
     "No se escribe `schoolId` en ninguna parte.",
     "El orden de los arrays se preserva; ningún registro se reordena.",
-    "Segunda ejecución = cero cambios (idempotente por guardas de postcondición)."
+    "Segunda ejecución = cero cambios (idempotente por guardas de postcondición).",
+    "El usuario dado de alta tras la foto anterior no se modifica: ninguna operación lo selecciona.",
+    "La membresía añadida a su grupo se preserva: ninguna operación toca memberIds ni studentIds."
   ],
-
   "rollback": {
     "strategy": "byte-a-byte",
     "requirement": "El apply debe copiar cada archivo de entrada a <archivo>.pre-CHP-ID-RECON-01B antes de escribir, y el rollback restaura esos bytes exactos.",
     "verification": "sha256 del archivo restaurado == sha256 declarado en expectedInputs."
   },
-
   "applyPreconditions": [
     "BACKUP GATE GREEN con evidencia explícita.",
     "sha256 de los 3 archivos idéntico a expectedInputs (si difieren, STOP).",
     "Aprobación humana explícita registrada.",
     "Ejecución con --apply, que no es el modo por defecto."
-  ]
+  ],
+  "rebaseEvidence": {
+    "referenceSnapshot": "restic 51a3f29f (2026-07-27T12:03:36Z, structured, 24 stores)",
+    "schoolsUnchanged": "byte a byte idéntico entre el snapshot y la foto actual",
+    "groupsAtManifestPhoto": "el snapshot conserva 870b4bfb… 36812 B: es exactamente la foto del manifiesto anterior",
+    "usersDelta": "+1 registro, 0 eliminados; 1 registro existente modificado, únicamente en lastLoginAt (campo volátil legítimo)",
+    "groupsDelta": "20 → 20 registros; 1 grupo modificado solo en memberIds/studentIds; membresías 624 → 625",
+    "newUser": "alta legítima de un mediador en school-1777176810244, con 1 groupId y membership inversa coherente. No se toca.",
+    "schemaStable": "cero campos nuevos, cero campos perdidos, cero emails duplicados, cero ids duplicados",
+    "selectorsRevalidated": "OP-A 1 alta · OP-B exactamente 2 mediadores · OP-C exactamente 1 grupo sin id, sin colisión"
+  }
 }

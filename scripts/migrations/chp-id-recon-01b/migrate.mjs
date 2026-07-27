@@ -153,11 +153,15 @@ function applySetFieldWhere(records, op) {
  * @param {boolean} [opts.enforceHashes] true por defecto; solo los tests con
  *                                    fixtures sintéticas lo desactivan
  * @param {string}  [opts.backupEvidence] evidencia de BACKUP GATE GREEN
+ * @param {object}  [opts.manifest]   manifiesto ya parseado; tiene precedencia
+ *                                    sobre `manifestPath`. Permite ejecutar el
+ *                                    dry-run contra rutas productivas sin dejar
+ *                                    ningún archivo en el host ni el container.
  */
 export function runMigration({ root, apply = false, enforceHashes = true, backupEvidence = null,
-                               manifestPath = MANIFEST_PATH } = {}) {
+                               manifestPath = MANIFEST_PATH, manifest: injected = null } = {}) {
     if (!root) throw new MigrationStop('ROOT_REQUIRED', 'usa --root <dir>');
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const manifest = injected ?? JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
     if (apply) {
         const evidence = backupEvidence ?? process.env.CHP_BACKUP_GATE ?? null;

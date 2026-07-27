@@ -327,6 +327,50 @@ schema, respalda antes de escribir, usa temporal + rename atómico, y una segund
 ejecución produce cero cambios. **No conoce ninguna ruta productiva**: `--root`
 es obligatorio.
 
+## 3.g Paquete de release y rebase del manifiesto (01A-R1)
+
+**Rebase del manifiesto.** El primer intento de despliegue se detuvo por
+`MANIFEST HASH DRIFT`. Causa: un alta legítima de usuario en producción (646 →
+647, un **mediador** de FilBo 2026 con su membresía). Demostrado por diff
+semántico contra el snapshot restic `51a3f29f`, cuyo `groups_db.json` y
+`schools_db.json` son **byte a byte idénticos al manifiesto anterior**:
+
+- usuarios: +1 registro, 0 eliminados, **1 registro existente modificado y solo
+  en `lastLoginAt`**, 0 emails duplicados, schema sin cambios;
+- grupos: 20 → 20, **1 grupo modificado solo en `memberIds`/`studentIds`**,
+  membresías 624 → 625, sigue habiendo exactamente 1 registro sin `id`;
+- instituciones: hash idéntico.
+
+Se regeneraron **solo** `expectedInputs`. Las tres operaciones no cambian, y dos
+invariantes nuevos declaran que el alta y su membresía no se tocan.
+
+> **Consecuencia para el despliegue:** `registeredUsers` de FilBo 2026 pasa de
+> **46 a 47**. `registeredReaders` sigue en 46 (el alta es mediador, no lector) y
+> `readersWithoutGroup` sigue en 2.
+
+**Entrega de `engines/`.** El backend corre por bind mount de `server/` y
+`utils/`; `/app/engines` **no existía** ni en la imagen ni en el host, así que el
+router v2 —que importa `engines/metrics/*`— no habría montado y la API v2 se
+habría desplegado ausente sin fallar de forma visible. Cerrado con:
+
+- `docker-compose.prod.yml`: `- /var/www/chibalete/engines:/app/engines:ro`;
+- `scripts/deploy-backend.sh`: empaqueta y tarea `engines`, con guard que aborta
+  si faltan los módulos que el router importa;
+- `verify-deploy-config`: falla si el mount falta, si el destino no es
+  `/app/engines`, si no es `:ro`, si está en una sola de las API, si el release
+  no empaqueta `engines/`, o si un import del router cae fuera del paquete.
+
+**Trazabilidad de health.** El contrato `server/.deploy-info` (`release_tag`,
+`git_sha`, `deployed_at`) ya existía y `deploy-backend.sh` lo escribe; el
+`commit: null` de producción se debe a que el código vivo se desplegó sin ese
+flujo. Se añadió `assertHealthTraceability()`, que **no cambia el endpoint** pero
+permite que el smoke y los tests detecten un despliegue no trazable: en
+producción `commit: null` es un fallo; en desarrollo es un fallback legítimo.
+
+**Write freeze**: diseñado en `docs/identity/write-freeze-plan.md`, **no
+activado**. Sin él el drift se repetirá — el login escribe `lastLoginAt` y basta
+para invalidar el hash sin cambiar el tamaño del archivo.
+
 ## 4. Deuda abierta
 
 - **CHP-ID-01 no está desplegado.** En producción, `scopeAccess.mjs` todavía

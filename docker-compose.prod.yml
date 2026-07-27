@@ -65,6 +65,11 @@ services:
       # Padrón canónico de usuarios (bind mount — gestionado fuera del container).
       # Escritura necesaria: login persiste lastLoginAt y el admin crea usuarios.
       - /var/www/chibalete/data-critical:/app/data-critical:rw
+      # CHP-ID-METRICS-DEPLOY-01A-R1: motor canónico de métricas. Sin este mount
+      # `server/metrics/metricsRouterV2.mjs` no resuelve sus imports a
+      # `engines/metrics/*` y la API v2 se cae en silencio (el try/catch del
+      # montaje solo deja un WARN). Read-only: es código, no datos.
+      - /var/www/chibalete/engines:/app/engines:ro
 
 volumes:
   data-volume:

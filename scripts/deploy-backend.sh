@@ -561,10 +561,18 @@ phase_b1() {
     rm -rf "$pkg_root"
     mkdir -p "$pkg_root"
 
-    # Copiar (no mover) las carpetas — preserva el repo intacto
-    for d in server utils types; do
+    # Copiar (no mover) las carpetas — preserva el repo intacto.
+    # CHP-ID-METRICS-DEPLOY-01A-R1: `engines` entra al paquete porque
+    # server/metrics/metricsRouterV2.mjs importa engines/metrics/*. Sin él el
+    # router v2 no monta y la API se despliega incompleta sin fallar.
+    for d in server utils types engines; do
         [ -d "$d" ] || fail "directorio fuente '$d' no existe en repo" 2
         cp -a "$d" "$pkg_root/"
+    done
+
+    # Guard de empaquetado: los módulos que el router v2 importa deben viajar.
+    for f in engines/metrics/eventContract.mjs engines/metrics/referenceEngine.mjs; do
+        [ -f "$pkg_root/$f" ] || fail "paquete incompleto: falta $f" 2
     done
 
     # Escribir .deploy-info — fuente canónica D2 leída por healthHandler.js
@@ -584,7 +592,7 @@ EOF
             --exclude='_api_snapshot_' \
             --exclude='.DS_Store' \
             -czf "$TARBALL" \
-            -C "$pkg_root" server utils types; then
+            -C "$pkg_root" server utils types engines; then
         rm -rf "$pkg_root"
         fail "tar falló" 2
     fi

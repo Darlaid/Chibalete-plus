@@ -147,6 +147,41 @@ export function getHealthDefaults() {
 }
 
 /**
+ * Verifica que el despliegue sea trazable (CHP-ID-METRICS-DEPLOY-01A-R1).
+ *
+ * `getHealthDefaults` es deliberadamente tolerante: sin `.deploy-info` responde
+ * `commit: null` en vez de romper el arranque, y eso está bien para desarrollo.
+ * Pero en producción un `commit: null` significa que nadie puede decir qué
+ * código está corriendo — que es exactamente lo que ocurría antes de esta
+ * unidad. Esta función NO cambia el comportamiento del endpoint: es el guard
+ * que usan el smoke de despliegue y los tests para detectarlo.
+ *
+ * @param {{commit:string|null, deployed_at:string|null}} defaults
+ * @param {{nodeEnv?:string}} [opts]
+ * @returns {{traceable:boolean, problems:string[]}}
+ */
+export function assertHealthTraceability(defaults, { nodeEnv = process.env.NODE_ENV } = {}) {
+    const problems = [];
+    const isProd = String(nodeEnv || '').toLowerCase() === 'production';
+
+    if (!defaults?.commit) {
+        problems.push('COMMIT_MISSING');
+    } else if (!/^[0-9a-f]{7,40}$/i.test(String(defaults.commit))) {
+        problems.push('COMMIT_INVALID_FORMAT');
+    }
+
+    if (!defaults?.deployed_at) {
+        problems.push('DEPLOYED_AT_MISSING');
+    } else if (Number.isNaN(Date.parse(defaults.deployed_at))) {
+        problems.push('DEPLOYED_AT_INVALID');
+    }
+
+    // En desarrollo la ausencia es un fallback legítimo y explícito, no un fallo.
+    if (!isProd) return { traceable: problems.length === 0, problems, enforced: false };
+    return { traceable: problems.length === 0, problems, enforced: true };
+}
+
+/**
  * Construye el payload del health response.
  *
  * @param {object} defaults  Resultado de getHealthDefaults() (computado una vez)
