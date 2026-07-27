@@ -22,6 +22,7 @@ on:
     paths:
       - 'server/**'
       - 'utils/groupMembership.*'
+      - 'engines/metrics/**'
       - 'services/dataService.ts'
       - 'pages/AdminUsuarios.tsx'
       - 'pages/__tests__/**'
@@ -36,6 +37,7 @@ on:
     paths:
       - 'server/**'
       - 'utils/groupMembership.*'
+      - 'engines/metrics/**'
       - 'services/dataService.ts'
       - 'pages/AdminUsuarios.tsx'
       - 'pages/__tests__/**'
