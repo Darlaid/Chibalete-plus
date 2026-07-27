@@ -1,6 +1,7 @@
 # Fuente canónica de usuarios y contrato de grupos
 
-**Unidad:** CHP-ID-CANON-01A · **Estado:** GREEN LOCAL — NO DESPLEGADO
+**Unidades:** CHP-ID-CANON-01A + **01B** · **Estado:** READY FOR PRODUCTION
+PREFLIGHT — NO DESPLEGADO
 
 ---
 
@@ -12,11 +13,13 @@ permisos, scopes, Aula Viva, instituciones, memberships y asignaciones.
 
 `data/users_db.json` queda clasificado como:
 
-> **LEGACY_NON_CANONICAL — DO NOT DELETE — DO NOT WRITE — DO NOT READ AT RUNTIME**
+> **LEGACY_NON_CANONICAL — DO NOT DELETE — DO NOT WRITE — DO NOT READ AT
+> RUNTIME — DO NOT USE AS DEVELOPMENT SEED**
 
-Se conserva intacto por trazabilidad y respaldo. Su único uso admisible es
-**seed de desarrollo local**, y solo si el desarrollador lo pide explícitamente
-vía `USERS_DB`.
+Se conserva intacto por trazabilidad y respaldo, y **no tiene ningún uso
+runtime admisible**. 01B retiró la última autorización que le quedaba (seed de
+desarrollo local): apuntarle `USERS_DB` ahora **aborta el arranque en cualquier
+modo**. Tampoco se admite una tercera fuente persistente.
 
 ### Por qué
 
@@ -41,28 +44,56 @@ canónico. Corregirlo solo restituye acceso legítimo; no lo retira a nadie.
 
 ---
 
-## 2. Resolución de la fuente
+## 2. Resolución de la fuente — la ruta canónica no es overrideable
 
-`server/config.js` es el **único** resolver:
+`server/config.js` es el **único** resolver, y aplica la regla en **import-time**
+(`assertCanonicalUsersDb`), de modo que ninguna ruta del runtime puede saltárselo
+por olvido. No hay fallback en ningún modo.
 
-```
-USERS_DB (env)  →  si no está, data-critical/usuarios_colegios_oro.json
-```
+| Modo (`NODE_ENV`) | Ruta admitida | Cualquier otra ruta |
+|---|---|---|
+| `production` | exactamente `/app/data-critical/usuarios_colegios_oro.json` | **aborta el arranque** |
+| `development` | exclusivamente `data-critical/usuarios_colegios_oro.json` del repo | **aborta el arranque** |
+| `test` | sólo un fixture dentro de un directorio temporal (`fs.mkdtemp`) | **aborta el arranque** |
 
-- **Cero fallback** al legacy. Si el archivo resuelto no existe, `server.js`
-  aborta con un mensaje explícito en vez de degradar a otro padrón.
-- `config.js` carga `.env` en import-time (antes lo hacía `server.js` **después**
-  de resolver, así que un `USERS_DB` puesto en `.env` quedaba inerte). La env var
-  real del container sigue ganando sobre `.env`.
-- Si `USERS_DB` resuelve al padrón legacy: aviso ruidoso al arrancar en dev, y
-  **fallo duro** con `NODE_ENV=production`.
+En modo test, además, un `USERS_DB` heredado del `.env` de la máquina se
+**neutraliza**: la suite no puede depender del entorno de quien la ejecuta. La
+fuente se inyecta explícitamente por el test.
 
-Constantes exportadas: `USERS_DB`, `USERS_DB_CANONICAL_DEFAULT`,
+`config.js` carga `.env` en import-time (antes lo hacía `server.js` **después**
+de resolver, así que un `USERS_DB` puesto en `.env` quedaba inerte). La env var
+real del container sigue ganando sobre `.env`.
+
+Exports: `USERS_DB`, `USERS_DB_CANONICAL_DEFAULT`, `CONTAINER_CANONICAL_USERS_DB`,
 `USERS_DB_LEGACY_NON_CANONICAL` (solo deprecación/tests), `resolveUsersDb(env)`,
-`isLegacyNonCanonicalUsersDb(path)`.
+`assertCanonicalUsersDb(env)`, `resolveRuntimeMode(env)`,
+`isLegacyNonCanonicalUsersDb(path)`, `CanonicalSourceError`.
 
-Ningún otro archivo de runtime menciona `users_db.json` — verificado por
+Ningún archivo de runtime menciona `users_db.json` — verificado por
 `server/__test__/identityCanonicalSource.test.js` §C.
+
+### Consecuencia operativa para desarrollo local
+
+Para levantar el backend en local hace falta un padrón en
+`data-critical/usuarios_colegios_oro.json`. Ya **no** vale apuntar `USERS_DB` al
+padrón legacy ni a un tercer archivo: el proceso aborta con un mensaje que
+nombra la causa. Usa una copia saneada del canónico.
+
+## 2.b Aislamiento de los stores reales en la suite
+
+- `scripts/test-real-store-guard.mjs` — módulo de precarga (`node --import`) que
+  lanza **antes de tocar el disco** ante cualquier escritura dentro de `data/`,
+  `data-critical/` o `public/uploads/`. Las lecturas siguen permitidas.
+- `scripts/verify-test-store-isolation.mjs` — toma un snapshot sha256+mtime de
+  esos directorios, corre las suites con el guard activo y falla si algo cambió.
+  `npm run test:store-isolation`.
+- `server/__test__/helpers/testMode.mjs` — fija `NODE_ENV=test` y redirige los
+  stores SQLite a un temporal por proceso. Debe ser el **primer import** del test.
+
+`aulaVivaInstitutional.test.js` sobrescribía y restauraba `data/users_db.json` y
+`data/groups_db.json` reales desde un backup en memoria; ese hack existía porque
+`scopeAccess` leía un path hardcodeado. Ya no: inyecta sus fixtures por
+`USERS_DB`/`GROUPS_DB` hacia un `mkdtemp`.
 
 ---
 
@@ -112,11 +143,85 @@ opcional y su semántica de asignación no cambia en esta unidad.
 
 ---
 
+## 3.b Shadow comparison read-only en producción (01B, 2026-07-27)
+
+Comparación de decisiones de autorización institucional entre el runtime actual
+(scopeAccess sobre el padrón legacy) y el propuesto (CIS sobre el canónico),
+con el **mismo** store de grupos, de modo que la única variable es el padrón.
+
+`scripts/shadow-scope-compare.mjs`; la réplica del CIS que usa está probada
+equivalente al `cis.mjs` real en 5.376 decisiones sobre fixtures sintéticas
+(`scripts/__test__/shadowScopeEquivalence.test.mjs`).
+
+| | |
+|---|---|
+| Callers evaluados | 1.139 (unión de ambos padrones) |
+| Decisiones evaluadas | 26.741 |
+| Idénticas | 23.860 |
+| deny → allow | 2.388 — **todas** `EXPECTED_RESTORE_LEGITIMATE_ACCESS` |
+| allow → deny | 493 — **todas** `EXPECTED_REMOVE_INCORRECT_ACCESS` |
+| `REVIEW_UNEXPLAINED` | **0** |
+| `HIGH_RISK_ACCESS_EXPANSION` | **0** |
+| `HIGH_RISK_ACCESS_LOSS` | **0** |
+
+**Por qué el gate actual deniega casi todo:** el `scopeAccess` desplegado lee
+`user.role` **singular**, y ese campo **no existe en ningún registro** del padrón
+legacy. `isAdmin`/`isMediator` devuelven `false` para todos; sumado a que 645 de
+646 identidades canónicas no están en el legacy, hoy se deniega hasta el propio
+perfil del usuario. De ahí los 2.388 `deny→allow`: no son ampliación de
+privilegio, son restitución de acceso que el bug quitaba.
+
+**Los 493 `allow→deny`** son el scope `self` de las identidades que existen sólo
+en el legacy. No pierden nada real: el login desplegado resuelve contra
+`config.USERS_DB` (el canónico), así que **no pueden autenticarse**; su único
+"acceso" actual sería presentando un `x-user-id` no verificado. Retirarlo cierra
+una superficie de suplantación. El argumento es estructural, no de actividad: no
+se apoya en `lastLoginAt`.
+
+**Limitación declarada:** los 20 grupos productivos tienen **0 `schoolId`**, así
+que el scope `school` no es resoluble para nadie en **ninguno** de los dos
+modelos y esta comparación no pudo ejercitarlo. Es una brecha de datos
+preexistente, ajena a este cambio, y debe cubrirse antes de confiar en el
+aislamiento por institución.
+
+## 3.c Auditoría del contrato de grupos sobre el padrón canónico
+
+623 lectores / 22 mediadores / 1 administrador; 20 grupos en 15 instituciones
+(13 mono-grupo, 2 multi-grupo).
+
+- **Integridad referencial limpia:** 0 `groupIds` inexistentes, 0 `groupIds` de
+  otra institución.
+- Lectores por `groupIds`: 402 con cero, 221 con uno, 0 con varios.
+- De los 402 sin grupo, **400 son usuarios sintéticos** `_loadtest_marker` cuya
+  institución no tiene ningún grupo.
+- **Sólo 2 lectores reales** quedan sin grupo, y su institución sí tiene grupos:
+  el administrador los resuelve eligiendo en el formulario, que es justamente el
+  resultado buscado (hoy están huérfanos en Aula Viva).
+- **0 casos legítimos bloqueados** por el contrato nuevo.
+- Mediadores y administradores no requieren grupo: contrato preservado.
+
 ## 4. Deuda abierta
 
 - **CHP-ID-01 no está desplegado.** En producción, `scopeAccess.mjs` todavía
   hardcodea el padrón legacy (verificado read-only el 2026-07-27). El aislamiento
   institucional sigue roto en prod hasta su GREEN DEPLOY.
+- **Preflight obligatorio — `docker-compose.prod.yml` del repo está
+  desincronizado:** declara `USERS_DB: /data-critical/usuarios_colegios_oro.json`
+  (sin `/app`), mientras el compose realmente desplegado
+  (`/opt/chibaleteplus/docker-compose.yml`) toma la variable de su `env_file` con
+  el valor correcto `/app/data-critical/usuarios_colegios_oro.json`. Con la regla
+  de 01B, desplegar desde el archivo del repo **abortaría el arranque**. Hay que
+  corregirlo antes de cualquier recreación de contenedores.
+- **Los 20 grupos productivos no tienen `schoolId`**, así que el scope `school`
+  no autoriza a nadie en ningún modelo. Brecha de datos preexistente que hay que
+  cerrar antes de confiar en el aislamiento institucional.
+- **`scripts/seed-local-admin.mjs` sigue apuntando por defecto al padrón
+  legacy** y lo escribe. Ya no sirve para nada (el runtime no lo lee) y
+  contradice `DO NOT WRITE`: debe repuntarse al canónico o retirarse. Queda
+  fuera del alcance de 01B por la restricción de diff.
+- **`PUT /api/users/:id` no valida pertenencia institucional** de los `groupIds`
+  (sí rechaza los inexistentes). El formulario ya no puede enviar uno ajeno,
+  pero la validación de servidor correspondiente queda pendiente.
 - Los 2 ids duplicados dentro del legacy no se tocan: el archivo no se modifica.
 - La migración a `identity.db` queda fuera de alcance; esta unidad no la habilita
   ni la bloquea.

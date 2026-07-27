@@ -143,6 +143,14 @@ dummy_text.txt
 !/scripts/seed-local-admin.mjs
 !/scripts/__test__/seed-local-admin.test.mjs
 
+# CHP-ID-CANON-01B — utillaje de aislamiento de tests y comparación shadow.
+# Se versionan porque `npm run test:store-isolation` y el test versionado
+# scripts/__test__/shadowScopeEquivalence.test.mjs dependen de ellos: sin esto,
+# la suite no correría en un clone limpio ni en CI.
+!/scripts/test-real-store-guard.mjs
+!/scripts/verify-test-store-isolation.mjs
+!/scripts/shadow-scope-compare.mjs
+
 # Audit / diagnostic scripts — READ-ONLY, sin escritura en producción.
 # Reusables vía stdin pipe (no requieren despliegue en el VPS). NO integrados
 # al pipeline de deploy ni a cron — se ejecutan manualmente cuando hace falta.

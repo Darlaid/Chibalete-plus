@@ -42,7 +42,7 @@ import {
     computeCourseMetrics,
     computeSchoolMetrics,
 } from './metricsService.js';
-import { UPLOADS_ROOT, USERS_DB, GROUPS_DB, isLegacyNonCanonicalUsersDb } from './config.js';
+import { UPLOADS_ROOT, USERS_DB, GROUPS_DB } from './config.js';
 import { withUsersLock, withFileLock } from './usersLock.js';
 import {
     findGroupsForSchool,
@@ -587,18 +587,10 @@ if (!fs.existsSync(USERS_DB)) {
     process.exit(1);
 }
 
-// CHP-ID-CANON-01A — el padrón legacy conserva un solo uso legítimo: seed de
-// desarrollo local, y solo si el desarrollador lo pide EXPLÍCITAMENTE por
-// USERS_DB. Nunca puede gobernar producción, y nunca de forma silenciosa.
-if (isLegacyNonCanonicalUsersDb(USERS_DB)) {
-    if (process.env.NODE_ENV === 'production') {
-        log(`FATAL: USERS_DB apunta al padrón LEGACY_NON_CANONICAL en producción.`, 'ERROR');
-        log(`FATAL: El único padrón válido es data-critical/usuarios_colegios_oro.json.`, 'ERROR');
-        process.exit(1);
-    }
-    log(`[CONFIG] AVISO: USERS_DB apunta al padrón LEGACY_NON_CANONICAL (seed dev).`, 'WARN');
-    log(`[CONFIG] Es un padrón obsoleto y casi disjunto del canónico. Solo para desarrollo local.`, 'WARN');
-}
+// CHP-ID-CANON-01B — la regla canónica ya se aplicó en server/config.js, en
+// import-time (assertCanonicalUsersDb): si USERS_DB no es la ruta canónica del
+// modo vigente, el proceso aborta antes de llegar hasta aquí. El padrón legacy
+// no es admisible en ningún modo, tampoco como seed de desarrollo.
 
 // HARDENING — UPLOADS_ROOT must exist.
 if (!fs.existsSync(UPLOADS_ROOT)) {

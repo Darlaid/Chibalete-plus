@@ -29,6 +29,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 // Aislar ANTES de cargar módulos
+import './helpers/testMode.mjs';
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'out_'));
 process.env.EVENTS_SQLITE_PATH   = path.join(tmpDir, 'events.db');
 process.env.INSIGHTS_SQLITE_PATH = path.join(tmpDir, 'insights.db');

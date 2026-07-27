@@ -15,6 +15,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// CHP-ID-CANON-01B — este test corre en modo test: los overrides de USERS_DB
+// solo se admiten hacia fixtures temporales, e importar config.js con la env
+// ambiente jamás debe resolver a un store real.
+process.env.NODE_ENV = 'test';
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 let pass = 0, fail = 0;
@@ -27,26 +32,17 @@ console.log('identityCanonicalSource — CHP-ID-CANON-01A');
 // ────────────────────────────────────────────────────────────────────────────
 // A. Canonicalidad de la resolución (sin env: default del repo)
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\n[A] Resolución canónica por defecto');
+console.log('\n[A] Constantes canónicas');
+const cfg = await import('../config.js?canon=default');
+const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
 {
-    const cfg = await import('../config.js?canon=default');
-    const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
-
     ok('USERS_DB_CANONICAL_DEFAULT = data-critical/usuarios_colegios_oro.json',
         rel(cfg.USERS_DB_CANONICAL_DEFAULT) === 'data-critical/usuarios_colegios_oro.json',
         rel(cfg.USERS_DB_CANONICAL_DEFAULT));
 
-    // La regla se verifica sobre el resolver puro, no sobre el entorno de la
-    // máquina: un .env de desarrollo no debe poder hacer pasar/fallar el test.
-    ok('sin USERS_DB, el resolver devuelve el canónico',
-        cfg.resolveUsersDb({}) === cfg.USERS_DB_CANONICAL_DEFAULT,
-        rel(cfg.resolveUsersDb({})));
-
-    ok('sin USERS_DB, el resolver NO devuelve el legacy (cero fallback)',
-        cfg.resolveUsersDb({}) !== cfg.USERS_DB_LEGACY_NON_CANONICAL);
-
-    ok('con USERS_DB, el resolver respeta la ruta inyectada',
-        cfg.resolveUsersDb({ USERS_DB: '/tmp/padron.json' }) === '/tmp/padron.json');
+    ok('CONTAINER_CANONICAL_USERS_DB = /app/data-critical/usuarios_colegios_oro.json',
+        cfg.CONTAINER_CANONICAL_USERS_DB === '/app/data-critical/usuarios_colegios_oro.json',
+        cfg.CONTAINER_CANONICAL_USERS_DB);
 
     ok('la constante legacy sigue nombrando data/users_db.json (solo deprecación)',
         rel(cfg.USERS_DB_LEGACY_NON_CANONICAL) === 'data/users_db.json',
@@ -60,20 +56,81 @@ console.log('\n[A] Resolución canónica por defecto');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// B. Env override sigue mandando (producción inyecta USERS_DB por container)
+// B. La ruta canónica NO es overrideable — matriz completa por modo
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\n[B] Override por entorno');
+console.log('\n[B] La ruta canónica no es overrideable');
 {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'idcanon_'));
-    const CANON  = path.join(tmpDir, 'usuarios_colegios_oro.json');
-    fs.writeFileSync(CANON, JSON.stringify([]), 'utf8');
+    const CONTAINER = cfg.CONTAINER_CANONICAL_USERS_DB;
+    const LEGACY    = cfg.USERS_DB_LEGACY_NON_CANONICAL;
+    const REPO_CANON = cfg.USERS_DB_CANONICAL_DEFAULT;
 
-    const prev = process.env.USERS_DB;
-    process.env.USERS_DB = CANON;
-    const cfg = await import('../config.js?canon=env');
-    if (prev === undefined) delete process.env.USERS_DB; else process.env.USERS_DB = prev;
+    const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'idcanon_mode_'));
+    const FIXTURE = path.join(tmpDir, 'usuarios_colegios_oro.json');
+    fs.writeFileSync(FIXTURE, JSON.stringify([]), 'utf8');
 
-    ok('USERS_DB env gana sobre el default', cfg.USERS_DB === CANON, cfg.USERS_DB);
+    const decide = (env) => cfg.resolveUsersDb(env);
+    const denies = (env) => decide(env).ok === false;
+    const allows = (env) => decide(env).ok === true;
+    const throws = (env) => {
+        try { cfg.assertCanonicalUsersDb(env); return false; }
+        catch (e) { return e?.code === 'CANONICAL_SOURCE_VIOLATION'; }
+    };
+
+    // ── producción ──────────────────────────────────────────────────────────
+    ok('producción + ruta canónica del contenedor → arranca',
+        allows({ NODE_ENV: 'production', USERS_DB: CONTAINER }),
+        decide({ NODE_ENV: 'production', USERS_DB: CONTAINER }).reason);
+    ok('producción + legacy → aborta',
+        denies({ NODE_ENV: 'production', USERS_DB: LEGACY }));
+    ok('producción + tercera ruta → aborta',
+        denies({ NODE_ENV: 'production', USERS_DB: '/srv/otro/padron.json' }));
+    ok('producción + ruta relativa alternativa → aborta',
+        denies({ NODE_ENV: 'production', USERS_DB: './data-critical/otro_padron.json' }));
+    ok('producción + fixture temporal → aborta (no hay excepción por temporal)',
+        denies({ NODE_ENV: 'production', USERS_DB: FIXTURE }));
+    ok('producción sin override → aborta si el repo no está en /app',
+        REPO_CANON === CONTAINER
+            ? allows({ NODE_ENV: 'production' })
+            : denies({ NODE_ENV: 'production' }));
+    ok('producción: la violación lanza CANONICAL_SOURCE_VIOLATION',
+        throws({ NODE_ENV: 'production', USERS_DB: LEGACY }));
+
+    // ── desarrollo ──────────────────────────────────────────────────────────
+    ok('desarrollo sin override → canónico del repositorio',
+        allows({ NODE_ENV: 'development' })
+        && decide({ NODE_ENV: 'development' }).path === REPO_CANON);
+    ok('desarrollo + legacy → aborta (ya no es seed admisible)',
+        denies({ NODE_ENV: 'development', USERS_DB: LEGACY })
+        && decide({ NODE_ENV: 'development', USERS_DB: LEGACY }).reason === 'development_legacy_forbidden');
+    ok('desarrollo + tercera fuente → aborta',
+        denies({ NODE_ENV: 'development', USERS_DB: FIXTURE }));
+    ok('sin NODE_ENV se trata como desarrollo (no como test)',
+        denies({ USERS_DB: FIXTURE }));
+
+    // ── test ────────────────────────────────────────────────────────────────
+    ok('test + fixture temporal → permitido',
+        allows({ NODE_ENV: 'test', USERS_DB: FIXTURE })
+        && decide({ NODE_ENV: 'test', USERS_DB: FIXTURE }).reason === 'test_temp_fixture');
+    ok('test + legacy real → aborta',
+        denies({ NODE_ENV: 'test', USERS_DB: LEGACY }));
+    ok('test + canónico real del repo → aborta',
+        denies({ NODE_ENV: 'test', USERS_DB: REPO_CANON }));
+    ok('test + archivo dentro de data/ → aborta',
+        denies({ NODE_ENV: 'test', USERS_DB: path.join(REPO_ROOT, 'data', 'cualquiera.json') }));
+    ok('test + archivo dentro de data-critical/ → aborta',
+        denies({ NODE_ENV: 'test', USERS_DB: path.join(REPO_ROOT, 'data-critical', 'x.json') }));
+    ok('test + ruta persistente fuera de temp → aborta',
+        denies({ NODE_ENV: 'test', USERS_DB: path.join(REPO_ROOT, 'padron_test.json') }));
+    ok('test sin override → canónico, sin crear nada',
+        allows({ NODE_ENV: 'test' })
+        && decide({ NODE_ENV: 'test' }).reason === 'test_no_override');
+
+    ok('ningún modo admite una tercera fuente persistente',
+        ['production', 'development'].every(m => denies({ NODE_ENV: m, USERS_DB: '/var/tmp/tercera.json' })));
+
+    ok('el resolver es puro: no creó ningún archivo',
+        !fs.existsSync(path.join(REPO_ROOT, 'padron_test.json')));
+
     fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 

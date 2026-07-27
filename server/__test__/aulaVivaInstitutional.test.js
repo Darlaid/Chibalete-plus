@@ -35,6 +35,13 @@ process.env.INSIGHTS_SQLITE_PATH = path.join(tmpDir, 'insights.db');
 const dataDir = path.join(tmpDir, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 
+// CHP-ID-CANON-01B — inyección explícita del padrón de fixtures ANTES de los
+// imports: config.js resuelve USERS_DB/GROUPS_DB en import-time. NODE_ENV=test
+// es lo único que habilita el override, y solo hacia un directorio temporal.
+process.env.NODE_ENV  = 'test';
+process.env.USERS_DB  = path.join(dataDir, 'usuarios_colegios_oro.json');
+process.env.GROUPS_DB = path.join(dataDir, 'groups_db.json');
+
 // Importes después de setear env
 const eventsService = await import('../eventsService.js');
 const insExt = await import('../db/insightsDbExt.mjs');
@@ -98,29 +105,16 @@ function req(server, method, path, opts = {}) {
     });
 }
 
-// Seed users + groups en filesystem aislado
-function writeUsersGroups(users, groups) {
-    fs.writeFileSync(path.join(dataDir, 'users_db.json'), JSON.stringify(users), 'utf8');
-    fs.writeFileSync(path.join(dataDir, 'groups_db.json'), JSON.stringify(groups), 'utf8');
-}
-
-// Helper para que scopeAccess lea de nuestro fixture (necesita mock de path)
-// scopeAccess.mjs lee de `data/` relativo al server/aulaViva/ dir → no podemos
-// re-apuntarlo trivialmente desde un test. Estrategia: copiamos los fixtures
-// a la ubicación real BACKUP-RESTORE.
-const REAL_USERS  = path.resolve(process.cwd(), 'data', 'users_db.json');
-const REAL_GROUPS = path.resolve(process.cwd(), 'data', 'groups_db.json');
-let backupUsers = null, backupGroups = null;
-try { if (fs.existsSync(REAL_USERS))  backupUsers  = fs.readFileSync(REAL_USERS,  'utf8'); } catch {}
-try { if (fs.existsSync(REAL_GROUPS)) backupGroups = fs.readFileSync(REAL_GROUPS, 'utf8'); } catch {}
-function restoreReal() {
-    try { if (backupUsers  !== null) fs.writeFileSync(REAL_USERS,  backupUsers,  'utf8'); } catch {}
-    try { if (backupGroups !== null) fs.writeFileSync(REAL_GROUPS, backupGroups, 'utf8'); } catch {}
-}
+// CHP-ID-CANON-01B — los fixtures viven SOLO en el directorio temporal, y el
+// CIS los lee porque USERS_DB/GROUPS_DB apuntan ahí. Antes este test
+// sobrescribía `data/users_db.json` y `data/groups_db.json` reales y los
+// restauraba desde un backup en memoria: ese hack existía porque scopeAccess
+// leía un path hardcodeado. Ya no: cero escrituras sobre stores reales.
+const FIXTURE_USERS  = process.env.USERS_DB;
+const FIXTURE_GROUPS = process.env.GROUPS_DB;
 function installFixture(users, groups) {
-    fs.mkdirSync(path.dirname(REAL_USERS), { recursive: true });
-    fs.writeFileSync(REAL_USERS,  JSON.stringify(users),  'utf8');
-    fs.writeFileSync(REAL_GROUPS, JSON.stringify(groups), 'utf8');
+    fs.writeFileSync(FIXTURE_USERS,  JSON.stringify(users),  'utf8');
+    fs.writeFileSync(FIXTURE_GROUPS, JSON.stringify(groups), 'utf8');
 }
 
 function seedEvent(evs) {
@@ -533,7 +527,6 @@ try {
     }
 
 } finally {
-    restoreReal();
     outExt.closeOutcomesExtDb?.();
     rolExt.closeRollupsExtDb?.();
     pedExt.closePedagogyExtDb?.();

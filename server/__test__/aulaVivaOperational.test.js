@@ -20,6 +20,7 @@ import express from 'express';
 import http from 'node:http';
 
 // Aislar ANTES de cargar módulos.
+import './helpers/testMode.mjs';
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'av5_'));
 process.env.EVENTS_SQLITE_PATH    = path.join(tmpDir, 'events.db');
 process.env.INSIGHTS_SQLITE_PATH  = path.join(tmpDir, 'insights.db');

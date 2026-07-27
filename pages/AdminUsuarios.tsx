@@ -111,7 +111,28 @@ const AdminUsuarios: React.FC = () => {
     // contrato actual: el grupo es opcional.
     const editingUserIsLector = (editingUser?.roles || []).includes('lector');
     const userNeedsGroup = editingUserIsLector;
-    const userHasGroup   = (editingUser?.groupIds || []).length > 0;
+
+    // CHP-ID-CANON-01B — sólo los grupos de la institución seleccionada son
+    // elegibles. `authorizedGroupIds` es el conjunto autorizado y `selectedGroupIds`
+    // la selección ya saneada: una selección heredada de otro colegio no cuenta
+    // como válida ni puede llegar al backend.
+    const authorizedGroupIds = React.useMemo(
+        () => new Set(schoolGroups.map(g => g.id)),
+        [schoolGroups],
+    );
+    const selectedGroupIds = (editingUser?.groupIds || []).filter(id => authorizedGroupIds.has(id));
+    const userHasGroup = selectedGroupIds.length > 0;
+
+    // Al cambiar de institución (o cambiar sus grupos), purgar del formulario
+    // cualquier groupId que ya no pertenezca al colegio en contexto.
+    useEffect(() => {
+        if (!isUserModalOpen || !editingUser) return;
+        const current = editingUser.groupIds || [];
+        const pruned  = current.filter(id => authorizedGroupIds.has(id));
+        if (pruned.length !== current.length) {
+            setEditingUser(prev => (prev ? { ...prev, groupIds: pruned } : prev));
+        }
+    }, [authorizedGroupIds, isUserModalOpen]);
 
     // --- HANDLERS FOR CSV ---
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -366,7 +387,10 @@ const AdminUsuarios: React.FC = () => {
             return;
         }
 
-        const userData = { ...editingUser, colegio: selectedSchool }; // Force school context
+        // Force school context + defensa en profundidad: nunca se envía un
+        // groupId ajeno a la institución seleccionada, ni siquiera si quedó en
+        // el estado por una edición previa (CHP-ID-CANON-01B).
+        const userData = { ...editingUser, colegio: selectedSchool, groupIds: selectedGroupIds };
 
         setIsSavingUser(true);
         setUserSaveMsg(null);
@@ -1161,7 +1185,7 @@ const AdminUsuarios: React.FC = () => {
                                                 <input
                                                     type="checkbox"
                                                     id={`group-${group.id}`}
-                                                    checked={editingUser?.groupIds?.includes(group.id) || false}
+                                                    checked={selectedGroupIds.includes(group.id)}
                                                     onChange={(e) => {
                                                         const currentGroups = editingUser?.groupIds || [];
                                                         let newGroups;

@@ -19,6 +19,9 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cis_'));
 const USERS_TMP    = path.join(tmpDir, 'canon_users.json');
 const GROUPS_TMP   = path.join(tmpDir, 'canon_groups.json');
 const OBSOLETE_TMP = path.join(tmpDir, 'obsolete_users_decoy.json'); // señuelo ≠ canónico
+// CHP-ID-CANON-01B — NODE_ENV=test es lo único que habilita el override de
+// USERS_DB, y solo hacia un fixture dentro de un directorio temporal.
+process.env.NODE_ENV  = 'test';
 process.env.USERS_DB  = USERS_TMP;
 process.env.GROUPS_DB = GROUPS_TMP;
 

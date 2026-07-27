@@ -1,7 +1,25 @@
 # Seed Admin Local — auditoría manual
 
-> **PROPÓSITO:** garantizar que en entorno LOCAL/DEV exista un usuario
-> administrador conocido para auditoría manual y QA, **sin tocar
+> ## ⛔ OBSOLETO desde CHP-ID-CANON-01B (2026-07-27)
+>
+> Este documento describe el seed sobre `data/users_db.json`, que quedó
+> clasificado **LEGACY_NON_CANONICAL — DO NOT WRITE — DO NOT READ AT RUNTIME —
+> DO NOT USE AS DEVELOPMENT SEED**.
+>
+> El backend ya **no lee ese archivo en ningún modo**: `server/config.js` aborta
+> el arranque si `USERS_DB` apunta ahí. Sembrar un admin en él no tiene ningún
+> efecto sobre la aplicación.
+>
+> La única fuente de usuarios es `data-critical/usuarios_colegios_oro.json`.
+> Para desarrollo local, usa una copia saneada del padrón canónico en esa ruta.
+> Ver `docs/identity/canonical-user-source.md`.
+>
+> `scripts/seed-local-admin.mjs` sigue en el repo pendiente de repuntar al
+> canónico o de retirarse; hasta entonces **no lo uses**. El resto de este
+> documento se conserva sólo como referencia histórica.
+
+> **PROPÓSITO (histórico):** garantizar que en entorno LOCAL/DEV exista un
+> usuario administrador conocido para auditoría manual y QA, **sin tocar
 > producción**, sin debilitar autenticación y sin duplicar usuarios.
 
 ## Credenciales

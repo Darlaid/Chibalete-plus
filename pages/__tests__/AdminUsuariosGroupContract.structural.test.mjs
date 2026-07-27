@@ -58,6 +58,23 @@ ok('el corte ocurre antes de llamar a createUser',
 ok('se explica el caso "colegio sin grupos"',
     /todavía no tiene grupos/.test(src));
 
+// ── §2b ─────────────────────────────────────────────────────────────────────
+section('[2b] sólo grupos autorizados de la institución seleccionada');
+ok('el conjunto autorizado sale de schoolGroups',
+    /const authorizedGroupIds = React\.useMemo\(\s*\(\) => new Set\(schoolGroups\.map/.test(src));
+ok('la selección se sanea contra el conjunto autorizado',
+    /const selectedGroupIds = \(editingUser\?\.groupIds \|\| \[\]\)\.filter\(id => authorizedGroupIds\.has\(id\)\)/.test(src));
+ok('userHasGroup se calcula sobre la selección saneada',
+    /const userHasGroup = selectedGroupIds\.length > 0/.test(src));
+ok('un cambio de institución purga la selección inválida',
+    /const pruned  = current\.filter\(id => authorizedGroupIds\.has\(id\)\)/.test(src));
+ok('el envío usa la selección saneada, no el estado crudo',
+    /colegio: selectedSchool, groupIds: selectedGroupIds/.test(src));
+ok('el checkbox refleja la selección saneada',
+    /checked=\{selectedGroupIds\.includes\(group\.id\)\}/.test(src));
+ok('el selector solo lista grupos del colegio en contexto',
+    /\{schoolGroups\.map\(group => \(/.test(src));
+
 // ── §3 ──────────────────────────────────────────────────────────────────────
 section('[3] el curso en texto libre no decide membresía');
 ok('el campo curso sigue existiendo (metadato del perfil)',

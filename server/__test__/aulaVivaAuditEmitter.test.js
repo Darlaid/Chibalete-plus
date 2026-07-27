@@ -13,6 +13,7 @@
  *   node server/__test__/aulaVivaAuditEmitter.test.js
  */
 
+import './helpers/testMode.mjs'; // PRIMERO: fija NODE_ENV=test antes de config.js
 import {
     emitTeacherViewedStudent,
     emitTeacherReviewedRecommendation,

@@ -6,6 +6,7 @@
  *
  *   node server/__test__/analyticsCanon.test.js
  */
+import './helpers/testMode.mjs'; // PRIMERO: aísla NODE_ENV + stores SQLite
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
