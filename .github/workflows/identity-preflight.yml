@@ -71,19 +71,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Los stores reales no existen en un clone limpio (data/ y data-critical/
-      # no están versionados). Se comprueba explícitamente para que el job falle
-      # con un mensaje claro si alguien los versionara por error.
-      - name: Assert que el checkout no trae stores reales
+      # Los stores reales no existen en un clone limpio: data/ y data-critical/
+      # no están versionados. Se comprueba que siga siendo así, para que el job
+      # falle con un mensaje claro si alguien versionara un padrón por error.
+      # Se consulta el índice de git (no el filesystem) y sin nombrar rutas
+      # concretas: cualquier archivo bajo esos directorios es una violación.
+      - name: Assert que ningún store real está versionado
         run: |
           set -euo pipefail
-          for p in data/users_db.json data-critical/usuarios_colegios_oro.json; do
-            if [ -e "$p" ]; then
-              echo "::error::$p no debe estar versionado (padrón de usuarios en el repo)"
-              exit 1
-            fi
-          done
-          echo "OK — ningún padrón de usuarios versionado"
+          tracked=$(git ls-files -- data data-critical public/uploads uploads | head -20)
+          if [ -n "$tracked" ]; then
+            echo "::error::Hay stores de datos versionados; deben quedar fuera del repositorio:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "OK — ningún store de datos versionado"
 
       - name: Configuración de despliegue apunta al padrón canónico
         run: npm run verify:deploy-config
