@@ -53,8 +53,11 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Bootstrap de DB vacías — en producción los bind mounts de /app/data las
 # sombrean. Presentes para que la imagen arranque también sin mounts.
+# CHP-ID-DEPLOY-PREFLIGHT-01A: `users_db.json` ya NO se bootstrapea. Es el
+# padrón LEGACY_NON_CANONICAL: ninguna ruta de runtime lo lee ni lo escribe, y
+# crearlo en la imagen solo reintroduciría un store fantasma. El padrón real es
+# /app/data-critical/usuarios_colegios_oro.json, que llega por bind mount.
 RUN mkdir -p /app/data && \
-    echo '[]'                       > /app/data/users_db.json           && \
     echo '[]'                       > /app/data/content.json            && \
     echo '[]'                       > /app/data/content_db.json         && \
     echo '[]'                       > /app/data/groups_db.json          && \

@@ -37,15 +37,15 @@
  *      estar corriendo o no — no se reinicia, el server recarga al primer
  *      request (lectura cada vez de disco, sin cache largo).
  *
+ * UTILIDAD DE DESARROLLO / TEST. No siembra ningún store real.
+ *
+ * CHP-ID-DEPLOY-PREFLIGHT-01A: `USERS_DB` es OBLIGATORIO y debe apuntar a un
+ * archivo sintético. El script aborta si apunta al padrón canónico, al legacy,
+ * o a cualquier ruta dentro de data/, data-critical/ o uploads/.
+ *
  * Uso:
  *
- *   node scripts/seed-local-admin.mjs
- *   # o
- *   npm run seed:admin-local
- *
- * Override del path (tests):
- *
- *   USERS_DB=/path/to/test/users_db.json node scripts/seed-local-admin.mjs
+ *   USERS_DB="$(mktemp -d)/padron.json" node scripts/seed-local-admin.mjs
  */
 
 import fs   from 'node:fs';
@@ -64,10 +64,18 @@ const SEED_ROLE     = 'administrador';
 const SEED_ID_NEW   = 'local-admin-seed';   // solo se usa si no existe el email
 
 // ── Path resolution ────────────────────────────────────────────────────────
-// Mismo mecanismo que el server: env var USERS_DB primero, fallback a
-// data/users_db.json desde la raíz del repo. Permite que los tests pasen
-// un tmp file.
-const USERS_DB = process.env.USERS_DB || path.join(REPO_ROOT, 'data', 'users_db.json');
+// CHP-ID-DEPLOY-PREFLIGHT-01A — este script YA NO tiene destino por defecto.
+//
+// Antes escribía `data/users_db.json` por omisión: el padrón
+// LEGACY_NON_CANONICAL, que ningún runtime lee y que está marcado DO NOT WRITE.
+// Sembrar ahí no producía ningún efecto sobre la aplicación y sí ensuciaba un
+// store real. Ahora la ruta destino es OBLIGATORIA y debe ser un archivo
+// sintético temporal: sin `USERS_DB`, el script aborta.
+//
+// Sigue siendo útil como utilidad de DESARROLLO/TEST: genera un registro de
+// administrador con hash bcrypt válido, que es justo lo que necesitan las
+// fixtures de QA manual y el propio test del script.
+const USERS_DB = (process.env.USERS_DB || '').trim();
 
 // ── Logger conciso ─────────────────────────────────────────────────────────
 function log(msg, level = 'INFO') {
@@ -106,10 +114,56 @@ function assertNotProductionFilesystem() {
     }
 }
 
+// ── GUARDIA #3: destino explícito y sintético ─────────────────────────────
+// CHP-ID-DEPLOY-PREFLIGHT-01A. El seed nunca puede escribir un store real.
+const PROTECTED_DIRS = ['data', 'data-critical', 'uploads', path.join('public', 'uploads')]
+    .map(d => path.resolve(REPO_ROOT, d));
+
+function isInside(child, parent) {
+    const rel = path.relative(parent, child);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function assertSyntheticTarget() {
+    if (!USERS_DB) {
+        log('Aborto: falta USERS_DB. Este script ya no tiene destino por defecto.', 'ERROR');
+        log('El padrón legacy data/users_db.json quedó DO NOT WRITE y el canónico', 'ERROR');
+        log('no se siembra desde aquí. Pasa una ruta sintética temporal, p. ej.:', 'ERROR');
+        log('  USERS_DB="$(mktemp -d)/padron.json" node scripts/seed-local-admin.mjs', 'ERROR');
+        process.exit(1);
+    }
+
+    const target = path.resolve(USERS_DB);
+
+    // Nunca los padrones del repositorio, ni canónico ni legacy.
+    const CANONICAL = path.resolve(REPO_ROOT, 'data-critical', 'usuarios_colegios_oro.json');
+    const LEGACY    = path.resolve(REPO_ROOT, 'data', 'users_db.json');
+    const same = (a, b) => (process.platform === 'win32'
+        ? a.toLowerCase() === b.toLowerCase() : a === b);
+    if (same(target, CANONICAL)) {
+        log('Aborto: el padrón canónico no se siembra con este script.', 'ERROR');
+        process.exit(1);
+    }
+    if (same(target, LEGACY)) {
+        log('Aborto: data/users_db.json es LEGACY_NON_CANONICAL — DO NOT WRITE.', 'ERROR');
+        process.exit(1);
+    }
+
+    // Nunca dentro de un store real del repositorio.
+    for (const dir of PROTECTED_DIRS) {
+        if (isInside(target, dir)) {
+            log(`Aborto: ${USERS_DB} cae dentro de un store real (${path.relative(REPO_ROOT, dir)}).`, 'ERROR');
+            log('Usa un archivo sintético en un directorio temporal.', 'ERROR');
+            process.exit(1);
+        }
+    }
+}
+
 // ── Core seed logic ───────────────────────────────────────────────────────
 
 async function runSeed() {
     assertNotProduction();
+    assertSyntheticTarget();
     assertNotProductionFilesystem();
 
     log(`USERS_DB: ${USERS_DB}`);

@@ -151,6 +151,12 @@ dummy_text.txt
 !/scripts/verify-test-store-isolation.mjs
 !/scripts/shadow-scope-compare.mjs
 
+# CHP-ID-DEPLOY-PREFLIGHT-01A — utillaje que el job bloqueante de CI necesita.
+# Sin versionarlos, `identity-preflight` no podría correr en un clone limpio.
+!/scripts/verify-deploy-config.mjs
+!/scripts/typecheck-baseline.mjs
+!/scripts/typecheck-baseline.txt
+
 # Audit / diagnostic scripts — READ-ONLY, sin escritura en producción.
 # Reusables vía stdin pipe (no requieren despliegue en el VPS). NO integrados
 # al pipeline de deploy ni a cron — se ejecutan manualmente cuando hace falta.

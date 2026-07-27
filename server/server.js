@@ -3273,15 +3273,29 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
             const newGroupIds = Array.isArray(mergedUser.groupIds) ? [...mergedUser.groupIds] : [];
 
             const { added, removed } = diffIds(oldGroupIds, newGroupIds);
+
+            // CHP-ID-DEPLOY-PREFLIGHT-01A — contrato de grupos también en la
+            // edición, con la misma fuerza que en la creación. Se valida ANTES
+            // de mutar nada (ni en memoria) y dentro del lock, así que un
+            // payload inválido no deja el store a medias.
+            //
+            // 1) Existencia: solo sobre los ids AÑADIDOS. Un id colgante
+            //    preexistente no debe bloquear una edición ajena (p. ej.
+            //    corregir el nombre); eso es reparación de datos, no de este
+            //    endpoint. Preserva el contrato previo.
+            const addedExist = validateExplicitGroupIds(added, groups, null);
+            if (!addedExist.ok) { conflict = { conflict: 'group', ...addedExist }; return; }
+
+            // 2) Institución: sobre TODO el conjunto resultante que exista. Así
+            //    se cubre el caso en que cambia `colegio` y el grupo anterior
+            //    deja de pertenecer a la institución del usuario.
+            const groupIdSet   = new Set(groups.filter(g => g?.id).map(g => g.id));
+            const resolvedNew  = newGroupIds.filter(g => groupIdSet.has(g));
+            const schoolCheck  = validateExplicitGroupIds(resolvedNew, groups, mergedUser.colegio);
+            if (!schoolCheck.ok) { conflict = { conflict: 'group', ...schoolCheck }; return; }
+
             const applied = applyUserGroupsChange(groups, id, added, removed);
             groupDelta = { added, removed, missingGroupIds: applied.missingGroupIds };
-
-            // Si el caller intentó añadir el user a un groupId que no existe,
-            // rechazamos en lugar de dejar groupIds huérfanos en el user.
-            if (applied.missingGroupIds.length > 0 && added.some(g => applied.missingGroupIds.includes(g))) {
-                conflict = { conflict: 'orphan_group', groupIds: applied.missingGroupIds };
-                return;
-            }
 
             // Escribir GROUPS primero, USERS después. Mismo principio que en create:
             // si la escritura del grupo falla, el user no queda con groupIds que
@@ -3293,7 +3307,18 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     }, 'groupsLock');
     if (conflict?.conflict === 'not_found')    return res.status(404).json({ error: 'Usuario no encontrado' });
     if (conflict?.conflict === 'dup_email')    return res.status(409).json({ error: 'El nuevo email ya está en uso' });
-    if (conflict?.conflict === 'orphan_group') return res.status(400).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND, message: `groupIds inexistentes: ${conflict.groupIds.join(', ')}` });
+    if (conflict?.conflict === 'group') {
+        if (conflict.error === GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND) {
+            return res.status(400).json({
+                error:   GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND,
+                message: `groupIds inexistentes: ${conflict.missing.join(', ')}`,
+            });
+        }
+        return res.status(400).json({
+            error:   GROUP_MEMBERSHIP_ERR.GROUP_SCHOOL_MISMATCH,
+            message: `Los grupos ${conflict.foreign.join(', ')} no pertenecen a la institución del usuario.`,
+        });
+    }
 
     if (groupDelta.added.length || groupDelta.removed.length) {
         log(`User ${id} groupIds delta — added=${JSON.stringify(groupDelta.added)} removed=${JSON.stringify(groupDelta.removed)}`, 'ACCESS');

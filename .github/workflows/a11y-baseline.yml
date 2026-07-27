@@ -5,7 +5,7 @@ name: a11y-baseline
 #
 # Diseño:
 #   - Job `resolve` genera la matriz dinámicamente desde data/content.json
-#     y data/users_db.json. Si el repo tiene 2 contents con texto_plano_url,
+#     y el padrón canónico. Si el repo tiene 2 contents con texto_plano_url,
 #     la matriz audita 2 (loaded) + 3 (loading/error/access-denied) = 5 jobs.
 #     Si tiene 5 contents, son 5 + 3 = 8 jobs. La matriz NO se hardcodea.
 #   - Job `audit` levanta backend+frontend, espera, corre axe en el estado
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       user_id:
-        description: 'USER_ID de fixture (id en data/users_db.json). Vacío = autodetectar.'
+        description: 'USER_ID de fixture (id del padrón canónico). Vacío = autodetectar.'
         required: false
         default: ''
       content_id:
@@ -90,7 +90,9 @@ jobs:
           node <<'EOF' > /tmp/matrix.json
           const fs = require('fs');
 
-          const usersRaw   = JSON.parse(fs.readFileSync('data/users_db.json', 'utf8'));
+          // CHP-ID-DEPLOY-PREFLIGHT-01A: el fixture sale del padrón canónico.
+          // El legacy data/users_db.json ya no tiene autoridad en ningún runtime.
+          const usersRaw   = JSON.parse(fs.readFileSync('data-critical/usuarios_colegios_oro.json', 'utf8'));
           const contentRaw = JSON.parse(fs.readFileSync('data/content.json',  'utf8'));
           const users   = Array.isArray(usersRaw)   ? usersRaw   : (usersRaw.users   || Object.values(usersRaw));
           const content = Array.isArray(contentRaw) ? contentRaw : (contentRaw.content || Object.values(contentRaw));
@@ -105,7 +107,7 @@ jobs:
             userId = (lector || users.find(u => u?.id) || {}).id || '';
           }
           if (!userId) {
-            console.error('::error::No se pudo resolver USER_ID. Verificar data/users_db.json.');
+            console.error('::error::No se pudo resolver USER_ID. Verificar el padrón canónico data-critical/usuarios_colegios_oro.json.');
             process.exit(2);
           }
 

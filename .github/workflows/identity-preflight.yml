@@ -1,0 +1,113 @@
+name: identity-preflight
+
+# ──────────────────────────────────────────────────────────────────────────
+# Job BLOQUEANTE de identidad (CHP-ID-DEPLOY-PREFLIGHT-01A).
+#
+# Protege las invariantes que sostienen el despliegue de identidad:
+#   - todos los artefactos versionados declaran la ruta canónica del padrón;
+#   - la fuente canónica no es overrideable fuera de fixtures temporales;
+#   - el contrato de grupos en creación y edición de usuarios;
+#   - la suite no escribe data/, data-critical/ ni public/uploads/;
+#   - la réplica del CIS usada en el shadow comparison sigue siendo equivalente;
+#   - el seed local no puede escribir stores reales;
+#   - typecheck sin regresiones y build de producción.
+#
+# Acotado a propósito: NADA aquí depende de stores reales, de red ni de
+# secretos. Todas las fixtures son sintéticas y viven en directorios temporales.
+# Por eso puede ser bloqueante sin volverse flaky.
+# ──────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    paths:
+      - 'server/**'
+      - 'utils/groupMembership.*'
+      - 'services/dataService.ts'
+      - 'pages/AdminUsuarios.tsx'
+      - 'pages/__tests__/**'
+      - 'scripts/**'
+      - 'docker-compose*.yml'
+      - 'Dockerfile*'
+      - 'ecosystem.config.cjs'
+      - 'package.json'
+      - 'tsconfig.json'
+      - '.github/workflows/identity-preflight.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'utils/groupMembership.*'
+      - 'services/dataService.ts'
+      - 'pages/AdminUsuarios.tsx'
+      - 'pages/__tests__/**'
+      - 'scripts/**'
+      - 'docker-compose*.yml'
+      - 'Dockerfile*'
+      - 'ecosystem.config.cjs'
+      - 'package.json'
+      - 'tsconfig.json'
+      - '.github/workflows/identity-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: identity-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  identity-preflight:
+    name: identity-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Los stores reales no existen en un clone limpio (data/ y data-critical/
+      # no están versionados). Se comprueba explícitamente para que el job falle
+      # con un mensaje claro si alguien los versionara por error.
+      - name: Assert que el checkout no trae stores reales
+        run: |
+          set -euo pipefail
+          for p in data/users_db.json data-critical/usuarios_colegios_oro.json; do
+            if [ -e "$p" ]; then
+              echo "::error::$p no debe estar versionado (padrón de usuarios en el repo)"
+              exit 1
+            fi
+          done
+          echo "OK — ningún padrón de usuarios versionado"
+
+      - name: Configuración de despliegue apunta al padrón canónico
+        run: npm run verify:deploy-config
+
+      - name: Canonicidad de la fuente de usuarios
+        run: npm run test:identity
+
+      - name: Contrato de grupos y memberships (creación + edición)
+        run: npm run test:memberships
+
+      - name: Equivalencia de la réplica del CIS (shadow comparison)
+        run: node scripts/__test__/shadowScopeEquivalence.test.mjs
+
+      - name: El seed local no puede escribir stores reales
+        run: node scripts/__test__/seed-local-admin.test.mjs
+
+      - name: Guard de escrituras sobre stores reales
+        run: node server/__test__/realStoreGuard.test.js
+
+      - name: La suite no escribe stores reales
+        run: node scripts/verify-test-store-isolation.mjs test:identity test:memberships
+
+      - name: Typecheck sin regresiones (ops/ excluido por tsconfig)
+        run: npm run typecheck:baseline
+
+      - name: Build de producción
+        run: npm run build

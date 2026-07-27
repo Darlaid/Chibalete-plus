@@ -231,5 +231,60 @@ section('[10] backup automático en modificación');
     }
 }
 
+// ── §11 CHP-ID-DEPLOY-PREFLIGHT-01A: destino explícito y sintético ────────
+section('[11] el seed ya no puede escribir stores reales');
+{
+    const REPO_ROOT = path.resolve(__dirname, '..', '..');
+    const LEGACY    = path.join(REPO_ROOT, 'data', 'users_db.json');
+    const CANONICAL = path.join(REPO_ROOT, 'data-critical', 'usuarios_colegios_oro.json');
+
+    // Estado previo de los stores reales: nada de esto debe cambiar.
+    const statOf = (p) => (fs.existsSync(p)
+        ? { e: true, s: fs.statSync(p).size, m: fs.statSync(p).mtimeMs }
+        : { e: false });
+    const legacyBefore = statOf(LEGACY);
+    const canonBefore  = statOf(CANONICAL);
+
+    // Sin USERS_DB → aborta (ya no hay destino por defecto).
+    const noTarget = runScript({ NODE_ENV: 'development', USERS_DB: '' });
+    ok('sin USERS_DB aborta', noTarget.exitCode === 1, `exit=${noTarget.exitCode}`);
+    ok('explica que no hay destino por defecto',
+        /no tiene destino por defecto/.test(noTarget.stdout + noTarget.stderr));
+
+    // Apuntar al padrón legacy → aborta.
+    const toLegacy = runScript({ NODE_ENV: 'development', USERS_DB: LEGACY });
+    ok('apuntar al padrón legacy aborta', toLegacy.exitCode === 1, `exit=${toLegacy.exitCode}`);
+    ok('nombra LEGACY_NON_CANONICAL',
+        /LEGACY_NON_CANONICAL/.test(toLegacy.stdout + toLegacy.stderr));
+
+    // Apuntar al padrón canónico → aborta.
+    const toCanon = runScript({ NODE_ENV: 'development', USERS_DB: CANONICAL });
+    ok('apuntar al padrón canónico aborta', toCanon.exitCode === 1, `exit=${toCanon.exitCode}`);
+
+    // Cualquier ruta dentro de data/, data-critical/ o uploads/ → aborta.
+    for (const rel of ['data/otro_padron.json', 'data-critical/x.json', 'public/uploads/y.json']) {
+        const r = runScript({ NODE_ENV: 'development', USERS_DB: path.join(REPO_ROOT, rel) });
+        ok(`ruta dentro de ${rel.split('/')[0]}/ aborta`, r.exitCode === 1, `exit=${r.exitCode}`);
+    }
+
+    // Ruta sintética temporal → sigue funcionando (el script conserva utilidad).
+    const { dir, file } = makeTmpDb();
+    const okRun = runScript({ NODE_ENV: 'development', USERS_DB: file });
+    ok('una ruta sintética temporal sigue permitida', okRun.exitCode === 0, okRun.stderr.slice(0, 200));
+    ok('y produce el admin sembrado',
+        fs.existsSync(file) && readUsers(file).some(u => u.email === 'admin@chibaleteeditores.com'));
+    fs.rmSync(dir, { recursive: true, force: true });
+
+    // Ningún store real fue tocado por ninguna de las invocaciones anteriores.
+    const legacyAfter = statOf(LEGACY);
+    const canonAfter  = statOf(CANONICAL);
+    ok('el padrón legacy quedó intacto',
+        JSON.stringify(legacyBefore) === JSON.stringify(legacyAfter));
+    ok('el padrón canónico quedó intacto',
+        JSON.stringify(canonBefore) === JSON.stringify(canonAfter));
+    ok('no se creó ningún archivo suelto en data/',
+        !fs.existsSync(path.join(REPO_ROOT, 'data', 'otro_padron.json')));
+}
+
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

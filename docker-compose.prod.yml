@@ -45,8 +45,16 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ADMIN_SECRET: ${ADMIN_SECRET}
-      # Override DB paths to point at persistent volumes
-      USERS_DB: /data-critical/usuarios_colegios_oro.json
+      # Override DB paths to point at persistent volumes.
+      # CHP-ID-DEPLOY-PREFLIGHT-01A: la ruta canónica del padrón es
+      # /app/data-critical/usuarios_colegios_oro.json — exactamente la que
+      # exige server/config.js en producción, y la que usa el compose
+      # desplegado (/opt/chibaleteplus/docker-compose.yml). Antes este archivo
+      # declaraba /data-critical/... con el mount en /data-critical:ro, una
+      # topología divergente: con la regla canónica el arranque abortaría, y
+      # el mount de solo lectura además impediría crear usuarios o registrar
+      # lastLoginAt.
+      USERS_DB: /app/data-critical/usuarios_colegios_oro.json
       UPLOADS_ROOT: /app/public/uploads
       ACCESS_FALLBACK_MODE: restricted
     volumes:
@@ -54,8 +62,9 @@ services:
       - data-volume:/app/data
       # Uploads (PDFs, audio, images)
       - uploads-volume:/app/public/uploads
-      # Production users DB (bind mount — managed outside container)
-      - /var/www/chibalete/data-critical:/data-critical:ro
+      # Padrón canónico de usuarios (bind mount — gestionado fuera del container).
+      # Escritura necesaria: login persiste lastLoginAt y el admin crea usuarios.
+      - /var/www/chibalete/data-critical:/app/data-critical:rw
 
 volumes:
   data-volume:

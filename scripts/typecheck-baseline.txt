@@ -1,0 +1,25 @@
+components/ClubFormModal.tsx: error TS2322: Type 'void' is not assignable to type 'Group'.
+components/OralityModal.tsx: error TS2339: Property 'SpeechRecognition' does not exist on type 'Window & typeof globalThis'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/useImmersivePlayback.ts: error TS2503: Cannot find namespace 'React'.
+hooks/usePlaybackAnalytics.ts: error TS2503: Cannot find namespace 'React'.
+hooks/usePlaybackAnalytics.ts: error TS2503: Cannot find namespace 'React'.
+pages/AdminUsuarios.tsx: error TS2345: Argument of type '{ name: any; grade: any; school: any; type: any; mediatorIds: any; availableContentIds: any; collectionIds: any; accessStartsAt: any; accessEndsAt: any; }' is not assignable to parameter of type 'Omit<Group, "id" | "studentIds">'.
+pages/AulaViva.tsx: error TS2341: Property 'groups' is private and only accessible within class 'DataService'.
+pages/VisorInmersivo.tsx: error TS2341: Property 'groups' is private and only accessible within class 'DataService'.
+services/dataService.ts: error TS2304: Cannot find name 'ContentAccess'.
+services/dataService.ts: error TS2304: Cannot find name 'ContentAccess'.
+services/dataService.ts: error TS2304: Cannot find name 'ResolvedAccessState'.
+services/dataService.ts: error TS2304: Cannot find name 'ResolvedAccessState'.
+services/dataService.ts: error TS2345: Argument of type '{ name: string; school: any; grade: any; }' is not assignable to parameter of type 'Omit<Group, "id" | "studentIds">'.

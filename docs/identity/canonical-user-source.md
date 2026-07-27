@@ -200,28 +200,74 @@ aislamiento por institución.
 - **0 casos legítimos bloqueados** por el contrato nuevo.
 - Mediadores y administradores no requieren grupo: contrato preservado.
 
+## 3.d Preflight de despliegue (CHP-ID-DEPLOY-PREFLIGHT-01A)
+
+**Configuración.** `docker-compose.prod.yml` declaraba `USERS_DB:
+/data-critical/...` con el bind mount en `/data-critical:ro` — una topología
+divergente de la desplegada, que con la regla canónica **abortaría el arranque**
+y que además impediría escribir el padrón (login registra `lastLoginAt`, el
+admin crea usuarios). Corregido a `/app/data-critical/...` con mount `:rw`.
+`Dockerfile.api` dejó de bootstrapear `users_db.json` en la imagen.
+`npm run verify:deploy-config` falla si cualquier artefacto **versionado**
+declara el padrón legacy, un `USERS_DB` no canónico, vacío o relativo, o si el
+mount de `data-critical` no queda en `/app/data-critical` o es de solo lectura.
+
+**Edición de usuarios.** `PUT /api/users/:id` ahora aplica el mismo contrato que
+la creación: existencia de los `groupIds` añadidos, y pertenencia institucional
+de **todo** el conjunto resultante — lo que cubre el caso de cambiar `colegio`
+dejando un grupo que ya no corresponde. Se valida dentro del lock y antes de
+mutar nada, así que un rechazo deja ambos stores byte a byte intactos. Un
+`groupId` colgante preexistente **no** bloquea editar otros campos: eso es
+reparación de datos, no responsabilidad de este endpoint.
+
+**Seed local.** `scripts/seed-local-admin.mjs` ya no tiene destino por defecto:
+`USERS_DB` es obligatorio y aborta si apunta al padrón canónico, al legacy o a
+cualquier ruta dentro de `data/`, `data-critical/` o `uploads/`. Conserva su
+utilidad como generador de fixtures sintéticas con hash bcrypt válido.
+
+### Auditoría de `schoolId` — **mapeo NO determinístico (bloqueante)**
+
+Inventario read-only de los 20 grupos productivos:
+
+| Clasificación | Grupos | Usuarios asociados |
+|---|---:|---:|
+| `DETERMINISTIC` (declaran `organizationId`) | 5 | 624 |
+| `AMBIGUOUS` (institución solo como texto libre) | 15 | 20 |
+| `ORPHAN` | 0 | — |
+| `CONFLICTING_REFERENCES` | 0 | — |
+
+`schools_db.json` registra **3 instituciones**, y los grupos usan 4
+`organizationId` (esas 3 + `lt-org`, sintético de loadtest). Para los 15 grupos
+restantes la institución existe **únicamente como cadena `school`**: no hay
+ningún identificador estable del cual derivar `schoolId`. Derivarlo por
+similitud de nombre está expresamente prohibido, así que **la migración no se
+construyó**: el gate exige 20/20 determinístico.
+
+Hallazgo adicional: **un grupo productivo no tiene campo `id`**. Es un registro
+corrupto que hay que resolver antes de cualquier migración que itere grupos.
+
+Consecuencia: el scope `school` seguirá sin autorizar a nadie hasta que exista un
+identificador institucional para esos 15 grupos. **No bloquea** el despliegue de
+identidad (el shadow comparison mostró que ese scope hoy tampoco autoriza a
+nadie), pero sí bloquea dar por bueno el aislamiento por institución.
+
 ## 4. Deuda abierta
 
 - **CHP-ID-01 no está desplegado.** En producción, `scopeAccess.mjs` todavía
   hardcodea el padrón legacy (verificado read-only el 2026-07-27). El aislamiento
   institucional sigue roto en prod hasta su GREEN DEPLOY.
-- **Preflight obligatorio — `docker-compose.prod.yml` del repo está
-  desincronizado:** declara `USERS_DB: /data-critical/usuarios_colegios_oro.json`
-  (sin `/app`), mientras el compose realmente desplegado
-  (`/opt/chibaleteplus/docker-compose.yml`) toma la variable de su `env_file` con
-  el valor correcto `/app/data-critical/usuarios_colegios_oro.json`. Con la regla
-  de 01B, desplegar desde el archivo del repo **abortaría el arranque**. Hay que
-  corregirlo antes de cualquier recreación de contenedores.
-- **Los 20 grupos productivos no tienen `schoolId`**, así que el scope `school`
-  no autoriza a nadie en ningún modelo. Brecha de datos preexistente que hay que
-  cerrar antes de confiar en el aislamiento institucional.
-- **`scripts/seed-local-admin.mjs` sigue apuntando por defecto al padrón
-  legacy** y lo escribe. Ya no sirve para nada (el runtime no lo lee) y
-  contradice `DO NOT WRITE`: debe repuntarse al canónico o retirarse. Queda
-  fuera del alcance de 01B por la restricción de diff.
-- **`PUT /api/users/:id` no valida pertenencia institucional** de los `groupIds`
-  (sí rechaza los inexistentes). El formulario ya no puede enviar uno ajeno,
-  pero la validación de servidor correspondiente queda pendiente.
+- **`schoolId` sin mapeo determinístico** para 15 de 20 grupos (§3.d). Requiere
+  una decisión de producto: registrar esas 12 instituciones en `schools_db.json`
+  y asignarles `organizationId`, o aceptar que el scope `school` siga inactivo.
+  Hasta entonces no hay migración que aplicar.
+- **Un grupo productivo sin campo `id`** — registro corrupto en `groups_db.json`.
+- **Copias no versionadas con la ruta antigua**: `deployment_package/` y
+  `_prod_snapshot_/` conservan un `docker-compose.prod.yml` con
+  `USERS_DB: /data-critical/...`. No se despliega desde ahí, pero si alguien lo
+  hiciera, el arranque abortaría. `verify-deploy-config` las reporta como aviso.
+- **Ningún test es bloqueante en el workflow `security`**; la cobertura de
+  identidad vive en el workflow `identity-preflight`, acotado a fixtures
+  sintéticas.
 - Los 2 ids duplicados dentro del legacy no se tocan: el archivo no se modifica.
 - La migración a `identity.db` queda fuera de alcance; esta unidad no la habilita
   ni la bloquea.
