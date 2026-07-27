@@ -303,13 +303,14 @@ export function computeOrganization({ organizationId, events, index, users, peri
     };
 
     // Sesiones y tiempo, solo sobre lectores elegibles.
-    let sessionCount = 0, platformMs = 0, cappedSessions = 0;
+    let sessionCount = 0, platformMs = 0, cappedSessions = 0, orphanSessionEnds = 0;
     const contents = new Set();
     for (const uid of [...pop.ids.eligibleReaders].sort()) {
         const evs = byUser.get(uid);
         if (!evs) continue;
         const sessions = reconstructSessions(evs, { idleMs, capMs });
         sessionCount += sessions.length;
+        orphanSessionEnds += sessions.orphanSessionEnds ?? 0;
         for (const s of sessions) {
             if (Number.isFinite(s.durationMs)) platformMs += s.durationMs;
             if (s.durationCapped) cappedSessions++;
@@ -326,7 +327,7 @@ export function computeOrganization({ organizationId, events, index, users, peri
             ? Math.round((activeReaderIds.size / pop.eligibleReaders.length) * 10000) / 10000
             : null,
     };
-    const quality = { unattributedEvents: unattributedForOrg, unknownEvents, cappedSessions };
+    const quality = { unattributedEvents: unattributedForOrg, unknownEvents, cappedSessions, orphanSessionEnds };
     const common = { population: populationBlock, coverage, quality };
 
     const metrics = {

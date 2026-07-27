@@ -178,7 +178,7 @@ export function reconstructSessions(userEvents, { idleMs = IDLE_MS, capMs } = {}
 
     const out = [];
     let cur = null;
-    let orphanEvents = 0;
+    let orphanEvents = 0, orphanSessionEnds = 0, orphanSystemEvents = 0;
     const close = () => { if (cur) { out.push(cur); cur = null; } };
 
     for (const e of list) {
@@ -189,7 +189,11 @@ export function reconstructSessions(userEvents, { idleMs = IDLE_MS, capMs } = {}
 
         if (!cur) {
             // Ni un evento de sistema ni un cierre pueden abrir una sesión.
-            if (isSystem || cls.suffix === 'session_end') { orphanEvents++; continue; }
+            if (isSystem || cls.suffix === 'session_end') {
+                orphanEvents++;
+                if (cls.suffix === 'session_end') orphanSessionEnds++; else orphanSystemEvents++;
+                continue;
+            }
             cur = { startTs: e.serverTs, lastTs: e.serverTs, events: [e], sessionIds: new Set([e.sessionId ?? null]) };
         } else {
             cur.lastTs = e.serverTs;
@@ -212,8 +216,10 @@ export function reconstructSessions(userEvents, { idleMs = IDLE_MS, capMs } = {}
             distinctSessionIds: s.sessionIds.size,
         };
     });
-    // Se adjunta como propiedad no enumerable para no alterar la serialización.
-    Object.defineProperty(sessions, 'orphanEvents', { value: orphanEvents, enumerable: false });
+    // Se adjuntan como propiedades no enumerables para no alterar la serialización.
+    Object.defineProperty(sessions, 'orphanEvents',       { value: orphanEvents,       enumerable: false });
+    Object.defineProperty(sessions, 'orphanSessionEnds',  { value: orphanSessionEnds,  enumerable: false });
+    Object.defineProperty(sessions, 'orphanSystemEvents', { value: orphanSystemEvents, enumerable: false });
     return sessions;
 }
 

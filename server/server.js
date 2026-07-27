@@ -1036,6 +1036,25 @@ try {
 } catch (e) {
     log(`[PASO7] institutional router mount failed: ${e.message}`, 'WARN');
 }
+// CHP-API-METRICS-01A — API v2 de métricas sobre el motor canónico.
+// Rutas NUEVAS bajo /api/v2/metrics/*: no tocan ninguna ruta legacy. El
+// feature flag METRICS_ENGINE (default 'legacy') gobierna si el motor nuevo
+// llega a responder por las rutas antiguas; estas v2 son siempre aditivas.
+try {
+    const { createMetricsRouterV2 } = await import('./metrics/metricsRouterV2.mjs');
+    const { createMetricsProvider }  = await import('./metrics/metricsProvider.mjs');
+    app.use('/api', createMetricsRouterV2({
+        requireUserAuth,
+        provider: createMetricsProvider(),
+        now: () => Date.now(),
+        log,
+        express,
+    }));
+    log('[METRICS-V2] /api/v2/metrics/* router mounted', 'INFO');
+} catch (e) {
+    log(`[METRICS-V2] router mount failed: ${e.message}`, 'WARN');
+}
+
 // Scheduler init diferido al ready event para no bloquear boot.
 if (process.env.AULA_VIVA_SCHEDULER_ENABLED === '1') {
     setImmediate(async () => {
