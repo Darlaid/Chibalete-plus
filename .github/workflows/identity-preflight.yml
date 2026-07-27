@@ -96,6 +96,9 @@ jobs:
       - name: Contrato de grupos y memberships (creación + edición)
         run: npm run test:memberships
 
+      - name: Contrato canónico de métricas (motor de referencia)
+        run: npm run test:metric-contract
+
       - name: Equivalencia de la réplica del CIS (shadow comparison)
         run: node scripts/__test__/shadowScopeEquivalence.test.mjs
 
