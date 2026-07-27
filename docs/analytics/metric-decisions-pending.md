@@ -1,9 +1,10 @@
-# Decisiones de métricas pendientes de aprobación
+# Decisiones de métricas — APROBADAS
 
-**Unidad:** CHP-METRICS-CONTRACT-01A · `HUMAN_APPROVAL_REQUIRED`
+**Unidad:** CHP-METRICS-CONTRACT-01A → **aprobadas en 01B** · `HUMAN_APPROVED`
 
-Ninguna de estas decisiones está tomada. El motor de referencia implementa la
-opción recomendada como **valor por defecto configurable**, no como verdad.
+**D1–D10 quedaron aprobadas.** El motor de referencia (contrato v2) las
+implementa. Se conserva el razonamiento original —opciones, impacto y riesgo—
+porque documenta *por qué* se decidió así.
 
 ---
 
@@ -109,3 +110,48 @@ tooltip de cobertura.
 Publicar **siempre** el par *(valor, cobertura)*. «37 lectores activos» sin
 «de 90» es una media verdad, y en Nuevo Bosque la cobertura del 0 % es
 precisamente la señal que hay que ver.
+
+---
+
+## Resoluciones aprobadas (CHP-METRICS-CONTRACT-01B)
+
+| Decisión | Resolución |
+|---|---|
+| D1 · Entrada | inicio de una sesión reconstruida |
+| D2 · Sesión | ventana de inactividad + `session_end` cierra antes + `session_start` abre si no hay activa; `session_id` no es autoridad; un evento de sistema no abre sesión |
+| D3 · Umbral | **15 min** |
+| D4 · Actividad y lectura | **se divide en dos métricas** (ver abajo) |
+| D5 · Tiempo en plataforma | `min(última − primera actividad atribuible, 4 h)`; `elapsed_ms` solo corrobora; `cappedSessions` en `reason` |
+| D6 · Tiempo de lectura | **`NOT_DEFINED`**, sin estimación ni reetiquetado |
+| D7 · Periodo | últimos 30 días por defecto, configurable, siempre declarado |
+| D8 · No atribuibles | fuera de las métricas institucionales, visibles en los seis buckets |
+| D9 · Sin actividad | `status=NO_ACTIVITY`, `value=0`, `measured=true`; no se ocultan |
+| D10 · Estados visibles | etiquetas fijadas en `STATUS_LABEL` |
+
+### D4 se divide en dos métricas — no es una sola
+
+| Métrica | Definición | Denominador |
+|---|---|---|
+| `usersWithActivity` | usuario registrado con ≥1 evento atribuible **no sistémico** | `registeredUsers` |
+| `activeReaders` | **lector elegible** con ≥1 evento `READING_ACTIVITY` | `eligibleReaders` |
+
+Estar presente no es leer. Medido en producción sobre Villas: **37 usuarios con
+actividad frente a 21 lectores activos**. Publicar una sola cifra habría inflado
+la lectura en un 76 %.
+
+### Corrección de vocabulario poblacional
+
+«Registrados» **ya no** significa «miembros de grupos». Son cinco poblaciones
+distintas y el motor las reporta por separado:
+
+| Término | Significado |
+|---|---|
+| `registeredUsers` | pertenecen a la organización, por `organizationId` declarado **o** por pertenencia a uno de sus grupos. **No depende de que existan eventos.** |
+| `registeredReaders` | los anteriores con rol lector — se reporta el conteo real, no se asume que todos lo sean |
+| `eligibleReaders` | lectores registrados en ≥1 grupo `ACTIVE_REAL` de esa organización — **denominador de cobertura** |
+| `usersWithActivity` | registrados con actividad no sistémica |
+| `activeReaders` | elegibles con lectura |
+
+Efecto de la corrección en producción: FilBo pasa de mostrarse con **44** a
+**46 registrados** (los 2 sin grupo se reportan aparte) y Externado de **0** a
+**2**.

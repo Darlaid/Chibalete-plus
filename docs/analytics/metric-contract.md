@@ -1,7 +1,7 @@
 # Contrato canónico de métricas
 
-**Unidad:** CHP-METRICS-CONTRACT-01A · **Estado:** `METRIC CONTRACT READY FOR
-APPROVAL — NOT DEPLOYED`
+**Unidades:** CHP-METRICS-CONTRACT-01A + **01B** · **Contrato v2, D1–D10
+`HUMAN_APPROVED`** · **Estado:** `APPROVED CONTRACT — READY FOR API INTEGRATION`
 
 Este documento define qué significa cada número visible de Chibalete+ y cómo se
 calcula. El motor de referencia (`engines/metrics/`) lo implementa en puro,
@@ -66,26 +66,30 @@ Sensibilidad sobre Villas de Aranjuez: 5 min → 128 sesiones / 25,2 h · 15 min
 
 ---
 
-## 5. Definiciones propuestas
+## 5. Definiciones aprobadas
 
 | # | Métrica | Definición | Exclusiones | Sin cobertura |
 |---|---|---|---|---|
-| A | Usuario registrado | registro en el padrón canónico | sintéticos (`_loadtest_marker`) | `NO_DATA` |
-| B | Lector real | usuario con rol `lector`, no sintético | — | `NO_DATA` |
-| C | Lector con cobertura | lector con ≥1 evento en el periodo | — | `coverage.ratio` |
-| D | **Lector activo** | lector con ≥1 evento **atribuible** en el periodo | históricos, sintéticos, sin grupo | `NO_ACTIVITY` si población>0 |
-| E | Entrada | inicio de una sesión reconstruida | — | `NO_ACTIVITY` |
-| F | Sesión | grupo maximal de eventos de un usuario sin huecos > idle | — | `NO_ACTIVITY` |
-| G | Tiempo en plataforma | Σ duraciones de sesión (nunca Σ `elapsed_ms`), acotadas a 4 h | sesiones acotadas se declaran | `NO_ACTIVITY` |
-| H | **Tiempo de lectura** | **`NOT_DEFINED`** — exige separar lectura efectiva de sesión abierta | — | `NOT_DEFINED` |
-| I | Contenido abierto | `contentId` distinto en un modo de lectura | modo `lu` (app companion) | `NO_ACTIVITY` |
+| A | `registeredUsers` | pertenecen a la organización por `organizationId` declarado **o** por pertenencia a uno de sus grupos. **No depende de eventos.** | sintéticos | `NO_DATA` si 0 |
+| B | `registeredReaders` | los anteriores con rol `lector` — conteo real, no se asume | — | — |
+| C | `eligibleReaders` | `registeredReaders` en ≥1 grupo `ACTIVE_REAL` de la misma organización | — | denominador de cobertura |
+| D1 | `usersWithActivity` | `registeredUsers` con ≥1 evento atribuible **no sistémico** | históricos, sintéticos, no atribuibles | `NO_ACTIVITY` |
+| D2 | `activeReaders` | `eligibleReaders` con ≥1 evento `READING_ACTIVITY` | telemetría y sistema | `NO_ACTIVITY` |
+| E | `entries` | inicio de una sesión reconstruida | — | `NO_ACTIVITY` |
+| F | `sessions` | ventana de inactividad 15 min; `session_end` cierra antes; un evento de sistema no abre sesión | — | `NO_ACTIVITY` |
+| G | `platformTimeMs` | Σ `min(última − primera actividad atribuible, 4 h)`; **nunca** Σ `elapsed_ms` | — | `NO_ACTIVITY` |
+| H | `readingTimeMs` | **`NOT_DEFINED`** — exige separar lectura efectiva de pestaña abierta | — | `NOT_DEFINED` |
+| I | `contentsOpened` | `contentId` distinto en un modo de lectura | modo `lu` | `NO_ACTIVITY` |
 | J | Libro consultado | = I mientras `contentId` no distinga libro de fragmento | — | `NOT_DEFINED` si se exige "libro" |
 | K | Progreso | `progress_fraction` del último evento de progreso | — | `NO_DATA` |
 | L | Actividad institucional | agregación por `organizationId` **registrado** | históricos, sintéticos | ver estados |
-| M | Cobertura | `representados / población` | — | `null` si población 0 |
+| M | `coverage` | `activeReaders / eligibleReaders`, con numerador y denominador explícitos | — | `null` si denominador 0 |
 
-**Denominador universal:** la población de la organización, nunca el subconjunto
-con eventos. Reportar 37 activos sin decir que la población es 90 induce a error.
+**`usersWithActivity` ≠ `activeReaders`** (D4). Estar presente no es leer: en
+Villas son **37 frente a 21**. Publicar una sola cifra inflaría la lectura un 76 %.
+
+**«Registrados» nunca significa «miembros de grupos».** Esa confusión hacía
+desaparecer 2 lectores en FilBo y los 2 usuarios de Externado.
 
 ---
 
@@ -136,18 +140,33 @@ usuario sin institución**: el segundo mayor productor de actividad del sistema.
 
 ---
 
-## 9. Shadow institucional (motor de referencia, idle 15 min)
+## 9. Shadow institucional — contrato v2, vista post-manifiesto, idle 15 min
 
-| Organización | Registrados | Activos | Cobertura | Sesiones | Tiempo | Contenidos |
-|---|---:|---:|---:|---:|---:|---:|
-| Villas de Aranjuez | 90 | 37 `MEASURED` | 41 % | 99 | 22,8 h | 18 |
-| Nuevo Bosque | 90 | **0 `NO_ACTIVITY`** | 0 % | 0 | 0 h | 0 |
-| Chibalete Club FilBo 2026 | 44 | 5 `MEASURED` | 11 % | 9 | 1,7 h | 11 |
-| Externado *(post-manifiesto)* | 0 | **— `NO_DATA`** | — | — | — | — |
+Todo el histórico:
 
-Contraste con lo que hoy muestran los dashboards para Villas: **24 activos, 420
-eventos, 2 sesiones** (vía `analytics_db.json`) frente a **37 activos, 16.263
-eventos, 99 sesiones** reconstruidos desde la fuente canónica.
+| Organización | Registrados | Lectores | Elegibles | Sin grupo | Con actividad | **Lectores activos** | Cobertura | Sesiones | Tiempo | Estado |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Villas de Aranjuez | 90 | 80 | 80 | 0 | 37 | **21** | 26 % | 227 | 16,4 h | `MEASURED` |
+| Nuevo Bosque | 90 | 80 | 80 | 0 | 0 | **0** | 0 % | 0 | 0 h | `NO_ACTIVITY` |
+| FilBo 2026 | **46** | 46 | 44 | **2** | 5 | **5** | 11 % | 27 | 0,9 h | `MEASURED` |
+| Externado | **2** | 0 | 0 | 0 | 0 | — | — | — | — | `NO_DATA` |
+
+Últimos 30 días (D7, periodo por defecto): Villas cae a 13 lectores activos y
+FilBo pasa a `NO_ACTIVITY` — toda su actividad es anterior al periodo.
+
+**Comparación de las tres lecturas para Villas de Aranjuez:**
+
+| | Registrados | Activos | Sesiones | Tiempo |
+|---|---:|---:|---:|---:|
+| Sink legacy (`analytics_db.json`, lo que se muestra hoy) | 80 | 24 | 2 | — |
+| Motor v1 | 90 | 37 | 99 | 22,8 h |
+| **Motor v2 (aprobado)** | **90** | **21** *(lectores)* / 37 *(actividad)* | **227** | **16,4 h** |
+
+v2 baja los lectores activos (exige `READING_ACTIVITY`, no telemetría), sube las
+sesiones (`session_end` corta antes del idle) y baja el tiempo (ventana de
+actividad en vez del acumulado, y sin cierres huérfanos inflando).
+
+No se presenta tiempo de lectura: permanece `NOT_DEFINED`.
 
 ---
 

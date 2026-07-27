@@ -83,46 +83,64 @@ export const isReadingMode  = (m) => READING_MODES.includes(m);
 
 // ── Tiempo ──────────────────────────────────────────────────────────────────
 
+/** Tope de sesión aprobado en D5: 4 horas. */
+export const SESSION_CAP_MS = 4 * 60 * 60 * 1000;
+/** Umbral de inactividad aprobado en D3: 15 minutos. */
+export const IDLE_MS = 15 * 60 * 1000;
+
 /**
- * Duración de una sesión a partir de sus eventos. NUNCA suma `elapsed_ms`.
+ * Duración de una sesión (D5, aprobado).
  *
- * Estrategia, en orden:
- *   1. `elapsed_ms` del evento de cierre (es el acumulado final: la duración).
- *   2. MÁXIMO `elapsed_ms` observado (mismo significado, sin cierre explícito).
- *   3. Ventana temporal `max(ts) - min(ts)` como cota inferior.
+ *   min(lastAttributableActivity - firstAttributableActivity, 4 h)
  *
- * Devuelve además la procedencia, para que el consumidor sepa qué está viendo.
- * `capMs` acota sesiones abandonadas; `null` desactiva el tope.
+ * La ventana entre el primer y el último evento atribuible es la magnitud
+ * primaria. `elapsed_ms` NO se suma nunca; se usa solo para:
+ *   · corroboración — se reporta la desviación frente a la ventana;
+ *   · fallback validado — cuando la ventana es 0 (sesión de un solo evento)
+ *     pero el acumulado del cierre demuestra una duración real.
  *
- * @returns {{ms:number|null, source:string, capped:boolean}}
+ * @returns {{ms:number|null, source:string, capped:boolean, corroborationMs:number|null,
+ *            corroborationDeltaMs:number|null}}
  */
-export function sessionDuration(events, { capMs = 4 * 60 * 60 * 1000 } = {}) {
+export function sessionDuration(events, { capMs = SESSION_CAP_MS } = {}) {
     const list = Array.isArray(events) ? events : [];
-    if (list.length === 0) return { ms: null, source: 'NO_EVENTS', capped: false };
+    if (list.length === 0) {
+        return { ms: null, source: 'NO_EVENTS', capped: false, corroborationMs: null, corroborationDeltaMs: null };
+    }
 
     const finite = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
-    const closing = list.filter(e => isSessionEnd(e.event) && finite(e.elapsedMs));
-    const maxElapsed = list.reduce((a, e) => (finite(e.elapsedMs) && e.elapsedMs > a ? e.elapsedMs : a), -1);
     const ts = list.map(e => e.serverTs).filter(finite);
     const window = ts.length ? Math.max(...ts) - Math.min(...ts) : null;
 
-    let ms = null, source = 'NO_DURATION';
-    if (closing.length > 0) {
-        ms = Math.max(...closing.map(e => e.elapsedMs));
-        source = 'SESSION_END_ELAPSED';
-    } else if (maxElapsed >= 0) {
-        ms = maxElapsed;
-        source = 'MAX_ELAPSED';
-    } else if (window != null) {
-        ms = window;
-        source = 'TIMESTAMP_WINDOW';
-    }
-    if (ms == null) return { ms: null, source, capped: false };
+    // Corroboración: acumulado del cierre, o máximo observado. Nunca la suma.
+    const closing = list.filter(e => isSessionEnd(e.event) && finite(e.elapsedMs));
+    const corroboration = closing.length > 0
+        ? Math.max(...closing.map(e => e.elapsedMs))
+        : list.reduce((a, e) => (finite(e.elapsedMs) && e.elapsedMs > a ? e.elapsedMs : a), -1);
+    const corroborationMs = corroboration >= 0 ? corroboration : null;
 
-    // Saltos de reloj y valores absurdos: se acotan, no se descartan en silencio.
+    let ms = null, source = 'NO_DURATION';
+    if (window != null && window > 0) {
+        ms = window;
+        source = 'ATTRIBUTABLE_ACTIVITY_WINDOW';
+    } else if (corroborationMs != null && corroborationMs > 0) {
+        // Ventana nula pero el acumulado demuestra duración: fallback validado.
+        ms = corroborationMs;
+        source = 'ELAPSED_FALLBACK_VALIDATED';
+    } else if (window != null) {
+        ms = window; // 0 medido
+        source = 'ATTRIBUTABLE_ACTIVITY_WINDOW';
+    }
+    if (ms == null) {
+        return { ms: null, source, capped: false, corroborationMs, corroborationDeltaMs: null };
+    }
+
     let capped = false;
     if (capMs != null && ms > capMs) { ms = capMs; capped = true; }
-    return { ms, source, capped };
+    return {
+        ms, source, capped, corroborationMs,
+        corroborationDeltaMs: corroborationMs != null && window != null ? corroborationMs - window : null,
+    };
 }
 
 // ── Sesiones ────────────────────────────────────────────────────────────────
@@ -134,39 +152,69 @@ export const SESSION_STRATEGY = Object.freeze({
 });
 
 /**
- * Reconstruye sesiones por ventana de inactividad sobre los eventos de UN
- * usuario. Es la estrategia principal propuesta: no depende de eventos de
- * cierre (ausentes en el 32 % de las sesiones abiertas) ni de `session_id`
- * (que en producción es casi un identificador por evento: 10.669 de 11.190
- * agrupaciones tienen duración cero).
+ * Reconstruye las sesiones de UN usuario (D2, aprobado).
+ *
+ * Reglas, en el orden en que se aplican a cada evento ordenado por tiempo:
+ *   · más de `idleMs` de inactividad          → abre sesión nueva;
+ *   · `session_end`                            → cierra la sesión en curso
+ *                                                (una sesión puede cerrarse
+ *                                                antes del umbral de inactividad);
+ *   · `session_start` sin sesión activa        → abre sesión;
+ *   · un evento de SISTEMA no abre sesión por sí solo — si no hay ninguna
+ *     activa, se registra como huérfano y no crea una sesión de lectura;
+ *   · un `session_end` sin sesión activa TAMPOCO abre sesión: un cierre no
+ *     puede iniciar lo que termina. Ocurre con reintentos, descargas offline y
+ *     eventos duplicados; sin esta regla el fallback de `elapsed_ms` le
+ *     atribuiría a ese huérfano la duración completa de la sesión ya cerrada, y
+ *     el tiempo total se duplicaría;
+ *   · `session_id` NO es autoridad: solo se conserva como referencia.
  *
  * Determinística: ordena por `serverTs` y desempata por `eventId`.
  */
-export function reconstructSessions(userEvents, { idleMs = 15 * 60 * 1000, capMs } = {}) {
+export function reconstructSessions(userEvents, { idleMs = IDLE_MS, capMs } = {}) {
     const list = (Array.isArray(userEvents) ? userEvents : [])
         .filter(e => e && Number.isFinite(e.serverTs))
         .sort((a, b) => (a.serverTs - b.serverTs) || String(a.eventId ?? '').localeCompare(String(b.eventId ?? '')));
+
     const out = [];
     let cur = null;
+    let orphanEvents = 0;
+    const close = () => { if (cur) { out.push(cur); cur = null; } };
+
     for (const e of list) {
-        if (!cur || e.serverTs - cur.lastTs > idleMs) {
-            if (cur) out.push(cur);
-            cur = { startTs: e.serverTs, lastTs: e.serverTs, events: [e] };
+        const cls = classifyEvent(e.event);
+        const isSystem = cls.class === EVENT_CLASS.SYSTEM_EVENT;
+
+        if (cur && e.serverTs - cur.lastTs > idleMs) close();
+
+        if (!cur) {
+            // Ni un evento de sistema ni un cierre pueden abrir una sesión.
+            if (isSystem || cls.suffix === 'session_end') { orphanEvents++; continue; }
+            cur = { startTs: e.serverTs, lastTs: e.serverTs, events: [e], sessionIds: new Set([e.sessionId ?? null]) };
         } else {
             cur.lastTs = e.serverTs;
             cur.events.push(e);
+            cur.sessionIds.add(e.sessionId ?? null);
         }
+
+        // El cierre explícito termina la sesión aunque no haya llegado el idle.
+        if (cls.suffix === 'session_end') close();
     }
-    if (cur) out.push(cur);
-    return out.map(s => {
+    close();
+
+    const sessions = out.map(s => {
         const d = sessionDuration(s.events, capMs === undefined ? {} : { capMs });
         return {
             startTs: s.startTs, endTs: s.lastTs, eventCount: s.events.length,
             durationMs: d.ms, durationSource: d.source, durationCapped: d.capped,
-            // Cota inferior independiente del campo acumulado, para contraste.
+            corroborationDeltaMs: d.corroborationDeltaMs,
             windowMs: s.lastTs - s.startTs,
+            distinctSessionIds: s.sessionIds.size,
         };
     });
+    // Se adjunta como propiedad no enumerable para no alterar la serialización.
+    Object.defineProperty(sessions, 'orphanEvents', { value: orphanEvents, enumerable: false });
+    return sessions;
 }
 
 /** Estrategia de fallback: agrupación por `session_id`. Documentada, no recomendada. */
