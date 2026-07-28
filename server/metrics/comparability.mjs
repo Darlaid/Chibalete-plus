@@ -40,6 +40,13 @@ export const REASON = Object.freeze({
     UNKNOWN_DIFFERENCE:             'UNKNOWN_DIFFERENCE',
 });
 
+/** Estado explícito de la comparación de una métrica (CHP-STATS-SHADOW-01A-R1). */
+export const COMPARISON_STATUS = Object.freeze({
+    COMPARABLE:            'COMPARABLE',
+    PERIOD_NOT_COMPARABLE: 'PERIOD_NOT_COMPARABLE',
+    PERIOD_UNKNOWN:        'PERIOD_UNKNOWN',
+});
+
 export const SEVERITY = Object.freeze({
     EXPECTED:     'EXPECTED',
     REVIEW:       'REVIEW',

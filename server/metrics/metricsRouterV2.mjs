@@ -23,6 +23,9 @@ import {
 import { IDLE_MS, SESSION_CAP_MS, classifyEvent, EVENT_CLASS } from '../../engines/metrics/eventContract.mjs';
 import { classifyGroup } from '../identity/organizationScope.mjs';
 import { evaluateScopeAccess } from '../aulaViva/scopeAccess.mjs';
+// CHP-STATS-SHADOW-01A-R1 — el cómputo vive en el servicio, no en el router.
+import { computeCanonicalMetrics, envelope, publishMetrics, PUBLISHED_METRICS }
+    from './canonicalMetricsService.mjs';
 
 /** Modo del motor. Producción arranca en `legacy`: el motor nuevo no responde. */
 export const METRICS_ENGINE_MODES = Object.freeze(['legacy', 'canonical', 'shadow']);
@@ -101,46 +104,8 @@ export function authorize({ callerId, scopeType, scopeId }) {
  * `contentsOpened` es el nombre del motor; la API lo publica como
  * `distinctContents`. Es un alias de presentación, no un cambio de contrato.
  */
-const PUBLISHED_METRICS = Object.freeze({
-    registeredUsers:   'registeredUsers',
-    registeredReaders: 'registeredReaders',
-    eligibleReaders:   'eligibleReaders',
-    readersWithoutGroup: 'readersWithoutGroup',
-    usersWithActivity: 'usersWithActivity',
-    activeReaders:     'activeReaders',
-    entries:           'entries',
-    sessions:          'sessions',
-    platformTimeMs:    'platformTimeMs',
-    contentsOpened:    'distinctContents',
-    readingTimeMs:     'readingTimeMs',
-});
-
-function publishMetrics(engineMetrics) {
-    const out = {};
-    for (const [engineName, publishedName] of Object.entries(PUBLISHED_METRICS)) {
-        const m = engineMetrics[engineName];
-        if (!m) continue;
-        out[publishedName] = { ...m, metric: publishedName };
-    }
-    return out;
-}
-
-function envelope({ organizationId = null, generatedAt, period, idleMs, org, includeQuality }) {
-    const metrics = publishMetrics(org.metrics);
-    const anyMetric = metrics.activeReaders ?? Object.values(metrics)[0] ?? null;
-    return {
-        contractVersion: CONTRACT_VERSION,
-        generatedAt,
-        period,
-        sessionStrategy: `INACTIVITY_WINDOW_${Math.round(idleMs / 60000)}MIN`,
-        sessionCapMs: SESSION_CAP_MS,
-        organizationId,
-        metrics,
-        population: org.population,
-        coverage: anyMetric?.coverage ?? null,
-        quality: includeQuality ? (anyMetric?.quality ?? null) : null,
-    };
-}
+// PUBLISHED_METRICS, publishMetrics y envelope viven ahora en
+// canonicalMetricsService.mjs. Se reexportan al final para no romper imports.
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -175,30 +140,15 @@ export function createMetricsRouterV2({ requireUserAuth, provider, now, log = ()
     router.get('/v2/metrics/organizations', requireUserAuth, async (req, res) => {
         const callerId = req.headers['x-user-id'];
         try {
-            const generatedAt = now();
-            const period = resolvePeriod(req.query, generatedAt);
-            const idleMs = resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) });
-            const includeQuality = wantsQuality(req.query);
-            const { users, groups, schools, events, index } = await loadContext(period);
-
-            const visible = [...index.registeredOrgIds].sort().filter(orgId =>
-                authorize({ callerId, scopeType: 'organization', scopeId: orgId }).ok);
-
-            const organizations = visible.map(organizationId => {
-                const org = computeOrganization({ organizationId, events, index, users, period, idleMs });
-                return envelope({ organizationId, generatedAt, period, idleMs, org, includeQuality });
+            const period = resolvePeriod(req.query, now());
+            const r = await computeCanonicalMetrics({
+                scopeKind: 'organizations', period,
+                idleMs: resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) }),
+                includeQuality: wantsQuality(req.query),
+                provider, clock: now,
+                isOrgVisible: (orgId) => authorize({ callerId, scopeType: 'organization', scopeId: orgId }).ok,
             });
-
-            const full = summarize({ users, groups, schools, events, classifyGroup, period, idleMs });
-            return res.json({
-                contractVersion: CONTRACT_VERSION,
-                generatedAt,
-                period,
-                sessionStrategy: full.sessionStrategy,
-                populations: full.populations,
-                organizations,
-                unattributed: includeQuality ? full.unattributed : null,
-            });
+            return res.status(r.status).json(r.body);
         } catch (e) {
             return handleError(res, e, log);
         }
@@ -211,22 +161,13 @@ export function createMetricsRouterV2({ requireUserAuth, provider, now, log = ()
         try {
             const auth = authorize({ callerId, scopeType: 'organization', scopeId: organizationId });
             if (!auth.ok) return fail(res, auth.httpStatus, auth.error, auth.cause ? { cause: auth.cause } : {});
-
-            const generatedAt = now();
-            const period = resolvePeriod(req.query, generatedAt);
-            const idleMs = resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) });
-            const { users, events, index } = await loadContext(period);
-
-            // Un administrador de plataforma pasa el gate del CIS para cualquier
-            // scope, así que la EXISTENCIA hay que comprobarla aparte: una
-            // organización no registrada no existe para esta API, tenga quien
-            // tenga privilegios. Sin esto, un id inventado devolvía 200/NO_DATA.
-            if (!index.registeredOrgIds.has(organizationId)) {
-                return fail(res, 404, 'organization_not_found');
-            }
-            const org = computeOrganization({ organizationId, events, index, users, period, idleMs });
-            return res.json(envelope({ organizationId, generatedAt, period, idleMs, org,
-                                       includeQuality: wantsQuality(req.query) }));
+            const period = resolvePeriod(req.query, now());
+            const r = await computeCanonicalMetrics({
+                scopeKind: 'organization', organizationId, period,
+                idleMs: resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) }),
+                includeQuality: wantsQuality(req.query), provider, clock: now,
+            });
+            return res.status(r.status).json(r.body);
         } catch (e) {
             return handleError(res, e, log);
         }
@@ -239,37 +180,13 @@ export function createMetricsRouterV2({ requireUserAuth, provider, now, log = ()
         try {
             const auth = authorize({ callerId, scopeType: 'group', scopeId: groupId });
             if (!auth.ok) return fail(res, auth.httpStatus, auth.error, auth.cause ? { cause: auth.cause } : {});
-
-            const generatedAt = now();
-            const period = resolvePeriod(req.query, generatedAt);
-            const idleMs = resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) });
-            const { users, events, index } = await loadContext(period);
-
-            const organizationId = index.orgOfGroup.get(groupId) ?? null;
-            if (!organizationId) {
-                // El grupo existe y el caller lo media, pero está fuera del scope
-                // activo (histórico o sintético): no hay métrica institucional.
-                return res.json({
-                    contractVersion: CONTRACT_VERSION, generatedAt, period, groupId,
-                    organizationId: null,
-                    metrics: { activeReaders: metricEnvelope({
-                        metric: 'activeReaders', status: MEASUREMENT_STATUS.NO_DATA,
-                        reason: 'GROUP_NOT_IN_ACTIVE_SCOPE', period }) },
-                    population: null, coverage: null, quality: null,
-                });
-            }
-
-            // Población acotada a los miembros del grupo.
-            const members = new Set();
-            const pop = organizationPopulation({ organizationId, users, index });
-            for (const u of pop.registeredUsers) {
-                if (index.groupsOfUser.get(u.id)?.has(groupId)) members.add(u.id);
-            }
-            const groupUsers = users.filter(u => members.has(u.id));
-            const org = computeOrganization({ organizationId, events, index, users: groupUsers, period, idleMs });
-            const out = envelope({ organizationId, generatedAt, period, idleMs, org,
-                                   includeQuality: wantsQuality(req.query) });
-            return res.json({ ...out, groupId });
+            const period = resolvePeriod(req.query, now());
+            const r = await computeCanonicalMetrics({
+                scopeKind: 'group', groupId, period,
+                idleMs: resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) }),
+                includeQuality: wantsQuality(req.query), provider, clock: now,
+            });
+            return res.status(r.status).json(r.body);
         } catch (e) {
             return handleError(res, e, log);
         }
@@ -282,29 +199,13 @@ export function createMetricsRouterV2({ requireUserAuth, provider, now, log = ()
         try {
             const auth = authorize({ callerId, scopeType: 'user', scopeId: userId });
             if (!auth.ok) return fail(res, auth.httpStatus, auth.error, auth.cause ? { cause: auth.cause } : {});
-
-            const generatedAt = now();
-            const period = resolvePeriod(req.query, generatedAt);
-            const idleMs = resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) });
-            const { users, events, index } = await loadContext(period);
-
-            if (!index.usersById.has(userId)) return fail(res, 404, 'user_not_found');
-            const organizationId = index.orgDeclared.get(userId)
-                ?? [...(index.orgsViaGroups.get(userId) ?? [])].sort()[0] ?? null;
-            if (!organizationId) {
-                return res.json({
-                    contractVersion: CONTRACT_VERSION, generatedAt, period, userId, organizationId: null,
-                    metrics: { activeReaders: metricEnvelope({
-                        metric: 'activeReaders', status: MEASUREMENT_STATUS.NO_DATA,
-                        reason: 'USER_NOT_IN_ACTIVE_ORGANIZATION', period }) },
-                    population: null, coverage: null, quality: null,
-                });
-            }
-            const org = computeOrganization({ organizationId, events, index,
-                                              users: users.filter(u => u.id === userId), period, idleMs });
-            const out = envelope({ organizationId, generatedAt, period, idleMs, org,
-                                   includeQuality: wantsQuality(req.query) });
-            return res.json({ ...out, userId });
+            const period = resolvePeriod(req.query, now());
+            const r = await computeCanonicalMetrics({
+                scopeKind: 'user', userId, period,
+                idleMs: resolveIdleMs(req.query, { isAdmin: isAdminCaller(callerId) }),
+                includeQuality: wantsQuality(req.query), provider, clock: now,
+            });
+            return res.status(r.status).json(r.body);
         } catch (e) {
             return handleError(res, e, log);
         }
@@ -402,3 +303,6 @@ export function compareShadow({ endpoint, legacy, canonical, thresholds = {} }) 
 /** Clasificación de un tipo de evento; se reexporta para el adaptador legacy. */
 export const eventClassOf = (name) => classifyEvent(name).class;
 export { EVENT_CLASS };
+
+// Reexportados desde el servicio: los tests y otros módulos los importaban de aquí.
+export { envelope, publishMetrics, PUBLISHED_METRICS };

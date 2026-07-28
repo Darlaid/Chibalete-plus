@@ -71,6 +71,10 @@ function emptyCounters() {
         shadow_canonical_errors: 0,
         shadow_shape_errors: 0,
         shadow_breaker_open_total: 0,
+        // Debe permanecer en 0 cuando shadow está bien configurado.
+        shadow_canonical_executor_missing_total: 0,
+        // Violaciones de la invariante canonicalStartedAt >= responseFinishedAt.
+        shadow_started_before_response_total: 0,
         shadow_differences_by_reason: Object.create(null),
         shadow_duration_ms: { count: 0, sum: 0, max: 0 },
         shadow_legacy_response_duration_ms: { count: 0, sum: 0, max: 0 },
@@ -102,6 +106,7 @@ export function createShadowExecutor({
     let consecutiveErrors = 0;
     let breakerOpenUntil = 0;
     let shuttingDown = false;
+    let lastLegacyCompletedAt = null;
     /** Promesas en vuelo, para poder drenar en el shutdown. */
     const inFlight = new Set();
 
@@ -119,6 +124,12 @@ export function createShadowExecutor({
             active += 1;
             counters.shadow_comparisons_started += 1;
             const started = now();
+            // Invariante dura: el canónico no puede empezar antes de que la
+            // respuesta pública haya terminado.
+            if (typeof job.responseFinishedAt === 'number' && started < job.responseFinishedAt) {
+                counters.shadow_started_before_response_total += 1;
+                log({ evt: 'shadow_started_before_response', routeKind: job.routeKind }, 'WARN');
+            }
 
             // Timeout que no deja timers colgando ni promesas sin capturar.
             let timer = null;
@@ -177,11 +188,17 @@ export function createShadowExecutor({
         /** Métrica del camino público, para demostrar que shadow no lo retrasa. */
         observeLegacyDuration(ms) { observe(counters.shadow_legacy_response_duration_ms, ms); },
 
+        /** Marca de fin del handler legacy (evidencia temporal, no por request). */
+        markLegacyCompleted(ts) { lastLegacyCompletedAt = ts; },
+
+        /** Shadow activo pero sin ejecutor canónico: error de configuración. */
+        countCanonicalExecutorMissing() { counters.shadow_canonical_executor_missing_total += 1; },
+
         /**
          * Admite trabajo canónico. **Retorna de inmediato**, sin await.
          * @returns {{accepted: boolean, reason?: string}}
          */
-        submit({ routeKind, task }) {
+        submit({ routeKind, task, responseFinishedAt = null, canonicalQueuedAt = null }) {
             counters.shadow_requests_total += 1;
             if (shuttingDown) return skip(SKIP.SHUTTING_DOWN);
             if (config.sampleRate <= 0) return skip(SKIP.DISABLED);
@@ -189,7 +206,7 @@ export function createShadowExecutor({
             if (config.sampleRate < 1 && random() >= config.sampleRate) return skip(SKIP.SAMPLED_OUT);
             if (queue.length >= config.queueLimit) return skip(SKIP.QUEUE_FULL);
 
-            queue.push({ routeKind, task });
+            queue.push({ routeKind, task, responseFinishedAt, canonicalQueuedAt });
             pump();                       // síncrono: solo encola y arranca
             return { accepted: true };
         },
@@ -201,6 +218,7 @@ export function createShadowExecutor({
                 breakerOpen: breakerOpen(),
                 consecutiveErrors,
                 shuttingDown,
+                lastLegacyCompletedAt,
             };
         },
 

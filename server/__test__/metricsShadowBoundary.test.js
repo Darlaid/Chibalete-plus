@@ -24,6 +24,9 @@ let pass = 0, fail = 0;
 const ok = (l, c, h = '') => { if (c) { console.log('  ✓', l); pass++; } else { console.error('  ✗', l, h ? `— ${h}` : ''); fail++; } };
 const section = (t) => console.log(`\n${t}`);
 const tick = async (n = 6) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
+// El encolado canonico se difiere al ciclo de macrotareas (res 'finish' o
+// setImmediate), asi que las microtareas no bastan para observarlo.
+const macroTick = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)); };
 
 // ── dobles ──────────────────────────────────────────────────────────────────
 const FIXED_NOW = 1_800_000_000_000;
@@ -103,6 +106,7 @@ section('[3] shadow ejecuta canonical en segundo plano');
         captureLegacy, shadowExecutor: exec, now: () => FIXED_NOW,
     });
     ok('la respuesta pública ya salió', res.ended === true);
+    await macroTick();
     await tick(20);
     ok('el canónico corrió después', ran === true);
     ok('contador de comparaciones iniciadas', exec.counters.shadow_comparisons_started === 1);
@@ -120,6 +124,7 @@ section('[4] error canónico no cambia la respuesta');
     });
     ok('body intacto', JSON.stringify(res.body) === JSON.stringify(LEGACY_BODY));
     ok('status 200', res.statusCode === 200);
+    await macroTick();
     await tick(20);
     ok('el fallo se contabilizó, no se propagó', exec.counters.shadow_comparisons_completed >= 0);
     await exec.shutdown({ drainMs: 50 });
@@ -138,6 +143,7 @@ section('[5] timeout canónico no cambia la respuesta');
         captureLegacy, shadowExecutor: exec, now: () => clock,
     });
     ok('body intacto pese al canónico lento', JSON.stringify(res.body) === JSON.stringify(LEGACY_BODY));
+    await macroTick();
     await new Promise(r => setTimeout(r, 60));
     ok('timeout contabilizado', exec.counters.shadow_timeouts === 1, String(exec.counters.shadow_timeouts));
     await exec.shutdown({ drainMs: 50 });
@@ -267,8 +273,9 @@ section('[18..19] cero PII');
     const s = JSON.stringify(cmp.differences);
     for (const forbidden of ['userId', 'email', 'nombre', 'token', 'password', 'headers', 'payload'])
         ok(`[18] la diferencia no contiene "${forbidden}"`, !s.includes(forbidden));
-    const allowed = new Set(['routeKind', 'organizationId', 'period', 'metricKey', 'legacyValue',
-        'canonicalValue', 'absoluteDelta', 'relativeDelta', 'reasonCode', 'severity', 'contractVersion']);
+    const allowed = new Set(['routeKind', 'organizationId', 'period', 'legacyPeriod', 'canonicalPeriod',
+        'comparisonStatus', 'metricKey', 'legacyValue', 'canonicalValue', 'absoluteDelta',
+        'relativeDelta', 'reasonCode', 'severity', 'contractVersion']);
     const keys = new Set(cmp.differences.flatMap(d => Object.keys(d)));
     ok('[19] solo campos declarados', [...keys].every(k => allowed.has(k)), [...keys].join(','));
 
@@ -283,6 +290,7 @@ section('[18..19] cero PII');
         captureLegacy, shadowExecutor: exec, log: (o) => logged.push(JSON.stringify(o)),
         now: () => FIXED_NOW,
     });
+    await macroTick();
     await tick(20);
     ok('[19] userId nunca aparece en los logs shadow', !logged.join('|').includes('user-secreto-123'));
     await exec.shutdown({ drainMs: 50 });
