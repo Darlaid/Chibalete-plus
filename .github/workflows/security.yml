@@ -112,6 +112,33 @@ jobs:
   # push. Este job REPORTA esos findings (visibles, exit-code 1) pero NO
   # bloquea el merge (continue-on-error): el gate duro de deps/código/IaC es
   # el job `trivy`. El ratcheo del base image se hace en cadencia propia.
+  # CHP-RELEASE-IMAGE-01A — gate DURO de completitud de la imagen API.
+  #
+  # A diferencia de `trivy-image` (que reporta deuda de la imagen base sin
+  # bloquear), este job SÍ bloquea: verifica que la imagen contenga todo el
+  # código de runtime (server/, utils/, engines/), que las dependencias
+  # instaladas correspondan al lockfile, y que NO contenga stores ni secretos.
+  #
+  # Existe porque la imagen af319ca se construía con `npm install` sin lockfile
+  # y sin copiar utils/ ni engines/: quedó con multer 2.1.1 en vez de 2.2.0 y
+  # sólo arrancaba gracias a bind mounts de código.
+  image-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Contrato estático (Dockerfile + .dockerignore + lockfile)
+        run: node scripts/verify-image-integrity.mjs
+
+      - name: Build api image
+        run: docker build -f Dockerfile.api -t chibalete/api:integrity .
+
+      - name: Integridad de la imagen construida
+        run: node scripts/verify-image-integrity.mjs chibalete/api:integrity
+
   trivy-image:
     runs-on: ubuntu-latest
     continue-on-error: true       # reporta CVEs de imagen base sin bloquear el workflow

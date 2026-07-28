@@ -1,95 +1,128 @@
 # ─────────────────────────────────────────────────────────────
 # Dockerfile.api — Chibalete+ Backend API
 #
-# Multi-stage (H-2 hardening):
-#   Stage 1 (builder) — compila node_modules (better-sqlite3 nativo) con el
-#                       toolchain python3/make/g++.
-#   Stage 2 (runtime) — imagen final SIN toolchain de build. El toolchain
-#                       (~313 MB) vive SOLO en el builder y se descarta.
+# CHP-RELEASE-IMAGE-01A — imagen REPRODUCIBLE y AUTOSUFICIENTE.
+#
+# Multi-stage:
+#   Stage 1 (builder) — resuelve node_modules con el toolchain
+#                       python3/make/g++ (better-sqlite3 nativo).
+#   Stage 2 (runtime) — imagen final SIN toolchain de build.
+#
+# Qué cambió respecto de la imagen af319ca y POR QUÉ:
+#
+#   1. `npm ci` con package-lock.json, en lugar de `npm install` sin lockfile.
+#      La imagen af319ca se construía copiando SOLO package.json y resolviendo
+#      los rangos semver en tiempo de build. Resultado: quedó con multer 2.1.1
+#      cuando el lockfile fija 2.2.0, y sin @opentelemetry/core. El build dejaba
+#      de ser reproducible: dos builds del mismo commit podían diferir.
+#
+#      El comentario histórico decía que `npm ci` rompía en alpine porque el
+#      lockfile se genera en Windows y pinnea binarios win32. Se verificó y la
+#      premisa está obsoleta: los 8 paquetes con `os: win32` del lockfile son
+#      TODOS `optional: true`, y no hay ningún paquete no-opcional y no-dev sin
+#      soporte linux. npm ci los omite por plataforma sin fallar.
+#
+#   2. Se copian `utils/` y `engines/`, que faltaban. Son imports de RUNTIME:
+#         server/server.js               → ../utils/groupDiagnosis.mjs,
+#                                          ../utils/membershipGovernance.mjs,
+#                                          ../utils/studentStatus.mjs
+#         server/groupMembershipService.js → ../utils/groupMembership.mjs
+#         server/metrics/metricsRouterV2.mjs → ../../engines/metrics/*.mjs
+#      Sin ellos la imagen sólo arrancaba gracias a bind mounts de código.
+#
+#   3. Se retiró el bootstrap de /app/data. La imagen NO debe contener stores
+#      (incluía bundles_db.json). `server.js` autocrea los JSON ausentes al
+#      arrancar, así que el bootstrap era redundante. data/, data-critical/ y
+#      uploads/ llegan siempre por bind mount.
+#
+#   4. Imagen base pinneada por digest, no por tag flotante.
+#
+# El contenedor corre como root a propósito: `server/lib/secretFile.js` exige
+# que /app/secrets/admin_secret pertenezca al UID/GID EFECTIVOS del proceso, y
+# el secreto productivo es root:root 0400. Cambiar de usuario rompería el
+# contrato file-only del admin secret.
 #
 # Entry point: server/server.js  (ESM, "type":"module")
 # ─────────────────────────────────────────────────────────────
 
 # ── Stage 1: builder ─────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 
 # Toolchain para node-gyp / better-sqlite3 — solo en el builder.
 RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# npm install (NO npm ci): el package-lock.json se genera en el workstation
-# Windows y pinnea binarios/opcionales win32 → npm ci rompe el build alpine.
-# Ver docs/V4-API-HARDENING.md §3 (reproducibilidad).
-COPY package.json ./
-RUN npm install --omit=dev --prefer-offline
+# Instalación REPRODUCIBLE: npm ci exige que package.json y package-lock.json
+# estén sincronizados y falla si divergen. Copiar ambos es lo que garantiza que
+# la imagen refleje exactamente el lockfile versionado.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # ── Stage 2: runtime ─────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
 
 # dumb-init → manejo correcto de señales para PID 1.
 RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-# package.json en /app — Node lo necesita para resolver "type":"module" del
-# server.js (bind-mounteado en prod) y healthHandler lo usa como fallback de
-# versión. Sin él, server.js (ESM) no arranca.
-COPY package.json ./
+# Trazabilidad del release. GIT_SHA alimenta el fallback de `commit` en
+# healthHandler.js cuando server/.deploy-info todavía no está montado.
+# `deployed_at` NO se fija en build a propósito: es exclusivo de .deploy-info y
+# debe reflejar el despliegue real, no la construcción de la imagen.
+ARG GIT_SHA=unknown
+ARG RELEASE_TAG=unknown
+ENV GIT_SHA=${GIT_SHA}
+ENV CHIBALETE_RELEASE=${RELEASE_TAG}
 
-# node_modules ya compilado, traído del builder. builder y runtime comparten
-# EXACTAMENTE node:20-alpine → ABI musl/alpine compatible: el binario nativo
-# de better-sqlite3 es válido sin recompilar.
+# Manifests: package.json resuelve "type":"module" y es fallback de versión en
+# healthHandler. El lockfile viaja para poder auditar la imagen a posteriori.
+COPY package.json package-lock.json ./
+
+# node_modules ya resuelto y compilado en el builder. builder y runtime
+# comparten EXACTAMENTE la misma base pinneada → ABI musl/alpine compatible:
+# el binario nativo de better-sqlite3 es válido sin recompilar.
 COPY --from=builder /app/node_modules ./node_modules
 
-# Código backend + scripts de migración.
+# ── Código runtime versionado ────────────────────────────────
+# Los tres son necesarios para arrancar. Ver nota (2) en la cabecera.
 COPY server/  ./server/
-COPY scripts/ ./scripts/
+COPY utils/   ./utils/
+COPY engines/ ./engines/
+
+# `scripts/` NO se copia (la imagen af319ca sí lo hacía).
+#
+# Razones:
+#   - Ningún módulo de runtime importa nada de scripts/ (verificado).
+#   - Ningún runbook de despliegue ejecuta scripts dentro del contenedor: los
+#     scripts operacionales corren en el host.
+#   - .gitignore ignora `/scripts/*` y re-trackea sólo 23 scripts legítimos por
+#     negación explícita. En el árbol de trabajo conviven ~76 archivos ad-hoc
+#     ignorados; un `docker build` desde una copia sucia los horneaba en la
+#     imagen. Eliminar el COPY suprime ese vector por completo.
+
+# Punto de montaje del secreto administrativo (file-only). Se crea vacío: el
+# archivo real llega SIEMPRE por bind mount read-only. Nunca se hornea.
+RUN mkdir -p /app/secrets && chmod 0500 /app/secrets
 
 # Quitar el CLI de npm: el container corre `node server/server.js` y NUNCA
-# invoca npm en runtime. Saca sus deps vulnerables del filesystem (superficie
-# de ataque). El toolchain de build ya quedó fuera (vive solo en el builder).
+# invoca npm en runtime. Saca sus deps vulnerables del filesystem.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
-# Bootstrap de DB vacías — en producción los bind mounts de /app/data las
-# sombrean. Presentes para que la imagen arranque también sin mounts.
-# CHP-ID-DEPLOY-PREFLIGHT-01A: `users_db.json` ya NO se bootstrapea. Es el
-# padrón LEGACY_NON_CANONICAL: ninguna ruta de runtime lo lee ni lo escribe, y
-# crearlo en la imagen solo reintroduciría un store fantasma. El padrón real es
-# /app/data-critical/usuarios_colegios_oro.json, que llega por bind mount.
-RUN mkdir -p /app/data && \
-    echo '[]'                       > /app/data/content.json            && \
-    echo '[]'                       > /app/data/content_db.json         && \
-    echo '[]'                       > /app/data/groups_db.json          && \
-    echo '[]'                       > /app/data/sections.json           && \
-    echo '[]'                       > /app/data/analytics_db.json       && \
-    echo '[]'                       > /app/data/access_db.json          && \
-    echo '[]'                       > /app/data/bundles_db.json         && \
-    echo '[]'                       > /app/data/leo_interactions_db.json && \
-    echo '[]'                       > /app/data/submissions_db.json     && \
-    echo '[]'                       > /app/data/user_audit_log.json     && \
-    echo '[]'                       > /app/data/school_configs.json     && \
-    echo '[]'                       > /app/data/schools_db.json         && \
-    echo '{"interventions":[]}'     > /app/data/interventions_db.json   && \
-    echo '{"memoryMap":{}}'         > /app/data/leo_memory_db.json      && \
-    echo '{"profileMap":{}}'        > /app/data/leo_profile_db.json     && \
-    echo '{"progressMap":{}}'       > /app/data/progress_db.json        && \
-    echo '{"schemaVersion":1}'      > /app/data/leo_evidence_db.json    && \
-    echo '{"version":"0.1.0","apkUrl":"","forceUpdate":false,"minSupportedVersion":"0.1.0"}' \
-                                    > /app/data/lu_config.json
-
-# Metadata de trazabilidad (la imagen viva actual no tiene labels).
+# Metadata de trazabilidad.
 LABEL org.opencontainers.image.title="chibalete-api" \
-      org.opencontainers.image.version="v4.0.2-hardened"
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${RELEASE_TAG}" \
+      org.opencontainers.image.base.name="node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293"
 
 EXPOSE 3000
 
 # Healthcheck real — usa /api/health/ready (readiness multi-capa, NO liveness).
 # node -e + fetch nativo (node 20): sin curl, sin bash, sin scripts.
-# start-period cubre el boot (~10-15s); 3 fallos consecutivos → unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
 
-# Use dumb-init so Node receives SIGTERM correctly
+# dumb-init para que Node reciba SIGTERM correctamente.
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "server/server.js"]

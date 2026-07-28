@@ -38,6 +38,23 @@ deployment_package
 .env
 .env.*
 
+# ── Evidencia operativa y documentación — nunca parte de una imagen ─────────
+# CHP-RELEASE-IMAGE-01A: ningún Dockerfile copia estos árboles, pero mantenerlos
+# fuera del build context evita que material de auditoría (informes, anexos,
+# manifiestos, planes de backup) entre por error en una capa futura y reduce el
+# tamaño del contexto enviado al daemon.
+ops
+docs
+loadtest
+# scripts/: .gitignore ignora `/scripts/*` y re-trackea sólo los legítimos, así
+# que el árbol de trabajo contiene decenas de archivos ad-hoc. Ningún Dockerfile
+# los necesita; excluirlos del contexto evita hornearlos desde una copia sucia.
+scripts
+*.pem
+*.key
+*.p12
+secrets
+
 # ── Misc dev ────────────────────────────────────────────────────────────────
 .vscode
 .idea
