@@ -157,6 +157,11 @@ dummy_text.txt
 !/scripts/typecheck-baseline.mjs
 !/scripts/typecheck-baseline.txt
 
+# CHP-STATS-SHADOW-PERF-01A — harness de benchmark del shadow. Se versiona para
+# que la unidad de implementacion reproduzca la misma metodologia.
+!/scripts/perf/
+!/scripts/perf/**
+
 # CHP-RELEASE-IMAGE-01A — verificador de integridad de la imagen API.
 # Se versiona porque el job bloqueante `image-integrity` de CI lo ejecuta, y
 # `npm run test:image-integrity` debe funcionar en un clone limpio.
