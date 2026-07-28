@@ -180,6 +180,12 @@ import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
 import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
+// CHP-STATS-SHADOW-01A — frontera única de las rutas legacy de métricas.
+// Import estático (no dinámico) porque `createShadowExecutor` se invoca en
+// scope de módulo al registrar las rutas.
+import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
+import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
+import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 
 // --- LOGGING HELPER ---
 const log = (msg, type = 'INFO') => {
@@ -7678,7 +7684,34 @@ function computeCourseDataWindow(studentBreakdown) {
 // Lists all schools with both stable schoolId (slug) and display schoolName.
 // Mediators see only schools of their assigned groups.
 // Requires: admin OR authenticated mediator/user.
-app.get('/api/metrics/schools', async (req, res) => {
+// ── CHP-STATS-SHADOW-01A — frontera única de las rutas legacy de métricas ──
+//
+// `mountLegacyMetricsRoute` NO decide autorización: cada handler legacy sigue
+// haciéndolo tal cual. Con el default `legacy` la frontera devuelve el handler
+// intacto, así que el comportamiento productivo no cambia.
+//
+// El ejecutor canónico queda SIN enlazar en esta unidad: enlazarlo exige
+// extraer de `metricsRouterV2` un cómputo canónico reutilizable y alineado por
+// periodo, que es una refactorización de los handlers v2 y pertenece a su
+// propia unidad. Hasta entonces, `shadow` responde legacy y no compara.
+const legacyMetricsShadowExecutor = createShadowExecutor({ log: (o, lvl) => log(JSON.stringify(o), lvl || 'INFO') });
+
+function mountLegacyMetricsRoute(routeKind, legacyHandler) {
+    return async function legacyMetricsRoute(req, res) {
+        return executeMetricsRoute({
+            mode: metricsEngineMode(),
+            routeKind,
+            req, res,
+            legacyHandler,
+            canonicalExecutor: null,      // pendiente: enlace al proveedor canónico
+            captureLegacy: null,
+            shadowExecutor: legacyMetricsShadowExecutor,
+            log: (o, lvl) => log(JSON.stringify(o), lvl || 'INFO'),
+        });
+    };
+}
+
+const legacyMetricsSchoolsHandler = async (req, res) => {
     const { groups, users } = loadAndInitMetrics();
     const requester = resolveRequester(req, users);
     const adminAccess = await isAdminRequest(req);
@@ -7705,12 +7738,14 @@ app.get('/api/metrics/schools', async (req, res) => {
         .sort((a, b) => a.schoolName.localeCompare(b.schoolName));
 
     res.json({ schools });
-});
+};
+
+app.get('/api/metrics/schools', mountLegacyMetricsRoute('metrics.schools', legacyMetricsSchoolsHandler));
 
 // GET /api/metrics/student/:userId
 // Returns full structured metrics for a single student.
 // Requires: admin secret OR the student's own x-user-id.
-app.get('/api/metrics/student/:userId', async (req, res) => {
+const legacyMetricsStudentHandler = async (req, res) => {
     const { userId }        = req.params;
     const { users }         = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
@@ -7734,7 +7769,9 @@ app.get('/api/metrics/student/:userId', async (req, res) => {
         log(`Metrics student error (${userId}): ${e.message}`, 'ERROR');
         res.status(500).json({ error: e.message });
     }
-});
+};
+
+app.get('/api/metrics/student/:userId', mountLegacyMetricsRoute('metrics.student', legacyMetricsStudentHandler));
 
 // ---------------------------------------------------------------------------
 // DATA BACKBONE METRICS — helper compartido por endpoints
@@ -7810,7 +7847,7 @@ function collectSchoolUserIds(schoolName, groups) {
 // GET /api/metrics/course/:courseId
 // Returns aggregated structured metrics for a course.
 // Requires: admin secret OR mediator assigned to that course (x-user-id).
-app.get('/api/metrics/course/:courseId', async (req, res) => {
+const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
@@ -7856,13 +7893,15 @@ app.get('/api/metrics/course/:courseId', async (req, res) => {
         const status = e.message.includes('not found') ? 404 : 500;
         res.status(status).json({ error: e.message });
     }
-});
+};
+
+app.get('/api/metrics/course/:courseId', mountLegacyMetricsRoute('metrics.course', legacyMetricsCourseHandler));
 
 // GET /api/metrics/school/:schoolId
 // Accepts schoolId as either a slug ("colegio-chibalete") or original name.
 // Returns aggregated structured metrics for a school.
 // Requires: admin secret only.
-app.get('/api/metrics/school/:schoolId', async (req, res) => {
+const legacyMetricsSchoolHandler = async (req, res) => {
     if (!(await isAdminRequest(req))) {
         return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
     }
@@ -7891,7 +7930,9 @@ app.get('/api/metrics/school/:schoolId', async (req, res) => {
         log(`Metrics school error (${schoolRecord.schoolName}): ${e.message}`, 'ERROR');
         res.status(500).json({ error: e.message });
     }
-});
+};
+
+app.get('/api/metrics/school/:schoolId', mountLegacyMetricsRoute('metrics.school', legacyMetricsSchoolHandler));
 
 // ---------------------------------------------------------------------------
 // DATA BACKBONE — endpoint diagnóstico (admin only)
