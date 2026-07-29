@@ -89,6 +89,73 @@ export class CanonicalBlocked extends Error {
 
 // ── utilidades puras ────────────────────────────────────────────────────────
 
+/**
+ * Envuelve `res.json`/`res.send` para capturar **una sola vez** el body que el
+ * handler legacy ya está enviando, sin alterar la respuesta pública ni volver a
+ * ejecutarlo.
+ *
+ * Antes se reejecutaba el handler completo contra un `res` falso: eso duplicaba
+ * el coste legacy en el hilo principal (~270 ms en `school/villas`) y ejecutaba
+ * la autorización dos veces.
+ *
+ * De la captura solo se conserva una **proyección mínima**: nunca la petición,
+ * ni cabeceras de autenticación, ni tokens, ni el body completo hacia el worker.
+ */
+export function attachLegacyCapture(res) {
+    const captured = { status: 200, body: null, captured: false };
+    if (!res || typeof res.json !== 'function') return captured;
+
+    const origJson = res.json.bind(res);
+    const origSend = typeof res.send === 'function' ? res.send.bind(res) : null;
+
+    res.json = (body) => {
+        if (!captured.captured) {
+            captured.captured = true;
+            captured.status = res.statusCode ?? 200;
+            captured.body = body;            // referencia, no copia: no se serializa dos veces
+        }
+        return origJson(body);
+    };
+    if (origSend) {
+        res.send = (body) => {
+            if (!captured.captured && body && typeof body === 'object') {
+                captured.captured = true;
+                captured.status = res.statusCode ?? 200;
+                captured.body = body;
+            }
+            return origSend(body);
+        };
+    }
+    return captured;
+}
+
+/**
+ * Proyección mínima del body legacy para comparar. Solo las métricas
+ * declaradas comparables; cero PII, cero campos innecesarios.
+ */
+export function projectLegacy({ routeKind, body }) {
+    const contract = ROUTE_CONTRACTS[routeKind];
+    if (!body || typeof body !== 'object') {
+        return { routeKind, usable: false, reason: REASON.LEGACY_SHAPE_INVALID, metrics: {} };
+    }
+    if (!contract?.backboneAugment) {
+        // La ruta no expone la ventana comparable: se registra la razón y no se
+        // conserva nada más.
+        return { routeKind, usable: false, reason: REASON.METRIC_NOT_COMPARABLE, metrics: {} };
+    }
+    const bb = body.backboneMetrics ?? {};
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    return {
+        routeKind,
+        usable: true,
+        windowDays: contract.backboneAugment.windowDays,
+        metrics: {
+            sessions:         num(bb.sessions),
+            distinctContents: num(bb.distinctContents),
+        },
+    };
+}
+
 /** Lee `a.b.c` sin lanzar. */
 export function pick(obj, path) {
     if (!path) return undefined;
@@ -208,69 +275,70 @@ export async function executeMetricsRoute({
         return res.json(projectToLegacyShape(envelope));
     }
 
-    // ── shadow: responde legacy YA; el canónico va aparte ──────────────────
+    // ── shadow: responde legacy YA; el canónico va al pool ─────────────────
     const started = now();
 
     // Sin ejecutor canónico el shadow NO puede compararse. Se contabiliza de
     // forma explícita para que readiness lo detecte, en vez de aparentar que
     // "shadow está activo".
-    if (shadowExecutor && (!canonicalExecutor || !captureLegacy)) {
+    if (shadowExecutor && !canonicalExecutor) {
         shadowExecutor.countCanonicalExecutorMissing();
         log({ evt: 'shadow_config_error', routeKind, error: 'ENGINE_CONFIGURATION_ERROR',
               severity: SEVERITY.ENGINE_ERROR }, 'WARN');
     }
 
-    if (shadowExecutor && canonicalExecutor && captureLegacy) {
-        // El trabajo canónico NO se encola aquí: se difiere al evento `finish`
-        // de la respuesta. Que `submit()` sea síncrono no basta — si el drain
-        // arranca en el mismo turno, consume CPU antes de que el socket haya
-        // terminado de escribir. La invariante que sostiene esto es
-        // canonicalStartedAt >= responseFinishedAt.
+    // La captura se engancha ANTES de ejecutar el handler: se obtiene el body
+    // que el propio handler envía, sin reejecutarlo.
+    const capture = (shadowExecutor && canonicalExecutor) ? attachLegacyCapture(res) : null;
+
+    if (capture) {
         const queueCanonical = () => {
-            // Una petición no autorizada (o errónea) no genera trabajo shadow:
-            // no hay respuesta legacy válida contra la que comparar, y calcular
-            // el canónico sería trabajo desperdiciado sobre un scope denegado.
-            const status = res?.statusCode ?? 200;
+            // Una petición no autorizada (o errónea) no genera trabajo shadow.
+            const status = capture.status ?? res?.statusCode ?? 200;
             if (status >= 400) {
                 log({ evt: 'shadow_skipped_unauthorized', routeKind, status }, 'INFO');
                 return;
             }
+            const legacyProjection = projectLegacy({ routeKind, body: capture.body });
             const responseFinishedAt = now();
+
             shadowExecutor.submit({
                 routeKind,
                 canonicalQueuedAt: now(),
                 responseFinishedAt,
                 task: async () => {
-                let canonical = null, canonicalError = null, period = null, organizationId = null;
-                try {
-                    const out = await canonicalExecutor({ req });
-                    canonical = out?.envelope ?? null;
-                    period = out?.period ?? null;
-                    organizationId = out?.organizationId ?? null;
-                } catch (e) {
-                    canonicalError = e?.code ?? 'CANONICAL_SOURCE_ERROR';
-                }
-                if (canonicalError) {
-                    log({ evt: 'shadow_canonical_error', routeKind, reasonCode: REASON.CANONICAL_SOURCE_ERROR,
-                          severity: SEVERITY.ENGINE_ERROR }, 'WARN');
-                    return { canonicalError: true, differences: [] };
-                }
-                const legacySnapshot = await captureLegacy({ req });
-                const cmp = compareMetrics({ routeKind, organizationId, legacy: legacySnapshot,
-                                             canonical, canonicalPeriod: period });
-                for (const d of cmp.differences) log({ evt: 'shadow_difference', ...d }, 'INFO');
-                if (cmp.differences.length === 0) {
-                    log({ evt: 'shadow_no_difference', routeKind, organizationId,
-                          skipped: cmp.skipped.length }, 'INFO');
-                }
+                    let out = null, canonicalError = null;
+                    try {
+                        out = await canonicalExecutor({ req });
+                    } catch (e) {
+                        canonicalError = e?.code ?? 'CANONICAL_SOURCE_ERROR';
+                    }
+                    if (canonicalError || !out?.ok) {
+                        const code = canonicalError ?? out?.error ?? 'CANONICAL_SOURCE_ERROR';
+                        log({ evt: 'shadow_canonical_error', routeKind, reasonCode: REASON.CANONICAL_SOURCE_ERROR,
+                              code, severity: SEVERITY.ENGINE_ERROR }, 'WARN');
+                        return { canonicalError: true, differences: [] };
+                    }
+                    const cmp = compareProjections({
+                        routeKind,
+                        organizationId: out.projection?.organizationId ?? null,
+                        legacyProjection,
+                        canonicalProjection: out.projection,
+                        canonicalPeriod: out.period ?? out.projection?.period ?? null,
+                    });
+                    for (const d of cmp.differences) log({ evt: 'shadow_difference', ...d }, 'INFO');
+                    if (cmp.differences.length === 0) {
+                        log({ evt: 'shadow_no_difference', routeKind,
+                              organizationId: out.projection?.organizationId ?? null,
+                              skipped: cmp.skipped.length }, 'INFO');
+                    }
                     return cmp;
                 },
             });
         };
 
-        // Se engancha al ciclo real de Express. `once` evita doble encolado si
-        // llegan `finish` y `close`. Si el objeto no es un response de Express
-        // (tests con dobles), se difiere con setImmediate: nunca en este turno.
+        // Ciclo real de Express. `once` + guard evita doble encolado si llegan
+        // `finish` y `close`.
         if (typeof res?.once === 'function') {
             let queued = false;
             const oncePerResponse = () => { if (!queued) { queued = true; queueCanonical(); } };
@@ -287,4 +355,65 @@ export async function executeMetricsRoute({
         shadowExecutor.markLegacyCompleted(now());
     }
     return out;
+}
+
+/**
+ * Compara PROYECCIONES pequeñas y agregadas. Nunca recibe bodies completos ni
+ * eventos: solo los valores declarados comparables.
+ */
+export function compareProjections({ routeKind, organizationId = null,
+                                     legacyProjection, canonicalProjection, canonicalPeriod }) {
+    const differences = [];
+    const skipped = [];
+    const contract = ROUTE_CONTRACTS[routeKind];
+    const declaredLegacyPeriod = contract?.backboneAugment
+        ? { kind: contract.backboneAugment.periodKind, days: contract.backboneAugment.windowDays }
+        : { kind: contract?.legacyCore?.periodKind ?? 'UNDETERMINED', days: null };
+
+    if (!legacyProjection?.usable) {
+        skipped.push({ reasonCode: legacyProjection?.reason ?? REASON.LEGACY_SHAPE_INVALID,
+                       comparisonStatus: COMPARISON_STATUS.PERIOD_UNKNOWN });
+        return { differences, skipped, shapeError: legacyProjection?.reason === REASON.LEGACY_SHAPE_INVALID };
+    }
+    if (!canonicalProjection || canonicalProjection.contractVersion !== 2) {
+        return { differences: [{ routeKind, organizationId, metricKey: null,
+            reasonCode: REASON.CANONICAL_SHAPE_INVALID, severity: SEVERITY.ENGINE_ERROR,
+            comparisonStatus: COMPARISON_STATUS.PERIOD_UNKNOWN }], skipped, shapeError: true };
+    }
+
+    for (const key of COMPARABLE_KEYS) {
+        const entry = matrixEntry(key);
+        const period = periodsAreComparable({ routeKind, metricKey: key, canonicalPeriod });
+        if (!period.comparable) {
+            skipped.push({ metricKey: key, reasonCode: period.reason ?? REASON.METRIC_NOT_COMPARABLE,
+                comparisonStatus: period.reason === REASON.PERIOD_DIFFERENCE
+                    ? COMPARISON_STATUS.PERIOD_NOT_COMPARABLE : COMPARISON_STATUS.PERIOD_UNKNOWN,
+                legacyPeriod: declaredLegacyPeriod, canonicalPeriod: sanitizePeriod(canonicalPeriod) });
+            continue;
+        }
+        const legacyValue = legacyProjection.metrics?.[key];
+        const canonicalValue = canonicalProjection.metrics?.[key]?.value;
+        if (!isNum(legacyValue) || !isNum(canonicalValue)) {
+            skipped.push({ metricKey: key, reasonCode: REASON.METRIC_NOT_COMPARABLE,
+                comparisonStatus: COMPARISON_STATUS.PERIOD_UNKNOWN });
+            continue;
+        }
+        if (legacyValue === canonicalValue) continue;
+
+        const absoluteDelta = Math.abs(canonicalValue - legacyValue);
+        const relativeDelta = legacyValue !== 0 ? absoluteDelta / Math.abs(legacyValue) : null;
+        const reasonCode = entry.reason ?? REASON.UNKNOWN_DIFFERENCE;
+        differences.push({
+            routeKind, organizationId,
+            legacyPeriod: declaredLegacyPeriod,
+            canonicalPeriod: sanitizePeriod(canonicalPeriod),
+            comparisonStatus: COMPARISON_STATUS.COMPARABLE,
+            metricKey: key, legacyValue, canonicalValue, absoluteDelta,
+            relativeDelta: relativeDelta == null ? null : Math.round(relativeDelta * 1000) / 1000,
+            reasonCode,
+            severity: severityFor({ reason: reasonCode, relativeDelta }),
+            contractVersion: 2,
+        });
+    }
+    return { differences, skipped, shapeError: false };
 }

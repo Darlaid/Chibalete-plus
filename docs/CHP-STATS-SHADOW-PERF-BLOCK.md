@@ -97,3 +97,73 @@ verdes. Hasta entonces:
 - no desplegar;
 - no activar `METRICS_ENGINE=shadow` en producción;
 - no fusionar `chp/stats-shadow-perf` a la rama desplegable.
+
+---
+
+## Actualización — CHP-STATS-SHADOW-PERF-01B (implementación local)
+
+```
+IMPLEMENTED_LOCALLY
+EQUIVALENCE_PENDING
+BENCHMARK_ACCEPTANCE_PENDING
+NOT_DEPLOYABLE
+```
+
+**El bloqueo de rendimiento NO se declara resuelto todavía**: falta el benchmark
+HTTP de aceptación (`-01D`) y la equivalencia sobre el snapshot completo (`-01C`).
+
+### Qué se implementó
+
+- **Captura única del body legacy.** `attachLegacyCapture` envuelve `res.json` /
+  `res.send` y toma el body que el handler ya está enviando. Se eliminó
+  `buildCaptureLegacy`, que reejecutaba el handler completo (y con él la
+  autorización). Verificado: `legacy_handler_execution_count = 1` en legacy y
+  en shadow.
+- **Proyección mínima.** Del body legacy solo se conserva `sessions` y
+  `distinctContents`; del canónico, esas dos métricas más estados y agregados
+  poblacionales. Nunca cruzan bodies HTTP, eventos, padrón ni PII.
+- **Worker persistente** (`shadowWorker.mjs`): importa el mismo
+  `computeCanonicalMetrics` y el mismo provider; SQLite read-only; sin
+  `CREATE TABLE`, sin `journal_mode`, sin `insights.db`, sin `analytics_db.json`.
+- **Pool acotado** (`shadowWorkerPool.mjs`): estados
+  `STARTING/READY/DEGRADED/STOPPING/STOPPED`, cola acotada, timeout, descarte de
+  respuestas tardías, crash + respawn con **backoff exponencial acotado**,
+  circuit breaker y shutdown limpio. `METRICS_SHADOW_WORKERS` default **1**,
+  máximo duro **4**; un valor inválido es error explícito, y el tamaño **nunca**
+  se deriva del número de CPU.
+
+### Protocolo del worker
+
+Hacia el worker: `jobId`, `protocolVersion`, `scopeKind`, identificadores
+mínimos, `period`, `idleMs`, `includeQuality`, `nowTs`.
+De vuelta: `jobId`, `ok`, `status`, proyección agregada, `durationMs` y error
+**sanitizado** (solo código). Los identificadores viven en memoria durante el job
+y no se registran en logs, métricas ni errores.
+
+### Verificación funcional (fixtures del snapshot)
+
+| Institución | Resultado del worker |
+|---|---|
+| Villas de Aranjuez | 90/80/80/0 · `MEASURED` · sessions 60 |
+| Nuevo Bosque | 90/80/80/0 · `NO_ACTIVITY` |
+| FilBo 2026 | **47/46/44/2** · `NO_ACTIVITY` |
+| Externado | 2/0/0 · `NO_DATA` · **sessions `null`, no 0** |
+
+También `group`, `user` y el listado responden 200. 7 jobs enviados, 7
+completados, 0 fallos, 0 crashes, shutdown limpio.
+
+### Sobre WAL/SHM
+
+`events.db` está en **modo WAL**: cualquier lector —incluida la API productiva
+actual— necesita el archivo `-shm`. Con un fixture fiel (que incluye
+`events.db-wal` y `events.db-shm`, como producción, donde existen desde el
+25 y el 28 de julio) el worker **no crea ningún archivo nuevo** y `events.db`
+queda byte a byte igual. Un fixture que copie solo `events.db` sí verá aparecer
+los compañeros: es comportamiento estándar de SQLite, no una escritura del
+shadow.
+
+### Pendientes
+
+- `-01C`: equivalencia de cifras sobre el snapshot productivo completo.
+- `-01D`: benchmark HTTP de aceptación de las 6 rutas contra el umbral.
+- Escalabilidad 5×/10×.

@@ -186,6 +186,7 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
+import { createShadowWorkerPool, resolveWorkerCount } from './metrics/shadowWorkerPool.mjs';
 import { computeCanonicalMetrics } from './metrics/canonicalMetricsService.mjs';
 import { createMetricsProvider } from './metrics/metricsProvider.mjs';
 import { resolveOrganizationInput } from './metrics/legacyMetricsAdapter.mjs';
@@ -7713,66 +7714,60 @@ const backboneWindow = (nowTs) => ({
     days: SHADOW_BACKBONE_WINDOW_DAYS,
 });
 
-/** Ejecutor canónico real por ruta. Recibe el scope YA autorizado. */
+// Pool de workers: perezoso y solo bajo `shadow`. En `legacy` no se crea
+// ningún worker, así que el modo productivo actual no paga absolutamente nada.
+let _shadowPool = null;
+function shadowPool() {
+    if (_shadowPool) return _shadowPool;
+    _shadowPool = createShadowWorkerPool({
+        workers: resolveWorkerCount(),
+        timeoutMs: Number(process.env.METRICS_SHADOW_TIMEOUT_MS ?? 5000),
+        queueLimit: Number(process.env.METRICS_SHADOW_QUEUE_LIMIT ?? 50),
+        log: (o, lvl) => log(JSON.stringify(o), lvl || 'INFO'),
+    });
+    return _shadowPool;
+}
+
+/**
+ * Ejecutor canónico real por ruta. Recibe el scope YA autorizado y delega el
+ * cómputo en el worker: **nada se calcula en el hilo principal**.
+ */
 function buildCanonicalExecutor(routeKind) {
     return async ({ req }) => {
         const nowTs = Date.now();
         const period = backboneWindow(nowTs);
-        const base = {
-            period, idleMs: CANONICAL_IDLE_MS, includeQuality: true,
-            provider: canonicalProvider(), clock: () => nowTs,
-        };
+        const base = { period, idleMs: CANONICAL_IDLE_MS, includeQuality: true, nowTs };
 
+        let msg;
         if (routeKind === 'metrics.schools') {
-            const r = await computeCanonicalMetrics({ scopeKind: 'organizations', ...base });
-            return { envelope: r.body, period, organizationId: null };
-        }
-        if (routeKind === 'metrics.school') {
+            msg = { scopeKind: 'organizations', ...base };
+        } else if (routeKind === 'metrics.school') {
             // El slug es SOLO compatibilidad de entrada: se resuelve contra el
             // registro institucional, nunca contra el texto libre del grupo, y
             // una coincidencia ambigua se rechaza en vez de tomar la primera.
-            const { schools } = canonicalProvider().loadDirectory();
+            const schools = readJSON(SCHOOLS_DB) || [];
             const { organizationId } = resolveOrganizationInput(
                 decodeURIComponent(req.params.schoolId), schools);
-            if (!organizationId) { const e = new Error('ambiguous'); e.code = 'ORGANIZATION_AMBIGUOUS'; throw e; }
-            const r = await computeCanonicalMetrics({ scopeKind: 'organization', organizationId, ...base });
-            return { envelope: r.body, period, organizationId };
+            if (!organizationId) return { ok: false, error: 'ORGANIZATION_AMBIGUOUS' };
+            msg = { scopeKind: 'organization', organizationId, ...base };
+        } else if (routeKind === 'metrics.course') {
+            msg = { scopeKind: 'group', groupId: req.params.courseId, ...base };
+        } else if (routeKind === 'metrics.student') {
+            msg = { scopeKind: 'user', userId: req.params.userId, ...base };
+        } else {
+            return { ok: false, error: 'UNKNOWN_ROUTE_KIND' };
         }
-        if (routeKind === 'metrics.course') {
-            const r = await computeCanonicalMetrics({ scopeKind: 'group', groupId: req.params.courseId, ...base });
-            return { envelope: r.body, period, organizationId: r.body?.organizationId ?? null };
-        }
-        if (routeKind === 'metrics.student') {
-            const r = await computeCanonicalMetrics({ scopeKind: 'user', userId: req.params.userId, ...base });
-            return { envelope: r.body, period, organizationId: r.body?.organizationId ?? null };
-        }
-        const e = new Error('routeKind'); e.code = 'UNKNOWN_ROUTE_KIND'; throw e;
-    };
-}
 
-/**
- * Reejecuta el handler legacy contra un `res` de captura para obtener su body
- * y poder compararlo. Ocurre DESPUÉS de la respuesta pública, dentro del
- * ejecutor acotado, así que no afecta a la latencia observada por el cliente.
- */
-function buildCaptureLegacy(legacyHandler) {
-    return async ({ req }) => {
-        let captured = null;
-        const capture = {
-            statusCode: 200,
-            status(c) { this.statusCode = c; return this; },
-            set() { return this; },
-            json(b) { captured = b; return this; },
-            send(b) { captured = b; return this; },
-        };
-        await legacyHandler(req, capture);
-        return captured;
+        const r = await shadowPool().submit(msg);
+        if (!r.ok) return { ok: false, error: r.error };
+        return { ok: true, status: r.status, projection: r.projection, period };
     };
 }
 
 function mountLegacyMetricsRoute(routeKind, legacyHandler) {
+    // La captura del body legacy ocurre DENTRO de la frontera, envolviendo
+    // res.json: el handler se ejecuta exactamente una vez.
     const canonicalExecutor = buildCanonicalExecutor(routeKind);
-    const captureLegacy = buildCaptureLegacy(legacyHandler);
     return async function legacyMetricsRoute(req, res) {
         return executeMetricsRoute({
             mode: metricsEngineMode(),
@@ -7780,7 +7775,6 @@ function mountLegacyMetricsRoute(routeKind, legacyHandler) {
             req, res,
             legacyHandler,
             canonicalExecutor,
-            captureLegacy,
             shadowExecutor: legacyMetricsShadowExecutor,
             log: (o, lvl) => log(JSON.stringify(o), lvl || 'INFO'),
         });
