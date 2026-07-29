@@ -294,6 +294,111 @@ default silencioso.
 
 ---
 
+## Actualización — `CHP-STATS-LEGACY-PERF-01D` (equivalencia completa)
+
+```
+FULL_SNAPSHOT_EQUIVALENCE_GREEN
+HTTP_ACCEPTANCE_PENDING
+FLAG_DEFAULT_OFF
+NOT_DEPLOYABLE
+```
+
+### Metodología
+
+El flag se resuelve al **cargar** el módulo, así que alternarlo dentro de un
+proceso no probaría nada: cada brazo corre en su **propio proceso hijo**, con
+las mismas fuentes, `TZ=UTC` y el **mismo reloj fijo** (`1800000000000`)
+instalado *antes* de importar `metricsService`.
+
+Eso permite comparar **byte a byte sin normalizar ningún campo funcional**:
+`computedAt` coincide, y también la regla de `abandoned` de `computeContentStats`,
+que depende de `Date.now()`. Si hubiera hecho falta excluir un campo del
+contrato, habría sido señal de no-determinismo, no motivo para maquillar.
+
+Comparación por hash SHA-256 de la serialización canónica de cada caso —el
+orden de claves forma parte del contrato—, con recuperación del detalle solo
+para los casos que divirgieran.
+
+### Matriz: 687 casos por corrida, dos corridas
+
+| Alcance | Casos |
+|---|---|
+| Usuarios canónicos | **647** |
+| Grupos | **20** |
+| Instituciones direccionables | **15** |
+| Listado institucional | 1 |
+| Inexistentes y malformados | 4 |
+
+> **15 instituciones, no 4.** `schools_db.json` registra 4, pero
+> `computeSchoolMetrics` resuelve contra el texto libre `group.school`, del que
+> salen **15 nombres distintos** (incluidos once `Chibalete Club Filbo 20XX`).
+> La matriz cubre las 15, que es un superconjunto estricto de las 4 registradas.
+>
+> **Externado** está registrada pero **no tiene grupos**, así que no es
+> direccionable: lanza `no groups found for school`, idéntico en ambos brazos.
+> Es el mismo 404 observado en el benchmark del shadow.
+
+### Resultado
+
+| | RUN_1 (orden estable) | RUN_2 (orden barajado, semilla fija) |
+|---|---|---|
+| `EXACT_MATCH` | **687 / 687** | **687 / 687** |
+| Divergencias | **0** | **0** |
+
+Determinismo: brazo `off` y brazo `on`, RUN_1 contra RUN_2, **idénticos**.
+
+### Contadores
+
+| | off | on |
+|---|---|---|
+| Contextos creados / liberados | 0 / 0 | **35 / 35** |
+| Llamadas sin contexto | 1784 | 649 |
+| Memo misses / hits | 0 / 0 | 890 / **245** |
+
+Los 35 contextos son exactamente los 20 grupos más las 15 instituciones: **uno
+por agregación**. Las 649 llamadas sin contexto del brazo `on` son los 647
+usuarios más los dos casos límite de usuario — la ruta de alumno suelto no crea
+contexto, por diseño. Los 245 aciertos son las recomputaciones eliminadas donde
+un alumno pertenece a más de un grupo del mismo colegio.
+
+### Verificaciones dirigidas (21 aserciones en cada brazo)
+
+Generation guard, concurrencia con 2/10/50 contextos, institución registrada sin
+grupos, ausencia de `AsyncLocalStorage`, ausencia de caché de datos a nivel de
+módulo, y `leoICDLIBridge` conservando su camino sin contexto y su caché propia.
+
+### Formatters: lo que NO pude ejecutar
+
+`formatStudentResponse`, `formatCourseResponse`, `formatSchoolResponse` y
+`buildStudentBreakdownRow` son **privados de `server.js`**, que llama a
+`app.listen()` sin guarda. No hay forma de invocarlos sin levantar un servidor
+HTTP —prohibido en esta unidad— ni sin exportarlos, que está fuera de lo
+autorizado. **No se ejecutaron.**
+
+Lo que sí se estableció: son función **pura de `raw`** más `users` y
+`contentMap`. Se verificó que ninguno de los cuatro menciona el flag, el
+contexto ni vuelve a llamar a `compute*`. Como `raw` es idéntico byte a byte en
+ambos brazos y las otras entradas también, el DTO resultante es idéntico por
+construcción. Es un argumento sólido, pero **no es una ejecución**: la
+verificación directa corresponde a `-01E`, que sí levanta HTTP.
+
+### Integridad
+
+Snapshot original **byte a byte intacto**. Copia de trabajo sin cambios en
+ningún `.db` ni `.json`. Sin `.tmp`, sin `insights.db`, sin ficheros nuevos.
+
+Los compañeros `-wal`/`-shm` de SQLite desaparecen al cerrar la última conexión:
+es ciclo de vida del motor, no una escritura sobre los datos. El hash del `.db`
+no cambia, que es lo que importa.
+
+### Qué sigue sin estar probado
+
+- El comportamiento **HTTP** de extremo a extremo (`-01E`).
+- El gemelo `engines/metricsEngine.ts`, con el mismo patrón cuadrático, sigue
+  sin tocar (verificado: mismo blob que en el merge-base).
+
+---
+
 ## Alcance de lo medido
 
 Las cifras salen de la capa de servicio (`metricsService`, `progressService`)

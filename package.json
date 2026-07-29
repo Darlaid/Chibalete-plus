@@ -37,7 +37,7 @@
     "test:seed-local-admin": "node scripts/__test__/seed-local-admin.test.mjs",
     "test:metrics-api": "node server/__test__/metricsApiV2.test.js",
     "test:metrics-shadow": "node server/__test__/metricsShadowBoundary.test.js",
-    "test:legacy-perf": "node scripts/perf/request-index.test.mjs && node server/__test__/metricsRequestContext.test.js"
+    "test:legacy-perf": "node scripts/perf/request-index.test.mjs && node server/__test__/metricsRequestContext.test.js && node server/__test__/metricsEquivalenceHarness.test.js"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
