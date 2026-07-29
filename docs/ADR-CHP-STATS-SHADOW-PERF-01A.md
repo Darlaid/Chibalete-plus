@@ -1,7 +1,57 @@
 # ADR CHP-STATS-SHADOW-PERF-01A — Arquitectura de ejecución del shadow canónico
 
-**Estado:** decidido, **no implementado**. Rama `chp/stats-shadow-perf`.
+**Estado:** implementado y **REFUTADO por medición**. Rama `chp/stats-shadow-perf`.
 Producción intacta en `5703ebb` con `METRICS_ENGINE=legacy`.
+
+> ## ⚠️ Corrección — `CHP-STATS-SHADOW-PERF-01D`
+>
+> ```
+> DECISION_STATUS: SUPERSEDED_BY_MEASUREMENT
+>
+> REJECTED:
+>   worker thread dentro del mismo contenedor/API
+>   bajo cuota de CPU compartida (cpus:1.0)
+>
+> CAUSA:
+>   · el worker thread aísla el EVENT LOOP;
+>   · el worker thread NO aísla la cuota CFS de CPU;
+>   · API y worker compiten dentro del mismo cgroup de cpus:1.0;
+>   · la contención degrada incluso peticiones que NO generan trabajo shadow.
+> ```
+>
+> **La decisión A + D2-pool no cumple el umbral.** El benchmark HTTP de
+> aceptación mide **+12 % a +73 % de p95 en las siete rutas**, con la petición
+> mediana casi duplicada. Detalle en `docs/CHP-STATS-SHADOW-PERF-BLOCK.md`.
+>
+> La evidencia original de este ADR **se conserva íntegra** más abajo. La
+> secuencia hipótesis → experimento → refutación es el registro: la
+> descomposición de coste y el descarte de las opciones B y C siguen siendo
+> válidos; lo que se refuta es la conclusión de que D2-pool bastaba.
+>
+> **Dónde falla el razonamiento de este ADR:** la tabla de «coste main-thread
+> previsto < 1 ms» es correcta y se confirmó (p95 0,74 ms), pero es la métrica
+> equivocada. Sacar el cómputo del event loop **no lo saca de la cuota de CPU
+> del contenedor**: el worker es un hilo del mismo cgroup, limitado a
+> `cpus: 1.0`. El modo legacy ya consume 0,88 de esa cuota, así que el worker no
+> encuentra CPU libre — la toma del hilo principal.
+>
+> Consecuencias medidas que este ADR no anticipó:
+> - el job canónico previsto en **p95 206 ms** dura **1973 ms de media** bajo
+>   carga real, porque el worker también está estrangulado;
+> - el RSS sube ~100 MB, no los ~20 MB estimados;
+> - una ruta 404 que **no encola ningún job** se degrada un +60 %, lo que prueba
+>   que el coste es contención entre peticiones, no sobrecoste por petición;
+> - **ningún sample rate lo evita**: al 10 % incumplen las 7 rutas.
+>
+> Lo que este ADR sí acertó: el worker elimina el bloqueo del event loop, no
+> duplica el motor, preserva la exactitud y la respuesta pública queda
+> **idéntica** (cero diferencias). El diagnóstico de dónde se va el tiempo
+> (`loadEvents` 53 %, `computeOrganization` 42 %) sigue siendo válido.
+>
+> El siguiente intento debe atacar el **consumo total de CPU por petición**, no
+> su ubicación. La vía más barata es abaratar el legacy —`USERS_DB` sin cachear
+> y `getAllProgressAsMap()` completo en cada petición—, que además ya es un
+> problema en producción hoy, sin shadow alguno.
 
 ## Contexto
 
@@ -71,7 +121,13 @@ ahorrar ~13 ms contando `loadDirectory`. **No compensa.**
 | RSS del worker | ~20 MB |
 | Cierre | limpio |
 
-## Decisión: **A + D2-pool**
+## Decisión: **A + D2-pool** — `SUPERSEDED_BY_MEASUREMENT` (`-01D`)
+
+> Lo que sigue es el razonamiento **original**, conservado sin editar. Su
+> conclusión quedó refutada por el benchmark HTTP: ver la corrección al inicio
+> del documento. El fallo está en la premisa de la tabla siguiente —«coste
+> main-thread previsto»—, que es la magnitud equivocada para decidir: mide dónde
+> se ejecuta el cómputo, no cuánta CPU del contenedor consume.
 
 El hilo principal pasa a pagar **menos de 1 ms** por petición muestreada. El
 margen mínimo del umbral es **+15 ms** en las seis rutas, así que cabe con

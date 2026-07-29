@@ -191,3 +191,14 @@ dummy_text.txt
 # healthHandler.js lo lee si existe; si no, cae a env vars/package.json.
 server/.deploy-info
 .codex-freeze/
+
+# CHP-STATS-SHADOW-PERF-01D — salidas del banco de pruebas del shadow.
+# El harness (scripts/perf/*.mjs) SÍ se versiona; lo que produce, NO:
+# datasets sintéticos generados, resultados crudos, muestras del worker y
+# perfiles. Se regeneran con el generador determinista y su semilla.
+/bench-results/
+/scripts/perf/bench-results/
+/scripts/perf/**/dataset-*/
+*.ndjson
+*.cpuprofile
+*.heapsnapshot
