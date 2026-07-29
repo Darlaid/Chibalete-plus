@@ -101,6 +101,15 @@ jobs:
       - name: Contrato canónico de métricas (motor de referencia)
         run: npm run test:metric-contract
 
+      # CHP-STATS-SHADOW-PERF-01D-CHKPT — trinquete ESTRUCTURAL del shadow y
+      # barrera de destino del banco de pruebas. No es aceptación de
+      # rendimiento: la arquitectura de worker en el contenedor está rechazada.
+      # Se ejecuta en CI para que las propiedades estructurales que sí eran
+      # correctas no se pierdan, y para que el harness nunca pueda apuntar a
+      # producción.
+      - name: Estructura del shadow y barrera del banco de pruebas
+        run: npm run test:metrics-shadow
+
       - name: Equivalencia de la réplica del CIS (shadow comparison)
         run: node scripts/__test__/shadowScopeEquivalence.test.mjs
 
