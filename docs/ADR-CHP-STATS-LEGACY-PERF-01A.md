@@ -181,6 +181,119 @@ al terminar. No hay crecimiento entre peticiones.
 Después, y no antes: rebase de `chp/stats-shadow-perf` sobre la mejora
 desplegada, corrección del comparador y nuevo benchmark del shadow.
 
+---
+
+## Actualización — `CHP-STATS-LEGACY-PERF-01B` (implementación local)
+
+```
+NO CROSS-REQUEST CACHE
+REQUEST-SCOPED COMPUTATION CONTEXT
+
+IMPLEMENTED_LOCALLY
+UNIT_EQUIVALENCE_GREEN
+SERVICE_BENCHMARK_GREEN
+FULL_SNAPSHOT_EQUIVALENCE_PENDING
+HTTP_ACCEPTANCE_PENDING
+NOT_DEPLOYABLE
+```
+
+### Qué se implementó
+
+`server/metricsService.js`, tras flag y **apagado por defecto**:
+
+- **`createMetricsRequestContext()`** — índices construidos una vez por cálculo
+  de nivel superior: `progressByUser`, `eventsByUser`, `sessionsByUser`. Se
+  indexa **solo donde está el coste**; la memoria de Leo (0,04-0,12 ms) y las
+  interacciones (0,002 ms) se dejan intactas: indexarlas no compensaría el
+  riesgo semántico de tocar el prefijo `userId__`.
+- **`parseSessions` se ejecuta una sola vez**, y es la función de siempre. Como
+  agrupa por usuario antes de procesar, cada usuario se reconstruye de forma
+  independiente: indexar su salida es idéntico a filtrarla. **No hay un segundo
+  algoritmo de sesiones.**
+- **Memoización** `Map<userId, resultado>` con vida de contexto.
+- `computeStudentMetrics(userId, options)`, `computeCourseMetrics(courseId,
+  options)`, `computeSchoolMetrics(schoolId, options)` — el parámetro es
+  **opcional**: sin él, el camino es exactamente el de antes.
+
+### Clave de memoización
+
+`userId`, y la razón por la que basta: esta función **no admite periodo,
+filtros ni opciones**. Su único parámetro funcional es el usuario; el resto de
+sus entradas es el estado de módulo que fija `init()`.
+
+De eso se ocupa **`generation`**: `init()` incrementa un contador y el contexto
+guarda el valor con el que se construyó. Un contexto usado después de otro
+`init()` **lanza** en vez de devolver cifras de datos que ya no son los
+vigentes. Por eso `userId` es una clave completa *dentro* de un contexto, y no
+lo sería fuera de él.
+
+### Lifecycle
+
+Una instancia por cálculo de nivel superior, pasada **explícitamente** (sin
+`AsyncLocalStorage`). Quien la crea la libera; si viene del caller, el caller
+decide. `dispose()` vacía los índices y la memo, y un contexto liberado ya no se
+puede usar. Cero estado entre peticiones: sin invalidación, sin TTL, sin
+fingerprint, sin divergencia entre instancias.
+
+### La ruta de un solo alumno NO crea contexto
+
+Medido: para un único alumno, construir los índices cuesta **+47 %**
+(4,06 → 5,98 ms). Indexar todo el progreso y todos los eventos para ahorrar un
+solo cálculo es coste puro. El contexto lo crean **solo** las agregaciones de
+varios alumnos, que es donde estaba el problema.
+
+### Resultado del microbenchmark de servicio
+
+Diseño intercalado OFF/ON/ON/OFF sobre copia del snapshot, en el contenedor
+productivo:
+
+| Objetivo | off p50 | on p50 | mejora | off p95 | on p95 |
+|---|---|---|---|---|---|
+| `ANCHOR_1` institución alta | 736,1 ms | **9,0 ms** | **−98,8 %** | 2080,3 ms | **14,3 ms** |
+| `ANCHOR_2` sin actividad | 641,6 ms | **8,1 ms** | **−98,7 %** | 1476,9 ms | 16,8 ms |
+| `ANCHOR_3` institución | 356,1 ms | **8,4 ms** | **−97,6 %** | 447,1 ms | 12,8 ms |
+| `GROUP_1` grupo | 369,2 ms | **8,3 ms** | **−97,8 %** | 447,5 ms | 14,2 ms |
+| `USER_1` alumno | 4,0 ms | 4,9 ms | — | 6,8 ms | 5,7 ms |
+
+`USER_1` ejecuta **el mismo código** en ambos brazos (no se crea contexto), así
+que su diferencia es ruido de medición sobre una operación de 4 ms, no una
+regresión.
+
+Trabajo repetido eliminado en `ANCHOR_1`: **180 llamadas → 90 cálculos reales +
+90 aciertos de memo**. Escaneo completo de progreso por petición: **1**. De
+eventos: **1**.
+
+### Exactitud
+
+40 aserciones en `server/__test__/metricsRequestContext.test.js`, comparación
+byte a byte salvo `computedAt`: alumno con y sin progreso, con y sin eventos,
+duplicados, eventos huérfanos, sesión incompleta, tipo de evento desconocido,
+usuario fuera del padrón, usuario inexistente, grupo sin actividad, institución
+sin grupos (mismo error), 50 contextos concurrentes.
+
+En el microbenchmark, las cinco dianas dan **idéntico** con flag on y off.
+
+### Observabilidad
+
+Contadores agregados en `metricsContextCounters`: creados, liberados, registros
+indexados, hits, misses, llamadas legacy y duración de construcción. **Cero
+identificadores**, cero claves de memo, cero PII — verificado por test.
+
+### Rollback
+
+`LEGACY_METRICS_REQUEST_CONTEXT` ausente o `off` devuelve el comportamiento
+anterior sin desplegar nada. Un valor no reconocido es error explícito, no un
+default silencioso.
+
+### Pendiente
+
+- Equivalencia sobre los **647** usuarios del snapshot completo (`-01D`).
+- Benchmark HTTP de aceptación de las siete rutas (`-01E`).
+- El gemelo TypeScript `engines/metricsEngine.ts` tiene el **mismo patrón
+  cuadrático** y no se ha tocado: queda fuera del alcance de esta rama.
+
+---
+
 ## Alcance de lo medido
 
 Las cifras salen de la capa de servicio (`metricsService`, `progressService`)

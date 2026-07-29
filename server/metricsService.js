@@ -28,6 +28,16 @@ let _groups           = [];
 let _users            = [];
 let _initialized      = false;
 
+/**
+ * Generación de los datos cargados. Se incrementa en cada `init()`.
+ *
+ * Un `MetricsRequestContext` guarda la generación con la que se construyó: si
+ * alguien intentara reutilizarlo después de otro `init()`, sus índices ya no
+ * describirían los datos vigentes y devolvería cifras de otra petición. En vez
+ * de arriesgar eso en silencio, el contexto lo detecta y lanza.
+ */
+let _generation = 0;
+
 /** Load all flat-file data into the module. Must be called before any compute* call. */
 export function init(raw) {
   _events          = Array.isArray(raw.events)          ? raw.events          : [];
@@ -37,6 +47,147 @@ export function init(raw) {
   _groups          = Array.isArray(raw.groups) ? raw.groups : [];
   _users           = Array.isArray(raw.users)  ? raw.users  : [];
   _initialized     = true;
+  _generation     += 1;
+}
+
+// ---------------------------------------------------------------------------
+// CHP-STATS-LEGACY-PERF-01B — CONTEXTO DE CÁLCULO POR PETICIÓN
+//
+// Medido en `-01A`: `computeSchoolMetrics` llama a `computeStudentMetrics` dos
+// veces por alumno (180 llamadas para 90 alumnos) y CADA llamada vuelve a
+// recorrer el progreso completo (73-90 % del coste) y a reconstruir las
+// sesiones de toda la plataforma (21-32 %), para quedarse con un solo usuario.
+// El coste es O(alumnos x datos).
+//
+// La corrección NO es una caché: es dejar de repetir el mismo trabajo dentro de
+// la misma petición. El contexto se crea al empezar el cálculo, se pasa
+// explícitamente y desaparece al terminar. Sin estado entre peticiones no hay
+// invalidación, ni TTL, ni fingerprint, ni divergencia entre instancias.
+// ---------------------------------------------------------------------------
+
+const REQUEST_CONTEXT_FLAG = 'LEGACY_METRICS_REQUEST_CONTEXT';
+
+export class MetricsConfigError extends Error {
+  constructor(detail) {
+    super(`METRICS_CONFIG_ERROR: ${detail}`);
+    this.name = 'MetricsConfigError';
+    this.code = 'METRICS_CONFIG_ERROR';
+  }
+}
+
+/**
+ * Resuelve el flag. **Default `off`**: la ausencia de la variable nunca activa
+ * nada, y un valor no reconocido es un error explícito en vez de un default
+ * silencioso que nadie revisaría.
+ */
+export function resolveRequestContextFlag(env = process.env) {
+  const raw = env?.[REQUEST_CONTEXT_FLAG];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return false;
+  const v = String(raw).trim().toLowerCase();
+  if (v === 'off' || v === 'false' || v === '0') return false;
+  if (v === 'on'  || v === 'true'  || v === '1') return true;
+  throw new MetricsConfigError(`${REQUEST_CONTEXT_FLAG} debe ser on|off, recibido "${raw}"`);
+}
+
+// Se resuelve UNA vez al cargar el módulo: el flag nunca se lee dentro del
+// bucle por alumno.
+let _requestContextEnabled = resolveRequestContextFlag();
+
+/** Solo para tests: reevalúa el flag sin reiniciar el proceso. */
+export function __setRequestContextEnabledForTests(value) {
+  _requestContextEnabled = Boolean(value);
+}
+export function isRequestContextEnabled() { return _requestContextEnabled; }
+
+/** Contadores agregados. Sin identificadores, sin claves de memo, sin PII. */
+export const metricsContextCounters = {
+  metrics_request_context_created_total: 0,
+  metrics_request_context_disposed_total: 0,
+  metrics_request_context_progress_records_indexed: 0,
+  metrics_request_context_events_indexed: 0,
+  metrics_student_memo_hits_total: 0,
+  metrics_student_memo_misses_total: 0,
+  metrics_legacy_fallback_calls_total: 0,
+  metrics_request_context_build_duration_ms: 0,
+};
+
+/** Agrupa preservando el orden de aparición. Ausencia → lista vacía, nunca null. */
+function groupBy(rows, keyOf) {
+  const idx = new Map();
+  for (const r of rows) {
+    const k = keyOf(r);
+    let bucket = idx.get(k);
+    if (bucket === undefined) { bucket = []; idx.set(k, bucket); }
+    bucket.push(r);
+  }
+  return idx;
+}
+
+const EMPTY = Object.freeze([]);
+
+/**
+ * Índices y memo con vida de UNA petición.
+ *
+ * Solo se indexa donde está el coste: progreso, eventos y sesiones. La memoria
+ * de Leo (0,04-0,12 ms) y las interacciones (0,002 ms) se dejan como están —
+ * indexarlas no compensaría el riesgo semántico de tocar el prefijo `userId__`.
+ */
+export function createMetricsRequestContext() {
+  if (!_initialized) throw new Error('metricsService: call init() before creating a context');
+  const t0 = Date.now();
+
+  // `parseSessions` se ejecuta UNA vez, la misma función de siempre. Como
+  // agrupa por usuario antes de procesar, cada usuario se reconstruye de forma
+  // independiente: por eso indexar su salida es idéntico a filtrarla por
+  // usuario, y no hace falta un segundo algoritmo de sesiones.
+  const allSessions = parseSessions(_events);
+
+  const ctx = {
+    generation: _generation,
+    progressByUser: groupBy(Object.values(_progress.progressMap || {}), (p) => p.userId),
+    eventsByUser:   groupBy(_events,   (e) => e.userId),
+    sessionsByUser: groupBy(allSessions, (s) => s.userId),
+    memo: new Map(),
+    disposed: false,
+    counters: { memoHits: 0, memoMisses: 0 },
+
+    assertUsable() {
+      if (this.disposed) throw new Error('metricsService: MetricsRequestContext ya liberado');
+      if (this.generation !== _generation) {
+        throw new Error('metricsService: MetricsRequestContext obsoleto (init() posterior)');
+      }
+    },
+    progressFor(userId)  { this.assertUsable(); return this.progressByUser.get(userId)  ?? EMPTY; },
+    eventsFor(userId)    { this.assertUsable(); return this.eventsByUser.get(userId)    ?? EMPTY; },
+    sessionsFor(userId)  { this.assertUsable(); return this.sessionsByUser.get(userId)  ?? EMPTY; },
+
+    /** Libera las referencias para que el contexto no sobreviva a la petición. */
+    dispose() {
+      if (this.disposed) return;
+      this.progressByUser.clear();
+      this.eventsByUser.clear();
+      this.sessionsByUser.clear();
+      this.memo.clear();
+      this.disposed = true;
+      metricsContextCounters.metrics_request_context_disposed_total += 1;
+    },
+  };
+
+  metricsContextCounters.metrics_request_context_created_total += 1;
+  metricsContextCounters.metrics_request_context_progress_records_indexed += ctx.progressByUser.size;
+  metricsContextCounters.metrics_request_context_events_indexed += ctx.eventsByUser.size;
+  metricsContextCounters.metrics_request_context_build_duration_ms += Date.now() - t0;
+  return ctx;
+}
+
+/**
+ * Contexto para un cálculo de nivel superior. Devuelve `null` con el flag
+ * apagado, de modo que la ruta legacy queda exactamente como estaba.
+ */
+function contextForTopLevel(options) {
+  if (options?.context) return { ctx: options.context, owned: false };
+  if (!_requestContextEnabled) return { ctx: null, owned: false };
+  return { ctx: createMetricsRequestContext(), owned: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +630,14 @@ const ABANDONED_DAYS_METRICS = 30;
  * Compute per-content reading progress stats for a user from progress_db.
  * Mirrors the status rules in server.js computeReadingProgress() — kept in sync manually.
  */
-function computeContentStats(userId) {
-    const entries = Object.values(_progress.progressMap || {}).filter(p => p.userId === userId);
+function computeContentStats(userId, ctx = null) {
+    // Con contexto, la rebanada del usuario sale de un índice construido una
+    // sola vez; sin él, el escaneo completo de siempre. Ambos caminos producen
+    // exactamente los mismos registros y en el mismo orden (verificado sobre
+    // los 647 usuarios del padrón en `-01A`).
+    const entries = ctx
+        ? ctx.progressFor(userId)
+        : Object.values(_progress.progressMap || {}).filter(p => p.userId === userId);
     const contents = entries.map(raw => {
         const pct     = raw.canonicalProgress?.globalPercentage ?? 0;
         const history = Array.isArray(raw.history) ? raw.history : [];
@@ -509,13 +666,16 @@ function computeContentStats(userId) {
 }
 
 /** Compute Leo interaction metrics for a user from leo_interactions_db entries and analytics events. */
-function computeLeoMetrics(userId) {
+function computeLeoMetrics(userId, userEvents = null) {
   const userInteractions = _leoInteractions.filter(e => e.userId === userId);
   const totalLeoInteractions = userInteractions.length;
 
   // Offline attempts come from analytics_db (LU Android: leo_interaction_attempted event)
-  const totalLeoOfflineAttempts = _events.filter(
-    e => e.userId === userId && (e.event === 'leo_interaction_attempted' || e.eventType === 'leo_interaction_attempted')
+  // Filtrar la rebanada del usuario por tipo es idéntico a filtrar todos los
+  // eventos por usuario Y tipo; se evita así un segundo recorrido completo.
+  const scope = userEvents ?? _events.filter(e => e.userId === userId);
+  const totalLeoOfflineAttempts = scope.filter(
+    e => (e.event === 'leo_interaction_attempted' || e.eventType === 'leo_interaction_attempted')
   ).length;
 
   // Count by interactionType
@@ -542,14 +702,11 @@ function computeLeoMetrics(userId) {
   return { totalLeoInteractions, totalLeoOfflineAttempts, byType, dominantType, byContent };
 }
 
-export function computeStudentMetrics(userId) {
-  if (!_initialized) throw new Error('metricsService: call init() before computing metrics');
-
-  const userEvents   = _events.filter(e => e.userId === userId);
-  const allSessions  = parseSessions(_events);
-  const sessions     = allSessions.filter(s => s.userId === userId);
+function computeStudentMetricsUncached(userId, ctx) {
+  const userEvents   = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
+  const sessions     = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
   const leoEntries   = getLeoEntriesForUser(userId);
-  const leoMetrics   = computeLeoMetrics(userId);
+  const leoMetrics   = computeLeoMetrics(userId, ctx ? userEvents : null);
 
   const behavioral    = computeBehavioral(sessions, userEvents);
   const readingLevels = computeReadingLevels(behavioral, sessions, leoEntries);
@@ -560,23 +717,70 @@ export function computeStudentMetrics(userId) {
     ? { from: Math.min(...timestamps), to: Math.max(...timestamps) }
     : null;
   const lastAccessAt  = timestamps.length > 0 ? Math.max(...timestamps) : null;
-  const contentStats  = computeContentStats(userId);
+  const contentStats  = computeContentStats(userId, ctx);
 
   return { userId, behavioral, readingLevels, icdli, leoMetrics, contentStats, dataWindow, lastAccessAt, computedAt: Date.now() };
+}
+
+/**
+ * @param {string} userId
+ * @param {{context?: object}} [options]  contexto de petición, OPCIONAL.
+ *
+ * Sin `options.context` el comportamiento es exactamente el de siempre: los
+ * call sites existentes no cambian ni una línea.
+ *
+ * Sobre la clave de memoización: esta función no admite periodo, filtros ni
+ * opciones — su único parámetro funcional es `userId`. El resto de sus entradas
+ * es el estado de módulo que fija `init()`, y de eso se ocupa `generation`: un
+ * contexto construido antes de otro `init()` se rechaza en vez de devolver
+ * cifras de datos que ya no son los vigentes. Por eso `userId` es una clave
+ * completa DENTRO de un contexto, y no lo sería fuera de él.
+ */
+export function computeStudentMetrics(userId, options = {}) {
+  if (!_initialized) throw new Error('metricsService: call init() before computing metrics');
+
+  const ctx = options?.context ?? null;
+  if (!ctx) {
+    metricsContextCounters.metrics_legacy_fallback_calls_total += 1;
+    return computeStudentMetricsUncached(userId, null);
+  }
+
+  ctx.assertUsable();
+  if (ctx.memo.has(userId)) {
+    ctx.counters.memoHits += 1;
+    metricsContextCounters.metrics_student_memo_hits_total += 1;
+    return ctx.memo.get(userId);
+  }
+  ctx.counters.memoMisses += 1;
+  metricsContextCounters.metrics_student_memo_misses_total += 1;
+  const result = computeStudentMetricsUncached(userId, ctx);
+  ctx.memo.set(userId, result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
 // COURSE METRICS
 // ---------------------------------------------------------------------------
 
-export function computeCourseMetrics(courseId) {
+export function computeCourseMetrics(courseId, options = {}) {
   if (!_initialized) throw new Error('metricsService: call init() before computing metrics');
 
   const group = _groups.find(g => g.id === courseId);
   if (!group) throw new Error(`metricsService: group "${courseId}" not found`);
 
-  const studentIds    = resolveGroupMemberIds(group);
-  const allStudents   = studentIds.map(id => computeStudentMetrics(id));
+  const { ctx, owned } = contextForTopLevel(options);
+  try {
+    return courseMetricsFrom(group, courseId, ctx);
+  } finally {
+    // El contexto solo se libera si lo creó ESTA llamada. Si vino del caller,
+    // el caller decide su vida.
+    if (owned && ctx) ctx.dispose();
+  }
+}
+
+function courseMetricsFrom(group, courseId, ctx) {
+  const studentIds     = resolveGroupMemberIds(group);
+  const allStudents    = studentIds.map(id => computeStudentMetrics(id, { context: ctx }));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
   const { top, bottom } = topBottomByComposite(activeStudents, 0.20);
 
@@ -602,7 +806,7 @@ export function computeCourseMetrics(courseId) {
 // SCHOOL METRICS
 // ---------------------------------------------------------------------------
 
-export function computeSchoolMetrics(schoolId) {
+export function computeSchoolMetrics(schoolId, options = {}) {
   if (!_initialized) throw new Error('metricsService: call init() before computing metrics');
 
   const schoolGroups = _groups.filter(
@@ -612,19 +816,32 @@ export function computeSchoolMetrics(schoolId) {
     throw new Error(`metricsService: no groups found for school "${schoolId}"`);
   }
 
+  const { ctx, owned } = contextForTopLevel(options);
+  try {
+    return schoolMetricsFrom(schoolGroups, schoolId, ctx);
+  } finally {
+    if (owned && ctx) ctx.dispose();
+  }
+}
+
+function schoolMetricsFrom(schoolGroups, schoolId, ctx) {
   const allStudentIds = new Set();
   for (const group of schoolGroups) {
     for (const id of resolveGroupMemberIds(group)) allStudentIds.add(id);
   }
 
-  const allStudents    = [...allStudentIds].map(id => computeStudentMetrics(id));
+  // Aquí estaba el coste cuadrático: cada alumno se calculaba una vez para
+  // `allStudents` y OTRA dentro de `courseBreakdown`. Con contexto, la segunda
+  // pasada es un acierto de memo; sin contexto, el comportamiento es el de
+  // siempre.
+  const allStudents    = [...allStudentIds].map(id => computeStudentMetrics(id, { context: ctx }));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
 
   const courseBreakdown = schoolGroups
     .filter(g => resolveGroupMemberIds(g).length > 0)
     .map(g => {
       const groupStudentIds = resolveGroupMemberIds(g);
-      const groupStudents   = groupStudentIds.map(id => computeStudentMetrics(id));
+      const groupStudents   = groupStudentIds.map(id => computeStudentMetrics(id, { context: ctx }));
       const active          = groupStudents.filter(s => s.behavioral.totalSessions > 0);
       const compScores      = active.map(s => s.readingLevels.composite);
       return {
