@@ -17,7 +17,7 @@
     "verify:deploy-config": "node scripts/verify-deploy-config.mjs",
     "test:image-integrity": "node scripts/verify-image-integrity.mjs",
     "test:mediator-repair": "node scripts/migrations/chp-mem-mediator-647/__test__/migrate.test.mjs",
-    "test:metric-contract": "node engines/metrics/__tests__/referenceEngine.test.mjs && node server/__test__/metricsApiV2.test.js && node server/__test__/metricsShadowBoundary.test.js",
+    "test:metric-contract": "node engines/metrics/__tests__/referenceEngine.test.mjs && node server/__test__/metricsApiV2.test.js && node server/__test__/metricsShadowBoundary.test.js && node scripts/perf/request-index.test.mjs",
     "test:identity-preflight": "npm run verify:deploy-config && npm run test:identity && npm run test:memberships && npm run test:metric-contract && node scripts/__test__/shadowScopeEquivalence.test.mjs && node scripts/__test__/seed-local-admin.test.mjs && node server/__test__/realStoreGuard.test.js && node scripts/verify-test-store-isolation.mjs test:identity test:memberships",
     "loadtest:k6": "k6 run loadtest/k6-chibalete.js",
     "loadtest:autocannon": "node loadtest/autocannon.mjs",
@@ -36,7 +36,8 @@
     "seed:admin-local": "node scripts/seed-local-admin.mjs",
     "test:seed-local-admin": "node scripts/__test__/seed-local-admin.test.mjs",
     "test:metrics-api": "node server/__test__/metricsApiV2.test.js",
-    "test:metrics-shadow": "node server/__test__/metricsShadowBoundary.test.js"
+    "test:metrics-shadow": "node server/__test__/metricsShadowBoundary.test.js",
+    "test:legacy-perf": "node scripts/perf/request-index.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",

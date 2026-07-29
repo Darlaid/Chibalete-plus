@@ -186,3 +186,13 @@ dummy_text.txt
 # healthHandler.js lo lee si existe; si no, cae a env vars/package.json.
 server/.deploy-info
 .codex-freeze/
+
+# CHP-STATS-LEGACY-PERF-01A — harness de auditoría del coste legacy. Los
+# scripts SÍ se versionan; sus salidas y fixtures generadas, NO.
+!/scripts/perf/
+!/scripts/perf/**
+/bench-results/
+/scripts/perf/bench-results/
+*.ndjson
+*.cpuprofile
+*.heapsnapshot
