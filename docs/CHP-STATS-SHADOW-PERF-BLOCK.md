@@ -167,3 +167,88 @@ shadow.
 - `-01C`: equivalencia de cifras sobre el snapshot productivo completo.
 - `-01D`: benchmark HTTP de aceptación de las 6 rutas contra el umbral.
 - Escalabilidad 5×/10×.
+
+---
+
+## Actualización — CHP-STATS-SHADOW-PERF-01C (equivalencia verificada)
+
+```
+WORKER_EQUIVALENCE_VERIFIED
+HTTP_BENCHMARK_PENDING
+SCALABILITY_PENDING
+NOT_DEPLOYABLE
+```
+
+### Metodología
+
+`REFERENCE` (`computeCanonicalMetrics` en el hilo principal) frente a `WORKER`
+(mismo request lógico por el pool real), ambos con **idénticos** `scopeKind`,
+identificadores, `period`, `idleMs`, `includeQuality`, stores y configuración.
+`TZ=UTC` y un `nowTs` fijo (`1800000000000`) para toda la batería.
+
+Snapshot `ace687e6`: **19.465 eventos**, `quick_check=ok`, 9.011.200 bytes,
+sha `03fe95e0…`, rango `1778203452389..1785021479763`, 647 usuarios, 20 grupos,
+4 instituciones. Copiado con sus compañeros `-wal`/`-shm`.
+
+### Corrección de protocolo (autorizada por Fase 14)
+
+El worker devolvía **solo una proyección**, lo que hacía imposible verificar la
+equivalencia contractual. Se elevó el protocolo a **v2**: ahora devuelve el
+**sobre completo** (que contiene solo agregados: `contractVersion`, `period`,
+`metrics`, `population` como conteos, `coverage`, `quality` — ningún
+identificador) y añade un **handshake sanitizado** con `protocolVersion`,
+`contractVersion`, módulo del motor y major de Node. Un protocolo incompatible
+falla **antes** de ejecutar jobs.
+
+No se tocó `referenceEngine`, ni definiciones poblacionales, ni sesiones, ni
+periodos, ni quality buckets, ni estados.
+
+### Normalización
+
+Se excluyen de la comparación **solo** metadata propia del worker: `durationMs`,
+`jobId` y `handshake`. Todo lo contractual —incluido `generatedAt`, que es
+determinista bajo `nowTs` fijo— se compara byte a byte.
+
+### Resultados
+
+| | |
+|---|---|
+| Casos ejecutados | **824** |
+| `EXACT_MATCH` | **824 (100 %)** |
+| Divergencias | **0** |
+| Jobs completados | 825 (824 + handshake) |
+| Fallos · timeouts · crashes · tardías | 0 · 0 · 0 · 0 |
+| Determinismo RUN_1 vs RUN_2 | **byte a byte idéntico** |
+| Duración orientativa | ~85 s por corrida |
+
+Matriz: listado (30d, all, sin quality) · las 4 instituciones (30d y all) ·
+los **20 grupos** (30d y all, incluyendo históricos y `lt-org`) · los **647
+usuarios** (30d) más 120 con `all` · scopes inexistentes · periodo personalizado
+con actividad, sin actividad y cruzando el límite UTC.
+
+### Anclas institucionales (vía worker)
+
+| Institución | Población | Estado |
+|---|---|---|
+| Villas de Aranjuez | 90 / 80 / 80 / 0 | `NO_ACTIVITY` en el periodo fijado |
+| Nuevo Bosque | 90 / 80 / 80 / 0 | `NO_ACTIVITY` |
+| FilBo 2026 | **47 / 46 / 44 / 2** | `NO_ACTIVITY` |
+| Externado | 2 / 0 / 0 / 0 | **`NO_DATA` con valores `null`** |
+
+`readingTimeMs = NOT_DEFINED` y `value = null` en las cuatro. Sin diagnósticos,
+rankings ni recomendaciones.
+
+**Distinción clave, verificada:** `NO_ACTIVITY` lleva `value: 0` —población
+medible, cero actividad observada— mientras `NO_DATA` lleva `value: null`. El
+cero significa cero observado; la ausencia tiene estado propio.
+
+### Integridad
+
+Cero archivos nuevos, hashes sin cambio y `quick_check=ok` antes y después de
+ambas corridas. Sin PII en la evidencia (las únicas coincidencias de «@» son el
+banner de dotenv).
+
+### Pendiente
+
+El bloqueo de rendimiento **sigue vigente**: falta `-01D`, el benchmark HTTP de
+aceptación de las 6 rutas, y la escalabilidad 5×/10×.

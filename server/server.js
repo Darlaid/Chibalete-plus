@@ -7760,7 +7760,7 @@ function buildCanonicalExecutor(routeKind) {
 
         const r = await shadowPool().submit(msg);
         if (!r.ok) return { ok: false, error: r.error };
-        return { ok: true, status: r.status, projection: r.projection, period };
+        return { ok: true, status: r.status, body: r.body, projection: r.projection, period };
     };
 }
 

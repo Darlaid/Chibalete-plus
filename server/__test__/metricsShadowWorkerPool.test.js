@@ -330,6 +330,32 @@ section('[30..31] stores intactos');
         !after.some(f => /\.db-(wal|shm)$/.test(f) && !before.includes(f)));
 }
 
+
+// ── [E] handshake y equivalencia de protocolo (CHP-STATS-SHADOW-PERF-01C) ───
+section('[E] handshake del worker');
+{
+    const { PROTOCOL_VERSION } = await import(M('shadowWorkerPool.mjs'));
+    const wkSrc = fs.readFileSync(path.join(HERE, '..', 'metrics', 'shadowWorker.mjs'), 'utf8');
+    ok('[1] main y worker declaran la misma protocolVersion',
+        new RegExp(`PROTOCOL_VERSION = ${PROTOCOL_VERSION}`).test(wkSrc), String(PROTOCOL_VERSION));
+    ok('[1] el handshake no expone rutas locales',
+        !/__dirname|process\.cwd|\/app\//.test(wkSrc.slice(wkSrc.indexOf('buildHandshake'), wkSrc.indexOf('buildHandshake') + 400)));
+    ok('[1] el worker devuelve el sobre completo para poder verificar equivalencia',
+        /body: r\.body/.test(wkSrc));
+
+    // [2] handshake incompatible: un protocolVersion distinto se rechaza ANTES del job
+    const W_OLD = mkWorker('old.mjs', `
+import { parentPort } from 'node:worker_threads';
+parentPort.on('message', (m) => parentPort.postMessage({
+  jobId: m.jobId, protocolVersion: 99, ok: false, error: 'PROTOCOL_VERSION_MISMATCH' }));
+`);
+    const pool = createShadowWorkerPool({ workers: 1, workerPath: W_OLD, timeoutMs: 500 });
+    await sleep(250);
+    const r = await pool.submit({ scopeKind: '__handshake__' });
+    ok('[2] protocolo incompatible → error, no resultado', r.ok === false && r.error === 'PROTOCOL_VERSION_MISMATCH');
+    await pool.shutdown({ drainMs: 100 });
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} ok, ${fail} fallidos`);
 process.exit(fail === 0 ? 0 : 1);

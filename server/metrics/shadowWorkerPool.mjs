@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(HERE, 'shadowWorker.mjs');
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export const POOL_STATE = Object.freeze({
     STARTING: 'STARTING',
@@ -162,7 +162,8 @@ export function createShadowWorkerPool({
                 if (msg.ok === true) {
                     counters.pool_jobs_completed += 1;
                     consecutiveErrors = 0;
-                    settle(msg.jobId, { ok: true, status: msg.status, projection: msg.projection, durationMs: msg.durationMs });
+                    settle(msg.jobId, { ok: true, status: msg.status, body: msg.body, projection: msg.projection,
+                                        handshake: msg.handshake, durationMs: msg.durationMs });
                 } else {
                     counters.pool_jobs_failed += 1;
                     consecutiveErrors += 1;

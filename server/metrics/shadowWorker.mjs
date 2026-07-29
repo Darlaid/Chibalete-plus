@@ -13,7 +13,21 @@
  */
 import { parentPort, workerData } from 'node:worker_threads';
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
+
+/**
+ * Handshake sanitizado: permite comprobar que hilo principal y worker ejecutan
+ * el mismo protocolo y el mismo contrato ANTES de aceptar resultados. No expone
+ * rutas locales ni identificadores personales.
+ */
+export function buildHandshake(contractVersion) {
+    return {
+        protocolVersion: PROTOCOL_VERSION,
+        contractVersion: contractVersion ?? null,
+        engineModule: 'canonicalMetricsService.computeCanonicalMetrics',
+        nodeMajor: Number(process.versions.node.split('.')[0]),
+    };
+}
 
 let computeCanonicalMetrics = null;
 let provider = null;
@@ -81,6 +95,12 @@ parentPort?.on('message', async (msg) => {
         return;
     }
 
+    if (msg.scopeKind === '__handshake__') {
+        parentPort.postMessage({ jobId, protocolVersion: PROTOCOL_VERSION, ok: true,
+            handshake: buildHandshake(null), durationMs: 0 });
+        return;
+    }
+
     try {
         const r = await computeCanonicalMetrics({
             scopeKind: msg.scopeKind,
@@ -96,7 +116,13 @@ parentPort?.on('message', async (msg) => {
         parentPort.postMessage({
             jobId, protocolVersion: PROTOCOL_VERSION, ok: true,
             status: r.status,
+            // Sobre contractual completo. Contiene SOLO agregados
+            // (contractVersion, period, metrics, population como conteos,
+            // coverage, quality): ningún identificador ni PII. Devolverlo hace
+            // la equivalencia verificable y deja la proyección a la frontera.
+            body: r.body,
             projection: r.status === 200 ? projectCanonical(r.body) : null,
+            handshake: buildHandshake(r.body?.contractVersion),
             durationMs: Date.now() - startedAt,
         });
     } catch (e) {
