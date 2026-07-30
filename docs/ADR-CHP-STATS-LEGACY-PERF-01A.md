@@ -399,6 +399,105 @@ no cambia, que es lo que importa.
 
 ---
 
+## Actualización — `CHP-STATS-LEGACY-PERF-01E` (benchmark HTTP)
+
+```
+HTTP_ACCEPTANCE_FAILED_UNDER_UNIFORM_GATE
+FORMATTERS_VERIFIED
+FLAG_DEFAULT_OFF
+NOT_DEPLOYABLE
+```
+
+> Este veredicto **se conserva tal cual**. La unidad `-01E-R1` lo revisa con
+> gates por clase de ruta, pero no lo borra: el gate homogéneo del 50 % se
+> incumplió y así queda registrado.
+
+### Lo que sí quedó cerrado
+
+**Equivalencia HTTP completa, con los formatters ejecutados de verdad.** Se
+midió contra rutas Express reales, con autorización, `metricsService`,
+`formatStudentResponse` / `formatCourseResponse` / `formatSchoolResponse` /
+`buildStudentBreakdownRow` y serialización JSON: **cero diferencias
+contractuales en 10/10 rutas** (status, content-type, body, orden de claves,
+nulls). Esto salda la limitación declarada en `-01D`, donde los formatters solo
+se habían argumentado, no ejecutado.
+
+La whitelist de campos volátiles **no se declaró, se derivó**: capturando dos
+respuestas consecutivas del mismo brazo, solo se excluyeron los 9 sellos
+técnicos que ya varían dentro del propio brazo `off`. Ningún campo no técnico
+varió.
+
+### Clasificación de rutas, verificada con contadores
+
+| Clase | Rutas | Crea contexto |
+|---|---|---|
+| `SCHOOL_AGGREGATION_MEMOIZED` | ROUTE_2, ROUTE_3, ROUTE_4 | sí, 1 por petición |
+| `COURSE_AGGREGATION_INDEXED` | ROUTE_7 | sí, 1 por petición |
+| `UNCHANGED_NO_CONTEXT` | ROUTE_1, ROUTE_5, ROUTE_6, 401, 403, 404 | **no** |
+
+ROUTE_1 (listado) se clasificó mal al principio: deriva de `groups` y **nunca**
+calcula métricas por alumno. Lo corrigieron los contadores del servidor, no una
+suposición.
+
+### Resultados (reducción de p95)
+
+| Ruta | A c=1 | A c=1 ritmo igualado | B dual | A c=4 |
+|---|---|---|---|---|
+| ROUTE_2 | 53,1 % | 56,7 % | 56,0 % | 57,8 % |
+| ROUTE_3 | 75,2 % | 71,9 % | 83,8 % | 69,4 % |
+| ROUTE_4 | 61,0 % | 61,1 % | 73,4 % | 61,6 % |
+| **ROUTE_7** | **45,1 %** | **47,6 %** | **42,0 %** | 61,0 % |
+| ROUTE_6 | −11,8 % | **+21,9 %** | +0,2 % | +58,6 % |
+| ROUTE_5 | −9,7 % | −5,1 % | +5,9 % | +62,5 % |
+
+### Dos correcciones de método
+
+**Bucle cerrado.** Con cliente secuencial, el brazo `on` emite ~3× más
+peticiones por segundo al mismo 92 % de CPU: las rutas baratas competían con un
+flujo más denso y aparentaban regresión. Medido a **ritmo de llegada igualado**,
+ROUTE_6 pasa de −11,8 % a **+21,9 %**. Era artefacto del generador de carga, no
+del código: esas rutas ejecutan exactamente el mismo camino en ambos brazos.
+
+**Clasificación.** Ver arriba: ROUTE_1 no es una agregación.
+
+### Por qué ROUTE_7 no llega al 50 %
+
+Medido con contadores, no inferido:
+
+| Ruta | memo hits | memo misses |
+|---|---|---|
+| ROUTE_2 (institución) | **90** | 90 |
+| ROUTE_7 (grupo) | **0** | 90 |
+
+`computeSchoolMetrics` calcula cada alumno **dos veces** —`allStudents` y
+`courseBreakdown`—, así que la memoización parte el trabajo por la mitad.
+`computeCourseMetrics` lo calcula **una sola vez**: no hay recomputación que
+memoizar, y solo queda el beneficio de la indexación.
+
+El techo de ROUTE_7 es por tanto estructuralmente menor, y su residuo lo domina
+`loadAndInitMetrics()` (~100 ms fijos) que esta optimización no toca. **No es un
+defecto del camino optimizado**: es el límite de aplicarle un gate pensado para
+una clase de ruta distinta.
+
+### Estado de las demás comprobaciones
+
+- Contextos: **864 creados = 864 liberados**. Cero fugas.
+- `lag_p95` **1242 → 428 ms**; CPU 0,917 → 0,903 cores; RSS estable (155,7 →
+  157,0 MB).
+- Dual: ambas instancias reciben carga (549/531), contextos propios, CPU 0,52,
+  `restarts=0`.
+- Stores: snapshot **byte a byte intacto**, copia sin cambios, sin `.tmp`, sin
+  `insights.db`. El único fichero nuevo es `playback_events.log` (0 bytes), que
+  la app crea al arrancar en ambos brazos.
+- ROUTE_5 quedó **0,5 ms** por encima de su tolerancia a ritmo igualado (0,14 %
+  sobre un p95 de ~376 ms), y mejora en dual y en concurrencia 4. La evidencia
+  no sostiene que regrese; sostiene que el experimento no resuelve una
+  diferencia tan pequeña.
+- Producción intacta durante todo el banco. Ninguna petición fue contra
+  producción: la barrera de destino se probó **antes** de generar carga.
+
+---
+
 ## Alcance de lo medido
 
 Las cifras salen de la capa de servicio (`metricsService`, `progressService`)
