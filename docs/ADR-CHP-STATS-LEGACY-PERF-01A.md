@@ -498,6 +498,116 @@ una clase de ruta distinta.
 
 ---
 
+## Actualización — `CHP-STATS-LEGACY-PERF-01E-R1` (confirmatoria por clase)
+
+```
+HTTP_ACCEPTANCE_GREEN_BY_ROUTE_CLASS
+FORMATTERS_VERIFIED
+DUAL_TOPOLOGY_GREEN
+FLAG_DEFAULT_OFF
+READY_FOR_IMAGE_CANARY
+NOT_DEPLOYED
+```
+
+Gates **preinscritos antes de medir** en
+`docs/CHP-STATS-LEGACY-PERF-01E-R1-GATES.md`, commiteados en `cf2d17f`. No se
+tocaron después.
+
+### Metodología
+
+Solo **ritmo de llegada igualado**, dimensionado con los datos y no con un
+número redondo: 600 ms para las rutas sin contexto (p95 off ≤ 455 ms) y 1500 ms
+para las agregaciones (p50 off 696–1444 ms). Diseño ABBA, 4 bloques por brazo,
+**252 muestras por ruta y brazo**, orden con semilla fija.
+
+Para las rutas de agregación el bucle cerrado es **conservador** —el brazo `on`
+es 2–6× más rápido, así que recibiría más carga—, de modo que aprobar con ritmo
+igualado es un resultado más fuerte, no más laxo.
+
+### Agregaciones — verde en las tres configuraciones
+
+Reducción de p95 (bloques que cumplen entre paréntesis):
+
+| Ruta | Gate | A c=1 | B dual | A c=4 |
+|---|---|---|---|---|
+| ROUTE_2 institución | ≥50 % | **68,8 %** (4/4) | 59,8 % (3/4) | 62,0 % (4/4) |
+| ROUTE_3 sin actividad | ≥50 % | **88,3 %** (4/4) | 82,5 % (4/4) | 65,5 % (4/4) |
+| ROUTE_4 FilBo | ≥50 % | **79,8 %** (4/4) | 74,7 % (4/4) | 65,6 % (4/4) |
+| **ROUTE_7 grupo** | **≥40 %** | **62,4 %** (4/4) | **58,1 %** (4/4) | **60,0 %** (4/4) |
+
+ROUTE_7 no solo cumple su gate de clase: **supera también el 50 % homogéneo**
+que había fallado en `-01E`. La diferencia no es el umbral, es la medición: allí
+el brazo `off` estaba saturado a 0,91 cores y el bucle cerrado penalizaba al
+brazo rápido. Con el `off` a 0,70 cores y ritmo igualado, el beneficio real de
+la indexación aflora.
+
+CPU por petición: **0,704 → 0,215 cores** en individual (−69 %) y 0,33 → 0,116
+en dual. `lag_p95` a concurrencia 4: **2119 → 699 ms**.
+
+### Rutas sin contexto — sin regresión demostrable
+
+Aquí el gate del ±5 % sobre p95 resultó **estar por debajo de la resolución del
+experimento**, y se demostró con un **control nulo**: comparando el brazo `off`
+**consigo mismo** (mitades de sus propios bloques, mismo código y misma
+configuración), ROUTE_5 y ROUTE_6 *incumplen* el umbral en la topología dual
+—268,91 vs 354,83 ms, un +32 % dentro de un mismo brazo—. Un umbral que la
+condición de control no supera no puede discriminar nada.
+
+La dispersión intra-brazo entre bloques es del **35 % al 108 %**, mientras que
+las diferencias entre brazos son ≤20 % y **cambian de signo según la
+topología** (en A el brazo `on` sale más rápido; en dual, más lento). Eso es
+ruido, no efecto.
+
+La evidencia robusta de que no hay regresión no es estadística, es estructural:
+
+- **cero contextos creados** en ambos brazos;
+- contadores **idénticos**: 268 cálculos de alumno en `off` y 268 en `on`;
+- CPU idéntica (0,17 en ambos) y `lag_p95` idéntico (6,9 ms);
+- **respuestas byte a byte iguales** (10/10 rutas, cero diferencias
+  contractuales);
+- en p50 —estadístico estable— el brazo `on` es igual o más rápido en 5 de 6
+  rutas;
+- a concurrencia 4 **todas mejoran un 58–61 %**, porque las agregaciones
+  optimizadas liberan CPU para el resto.
+
+Estas rutas ejecutan **el mismo camino de código** en ambos brazos. No hay
+mecanismo por el que puedan regresar.
+
+> Se deja constancia explícita: varias rutas sin contexto incumplen el
+> subcriterio literal de «3 de 4 bloques». Se aplica la cláusula de resolución
+> **registrada de antemano** en el documento de gates, y se sostiene con el
+> control nulo de arriba. Certificar una cota del ±5 % en p95 exigiría bastantes
+> más muestras por bloque; lo que sí queda certificado es que no existe
+> diferencia de camino de código.
+
+### Ciclo de vida y memoria
+
+**1072 contextos creados = 1072 liberados** en cada corrida de agregación. Cero
+fugas. RSS 143–164 MB, estable entre bloques. Cero OOM, cero restarts.
+
+### Integridad
+
+Snapshot **byte a byte intacto**; copia de trabajo sin cambios; sin `.tmp`, sin
+`insights.db`. Producción intacta: healthy, `restarts=0`, `5703ebb`,
+`METRICS_ENGINE=legacy`, flag **ausente**.
+
+### Un tropiezo del banco, registrado
+
+El bloque 1 de la corrida de rutas baratas quedó contaminado por un contenedor
+residual de una ejecución anterior (3674 llamadas acumuladas frente a las 67
+exactas de todos los demás bloques). Se detectó por los contadores, no por la
+latencia. Excluirlo cambia qué rutas rozan el umbral —lo cual, por sí solo, ya
+indica que el umbral estaba dentro del ruido—. El análisis final no depende de
+ese bloque.
+
+### Deuda pendiente
+
+- El gemelo `engines/metricsEngine.ts` conserva el **mismo patrón cuadrático** y
+  sigue sin tocar.
+- El flag permanece **`off` por defecto**; producción no lo tiene definido.
+
+---
+
 ## Alcance de lo medido
 
 Las cifras salen de la capa de servicio (`metricsService`, `progressService`)
