@@ -101,6 +101,11 @@ jobs:
       - name: Contrato canónico de métricas (motor de referencia)
         run: npm run test:metric-contract
 
+      # CHP-AI-RUNTIME-MODEL-COMPAT-01A — el runtime no puede volver a apuntar a
+      # un modelo retirado. Sin red: los proveedores se inyectan con dobles.
+      - name: Compatibilidad de modelos de IA (Gemini textual + breaker)
+        run: npm run test:ai-model-compat
+
       - name: Equivalencia de la réplica del CIS (shadow comparison)
         run: node scripts/__test__/shadowScopeEquivalence.test.mjs
 

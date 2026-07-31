@@ -12,26 +12,93 @@ const log = (msg) => {
 const AI_MODE = process.env.AI_MODE || 'real';
 const TTS_MODE = process.env.TTS_MODE || 'real';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CHP-AI-RUNTIME-MODEL-COMPAT-01A — modelo Gemini de texto y visión.
+//
+// `gemini-1.5-flash` fue RETIRADO por Google: desaparece de ModelService.
+// ListModels y generateContent devuelve 404 NOT_FOUND. Con él caían text_light,
+// el fallback Gemini de chat y chat_visual — es decir, todo el camino de texto
+// de Leo, porque el fallback OpenAI está bloqueado por saldo.
+//
+// El valor por defecto es un modelo ESTABLE y explícito. Nada de alias
+// `-latest`: un alias mueve el modelo bajo los pies del runtime sin que ningún
+// despliegue lo registre, y esta unidad existe justamente por un modelo que
+// cambió sin avisar. Un override por entorno permite reaccionar a un retiro
+// futuro sin tocar código, pero se valida antes de aceptarlo.
+//
+// El modelo TTS NO se toca: `gemini-2.5-flash-preview-tts` es hoy el único
+// camino de audio operativo en producción. Su migración es deuda aparte.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Modelo de texto/visión por defecto. Estable, sin alias. */
+export const GEMINI_TEXT_MODEL_DEFAULT = 'gemini-3.6-flash';
+
+/** Modelo TTS vigente. Se declara aquí solo para poder rechazarlo como modelo textual. */
+export const GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+
+/** Motivos por los que un override se rechaza. El orden define el motivo reportado. */
+const TEXT_MODEL_REJECTIONS = [
+    { test: (v) => v.length === 0,               reason: 'vacio' },
+    { test: (v) => /-tts(-|$)/i.test(v),         reason: 'modelo_tts_no_es_modelo_textual' },
+    { test: (v) => /(^|-)latest$/i.test(v),      reason: 'alias_latest_prohibido' },
+    { test: (v) => /^gemini-1\.5-/i.test(v),     reason: 'modelo_retirado' },
+    { test: (v) => !/^[a-z0-9][a-z0-9.\-]{2,63}$/i.test(v), reason: 'identificador_no_valido' },
+];
+
+/**
+ * Resuelve el modelo Gemini de texto/visión a partir del entorno.
+ *
+ * Contrato:
+ *   - ausente, vacío o no-string  → default (compatibilidad con config ausente);
+ *   - alias `*-latest`            → rechazado;
+ *   - modelo TTS                  → rechazado;
+ *   - familia 1.5 retirada        → rechazada;
+ *   - identificador con forma rara → rechazado.
+ *
+ * Un override inválido NO tumba el proceso: registra el motivo y cae al default.
+ * Reventar en el arranque por una variable mal escrita convertiría una errata
+ * en un crashloop de producción, y el default siempre es un modelo válido.
+ *
+ * @returns {{model: string, source: 'default'|'env', rejected: string|null}}
+ */
+export const resolveGeminiTextModel = (raw = process.env.GEMINI_TEXT_MODEL) => {
+    if (typeof raw !== 'string') return { model: GEMINI_TEXT_MODEL_DEFAULT, source: 'default', rejected: null };
+    const value = raw.trim();
+    const rejection = TEXT_MODEL_REJECTIONS.find((r) => r.test(value));
+    if (rejection) {
+        return { model: GEMINI_TEXT_MODEL_DEFAULT, source: 'default', rejected: rejection.reason };
+    }
+    return { model: value, source: 'env', rejected: null };
+};
+
+const _geminiText = resolveGeminiTextModel();
+/** Modelo Gemini efectivo para texto y visión. */
+export const GEMINI_TEXT_MODEL = _geminiText.model;
+
+// Se registra el identificador del modelo, nunca la clave.
+log(`[AI] gemini text model=${GEMINI_TEXT_MODEL} source=${_geminiText.source}` +
+    (_geminiText.rejected ? ` rejected_override=${_geminiText.rejected}` : ''));
+
 export const AI_CONFIG = {
     tts: {
         primary:  { provider: 'openai', model: 'tts-1' },
-        fallback: { provider: 'gemini', model: 'gemini-2.5-flash-preview-tts' },
+        fallback: { provider: 'gemini', model: GEMINI_TTS_MODEL },
         maxInputTokens: 2000,
     },
     text_light: {
-        primary: { provider: 'gemini', model: 'gemini-1.5-flash' },
+        primary: { provider: 'gemini', model: GEMINI_TEXT_MODEL },
         fallback: { provider: 'openai', model: 'gpt-4o-mini' },
         maxInputTokens: 4000
     },
     chat: {
         primary:  { provider: 'openai',  model: 'gpt-4o-mini' },
-        fallback: { provider: 'gemini',  model: 'gemini-1.5-flash' },
+        fallback: { provider: 'gemini',  model: GEMINI_TEXT_MODEL },
     },
     // chat_visual: album mode — image attached. Gemini is primary because it
     // handles inlineData natively. OpenAI fallback is text-only (imageData
     // is silently ignored on that branch) — acceptable graceful degradation.
     chat_visual: {
-        primary:  { provider: 'gemini', model: 'gemini-1.5-flash' },
+        primary:  { provider: 'gemini', model: GEMINI_TEXT_MODEL },
         fallback: { provider: 'openai', model: 'gpt-4o-mini' },
     },
     maxRetries: 2,
@@ -63,6 +130,25 @@ export const getGemini = () => {
         return geminiClient;
     }
     return null;
+};
+
+/**
+ * Inyecta clientes de proveedor. SOLO para tests — producción nunca lo llama.
+ *
+ * Existe para poder ejercitar el enrutado real (primary → fallback, breaker,
+ * reintentos, selección de modelo) con dobles y sin tocar la red. Misma
+ * convención que `_resetBreakers`. No altera ningún camino productivo: si nadie
+ * lo invoca, la inicialización perezosa se comporta exactamente igual que antes.
+ */
+export const _setProviderClientsForTest = ({ openai = null, gemini = null } = {}) => {
+    openaiClient = openai;
+    geminiClient = gemini;
+};
+
+/** Restaura la inicialización perezosa. SOLO para tests. */
+export const _resetProviderClientsForTest = () => {
+    openaiClient = null;
+    geminiClient = null;
 };
 
 /**

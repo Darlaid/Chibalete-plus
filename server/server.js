@@ -177,7 +177,7 @@ app.set('trust proxy', 1);
 
 import { generateAudioForContent } from './ttsService.js';
 import * as ttsQueue from './ttsQueue.js';
-import { runHybridTask, getGemini } from './aiEngine.js';
+import { runHybridTask, getGemini, GEMINI_TEXT_MODEL } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
 import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 // CHP-STATS-SHADOW-01A — frontera única de las rutas legacy de métricas.
@@ -6347,7 +6347,8 @@ Devuelve: {"regions": [...]}`;
 
     try {
         const response = await gemini.models.generateContent({
-            model: 'gemini-1.5-flash',
+            // CHP-AI-RUNTIME-MODEL-COMPAT-01A — modelo central; ver aiEngine.js.
+            model: GEMINI_TEXT_MODEL,
             contents: [{
                 role: 'user',
                 parts: [
@@ -6415,7 +6416,8 @@ app.post('/api/gemini/sugerir-etiquetas', requireAdminAccess, async (req, res) =
 
     try {
         const response = await gemini.models.generateContent({
-            model: 'gemini-1.5-flash',
+            // CHP-AI-RUNTIME-MODEL-COMPAT-01A — modelo central; ver aiEngine.js.
+            model: GEMINI_TEXT_MODEL,
             contents: `Analiza el siguiente libro y sugiere exactamente 4 etiquetas de clasificación (estilo THEMA simplificado para escuela).
 
 Título: ${safeTitle}
