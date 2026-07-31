@@ -415,7 +415,7 @@ curl -s "https://chibaleteplus.chibaleteeditores.com${NEW_BUNDLE}" \
 
 > Si §5.3.1, §5.3.2 o §5.3.3 fallan: el deploy realmente no llegó al
 > cliente. Investigar:
-> - ¿Está `chibalete_front` corriendo la imagen nueva? (`docker inspect`)
+> - ¿Está `chibalete_front` corriendo la imagen nueva? (`docker inspect --format '{{.Config.Image}}' chibalete_front`, o `safeOperationalEvidence.mjs image-summary` si hay que archivar la evidencia)
 > - ¿El edge tiene cache stale? (descartado por mapa en §5.2, pero verificable con `docker exec chibalete_edge ls /var/cache/nginx 2>/dev/null`)
 >
 > Si pasan: **el deploy fue OK** y cualquier "frontend viejo" que el
@@ -711,7 +711,7 @@ Modos de falla documentados (no exhaustivos):
 | `docker save` llena disco local | `df` antes y después | limpiar `~/.cache`, reintentar |
 | sha256 mismatch post-scp | §3.3 falla | re-scp, verificar red |
 | `docker load` falla en VPS | exit ≠ 0 en §3.4 | re-transfer, verificar disco VPS |
-| `docker compose config` inválido | §4.4 falla | restaurar `docker-compose.yml.bak-*`, re-editar |
+| `docker compose config -q` inválido | §4.4 falla | restaurar `docker-compose.yml.bak-*`, re-editar |
 | `front` no arranca tras swap | §4.6 logs muestran error | rollback (§7) inmediato |
 | `nginx -t` del edge falla | §5 falla | NO reload; investigar config del edge (no debería haberse tocado) |
 | Smoke S4 falla (botón sigue yendo a /texto) | bundle cacheado en cliente | hard-refresh; si persiste, verificar que el container front efectivamente tiene la imagen nueva |

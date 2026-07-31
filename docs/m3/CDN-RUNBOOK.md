@@ -85,9 +85,17 @@ Después de cualquier opción A o B:
 
 ```bash
 ssh root@72.60.158.97
-# 1. Backup .env
+# 1. Evidencia del .env ANTES de tocarlo — sin copiarlo.
+#
+#    Copiar el archivo entero es lo que dejó `m3-snapshot-*/configs/.env.original`
+#    con las dos claves de IA dentro, vivas durante meses (saneado en
+#    CHP-SEC-AI-PROVIDER-KEYS-ROTATE-01A). Lo que hace falta para un rollback no
+#    es el valor de las claves —que no cambian aquí— sino QUÉ VARIABLES había:
 SNAP=$(cat /opt/chibaleteplus/M3_SNAPSHOT.txt)
-cp /opt/chibaleteplus/.env "$SNAP/configs/.env.preCdnActivation"
+install -m 0600 /dev/null "$SNAP/configs/env-names.preCdnActivation.txt"
+grep -oE '^[A-Za-z_][A-Za-z0-9_]*' /opt/chibaleteplus/.env \
+  > "$SNAP/configs/env-names.preCdnActivation.txt"
+#    Rollback: si MEDIA_BASE_URL no estaba en esa lista, se elimina la línea.
 
 # 2. Agregar línea (sustituir URL real del CDN)
 echo "" >> /opt/chibaleteplus/.env

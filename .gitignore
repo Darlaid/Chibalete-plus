@@ -162,6 +162,15 @@ dummy_text.txt
 # `npm run test:image-integrity` debe funcionar en un clone limpio.
 !/scripts/verify-image-integrity.mjs
 
+# CHP-SEC-ADMIN-EVIDENCE-HARDEN-01B — evidencia operativa segura.
+# Se versiona el directorio entero: es la única ruta aprobada para generar
+# evidencia de producción, y el job bloqueante `evidence-hardening` de CI
+# ejecuta `npm run lint:evidence` y `npm run test:evidence` desde un clone
+# limpio. Las fixtures son sintéticas y se generan en tiempo de ejecución, así
+# que aquí no vive ninguna cadena con forma de credencial.
+!/scripts/security/
+!/scripts/security/**
+
 # CHP-ID-GROUPS-RECON-01B — manifiesto de saneamiento y su migrador dry-run.
 # Se versionan: son el expediente aprobado que un apply futuro debe ejecutar
 # byte a byte, y el test versionado reconMigration.test.mjs depende de ellos.

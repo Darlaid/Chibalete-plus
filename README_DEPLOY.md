@@ -134,8 +134,16 @@ ls chibalete-2026-04-17/
 ```bash
 cd /opt/chibaleteplus/releases/chibalete-2026-04-17
 
-# Asegurar que .env tiene los secretos reales
-cp /opt/chibaleteplus/.env .env
+# El build NO necesita una copia de .env: los secretos entran por `env_file:`
+# en tiempo de ejecución, no en tiempo de build. Copiar el .env de producción
+# a un directorio de release fue el origen de varias de las 17 copias con
+# credenciales que hubo que sanear en CHP-SEC-AI-PROVIDER-KEYS-ROTATE-01A.
+#
+# Para comprobar QUÉ VARIABLES declara el .env de producción sin ver ni un
+# valor (la extracción ocurre en el host; por el cable solo viajan nombres):
+#   ssh root@VPS "grep -oE '^[A-Za-z_][A-Za-z0-9_]*' /opt/chibaleteplus/.env"
+#
+# Ver docs/ops/SAFE_OPERATIONAL_EVIDENCE.md
 
 # Build de ambas imágenes
 docker build -t chibalete/front:2026-04-17 -f Dockerfile.front .

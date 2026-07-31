@@ -111,7 +111,7 @@ rate(node_network_transmit_bytes_total{device!~"lo|docker.*|veth.*|br-.*"}[1h])
 ## 5. Day-1 health check (T+24h)
 
 ```bash
-ssh root@72.60.158.97 'echo "=== Containers ==="; docker ps --format "table {{.Names}}\t{{.Status}}"; echo; echo "=== Active alerts ==="; curl -s http://127.0.0.1:9093/api/v2/alerts | jq "length"; echo; echo "=== 5xx last hour ==="; curl -sG --data-urlencode "query=sum(rate(chibalete_http_requests_total{status_class=\"5xx\"}[1h]))" http://127.0.0.1:9090/api/v1/query | jq ".data.result"; echo; echo "=== Restart count ==="; for c in chibalete_edge chibalete_front chibalete_api_1 chibalete_api_2; do echo -n "$c: "; docker inspect $c | jq -r ".[0].RestartCount"; done; echo; echo "=== Swap usage ==="; swapon --show; free -h | head -2'
+ssh root@72.60.158.97 'echo "=== Containers ==="; docker ps --format "table {{.Names}}\t{{.Status}}"; echo; echo "=== Active alerts ==="; curl -s http://127.0.0.1:9093/api/v2/alerts | jq "length"; echo; echo "=== 5xx last hour ==="; curl -sG --data-urlencode "query=sum(rate(chibalete_http_requests_total{status_class=\"5xx\"}[1h]))" http://127.0.0.1:9090/api/v1/query | jq ".data.result"; echo; echo "=== Restart count ==="; for c in chibalete_edge chibalete_front chibalete_api_1 chibalete_api_2; do echo -n "$c: "; docker inspect --format "{{.RestartCount}}" $c; done; echo; echo "=== Swap usage ==="; swapon --show; free -h | head -2'
 ```
 
 **Criterio T+24h** (todos deben ser true):

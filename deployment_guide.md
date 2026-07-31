@@ -527,7 +527,13 @@ FASE B1 — BACKUP REMOTO  (canónico vía scripts/backup-vps.sh — ver §7.1)
              guarda una copia, este .bak vive en /opt para edición rápida)
 
 FASE B2 — PRE-VALIDATE
-  [ ] curl -H "x-admin-secret: $SECRET" \
+  [ ] # El secreto NO va en argv: `ps` lo muestra a cualquier usuario del host.
+      # Se pasa por un archivo de configuración de curl con modo 0600:
+      #   install -m 0600 /dev/null /tmp/curlrc.$$
+      #   printf 'header = "x-admin-secret: %s"\n' "$SECRET" > /tmp/curlrc.$$
+      #   curl --config /tmp/curlrc.$$ https://chibaleteplus.../api/admin/membership/validate
+      #   shred -u /tmp/curlrc.$$
+      curl --config "$CURLRC" \
             https://chibaleteplus.../api/admin/membership/validate
   [ ] confirmar ok=true
   [ ] capturar baseline counts para post-deploy comparison

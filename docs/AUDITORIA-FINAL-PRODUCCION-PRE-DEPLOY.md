@@ -314,7 +314,12 @@ cp /var/www/chibalete/data-critical/insights.db       /backup/insights_$(date +%
 cp /var/www/chibalete/data-critical/events.archive.db /backup/archive_$(date +%F).db 2>/dev/null || true
 
 # 7. Verificar que ALLOWED_ORIGINS está seteado a producción (no localhost)
-docker exec chibalete_api_1 env | grep ALLOWED_ORIGINS
+#    NO volcar el entorno del contenedor y filtrarlo con grep: eso materializa
+#    todos los valores y basta perder el filtro para exponer las claves. El
+#    helper construye la salida por allowlist (nombres siempre; valores solo
+#    de las banderas permitidas, ALLOWED_ORIGINS entre ellas).
+docker inspect --format '{{json .}}' chibalete_api_1 \
+  | node scripts/security/safeOperationalEvidence.mjs environment-names --from-file -
 
 # 8. Swap bind-mount backend (atómico)
 rsync -av --delete server/ /var/www/chibalete/server-new/

@@ -68,6 +68,34 @@ jobs:
       - name: gitleaks detect (historial completo)
         run: gitleaks detect --source . --config .gitleaks.toml --redact -v --exit-code 1
 
+  # ── CHP-SEC-ADMIN-EVIDENCE-HARDEN-01B — evidencia sin captura de secretos ──
+  # BLOQUEANTE. Dos gates independientes:
+  #
+  #   lint:evidence  — ratchet sobre TODO lo versionado. Falla si reaparece un
+  #                    patrón que ya produjo credenciales en disco: docker
+  #                    inspect crudo, compose config persistido, copia de .env,
+  #                    Config.Env con valores, secreto en un prompt de `read`,
+  #                    secreto en argv, volcado de entorno.
+  #   test:evidence  — el helper, los redactores por formato, el escáner y la
+  #                    provisión segura, contra fixtures sintéticas generadas
+  #                    en tiempo de ejecución (nada con forma de credencial
+  #                    entra al repositorio, así que gitleaks no necesita
+  #                    excepciones nuevas).
+  #
+  # No necesita red, ni Docker, ni secretos: por eso puede bloquear sin volverse
+  # flaky. Ver docs/ops/SAFE_OPERATIONAL_EVIDENCE.md.
+  evidence-hardening:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Ratchet de captura de secretos (versionado completo)
+        run: npm run lint:evidence
+      - name: Contrato de evidencia, redacción, escáner y provisión
+        run: npm run test:evidence
+
   # ── P0.2a — SCA npm (protobufjs/firebase/vite/etc.) ─────────────────────
   osv-scanner:
     runs-on: ubuntu-latest
