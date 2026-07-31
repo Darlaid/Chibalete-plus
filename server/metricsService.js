@@ -111,6 +111,64 @@ export const metricsContextCounters = {
   metrics_request_context_build_duration_ms: 0,
 };
 
+/**
+ * Fotografía READ-ONLY de los contadores del request context.
+ * CHP-STATS-LEGACY-PERF-OBS-01A-R2.
+ *
+ * Devuelve un objeto NUEVO en cada llamada: mutarlo no afecta a los contadores.
+ * No reinicia, no incrementa, no abre stores, no lee bases y no toca disco.
+ *
+ * Sobre los nombres históricos, que son engañosos y se traducen aquí:
+ *   · `progress_records_indexed` cuenta USUARIOS con progreso indexados
+ *     (`progressByUser.size`), no registros individuales;
+ *   · `events_indexed` cuenta USUARIOS con eventos indexados;
+ *   · `build_duration_ms` es un ACUMULADO de todas las construcciones del
+ *     proceso, no la duración de la última petición.
+ *
+ * Dos derivaciones, y solo dos:
+ *   · `active = max(0, created - disposed)`. Es fiable porque `dispose()` va
+ *     siempre en un `finally`, es idempotente y solo libera quien creó.
+ *     El clamp es defensivo: un negativo indicaría un bug, no un estado.
+ *   · `studentComputations = memoMisses + legacyFallbackCalls`. Los *hits* son
+ *     reutilizaciones dentro de una misma petición, no cálculos; sumarlos
+ *     inflaría la cifra.
+ *
+ * NO se exponen `generationGuardFailures` ni `contextErrors`: la guarda
+ * `assertUsable()` lanza, pero no cuenta. Inventar el contador exigiría
+ * instrumentar lógica productiva, que está fuera del alcance de esta unidad.
+ *
+ * Los contadores son de PROCESO: no se agregan entre api_1 y api_2 y vuelven a
+ * cero al recrear el contenedor. Todos son monotónicos salvo `active`.
+ *
+ * @returns {{enabled: boolean, scope: 'process', createdTotal: number,
+ *   disposedTotal: number, active: number, progressUsersIndexedTotal: number,
+ *   eventUsersIndexedTotal: number, memoHitsTotal: number,
+ *   memoMissesTotal: number, legacyFallbackCallsTotal: number,
+ *   studentComputationsTotal: number, buildDurationMsTotal: number}}
+ */
+export function getMetricsRequestContextTelemetrySnapshot() {
+  const c = metricsContextCounters;
+  const created  = c.metrics_request_context_created_total;
+  const disposed = c.metrics_request_context_disposed_total;
+  const misses   = c.metrics_student_memo_misses_total;
+  const fallback = c.metrics_legacy_fallback_calls_total;
+
+  return {
+    enabled: _requestContextEnabled,
+    scope: 'process',
+    createdTotal: created,
+    disposedTotal: disposed,
+    active: Math.max(0, created - disposed),
+    progressUsersIndexedTotal: c.metrics_request_context_progress_records_indexed,
+    eventUsersIndexedTotal: c.metrics_request_context_events_indexed,
+    memoHitsTotal: c.metrics_student_memo_hits_total,
+    memoMissesTotal: misses,
+    legacyFallbackCallsTotal: fallback,
+    studentComputationsTotal: misses + fallback,
+    buildDurationMsTotal: c.metrics_request_context_build_duration_ms,
+  };
+}
+
 /** Agrupa preservando el orden de aparición. Ausencia → lista vacía, nunca null. */
 function groupBy(rows, keyOf) {
   const idx = new Map();

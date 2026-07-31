@@ -106,6 +106,12 @@ jobs:
       - name: Compatibilidad de modelos de IA (Gemini textual + breaker)
         run: npm run test:ai-model-compat
 
+      # CHP-STATS-LEGACY-PERF-OBS-01A-R2 — la telemetría del request context es
+      # secret-only y read-only. Sin red: el middleware se ejercita con un
+      # lector inyectado y la ruta con un servidor efímero en 127.0.0.1.
+      - name: Telemetría del request context (autorización + lifecycle)
+        run: npm run test:request-context-telemetry
+
       - name: Equivalencia de la réplica del CIS (shadow comparison)
         run: node scripts/__test__/shadowScopeEquivalence.test.mjs
 

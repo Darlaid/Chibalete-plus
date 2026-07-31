@@ -14,6 +14,7 @@ import { loginSchema, resetRequestSchema, resetConfirmSchema } from './schemas/a
 // P0.6 — access-log estructurado con request-id + redaction (capa incremental).
 import { httpLogger } from './lib/logger.js';
 import { createAdminAuth } from './lib/adminAuth.js';
+import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -41,6 +42,7 @@ import {
     computeStudentMetrics,
     computeCourseMetrics,
     computeSchoolMetrics,
+    getMetricsRequestContextTelemetrySnapshot,
 } from './metricsService.js';
 import { UPLOADS_ROOT, USERS_DB, GROUPS_DB } from './config.js';
 import { withUsersLock, withFileLock } from './usersLock.js';
@@ -1096,6 +1098,33 @@ app.get('/api/system/metrics', requireAdminAccess, (req, res) => {
         jsonCache: {
             entries: _jsonCache.size,
         },
+    });
+});
+
+// ---------------------------------------------------------------------------
+// TELEMETRÍA OPERACIONAL DEL REQUEST CONTEXT — CHP-STATS-LEGACY-PERF-OBS-01A-R2
+//
+// Ruta puramente operacional: la consume un canary de rendimiento para verificar
+// el ciclo de vida de MetricsRequestContext (creados = liberados, activos a
+// cero). NO la usa el frontend y no debe añadirse a ninguna navegación ni SDK.
+//
+// Autorización: EXCLUSIVAMENTE el ADMIN_SECRET file-only.
+//
+// Deliberadamente NO usa `requireAdminAccess`: ese middleware desvía todos los
+// GET a `allowAuthenticatedGetOrReject`, que autoriza a cualquier principal
+// autenticado —incluido un lector—. Sería exponer telemetría del proceso a
+// cuentas de estudiante. El endurecimiento de esos GET es deuda aparte
+// (CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01) y esta unidad no lo toca.
+//
+// Solo lectura: no abre stores, no crea contexto y no altera contadores.
+// ---------------------------------------------------------------------------
+const requireOperationalAdminSecret = createOperationalAdminSecretGuard({ log });
+
+app.get('/api/admin/system/metrics/request-context', requireOperationalAdminSecret, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({
+        ok: true,
+        metricsRequestContext: getMetricsRequestContextTelemetrySnapshot(),
     });
 });
 

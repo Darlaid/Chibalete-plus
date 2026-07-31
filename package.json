@@ -16,6 +16,7 @@
     "test:store-isolation": "node server/__test__/realStoreGuard.test.js && node scripts/verify-test-store-isolation.mjs",
     "test:evidence": "node scripts/security/__tests__/evidenceRedaction.test.mjs && node scripts/security/__tests__/scanArtifact.test.mjs && node scripts/security/__tests__/provisionSecret.test.mjs && node scripts/security/__tests__/evidenceRatchet.test.mjs",
     "test:ai-model-compat": "node server/__test__/geminiModelCompat.test.js && node server/__test__/providerCircuitBreaker.test.js",
+    "test:request-context-telemetry": "node server/__test__/requestContextTelemetry.test.js",
     "lint:evidence": "node scripts/security/evidence-ratchet.mjs",
     "verify:deploy-config": "node scripts/verify-deploy-config.mjs",
     "test:image-integrity": "node scripts/verify-image-integrity.mjs",
