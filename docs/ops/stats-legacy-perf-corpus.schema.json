@@ -1,0 +1,286 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://chibalete.local/schemas/stats-legacy-perf-corpus-01a.json",
+  "title": "CHP-STATS-LEGACY-PERF-CORPUS-01A — corpus productivo del canary",
+  "description": "Describe TANTO el artefacto root-only (con identificadores exactos, 0600 root:root en el VPS) COMO el descriptor sanitizado versionado. Los dos comparten contrato; se diferencian en que el sanitizado sustituye `id` por `idHash8` y omite `path`, `populationHashes` y `production.imageId`. Un validador que acepte claves no declaradas aquí no es fail-closed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "corpusId",
+    "corpusVersion",
+    "generatedAt",
+    "expiresAt",
+    "reviewBy",
+    "production",
+    "acceptanceContractVersion",
+    "acceptanceContractSha256",
+    "organizations",
+    "group",
+    "user",
+    "syntheticPrincipals",
+    "periods",
+    "routes",
+    "normalization",
+    "sampling",
+    "gates",
+    "lifecycle",
+    "driftCriteria"
+  ],
+  "properties": {
+    "corpusId": { "const": "CHP-STATS-LEGACY-PERF-CORPUS-01A" },
+    "corpusVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "generatedAt": { "$ref": "#/definitions/isoInstant" },
+    "expiresAt": {
+      "$ref": "#/definitions/isoInstant",
+      "description": "Instante en que la ventana rodante de 30 días del backbone deja de contener la última actividad registrada. Pasado ese punto el corpus describe una forma de respuesta que ya no se produce."
+    },
+    "reviewBy": { "$ref": "#/definitions/isoInstant" },
+    "production": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "imageRef", "observabilityCommit", "requiredFlags"],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "imageRef": { "type": "string" },
+        "imageId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "observabilityCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "requiredFlags": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["LEGACY_METRICS_REQUEST_CONTEXT", "METRICS_ENGINE"],
+          "properties": {
+            "LEGACY_METRICS_REQUEST_CONTEXT": { "const": "off" },
+            "METRICS_ENGINE": { "const": "legacy" }
+          }
+        }
+      }
+    },
+    "acceptanceContractVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "acceptanceContractSha256": { "$ref": "#/definitions/sha256" },
+    "rootOnlyArtifact": {
+      "type": "object",
+      "description": "Presente solo en el descriptor sanitizado: apunta al artefacto que sí lleva los identificadores exactos.",
+      "additionalProperties": false,
+      "required": ["path", "mode", "containsExactIdentifiers"],
+      "properties": {
+        "path": { "type": "string" },
+        "mode": { "const": "0600 root:root" },
+        "containsExactIdentifiers": { "const": true }
+      }
+    },
+    "organizations": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "name", "slug", "addressable", "groups", "membersInOro", "activeReaders", "dataState"],
+        "properties": {
+          "alias": { "enum": ["ORG_A", "ORG_B", "ORG_C", "ORG_D"] },
+          "name": { "type": "string" },
+          "id": { "type": "string", "description": "solo root-only" },
+          "idSha256": { "$ref": "#/definitions/sha256" },
+          "idHash8": { "$ref": "#/definitions/shortHash" },
+          "slug": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "addressable": { "type": "boolean" },
+          "groups": { "type": "integer", "minimum": 0 },
+          "membersInOro": { "type": "integer", "minimum": 0 },
+          "activeReaders": { "type": "integer", "minimum": 0 },
+          "dataState": {
+            "enum": ["ACTIVE", "NO_ACTIVITY", "NOT_ADDRESSABLE", "NO_DATA", "DATA_INCOMPLETE"],
+            "description": "0, NO_ACTIVITY, NO_DATA y DATA_INCOMPLETE son estados DISTINTOS y no se colapsan."
+          }
+        }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alias", "organizationAlias", "type", "membersInOro", "activeReaders", "selection"],
+      "properties": {
+        "alias": { "const": "GROUP_R7" },
+        "id": { "type": "string", "description": "solo root-only" },
+        "idSha256": { "$ref": "#/definitions/sha256" },
+        "idHash8": { "$ref": "#/definitions/shortHash" },
+        "organizationAlias": { "enum": ["ORG_A", "ORG_B", "ORG_C", "ORG_D", null] },
+        "type": { "type": ["string", "null"] },
+        "membersInOro": { "type": "integer", "minimum": 20, "maximum": 120 },
+        "activeReaders": { "type": "integer", "minimum": 1 },
+        "selection": { "type": "object" }
+      }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alias", "selection"],
+      "properties": {
+        "alias": { "const": "USER_R6" },
+        "id": { "type": "string", "description": "solo root-only" },
+        "idSha256": { "$ref": "#/definitions/sha256" },
+        "idHash8": { "$ref": "#/definitions/shortHash" },
+        "selection": { "type": "object" }
+      }
+    },
+    "syntheticPrincipals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["userId", "schoolSlug"],
+      "properties": {
+        "userId": { "const": "user-synthetic-corpus-01a-does-not-exist" },
+        "schoolSlug": { "const": "synthetic-school-does-not-exist" }
+      }
+    },
+    "periods": {
+      "type": "object",
+      "required": ["timezone", "routesAcceptQueryParameters", "dataCoverage", "rollingBackboneWindow", "canaryExecutionWindow"],
+      "properties": {
+        "timezone": { "const": "UTC" },
+        "routesAcceptQueryParameters": {
+          "const": false,
+          "description": "Los cuatro handlers legacy leen exclusivamente req.params. No hay periodo que fijar como parámetro de petición."
+        }
+      }
+    },
+    "routes": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "desc", "method", "pathTemplate", "auth", "routeClass", "expectedStatus", "expectedContentType", "createsContext", "topLevelKeys"],
+        "properties": {
+          "id": { "enum": ["ROUTE_1", "ROUTE_2", "ROUTE_3", "ROUTE_4", "ROUTE_5", "ROUTE_6", "ROUTE_7", "NEG_401", "NEG_403", "NEG_404"] },
+          "desc": { "type": "string" },
+          "method": { "const": "GET" },
+          "pathTemplate": { "type": "string", "pattern": "^/api/metrics/" },
+          "path": { "type": "string", "description": "solo root-only: lleva identificadores resueltos" },
+          "auth": { "enum": ["ADMIN_SECRET", "NONE", "SYNTHETIC_USER_HEADER"] },
+          "routeClass": { "enum": ["SCHOOL_AGGREGATION_MEMOIZED", "COURSE_AGGREGATION_INDEXED", "UNCHANGED_NO_CONTEXT"] },
+          "expectedStatus": { "enum": [200, 401, 403, 404] },
+          "expectedContentType": { "const": "application/json; charset=utf-8" },
+          "createsContext": { "type": "boolean" },
+          "topLevelKeys": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        }
+      }
+    },
+    "perfRouteIds": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": { "enum": ["ROUTE_1", "ROUTE_2", "ROUTE_3", "ROUTE_4", "ROUTE_5", "ROUTE_6", "ROUTE_7"] }
+    },
+    "negativeRouteIds": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "enum": ["NEG_401", "NEG_403", "NEG_404"] }
+    },
+    "normalization": {
+      "type": "object",
+      "required": ["technicalTimestampNames", "derivedVolatilePaths", "sortObjectKeys", "sortArrays"],
+      "properties": {
+        "technicalTimestampNames": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "description": "Exactamente los diez sellos de -01E. Añadir uno más es ampliar la whitelist para tapar una diferencia real."
+        },
+        "derivedVolatilePaths": { "type": "array", "minItems": 9, "maxItems": 9 },
+        "sortObjectKeys": { "const": false },
+        "sortArrays": { "const": false }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "required": ["level1", "level2", "level3"],
+      "properties": {
+        "level2": {
+          "type": "object",
+          "required": ["blocksPerArm", "observationsPerBlockAndArm", "totalObservationsPerArmAndRoute", "concurrency", "armSequence"],
+          "properties": {
+            "blocksPerArm": { "type": "integer", "minimum": 4 },
+            "observationsPerBlockAndArm": { "type": "integer", "minimum": 10 },
+            "totalObservationsPerArmAndRoute": { "type": "integer", "minimum": 40, "maximum": 64 },
+            "concurrency": { "const": 1 },
+            "armSequence": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "enum": ["off", "on"] } }
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "required": ["SCHOOL_AGGREGATION_MEMOIZED", "COURSE_AGGREGATION_INDEXED", "UNCHANGED_NO_CONTEXT"],
+      "properties": {
+        "SCHOOL_AGGREGATION_MEMOIZED": {
+          "type": "object",
+          "properties": {
+            "p50OnMaxRatio": { "const": 0.5 },
+            "p95OnMaxRatio": { "const": 0.5 },
+            "absoluteP95ReductionMs": { "const": 100 }
+          }
+        },
+        "COURSE_AGGREGATION_INDEXED": {
+          "type": "object",
+          "properties": {
+            "p50OnMaxRatio": { "const": 0.65 },
+            "p95OnMaxRatio": { "const": 0.6 },
+            "absoluteP95ReductionMs": { "const": 100 }
+          }
+        },
+        "UNCHANGED_NO_CONTEXT": {
+          "type": "object",
+          "properties": {
+            "latencyBlocking": {
+              "const": false,
+              "description": "El gate del ±5 % queda por debajo de la resolución del experimento; la verificación es estructural."
+            },
+            "createdDelta": { "const": 0 },
+            "activeFinal": { "const": 0 }
+          }
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": ["createdDeltaEqualsDisposedDelta", "activeFinal", "noContextAliveAfterSeconds", "telemetryEndpoint"],
+      "properties": {
+        "createdDeltaEqualsDisposedDelta": { "const": true },
+        "activeFinal": { "const": 0 },
+        "noContextAliveAfterSeconds": { "const": 60 },
+        "telemetryEndpoint": { "const": "/api/admin/system/metrics/request-context" }
+      }
+    },
+    "populationHashes": {
+      "type": "object",
+      "description": "solo root-only",
+      "required": ["oroSha256", "groupsSha256", "schoolsSha256", "groupR7MembersSha256"],
+      "properties": {
+        "oroSha256": { "$ref": "#/definitions/sha256" },
+        "groupsSha256": { "$ref": "#/definitions/sha256" },
+        "schoolsSha256": { "$ref": "#/definitions/sha256" },
+        "groupR7MembersSha256": { "$ref": "#/definitions/sha256" },
+        "groupR7MemberCount": { "type": "integer", "minimum": 0 },
+        "oroUserCount": { "type": "integer", "minimum": 0 },
+        "groupCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "populationCounts": {
+      "type": "object",
+      "description": "solo descriptor sanitizado: cardinalidades sin hashes de fichero",
+      "additionalProperties": false,
+      "properties": {
+        "oroUserCount": { "type": "integer", "minimum": 0 },
+        "groupCount": { "type": "integer", "minimum": 0 },
+        "groupR7MemberCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "driftCriteria": { "type": "object" }
+  },
+  "definitions": {
+    "isoInstant": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "shortHash": { "type": "string", "pattern": "^[0-9a-f]{8}$" }
+  }
+}

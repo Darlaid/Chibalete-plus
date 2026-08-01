@@ -1,0 +1,537 @@
+{
+  "corpusId": "CHP-STATS-LEGACY-PERF-CORPUS-01A",
+  "corpusVersion": "1.0.0",
+  "generatedAt": "2026-08-01T14:02:57Z",
+  "expiresAt": "2026-08-24T23:17:59Z",
+  "reviewBy": "2026-08-15T00:00:00Z",
+  "production": {
+    "commit": "4c407af21262905db9478a07ce3dfe4e39ac9734",
+    "imageRef": "chibalete/api:4c407af",
+    "observabilityCommit": "bba2a4ef8ce11712b0d2d6feba182ea2a6a47cf0",
+    "requiredFlags": {
+      "LEGACY_METRICS_REQUEST_CONTEXT": "off",
+      "METRICS_ENGINE": "legacy"
+    }
+  },
+  "acceptanceContractVersion": "1.0.0",
+  "acceptanceContractSha256": "344117208e63ec4f1a3ba6e105e6dc05c3b234f56d41c3486da009a0b7ef4dae",
+  "rootOnlyArtifact": {
+    "path": "/root/stats-legacy-perf-corpus-01a/PRODUCTION-CANARY-CORPUS.json",
+    "mode": "0600 root:root",
+    "containsExactIdentifiers": true
+  },
+  "organizations": [
+    {
+      "alias": "ORG_A",
+      "name": "Villas de Aranjuez",
+      "idHash8": "2622acf7",
+      "slug": "villas-de-aranjuez",
+      "addressable": true,
+      "groups": 1,
+      "membersInOro": 80,
+      "activeReaders": 36,
+      "dataState": "ACTIVE"
+    },
+    {
+      "alias": "ORG_B",
+      "name": "Nuevo Bosque",
+      "idHash8": "f1dd1828",
+      "slug": "nuevo-bosque",
+      "addressable": true,
+      "groups": 1,
+      "membersInOro": 80,
+      "activeReaders": 0,
+      "dataState": "NO_ACTIVITY"
+    },
+    {
+      "alias": "ORG_C",
+      "name": "Chibalete Club FilBo 2026",
+      "idHash8": "8cbb4a2b",
+      "slug": "chibalete-club-filbo-2026",
+      "addressable": true,
+      "groups": 2,
+      "membersInOro": 45,
+      "activeReaders": 9,
+      "dataState": "ACTIVE"
+    },
+    {
+      "alias": "ORG_D",
+      "name": "Externado",
+      "idHash8": "91457406",
+      "slug": "externado",
+      "addressable": false,
+      "groups": 0,
+      "membersInOro": 0,
+      "activeReaders": 0,
+      "dataState": "NOT_ADDRESSABLE"
+    }
+  ],
+  "group": {
+    "alias": "GROUP_R7",
+    "idHash8": "3328c000",
+    "organizationAlias": "ORG_A",
+    "type": "course",
+    "membersInOro": 80,
+    "activeReaders": 36,
+    "selection": {
+      "minMembersInOro": 20,
+      "maxMembersInOro": 120,
+      "minActiveReaders": 1,
+      "exclusions": [
+        "SCHOOL_NOT_REGISTERED",
+        "ARCHIVED",
+        "EMPTY",
+        "NO_ORO_COVERAGE",
+        "OUT_OF_RANGE",
+        "NO_ATTRIBUTABLE_ACTIVITY"
+      ],
+      "orderBy": "activeReaders DESC",
+      "tieBreak": "id ASC",
+      "eligibleCount": 2,
+      "runnerUpActiveReaders": 6
+    }
+  },
+  "user": {
+    "alias": "USER_R6",
+    "idHash8": "04280644",
+    "selection": {
+      "mustBeInCanonicalPadron": true,
+      "requiredRole": "lector",
+      "mustBeMemberOfGroupR7": true,
+      "requiresLogin": false,
+      "mustNotUpdateLastLoginAt": true,
+      "orderBy": "sha256(userId) ASC",
+      "takeFirstSatisfying": true,
+      "verifyResponseTwice": true,
+      "poolSize": 80
+    }
+  },
+  "syntheticPrincipals": {
+    "userId": "user-synthetic-corpus-01a-does-not-exist",
+    "schoolSlug": "synthetic-school-does-not-exist"
+  },
+  "periods": {
+    "timezone": "UTC",
+    "routesAcceptQueryParameters": false,
+    "dataCoverage": {
+      "role": "PRIMARY",
+      "progressFrom": "2026-03-16T21:51:07.928Z",
+      "progressTo": "2026-07-25T23:17:51.927Z",
+      "eventsFrom": "2026-05-08T01:24:12Z",
+      "eventsTo": "2026-07-25T23:17:59Z"
+    },
+    "rollingBackboneWindow": {
+      "role": "SECONDARY_CONTROL",
+      "windowDays": 30,
+      "codeFixed": true,
+      "relativeToRequestTime": true,
+      "normalizedFields": [
+        "windowFrom",
+        "windowTo",
+        "generatedAt"
+      ]
+    },
+    "canaryExecutionWindow": {
+      "role": "DECLARED_PER_RUN",
+      "mustBeAbsolute": true,
+      "mustBeBeforeCorpusExpiry": true
+    },
+    "forbidden": [
+      "now",
+      "ultimos-30-dias-recalculados-por-request",
+      "timestamps-moviles"
+    ]
+  },
+  "routes": [
+    {
+      "id": "ROUTE_1",
+      "desc": "listado institucional",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/schools",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "UNCHANGED_NO_CONTEXT",
+      "expectedStatus": 200,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": false,
+      "topLevelKeys": [
+        "schools"
+      ]
+    },
+    {
+      "id": "ROUTE_2",
+      "desc": "institucion alto volumen",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/school/{{ORG_A_SLUG}}",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "SCHOOL_AGGREGATION_MEMOIZED",
+      "expectedStatus": 200,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": true,
+      "topLevelKeys": [
+        "alerts",
+        "backboneMetrics",
+        "computedAt",
+        "courseBreakdown",
+        "distributions",
+        "icdli",
+        "productMetrics",
+        "readingLevels",
+        "schoolId",
+        "schoolName",
+        "summary"
+      ]
+    },
+    {
+      "id": "ROUTE_3",
+      "desc": "institucion sin actividad",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/school/{{ORG_B_SLUG}}",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "SCHOOL_AGGREGATION_MEMOIZED",
+      "expectedStatus": 200,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": true,
+      "topLevelKeys": [
+        "alerts",
+        "backboneMetrics",
+        "computedAt",
+        "courseBreakdown",
+        "distributions",
+        "icdli",
+        "productMetrics",
+        "readingLevels",
+        "schoolId",
+        "schoolName",
+        "summary"
+      ]
+    },
+    {
+      "id": "ROUTE_4",
+      "desc": "institucion FilBo",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/school/{{ORG_C_SLUG}}",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "SCHOOL_AGGREGATION_MEMOIZED",
+      "expectedStatus": 200,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": true,
+      "topLevelKeys": [
+        "alerts",
+        "backboneMetrics",
+        "computedAt",
+        "courseBreakdown",
+        "distributions",
+        "icdli",
+        "productMetrics",
+        "readingLevels",
+        "schoolId",
+        "schoolName",
+        "summary"
+      ]
+    },
+    {
+      "id": "ROUTE_5",
+      "desc": "institucion registrada sin grupos",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/school/{{ORG_D_SLUG}}",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "UNCHANGED_NO_CONTEXT",
+      "expectedStatus": 404,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": false,
+      "topLevelKeys": [
+        "error"
+      ]
+    },
+    {
+      "id": "ROUTE_6",
+      "desc": "usuario",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/student/{{USER_R6_ID}}",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "UNCHANGED_NO_CONTEXT",
+      "expectedStatus": 200,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": false,
+      "topLevelKeys": [
+        "alerts",
+        "backboneMetrics",
+        "computedAt",
+        "dataWindow",
+        "icdli",
+        "productMetrics",
+        "readingLevels",
+        "summary",
+        "userId"
+      ]
+    },
+    {
+      "id": "ROUTE_7",
+      "desc": "grupo",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/course/{{GROUP_R7_ID}}",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "COURSE_AGGREGATION_INDEXED",
+      "expectedStatus": 200,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": true,
+      "topLevelKeys": [
+        "alerts",
+        "backboneMetrics",
+        "computedAt",
+        "courseId",
+        "courseName",
+        "distributions",
+        "icdli",
+        "needsAttention",
+        "productMetrics",
+        "readingLevels",
+        "studentBreakdown",
+        "summary",
+        "topPerformers"
+      ]
+    },
+    {
+      "id": "NEG_401",
+      "desc": "sin identidad",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/schools",
+      "auth": "NONE",
+      "routeClass": "UNCHANGED_NO_CONTEXT",
+      "expectedStatus": 401,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": false,
+      "topLevelKeys": [
+        "error"
+      ]
+    },
+    {
+      "id": "NEG_403",
+      "desc": "principal sintetico fuera de scope",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/student/{{USER_R6_ID}}",
+      "auth": "SYNTHETIC_USER_HEADER",
+      "routeClass": "UNCHANGED_NO_CONTEXT",
+      "expectedStatus": 403,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": false,
+      "topLevelKeys": [
+        "error"
+      ]
+    },
+    {
+      "id": "NEG_404",
+      "desc": "scope inexistente",
+      "method": "GET",
+      "pathTemplate": "/api/metrics/school/synthetic-school-does-not-exist",
+      "auth": "ADMIN_SECRET",
+      "routeClass": "UNCHANGED_NO_CONTEXT",
+      "expectedStatus": 404,
+      "expectedContentType": "application/json; charset=utf-8",
+      "createsContext": false,
+      "topLevelKeys": [
+        "error"
+      ]
+    }
+  ],
+  "normalization": {
+    "technicalTimestampNames": [
+      "computedAt",
+      "generatedAt",
+      "createdAt",
+      "timestamp",
+      "windowFrom",
+      "windowTo",
+      "from",
+      "to",
+      "fromTs",
+      "toTs"
+    ],
+    "technicalTimestampPattern": "(^|\\.)(computedAt|generatedAt|createdAt|timestamp|windowFrom|windowTo|from|to|fromTs|toTs)$",
+    "derivedVolatilePaths": [
+      "backboneMetrics.funnels.generatedAt",
+      "backboneMetrics.funnels.windowFrom",
+      "backboneMetrics.funnels.windowTo",
+      "backboneMetrics.generatedAt",
+      "backboneMetrics.insights.generatedAt",
+      "backboneMetrics.insights.insights[].createdAt",
+      "backboneMetrics.windowFrom",
+      "backboneMetrics.windowTo",
+      "computedAt"
+    ],
+    "excludeRequiresBothNameAndIntraArmVariation": true,
+    "sortObjectKeys": false,
+    "sortArrays": false,
+    "compareStatus": true,
+    "compareContentType": true,
+    "compareNulls": true,
+    "compareZeroVsNull": true,
+    "compareDenominators": true,
+    "compareDataStates": true,
+    "compareCoverage": true
+  },
+  "sampling": {
+    "level1": {
+      "unit": "CHP-STATS-LEGACY-PERF-01E-R1",
+      "samplesPerRouteAndArm": 252,
+      "topologies": [
+        "individual",
+        "dual"
+      ],
+      "concurrencies": [
+        1,
+        4
+      ],
+      "repeatInProduction": false
+    },
+    "level2": {
+      "appliesToClasses": [
+        "SCHOOL_AGGREGATION_MEMOIZED",
+        "COURSE_AGGREGATION_INDEXED"
+      ],
+      "blocksPerArm": 4,
+      "totalBlocks": 8,
+      "armSequence": [
+        "off",
+        "on",
+        "on",
+        "off",
+        "off",
+        "on",
+        "on",
+        "off"
+      ],
+      "observationsPerBlockAndArm": 16,
+      "totalObservationsPerArmAndRoute": 64,
+      "concurrency": 1,
+      "openLoop": true,
+      "pacingMsAggregation": 2500,
+      "pacingMsUnchanged": 1000,
+      "warmupWavesPerBlock": 4,
+      "cooldownSecondsBetweenBlocks": 30,
+      "seedBase": 900,
+      "discardRules": [
+        "TRANSPORT_ERROR_OR_TIMEOUT_IN_BLOCK",
+        "CONTAMINATED_COUNTER_BASELINE_AT_BLOCK_START",
+        "FEWER_THAN_16_VALID_OBSERVATIONS"
+      ],
+      "maxRetriesPerBlock": 1,
+      "maxRetriesPerRun": 2,
+      "maxDiscardedBlocksPerArm": 1,
+      "abortIfHostLoad1Above": 3,
+      "abortIfApiCpuCoresAbove": 1.2,
+      "abortOnAnyApiRestart": true
+    },
+    "level3": {
+      "appliesToClasses": [
+        "UNCHANGED_NO_CONTEXT"
+      ],
+      "observationsPerBlockAndArm": 16,
+      "totalObservationsPerArmAndRoute": 64,
+      "latencyIsDescriptiveOnly": true,
+      "percentBandGateRejected": "±5 % sobre p95 — por debajo del ruido, no discrimina"
+    }
+  },
+  "gates": {
+    "SCHOOL_AGGREGATION_MEMOIZED": {
+      "routes": [
+        "ROUTE_2",
+        "ROUTE_3",
+        "ROUTE_4"
+      ],
+      "p50OnMaxRatio": 0.5,
+      "p95OnMaxRatio": 0.5,
+      "absoluteP95ReductionMs": 100,
+      "absoluteAppliesWhenP95OffAtLeastMs": 200,
+      "contextsCreatedEqualsDisposed": true,
+      "memoHitsMustBePositive": true,
+      "progressScansPerRequest": 1,
+      "eventProcessingsPerRequest": 1,
+      "blocksThatMustPass": 3,
+      "blocksPerArm": 4,
+      "aggregateMustPass": true
+    },
+    "COURSE_AGGREGATION_INDEXED": {
+      "routes": [
+        "ROUTE_7"
+      ],
+      "p50OnMaxRatio": 0.65,
+      "p95OnMaxRatio": 0.6,
+      "absoluteP95ReductionMs": 100,
+      "absoluteAppliesWhenP95OffAtLeastMs": 250,
+      "zeroMemoHitsIsExpected": true,
+      "progressScansPerRequest": 1,
+      "eventProcessingsPerRequest": 1,
+      "contractRegressions": 0,
+      "blocksThatMustPass": 3,
+      "blocksPerArm": 4,
+      "aggregateMustPass": true,
+      "dualTopologySatisfiedByLevel1Evidence": true
+    },
+    "UNCHANGED_NO_CONTEXT": {
+      "routes": [
+        "ROUTE_1",
+        "ROUTE_5",
+        "ROUTE_6",
+        "NEG_401",
+        "NEG_403",
+        "NEG_404"
+      ],
+      "contractDifferences": 0,
+      "valueDifferences": 0,
+      "createdDelta": 0,
+      "disposedDelta": 0,
+      "activeFinal": 0,
+      "memoHitsDelta": 0,
+      "memoMissesDelta": 0,
+      "latencyBlocking": false,
+      "extremeRegression": {
+        "newErrorStatusNotPresentInOffArm": true,
+        "anyTimeoutMs": 30000,
+        "p95RatioAbove": 2,
+        "andAbsoluteIncreaseAboveMs": 250
+      }
+    }
+  },
+  "lifecycle": {
+    "createdDeltaEqualsDisposedDelta": true,
+    "activeFinal": 0,
+    "noContextAliveAfterSeconds": 60,
+    "countersMonotonicExcept": [
+      "active"
+    ],
+    "operationalEndpointMustNotChangeCounters": true,
+    "telemetryEndpoint": "/api/admin/system/metrics/request-context",
+    "telemetryCounters": [
+      "createdTotal",
+      "disposedTotal",
+      "active",
+      "progressUsersIndexedTotal",
+      "eventUsersIndexedTotal",
+      "memoHitsTotal",
+      "memoMissesTotal",
+      "legacyFallbackCallsTotal",
+      "studentComputationsTotal",
+      "buildDurationMsTotal"
+    ],
+    "countersResetOnlyOnProcessRestart": true
+  },
+  "populationCounts": {
+    "oroUserCount": 647,
+    "groupCount": 20,
+    "groupR7MemberCount": 80
+  },
+  "driftCriteria": {
+    "productionCommitMustMatch": true,
+    "productionImageIdMustMatch": true,
+    "flagsMustBeOff": true,
+    "organizationIdsMustExist": true,
+    "groupIdMustExist": true,
+    "userIdMustExist": true,
+    "groupMembershipMustMatchHash": true,
+    "acceptanceContractShaMustMatch": true,
+    "routeStatusesMustMatch": true,
+    "routeTopLevelKeysMustMatch": true,
+    "expiryMustNotBePassed": true
+  }
+}
