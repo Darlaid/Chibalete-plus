@@ -29,7 +29,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { loadInspect, containerSummary } from '../security/safeOperationalEvidence.mjs';
+import { isPublishableEnvValue } from '../security/evidenceContract.mjs';
+import { REDACTED } from '../security/sensitiveTaxonomy.mjs';
 import {
     CORPUS_ID, CORPUS_VERSION, ACCEPTANCE_CONTRACT_VERSION,
     ORG_ALIASES, GROUP_ALIAS, USER_ALIAS,
@@ -229,21 +231,99 @@ export function validatePopulation(corpus, { data, dataCritical }, report) {
     return report;
 }
 
-/** Flags, imagen y ausencia de materializador. Requiere `docker` en el host. */
-export function validateRuntime(corpus, report, { docker = true } = {}) {
-    if (!docker) return report;
-    const inspect = (name, fmt) =>
-        execFileSync('docker', ['inspect', '-f', fmt, name], { encoding: 'utf8' }).trim();
-    for (const c of ['chibalete_api_1', 'chibalete_api_2']) {
-        const env = inspect(c, '{{range .Config.Env}}{{println .}}{{end}}').split('\n');
-        const flag = env.find((e) => e.startsWith('LEGACY_METRICS_REQUEST_CONTEXT='));
-        const engine = env.find((e) => e.startsWith('METRICS_ENGINE='));
-        report.add(`${c}.flagOff`, flag === 'LEGACY_METRICS_REQUEST_CONTEXT=off', VERDICTS.UNSAFE, flag ?? '(ausente)');
-        report.add(`${c}.engineLegacy`, engine === 'METRICS_ENGINE=legacy', VERDICTS.UNSAFE, engine ?? '(ausente)');
-        report.add(`${c}.imageId`, inspect(c, '{{.Image}}') === corpus.production.imageId, VERDICTS.DRIFTED);
-        report.add(`${c}.healthy`, inspect(c, '{{.State.Health.Status}}') === 'healthy', VERDICTS.UNSAFE);
-        const sha = env.find((e) => e.startsWith('GIT_SHA='));
-        report.add(`${c}.commit`, sha === `GIT_SHA=${corpus.production.commit}`, VERDICTS.DRIFTED, sha ?? '(ausente)');
+export const RUNTIME_CONTAINERS = Object.freeze(['chibalete_api_1', 'chibalete_api_2']);
+
+/** Banderas cuyo valor el validador NECESITA leer. Las tres están en la allowlist. */
+const REQUIRED_FLAGS = Object.freeze({
+    LEGACY_METRICS_REQUEST_CONTEXT: 'off',
+    METRICS_ENGINE: 'legacy',
+});
+
+/**
+ * El commit se toma de la etiqueta OCI `image.revision`, no de `GIT_SHA`.
+ *
+ * `GIT_SHA` es una variable de entorno y **no** está en `ENV_VALUE_ALLOWLIST`,
+ * así que la evidencia segura la devuelve `[REDACTED]` — correctamente: leer
+ * variables no publicables es exactamente lo que el contrato prohíbe. La
+ * etiqueta es además mejor prueba: la estampa el build de la imagen, no el
+ * entorno de ejecución, así que no puede divergir de lo que se construyó.
+ */
+const COMMIT_LABEL = 'org.opencontainers.image.revision';
+
+/**
+ * Flags, imagen y salud de las API productivas.
+ *
+ * **Evidencia operativa segura, por proyección.** No se lee `.Config.Env` ni se
+ * ejecuta `docker inspect` en crudo desde aquí: se reutiliza el helper sancionado
+ * `scripts/security/safeOperationalEvidence.mjs`, que proyecta el objeto por
+ * allowlist y devuelve `[REDACTED]` para todo valor no publicable —incluidas
+ * `OPENAI_API_KEY` y `GEMINI_API_KEY`—. No se crea un segundo mecanismo de
+ * redacción: si hiciera falta publicar una bandera nueva, se añade a
+ * `ENV_VALUE_ALLOWLIST` con su justificación.
+ *
+ * Es **fail-closed**: una bandera ausente, un valor redactado donde se esperaba
+ * uno publicable, o una variable sensible que llegara con valor, son fallos con
+ * veredicto `UNSAFE` — nunca un «no pude comprobarlo, sigo».
+ *
+ * @param {object} opts.inspected  objetos de inspect ya cargados (fixture de
+ *   prueba). Se proyectan por la MISMA allowlist: una fixture no es una vía
+ *   privilegiada, solo evita depender de Docker en CI.
+ */
+export function validateRuntime(corpus, report, { docker = true, inspected = null } = {}) {
+    if (!docker && !inspected) return report;
+
+    let summary;
+    try {
+        summary = containerSummary(inspected ?? loadInspect([...RUNTIME_CONTAINERS], null));
+    } catch (e) {
+        report.add('runtime.evidence', false, VERDICTS.UNSAFE, e.message);
+        return report;
+    }
+
+    const seen = new Set();
+    for (const c of summary.containers) {
+        const name = c.name ?? '(sin nombre)';
+        seen.add(name);
+        const env = new Map((c.environment ?? []).map((e) => [e.name, e.value]));
+
+        for (const [flag, expected] of Object.entries(REQUIRED_FLAGS)) {
+            const value = env.get(flag);
+            if (value === undefined) {
+                report.add(`${name}.${flag}`, false, VERDICTS.UNSAFE, 'bandera ausente');
+            } else if (value === REDACTED) {
+                // La bandera está en la allowlist, así que un [REDACTED] aquí
+                // significa que el contrato de evidencia cambió bajo nuestros pies.
+                report.add(`${name}.${flag}`, false, VERDICTS.UNSAFE,
+                    'redactada pese a estar en ENV_VALUE_ALLOWLIST');
+            } else {
+                report.add(`${name}.${flag}`, value === expected, VERDICTS.UNSAFE,
+                    { expected, got: value });
+            }
+        }
+
+        /**
+         * Defensa en profundidad: si el helper devolviera con valor una variable
+         * que no es publicable, la evidencia estaría filtrando y hay que
+         * detenerse, no continuar con un aviso.
+         */
+        const leaked = (c.environment ?? [])
+            .filter((e) => e.value !== REDACTED && e.value !== null && !isPublishableEnvValue(e.name))
+            .map((e) => e.name);
+        report.add(`${name}.noSensitiveValues`, leaked.length === 0, VERDICTS.UNSAFE, leaked);
+
+        report.add(`${name}.imageId`, c.imageId === corpus.production.imageId, VERDICTS.DRIFTED);
+        report.add(`${name}.healthy`, c.health === 'healthy', VERDICTS.UNSAFE, c.health);
+        report.add(`${name}.noRestarts`, c.restartCount === 0, VERDICTS.UNSAFE, c.restartCount);
+
+        const revision = c.labels?.allowed?.[COMMIT_LABEL];
+        report.add(`${name}.commit`, revision === corpus.production.commit, VERDICTS.DRIFTED,
+            revision === undefined ? `etiqueta ${COMMIT_LABEL} ausente` : { expected: corpus.production.commit, got: revision });
+    }
+
+    // Fail-closed también ante ausencias: un contenedor que no responde no puede
+    // leerse como «sin hallazgos».
+    for (const expectedName of RUNTIME_CONTAINERS) {
+        report.add(`${expectedName}.present`, seen.has(expectedName), VERDICTS.UNSAFE);
     }
     return report;
 }
@@ -332,7 +412,14 @@ async function main() {
         report.add('insights.untouched', before === after, VERDICTS.UNSAFE);
     }
 
-    if (!args.noDocker) validateRuntime(corpus, report);
+    if (args.inspectFrom) {
+        // Fixture sintética por la MISMA vía que el helper sancionado
+        // (`--from-file`): la proyección por allowlist se aplica igual, así que
+        // no es un camino privilegiado, solo uno que no depende de Docker.
+        validateRuntime(corpus, report, { inspected: loadInspect([], String(args.inspectFrom)) });
+    } else if (!args.noDocker) {
+        validateRuntime(corpus, report);
+    }
 
     if (args.probe) {
         try {

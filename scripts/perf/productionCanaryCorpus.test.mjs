@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
     CORPUS_ID, CORPUS_VERSION, ACCEPTANCE_CONTRACT_VERSION,
@@ -32,7 +33,7 @@ import {
 } from './productionCanaryCorpus.mjs';
 import {
     VERDICTS, Report, validateStructure, validateExpiry, validatePopulation,
-    scanCorpusForLeaks, scanSanitizedForLeaks,
+    validateRuntime, RUNTIME_CONTAINERS, scanCorpusForLeaks, scanSanitizedForLeaks,
 } from './validateProductionCanaryCorpus.mjs';
 
 let pass = 0, fail = 0;
@@ -447,6 +448,142 @@ section('[14] aislamiento de stores: la población se lee, no se escribe');
     validatePopulation(corpus, { data, dataCritical: dc }, r3);
     ok('[14d] si el principal sintético existiera → UNSAFE',
         r3.failures.some((f) => f.name === 'syntheticPrincipal.doesNotCollide' && f.verdictIfFailed === VERDICTS.UNSAFE));
+}
+
+section('[17] evidencia operativa segura: el entorno no se materializa');
+{
+    // Cebos sintéticos. Se construyen por concatenación para que ningún escáner
+    // de credenciales vea una asignación literal en el fuente.
+    const FAKE_OPENAI = ['sk', 'FIXTURE0000NOTAREALKEY0000'].join('-');
+    const FAKE_GEMINI = ['AIza', 'FIXTURE.NOT.A.REAL.KEY.0000'].join('');   // con puntos, como las reales
+    const FAKE_GIT_SHA = '9'.repeat(40);
+    const NEEDLES = [FAKE_OPENAI, FAKE_GEMINI, FAKE_GIT_SHA];
+
+    const makeInspect = (name, env, { revision = 'a'.repeat(40), health = 'healthy', restarts = 0 } = {}) => ({
+        Name: `/${name}`,
+        Image: `sha256:${'b'.repeat(64)}`,
+        RestartCount: restarts,
+        Created: '2026-08-01T00:00:00Z',
+        State: { Status: 'running', Health: { Status: health }, StartedAt: '2026-08-01T00:00:00Z' },
+        HostConfig: { RestartPolicy: { Name: 'unless-stopped' }, Memory: 0, NanoCpus: 0 },
+        Config: {
+            Image: 'chibalete/api:fixture',
+            Env: env,
+            Labels: { 'org.opencontainers.image.revision': revision, 'com.docker.compose.service': name },
+        },
+        Mounts: [],
+        NetworkSettings: { Networks: {} },
+    });
+
+    const goodEnv = [
+        'LEGACY_METRICS_REQUEST_CONTEXT=off',
+        'METRICS_ENGINE=legacy',
+        `GIT_SHA=${FAKE_GIT_SHA}`,
+        `OPENAI_API_KEY=${FAKE_OPENAI}`,
+        `GEMINI_API_KEY=${FAKE_GEMINI}`,
+        'NODE_ENV=production',
+    ];
+    const fixture = RUNTIME_CONTAINERS.map((n) => makeInspect(n, goodEnv));
+    const corpus = buildFixtureCorpus();
+    corpus.production.imageId = `sha256:${'b'.repeat(64)}`;
+    corpus.production.commit = 'a'.repeat(40);
+
+    const r = new Report();
+    validateRuntime(corpus, r, { docker: false, inspected: fixture });
+    ok('[17a] el validador acepta un runtime coherente',
+        r.failures.length === 0, r.failures.map((f) => `${f.name}:${JSON.stringify(f.detail)}`).join(' | '));
+
+    // El informe completo es lo que acaba en --json: ahí no puede haber cebos.
+    const serialized = JSON.stringify({ verdict: r.verdict(), checks: r.checks });
+    for (const needle of NEEDLES) {
+        ok(`[17b] el informe no contiene el cebo ${needle.slice(0, 6)}…`, !serialized.includes(needle));
+    }
+    ok('[17c] el informe sí contiene los valores de bandera permitidos',
+        serialized.includes('legacy') || r.checks.some((c) => c.name.endsWith('METRICS_ENGINE')));
+
+    // Fail-closed: bandera obligatoria ausente.
+    const missing = new Report();
+    validateRuntime(corpus, missing, {
+        docker: false,
+        inspected: RUNTIME_CONTAINERS.map((n) => makeInspect(n, ['METRICS_ENGINE=legacy'])),
+    });
+    ok('[17d] falta LEGACY_METRICS_REQUEST_CONTEXT → UNSAFE',
+        missing.verdict() === VERDICTS.UNSAFE &&
+        missing.failures.some((f) => f.name.endsWith('LEGACY_METRICS_REQUEST_CONTEXT')));
+
+    // Fail-closed: flag encendido.
+    const on = new Report();
+    validateRuntime(corpus, on, {
+        docker: false,
+        inspected: RUNTIME_CONTAINERS.map((n) => makeInspect(n, ['LEGACY_METRICS_REQUEST_CONTEXT=on', 'METRICS_ENGINE=legacy'])),
+    });
+    ok('[17e] flag encendido → UNSAFE', on.verdict() === VERDICTS.UNSAFE);
+
+    // Fail-closed: contenedor ausente.
+    const partial = new Report();
+    validateRuntime(corpus, partial, { docker: false, inspected: [makeInspect(RUNTIME_CONTAINERS[0], goodEnv)] });
+    ok('[17f] falta un contenedor → UNSAFE',
+        partial.verdict() === VERDICTS.UNSAFE &&
+        partial.failures.some((f) => f.name === `${RUNTIME_CONTAINERS[1]}.present`));
+
+    // Drift: commit distinto en la etiqueta OCI.
+    const drifted = new Report();
+    validateRuntime(corpus, drifted, {
+        docker: false,
+        inspected: RUNTIME_CONTAINERS.map((n) => makeInspect(n, goodEnv, { revision: 'c'.repeat(40) })),
+    });
+    ok('[17g] revisión OCI distinta → DRIFTED', drifted.verdict() === VERDICTS.DRIFTED);
+
+    // Sin etiqueta de revisión: no se puede probar el commit → no se aprueba.
+    const noLabel = new Report();
+    const noLabelFixture = RUNTIME_CONTAINERS.map((n) => {
+        const c = makeInspect(n, goodEnv); delete c.Config.Labels; return c;
+    });
+    validateRuntime(corpus, noLabel, { docker: false, inspected: noLabelFixture });
+    ok('[17h] sin etiqueta de revisión → no VALID', noLabel.verdict() !== VERDICTS.VALID);
+
+    // No hay lectura cruda de entorno en el fuente del validador.
+    const src = fs.readFileSync(path.join(HERE, 'validateProductionCanaryCorpus.mjs'), 'utf8');
+    const code = src.split('\n').filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n');
+    // Los patrones prohibidos se construyen por fragmentos a propósito:
+    // escribirlos literalmente haría que este mismo test disparara el ratchet
+    // de evidencia, y añadir un marcador `allow` para taparlo sería peor —
+    // convertiría en rutina la excepción que el ratchet existe para hacer rara.
+    const RAW_ENV_FIELD = ['.Config', '.Env'].join('');
+    const PROC_ENV_DUMP = new RegExp(`\\b${['print', 'env'].join('')}\\b|/proc/[^/]*/${['env', 'iron'].join('')}`);
+    ok(`[17i] sin lectura cruda de ${RAW_ENV_FIELD} ejecutable`, !code.includes(RAW_ENV_FIELD));
+    ok('[17j] sin volcado del entorno del proceso', !PROC_ENV_DUMP.test(code));
+    ok('[17k] sin invocación cruda del inspector desde el validador',
+        !/execFileSync\(\s*['"]docker['"]/.test(code));
+    ok('[17l] importa el helper sancionado',
+        /from '\.\.\/security\/safeOperationalEvidence\.mjs'/.test(src));
+
+    // End-to-end por el CLI real: nada de los cebos puede salir por stdout/stderr
+    // ni quedar en el artefacto --json.
+    const fx = path.join(TMP, 'inspect.json');
+    const cp = path.join(TMP, 'corpus.json');
+    const outJson = path.join(TMP, 'out.json');
+    fs.writeFileSync(fx, JSON.stringify(fixture));
+    fs.writeFileSync(cp, JSON.stringify(corpus), { mode: 0o600 });
+    const res = spawnSync(process.execPath,
+        [path.join(HERE, 'validateProductionCanaryCorpus.mjs'),
+            '--corpus', cp, '--inspectFrom', fx, '--json', outJson],
+        { encoding: 'utf8' });
+    const streams = `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
+    const artifact = fs.existsSync(outJson) ? fs.readFileSync(outJson, 'utf8') : '';
+    for (const needle of NEEDLES) {
+        ok(`[17m] stdout/stderr del CLI sin ${needle.slice(0, 6)}…`, !streams.includes(needle));
+        ok(`[17n] artefacto --json sin ${needle.slice(0, 6)}…`, !artifact.includes(needle));
+    }
+    ok('[17o] el CLI ejerció el runtime con la fixture',
+        artifact.includes('noSensitiveValues'), artifact.slice(0, 120));
+    ok('[17p] ningún temporal del test retiene los cebos',
+        !fs.readdirSync(TMP).some((f) => {
+            const p = path.join(TMP, f);
+            if (!fs.statSync(p).isFile() || p === fx) return false;
+            const t = fs.readFileSync(p, 'utf8');
+            return NEEDLES.some((n) => t.includes(n));
+        }));
 }
 
 section('[15] descriptor sanitizado versionado: cero PII, cero secretos');
