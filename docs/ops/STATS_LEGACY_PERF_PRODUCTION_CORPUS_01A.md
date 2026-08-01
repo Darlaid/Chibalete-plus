@@ -600,6 +600,21 @@ está desplegada** y que producción sigue intacta en `4c407af`.
 
 ---
 
+## 19bis. El runtime se atesta aparte
+
+`production.commit` y `production.imageId` de este corpus describen la
+producción **actual**. La imagen de observabilidad tendrá otros, sin que cambie
+una sola cifra del contrato — y regenerar el corpus para acomodarla lo
+descongelaría.
+
+Por eso la identidad del runtime se traslada a un artefacto propio,
+`PRODUCTION-CANARY-RUNTIME-BINDING.json`, que **no forma parte del
+`acceptanceContract`** y no entra en su hash. El validador conserva las dos
+vías: sin binding compara contra este corpus (modo A, producción actual); con
+`--runtime-binding` compara contra el atestado (modo B).
+
+Ver `docs/ops/STATS_LEGACY_PERF_RUNTIME_BINDING_01A.md`.
+
 ## 19. Qué sigue
 
 | unidad | alcance |

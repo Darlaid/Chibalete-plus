@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://chibalete.local/schemas/stats-legacy-perf-runtime-binding-01a.json",
+  "title": "CHP-STATS-LEGACY-PERF-CORPUS-01A-R2 — atestado de runtime del canary",
+  "description": "Autoriza a UNA imagen concreta a ejecutar el contrato estadístico congelado del corpus. NO forma parte del acceptanceContract: el corpus describe qué se mide, el binding describe con qué se mide. El artefacto vive root-only en el VPS con modo 0600; este esquema describe su forma, no su ubicación.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bindingVersion",
+    "corpusSha256",
+    "acceptanceContractSha256",
+    "baselineProductionCommit",
+    "sourceCommit",
+    "sourceTree",
+    "imageId",
+    "imageRevision",
+    "imageManifestSha256",
+    "approvedDiffSha256",
+    "approvedRuntimeFiles",
+    "createdAt",
+    "expiresAt"
+  ],
+  "properties": {
+    "bindingVersion": { "const": "1.0.0" },
+    "corpusSha256": {
+      "$ref": "#/definitions/sha256",
+      "description": "sha256 del fichero PRODUCTION-CANARY-CORPUS.json completo. Ata el atestado a un corpus byte a byte, no a 'un corpus'."
+    },
+    "acceptanceContractSha256": {
+      "const": "344117208e63ec4f1a3ba6e105e6dc05c3b234f56d41c3486da009a0b7ef4dae",
+      "description": "Contrato de aceptación 1.0.0. Un binding solo puede acompañar a un contrato conocido."
+    },
+    "baselineProductionCommit": {
+      "const": "4c407af21262905db9478a07ce3dfe4e39ac9734",
+      "description": "Producción desde la que se autoriza el salto. Es constante del proyecto, no parámetro."
+    },
+    "sourceCommit": {
+      "$ref": "#/definitions/gitSha",
+      "description": "Commit construido. Debe descender del baseline — pero descender NO basta: lo que autoriza es el contenido del diff."
+    },
+    "sourceTree": {
+      "$ref": "#/definitions/gitSha",
+      "description": "Árbol del sourceCommit. Detecta un commit reescrito con el mismo mensaje."
+    },
+    "imageId": {
+      "$ref": "#/definitions/imageId",
+      "description": "ImageID completo. Nunca abreviado: un prefijo no identifica una imagen de forma única."
+    },
+    "imageRevision": {
+      "$ref": "#/definitions/gitSha",
+      "description": "Etiqueta OCI org.opencontainers.image.revision de la imagen. DEBE ser idéntica a sourceCommit: es lo que une la imagen al código."
+    },
+    "imageManifestSha256": {
+      "$ref": "#/definitions/sha256",
+      "description": "Digest del manifiesto de la imagen."
+    },
+    "approvedDiffSha256": {
+      "$ref": "#/definitions/sha256",
+      "description": "Huella del cambio runtime autorizado. NO es el hash del texto de `git diff` —cuyo formato varía con core.abbrev y con la versión de git—, sino el de un manifiesto canónico de pares de blobs {path, baselineBlob, sourceBlob}. Reproducible y más fuerte: identifica el contenido final, no su representación."
+    },
+    "approvedRuntimeFiles": {
+      "type": "array",
+      "description": "Ficheros de clase RUNTIME_OBSERVABILITY que el diff modifica. Debe coincidir exactamente con lo que Git dice.",
+      "items": {
+        "enum": [
+          "server/lib/operationalAdminAuth.js",
+          "server/metricsService.js",
+          "server/server.js"
+        ]
+      },
+      "uniqueItems": true,
+      "maxItems": 3
+    },
+    "createdAt": { "$ref": "#/definitions/isoInstant" },
+    "expiresAt": {
+      "$ref": "#/definitions/isoInstant",
+      "description": "No puede ser posterior a la expiración del corpus: un binding que sobreviviera al corpus autorizaría medir con un contrato cuya ventana de datos ya no existe."
+    }
+  },
+  "definitions": {
+    "isoInstant": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "imageId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

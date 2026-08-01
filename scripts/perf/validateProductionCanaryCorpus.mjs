@@ -30,6 +30,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadInspect, containerSummary } from '../security/safeOperationalEvidence.mjs';
+import {
+    BASELINE_PRODUCTION_COMMIT, collectGitFacts, checkBindingStructure,
+    checkBindingExpiry, checkBindingAgainstGit, checkBindingAgainstRuntime,
+} from './productionCanaryRuntimeBinding.mjs';
 import { isPublishableEnvValue } from '../security/evidenceContract.mjs';
 import { REDACTED } from '../security/sensitiveTaxonomy.mjs';
 import {
@@ -68,6 +72,11 @@ export class Report {
     add(name, ok, verdictIfFailed, detail) {
         this.checks.push({ name, ok: Boolean(ok), verdictIfFailed, detail: detail ?? null });
         return ok;
+    }
+    /** Absorbe comprobaciones producidas por otro módulo, con su veredicto. */
+    addAll(checks) {
+        for (const c of checks) this.add(c.name, c.ok, c.verdict, c.detail);
+        return this;
     }
     get failures() { return this.checks.filter((c) => !c.ok); }
     /** El peor veredicto gana. Sin fallos, VALID. */
@@ -269,7 +278,7 @@ const COMMIT_LABEL = 'org.opencontainers.image.revision';
  *   prueba). Se proyectan por la MISMA allowlist: una fixture no es una vía
  *   privilegiada, solo evita depender de Docker en CI.
  */
-export function validateRuntime(corpus, report, { docker = true, inspected = null } = {}) {
+export function validateRuntime(corpus, report, { docker = true, inspected = null, binding = null } = {}) {
     if (!docker && !inspected) return report;
 
     let summary;
@@ -311,13 +320,26 @@ export function validateRuntime(corpus, report, { docker = true, inspected = nul
             .map((e) => e.name);
         report.add(`${name}.noSensitiveValues`, leaked.length === 0, VERDICTS.UNSAFE, leaked);
 
-        report.add(`${name}.imageId`, c.imageId === corpus.production.imageId, VERDICTS.DRIFTED);
         report.add(`${name}.healthy`, c.health === 'healthy', VERDICTS.UNSAFE, c.health);
         report.add(`${name}.noRestarts`, c.restartCount === 0, VERDICTS.UNSAFE, c.restartCount);
 
         const revision = c.labels?.allowed?.[COMMIT_LABEL];
-        report.add(`${name}.commit`, revision === corpus.production.commit, VERDICTS.DRIFTED,
-            revision === undefined ? `etiqueta ${COMMIT_LABEL} ausente` : { expected: corpus.production.commit, got: revision });
+        report.add(`${name}.hasRevisionLabel`, typeof revision === 'string', VERDICTS.DRIFTED,
+            revision === undefined ? `etiqueta ${COMMIT_LABEL} ausente` : null);
+
+        /**
+         * Identidad del runtime. En MODO A la referencia es el corpus —el
+         * runtime productivo de hoy—; en MODO B es el atestado, que es lo único
+         * capaz de autorizar una imagen nueva sin descongelar el corpus.
+         */
+        if (binding) {
+            report.addAll(checkBindingAgainstRuntime(binding,
+                { imageId: c.imageId, revision, containerName: name }));
+        } else {
+            report.add(`${name}.imageId`, c.imageId === corpus.production.imageId, VERDICTS.DRIFTED);
+            report.add(`${name}.commit`, revision === corpus.production.commit, VERDICTS.DRIFTED,
+                { expected: corpus.production.commit, got: revision ?? null });
+        }
     }
 
     // Fail-closed también ante ausencias: un contenedor que no responde no puede
@@ -325,6 +347,45 @@ export function validateRuntime(corpus, report, { docker = true, inspected = nul
     for (const expectedName of RUNTIME_CONTAINERS) {
         report.add(`${expectedName}.present`, seen.has(expectedName), VERDICTS.UNSAFE);
     }
+    return report;
+}
+
+/**
+ * MODO B — atestado del runtime.
+ *
+ * Valida el binding en tres capas, y las tres son obligatorias para `VALID`:
+ *
+ *  1. **estructural** — forma, hashes completos, baseline, caducidad no
+ *     posterior a la del corpus, alcance de `approvedRuntimeFiles`;
+ *  2. **caducidad** — del propio binding;
+ *  3. **atestación contra Git** — descendencia, árbol, clasificación de CADA
+ *     fichero cambiado, invariancia de dependencias y huella del diff runtime.
+ *
+ * La tercera capa no es opcional. Sin repositorio no se puede comprobar qué
+ * autoriza realmente el binding, y un atestado que nadie contrasta es una
+ * declaración de intenciones: se reporta `UNSAFE`, no se omite. No existe
+ * bandera ni variable de entorno que lo relaje.
+ *
+ * **Nunca crea, corrige ni actualiza el binding.**
+ */
+export function validateRuntimeBinding(binding, report, { corpusSha256, corpusExpiresAt, repo = null, now = new Date() } = {}) {
+    report.addAll(checkBindingStructure(binding, { corpusSha256, corpusExpiresAt }));
+    report.addAll(checkBindingExpiry(binding, now));
+
+    if (!repo) {
+        report.add('binding.gitAttested', false, VERDICTS.UNSAFE,
+            'sin --repo no se puede contrastar el atestado con Git');
+        return report;
+    }
+    let facts;
+    try {
+        facts = collectGitFacts(repo, BASELINE_PRODUCTION_COMMIT, String(binding?.sourceCommit ?? ''));
+    } catch (e) {
+        report.add('binding.gitAttested', false, VERDICTS.UNSAFE, e.message);
+        return report;
+    }
+    report.add('binding.gitAttested', true, VERDICTS.UNSAFE);
+    report.addAll(checkBindingAgainstGit(binding, facts));
     return report;
 }
 
@@ -412,13 +473,42 @@ async function main() {
         report.add('insights.untouched', before === after, VERDICTS.UNSAFE);
     }
 
+    // ── MODO B: atestado del runtime ────────────────────────────────────────
+    let binding = null;
+    if (args['runtime-binding']) {
+        const bindingPath = String(args['runtime-binding']);
+        try {
+            binding = JSON.parse(fs.readFileSync(bindingPath, 'utf8'));
+            report.add('binding.parseable', true, VERDICTS.UNSAFE);
+        } catch (e) {
+            report.add('binding.parseable', false, VERDICTS.UNSAFE, e.message);
+            return finish(report, args);
+        }
+        try {
+            const st = fs.statSync(bindingPath);
+            report.add('binding.mode0600', (st.mode & 0o777) === 0o600, VERDICTS.UNSAFE, (st.mode & 0o777).toString(8));
+            if (typeof process.getuid === 'function') {
+                report.add('binding.ownedByRoot', st.uid === 0, VERDICTS.UNSAFE, st.uid);
+            }
+        } catch (e) { report.add('binding.mode0600', false, VERDICTS.UNSAFE, e.message); }
+
+        const leaks = scanCorpusForLeaks(binding);
+        report.add('binding.noLeaks', leaks.length === 0, VERDICTS.UNSAFE, leaks);
+
+        validateRuntimeBinding(binding, report, {
+            corpusSha256: sha256Hex(fs.readFileSync(corpusPath)),
+            corpusExpiresAt: corpus.expiresAt,
+            repo: args.repo ? String(args.repo) : null,
+        });
+    }
+
     if (args.inspectFrom) {
         // Fixture sintética por la MISMA vía que el helper sancionado
         // (`--from-file`): la proyección por allowlist se aplica igual, así que
         // no es un camino privilegiado, solo uno que no depende de Docker.
-        validateRuntime(corpus, report, { inspected: loadInspect([], String(args.inspectFrom)) });
+        validateRuntime(corpus, report, { inspected: loadInspect([], String(args.inspectFrom)), binding });
     } else if (!args.noDocker) {
-        validateRuntime(corpus, report);
+        validateRuntime(corpus, report, { binding });
     }
 
     if (args.probe) {
