@@ -26,9 +26,15 @@ db.pragma('foreign_keys = ON');
 
 try {
     console.log('\n[1] migraciones idempotentes + versionadas');
-    const r1 = runMigrations(db);
+    // CHP-IDDB-02A: esta suite valida el CONTRATO v1 (users por id JSON,
+    // group_members student/teacher, espejo shadow). Desde que existe
+    // 0002_identity_v2 una base nueva migraría a v2, donde ese contrato ya no
+    // aplica, así que se ancla explícitamente en 0001. El contrato v2 tiene su
+    // propia suite en server/__test__/identitySchemaV2.test.js.
+    const V1 = { until: '0001_identity' };
+    const r1 = runMigrations(db, () => {}, V1);
     ok('aplica 0001_identity', r1.applied.includes('0001_identity'), JSON.stringify(r1));
-    const r2 = runMigrations(db);
+    const r2 = runMigrations(db, () => {}, V1);
     ok('reaplicar = no-op (idempotente)', r2.applied.length === 0 && r2.already.includes('0001_identity'));
     ok('tablas creadas', ['users','groups','group_members','access_rules','shadow_audit']
         .every(t => db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(t)));

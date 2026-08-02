@@ -42,14 +42,21 @@ function listMigrations() {
  * Aplica todas las migraciones pendientes. Idempotente.
  * @param {import('better-sqlite3').Database} db
  * @param {(msg:string)=>void} [log]
+ * @param {{ until?: string }} [opts]  `until` detiene la aplicación DESPUÉS de
+ *        esa versión (inclusive). Permite fijar una base en una versión
+ *        concreta —los tests del contrato v1 lo usan para seguir ejercitando
+ *        v1 después de que exista v2—. Sin `until` se aplica todo.
  * @returns {{ applied: string[], already: string[] }}
  */
-export function runMigrations(db, log = () => {}) {
+export function runMigrations(db, log = () => {}, opts = {}) {
     ensureMetaTable(db);
     const done = new Set(db.prepare('SELECT version FROM _migrations').all().map(r => r.version));
     const applied = [], already = [];
+    let stop = false;
     for (const file of listMigrations()) {
         const version = file.replace(/\.sql$/, '');
+        if (stop) break;
+        if (opts.until && version === opts.until) stop = true;
         if (done.has(version)) { already.push(version); continue; }
         const { up } = parseSql(fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8'));
         const tx = db.transaction(() => {

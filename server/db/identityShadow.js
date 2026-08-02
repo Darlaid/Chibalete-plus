@@ -20,6 +20,20 @@ function groupKey(g) {
 }
 function jstr(v) { try { return JSON.stringify(v ?? null); } catch { return 'null'; } }
 
+/**
+ * El espejo de users/groups está escrito contra el esquema v1 (users por id
+ * JSON, groups con clave school::grade::name, roles student/teacher). El
+ * esquema v2 (CHP-IDDB-02A) modela institución → grupo → membresía con rol y
+ * no admite esa forma: espejarla produciría datos incoherentes.
+ *
+ * Ante v2 el espejo se NIEGA en vez de intentarlo (fail-closed) y lo deja
+ * auditado. `access` no cambia en v2, así que sigue espejándose. El
+ * dual-write v2 es responsabilidad de CHP-IDDB-02B.
+ */
+function isV2Schema(db) {
+    try { return Number(db.pragma('user_version', { simple: true })) >= 2; } catch { return false; }
+}
+
 function audit(db, domain, jsonCount, sqliteCount, ok, detail) {
     try {
         db.prepare(`INSERT INTO shadow_audit(domain,json_count,sqlite_count,ok,detail)
@@ -30,6 +44,12 @@ function audit(db, domain, jsonCount, sqliteCount, ok, detail) {
 /** Full re-sync users JSON → SQLite. Idempotente, transaccional, no-throw. */
 export function mirrorUsers(db, users, log = () => {}) {
     try {
+        if (isV2Schema(db)) {
+            audit(db, 'users', Array.isArray(users) ? users.length : 0, null, false,
+                'v1_shadow_incompatible_with_v2_schema');
+            log('[identityShadow] users: esquema v2 → espejo v1 rechazado (fail-closed)');
+            return false;
+        }
         const arr = Array.isArray(users) ? users : [];
         const tx = db.transaction(() => {
             db.prepare(`UPDATE users SET deleted_at = datetime('now') WHERE deleted_at IS NULL`).run();
@@ -67,6 +87,12 @@ export function mirrorUsers(db, users, log = () => {}) {
 /** Full re-sync groups + group_members JSON → SQLite. */
 export function mirrorGroups(db, groups, log = () => {}) {
     try {
+        if (isV2Schema(db)) {
+            audit(db, 'groups', Array.isArray(groups) ? groups.length : 0, null, false,
+                'v1_shadow_incompatible_with_v2_schema');
+            log('[identityShadow] groups: esquema v2 → espejo v1 rechazado (fail-closed)');
+            return false;
+        }
         const arr = Array.isArray(groups) ? groups : [];
         const tx = db.transaction(() => {
             db.prepare(`UPDATE groups SET deleted_at = datetime('now') WHERE deleted_at IS NULL`).run();

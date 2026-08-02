@@ -22,7 +22,11 @@ const users = [
 
 closeIdentityDb();
 const db = getIdentityDb(tmp);          // singleton apunta al temp
-runMigrations(db);
+// CHP-IDDB-02A: la fixture se construye con el espejo v1 (mirrorUsers), que
+// solo es válido sobre el esquema v1, así que la base se ancla en 0001. La
+// facade en sí es agnóstica de versión: lee por identityRepo, que soporta v1 y
+// v2. La lectura sobre v2 se cubre en server/__test__/identitySchemaV2.test.js.
+runMigrations(db, () => {}, { until: '0001_identity' });
 mirrorUsers(db, users);                  // SQLite == JSON, shadow_audit ok=1
 
 const facade = await import('../db/identityReadFacade.js');

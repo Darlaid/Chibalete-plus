@@ -196,6 +196,16 @@ dummy_text.txt
 server/.deploy-info
 .codex-freeze/
 
+# CHP-IDDB-02A — esquema v2 e importador de la candidate de identity.db. Los
+# scripts SÍ se versionan; las candidates y manifiestos, NO (viven root-only
+# fuera del repositorio).
+!/scripts/identity/
+!/scripts/identity/**
+*.candidate.db
+*.candidate.db-wal
+*.candidate.db-shm
+IDENTITY-IMPORT-MANIFEST-*.json
+
 # CHP-STATS-LEGACY-PERF-01A — harness de auditoría del coste legacy. Los
 # scripts SÍ se versionan; sus salidas y fixtures generadas, NO.
 !/scripts/perf/
