@@ -4,6 +4,12 @@
 la ruta de una `identity.db`. **En esta unidad solo se ejercita en sandbox**; la
 promoción productiva es 02B-B.
 
+> **Ruta de destino:** la fija el contrato de
+> [`IDENTITY_DB_PATH_CONTRACT_02B.md`](IDENTITY_DB_PATH_CONTRACT_02B.md).
+> El promotor no la deduce: exige una allowlist explícita, y el runtime resuelve
+> la suya por `IDENTITY_DB`. El default histórico bajo `data-critical/` quedó
+> rechazado como destino productivo.
+
 ## 1. Se verifica todo ANTES de tocar el destino
 
 1. flags de identidad apagados;

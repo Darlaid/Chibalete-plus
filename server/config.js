@@ -249,3 +249,21 @@ export const GROUPS_DB = process.env.GROUPS_DB
  */
 export const SCHOOLS_DB = process.env.SCHOOLS_DB
     || path.resolve(__dirname, '../data/schools_db.json');
+
+// ────────────────────────────────────────────────────────────────────────────
+// identity.db — CHP-IDDB-02B-PATH-01
+//
+// El resolutor vive en `db/identityDbPath.mjs`, sin ninguna dependencia, para
+// que el módulo dormido de identidad pueda usarlo sin arrastrar las
+// aserciones de arranque de este fichero. Se reexporta aquí para que la ruta
+// de identity.db se descubra donde se descubren todas las demás rutas
+// canónicas — pero la implementación es UNA sola.
+// ────────────────────────────────────────────────────────────────────────────
+export {
+    IDENTITY_DB_LEGACY_DEFAULT,
+    IDENTITY_DB_ERRORS,
+    IdentityDbPathError,
+    identitySqliteCapabilityActive,
+    redactIdentityDbPath,
+    resolveIdentityDbPath,
+} from './db/identityDbPath.mjs';

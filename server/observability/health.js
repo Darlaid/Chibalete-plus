@@ -21,7 +21,17 @@ async function safe(fn) {
 async function checkIdentitySqlite() {
     if (!flags.identitySqliteEnabled()) return { ok: true, state: 'disabled' };
     if (!_identityMod) _identityMod = await import('../db/identityDb.js');
-    const db = _identityMod.getIdentityDb();
+    let db;
+    try {
+        // Misma resolución que el resto del runtime (CHP-IDDB-02B-PATH-01):
+        // health no tiene una ruta propia. Si la ruta productiva no está
+        // declarada, se reporta la clasificación estable en vez de un error
+        // opaco — y sobre todo, no se abre ni se crea nada.
+        db = _identityMod.getIdentityDb();
+    } catch (e) {
+        if (e?.classification) return { ok: false, state: 'path_error', classification: e.classification };
+        throw e;
+    }
     const jm = db.pragma('journal_mode', { simple: true });
     const ic = db.pragma('integrity_check', { simple: true });
     const migs = db.prepare(`SELECT COUNT(*) c FROM _migrations`).get().c;

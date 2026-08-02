@@ -2,8 +2,10 @@
  * identityDb.js — P1-A conexión SQLite WAL para users/groups/access.
  *
  * Mirror EXACTO del patrón ya probado en producción (server/eventsService.js):
- * mismos PRAGMA, mismo busy_timeout, misma ubicación data-critical/ (volumen
- * bind-mount compartido por api_1/api_2). NO se introduce patrón nuevo.
+ * mismos PRAGMA, mismo busy_timeout. NO se introduce patrón nuevo.
+ *
+ * La UBICACIÓN, en cambio, ya no es data-critical/: la decide el resolutor
+ * único de config.js (CHP-IDDB-02B-PATH-01) a partir de `IDENTITY_DB`.
  *
  * WAL = múltiples readers + 1 writer entre procesos sin corromper → resuelve
  * la raíz real (corrupción JSON cross-container). busy_timeout=5000 absorbe
@@ -12,23 +14,35 @@
  * Lazy singleton: NO abre el archivo a menos que se invoque getIdentityDb()
  * (que solo ocurre si IDENTITY_SQLITE_ENABLED). OFF por defecto = inerte.
  */
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import {
+    resolveIdentityDbPath, IDENTITY_DB_LEGACY_DEFAULT, redactIdentityDbPath,
+} from './identityDbPath.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// data-critical/ es el volumen persistente bind-mounteado (igual que events.db).
-const DEFAULT_DB_PATH = path.join(__dirname, '..', '..', 'data-critical', 'identity.db');
+/** Etiqueta segura de la ubicación activa, para logs y diagnóstico. */
+export function identityDbLocationLabel(opts = {}) {
+    try { return redactIdentityDbPath(resolveIdentityDbPath(opts)); }
+    catch (e) { return `(no resuelta: ${e.classification ?? 'error'})`; }
+}
+
+// La ruta la decide el resolutor único de config.js (CHP-IDDB-02B-PATH-01):
+// aquí ya no hay default implícito. En producción, con cualquier capacidad
+// SQLite activa, `IDENTITY_DB` es obligatoria y el default histórico bajo
+// data-critical queda rechazado — si no, `better-sqlite3` crearía ahí una base
+// vacía y nadie se enteraría.
+const DEFAULT_DB_PATH = IDENTITY_DB_LEGACY_DEFAULT;
 
 let _db = null;
 
 /**
- * @param {string} [dbPath] override (tests usan un archivo temporal).
+ * @param {string} [dbPath] override explícito (los tests usan un temporal). En
+ *        producción queda sujeto a las mismas validaciones que `IDENTITY_DB`.
  * @returns {import('better-sqlite3').Database}
  */
-export function getIdentityDb(dbPath = DEFAULT_DB_PATH) {
+export function getIdentityDb(dbPath = undefined) {
     if (_db) return _db;
-    _db = new Database(dbPath);
+    const resolved = resolveIdentityDbPath({ explicitPath: dbPath ?? null, forOpen: true });
+    _db = new Database(resolved);
     // PRAGMA set idéntico al de eventsService.js (probado en prod).
     _db.pragma('journal_mode = WAL');     // readers concurrentes + 1 writer sin lock
     _db.pragma('synchronous = NORMAL');   // fsync en checkpoints (seguro con WAL)
