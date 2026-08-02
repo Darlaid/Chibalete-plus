@@ -58,7 +58,9 @@ try {
     const { db: db3 } = newDb('v1access.db');
     db3.exec(`CREATE TABLE IF NOT EXISTS _migrations (version TEXT PRIMARY KEY,
               applied_at TEXT NOT NULL DEFAULT (datetime('now')));`);
-    runMigrations(db3);
+    // Anclada en 0002: rollbackLast revierte la ÚLTIMA aplicada, y 0003 es
+    // aditiva dentro de v2. Lo que se comprueba aquí es que 0002 es reversible.
+    runMigrations(db3, () => {}, { until: '0002_identity_v2' });
     rollbackLast(db3);
     const t3 = db3.prepare(
         `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all().map(t => t.name);

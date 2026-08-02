@@ -741,7 +741,7 @@ const writeJSON = (file, data) => {
         fs.renameSync(tempFile, file); // Atomic move
         _jsonCache.delete(file); // invalidate cache immediately after write
         // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
-        try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, log })(file, data); } catch { /* shadow nunca rompe el write */ }
+        try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSON' })(file, data); } catch { /* shadow nunca rompe el write */ }
     } catch (e) {
         log(`Error writing ${file}: ${e.message}`, 'ERROR');
         throw e; // Relanza error para permitir rollback transaccional
@@ -754,7 +754,7 @@ const writeJSONAsync = async (file, data) => {
     await fs.promises.rename(tmp, file);
     _jsonCache.delete(file);
     // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
-    try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, log })(file, data); } catch { /* shadow nunca rompe el write */ }
+    try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSONAsync' })(file, data); } catch { /* shadow nunca rompe el write */ }
 };
 
 async function mutateUsers(fn) {

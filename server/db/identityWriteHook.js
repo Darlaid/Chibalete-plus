@@ -15,9 +15,25 @@
  * shadow_audit (P1) registra cada espejo (json_count vs sqlite_count, ok) →
  * fuente de verdad del gate de cutover y de la alerta de inconsistencia P3-C.
  */
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { flags } from '../lib/flags.js';
+import { domainOf, assertRegisteredWriter } from './identityWriteSurface.mjs';
 
 let _hook = null;
+
+/**
+ * Versión de la instantánea canónica: hash del contenido + una secuencia
+ * monótona tomada del propio fichero ya escrito. Permite que el espejo
+ * rechace una instantánea obsoleta sin comparar contenido.
+ */
+function sourceVersionOf(file, data) {
+    const hash = crypto.createHash('sha256')
+        .update(JSON.stringify(data ?? null)).digest('hex').slice(0, 32);
+    let seq = 0;
+    try { seq = fs.statSync(file).mtimeMs; } catch { seq = 0; }
+    return { hash, seq };
+}
 
 /**
  * @param {{usersDb:string,groupsDb:string,accessDb:string,log:(m:string,t?:string)=>void}} cfg
@@ -25,36 +41,64 @@ let _hook = null;
  */
 export function makeIdentityWriteHook(cfg) {
     if (_hook) return _hook;
-    const { usersDb, groupsDb, accessDb, log = () => {} } = cfg;
+    const { usersDb, groupsDb, accessDb, schoolsDb = null, log = () => {},
+        writerId = 'server.writeJSON', now = () => new Date().toISOString() } = cfg;
+    const paths = { usersDb, groupsDb, accessDb, schoolsDb };
     // Imports perezosos: si SQLITE no está activo nunca se cargan.
-    let _db = null, _mirror = null;
+    let _db = null, _mirror = null, _mirrorV2 = null;
     async function ensure() {
-        if (_db && _mirror) return true;
+        if (_db && _mirror && _mirrorV2) return true;
         const { getIdentityDb } = await import('./identityDb.js');
-        const m = await import('./identityShadow.js');
+        _mirror = await import('./identityShadow.js');
+        _mirrorV2 = await import('./identityShadowV2.js');
         _db = getIdentityDb();
-        _mirror = m;
         return true;
     }
     _hook = (file, data) => {
         if (!flags.identityDualWrite()) return;
-        let domain = null;
-        if (file === usersDb) domain = 'users';
-        else if (file === groupsDb) domain = 'groups';
-        else if (file === accessDb) domain = 'access';
+        const domain = domainOf(file, paths);
         if (!domain) return;
+        const unregistered = assertRegisteredWriter(writerId);
+        if (unregistered) {
+            log(`[identity-shadow] ${domain}: escritor no registrado (${writerId}) → espejo omitido`, 'WARN');
+            return;
+        }
         // No-bloqueante: el espejo NO está en el path crítico de la respuesta.
+        // El write JSON ya está confirmado; pase lo que pase aquí, no se revierte.
         Promise.resolve()
             .then(ensure)
             .then(() => {
-                if (domain === 'users')  _mirror.mirrorUsers(_db, data, log);
-                if (domain === 'groups') _mirror.mirrorGroups(_db, data, log);
-                if (domain === 'access') _mirror.mirrorAccess(_db, data, log);
+                const isV2 = Number(_db.pragma('user_version', { simple: true })) >= 2;
+                if (!isV2) {
+                    if (domain === 'users') _mirror.mirrorUsers(_db, data, log);
+                    if (domain === 'groups') _mirror.mirrorGroups(_db, data, log);
+                    if (domain === 'access') _mirror.mirrorAccess(_db, data, log);
+                    return;
+                }
+                if (domain === 'access') {
+                    // `access` no forma parte del modelo v2; se sigue espejando
+                    // con el escritor v1, cuya tabla v2 conserva intacta.
+                    _mirror.mirrorAccess(_db, data, log);
+                    return;
+                }
+                const report = _mirrorV2.mirrorSnapshotV2(_db, {
+                    domain, records: data, sourceVersion: sourceVersionOf(file, data),
+                    writerId, at: now(),
+                });
+                if (report.status === 'FAILED_RECONCILABLE') {
+                    // Nunca silencioso: queda en shadow_operations, en
+                    // shadow_state y en el log operacional.
+                    log(`[identity-shadow] ${domain}: espejo FAILED_RECONCILABLE `
+                        + `(${report.classification}); el write JSON ya está confirmado`, 'ERROR');
+                }
             })
             .catch(e => log(`[identity-shadow] mirror ${domain} failed: ${e.message}`, 'WARN'));
     };
     return _hook;
 }
+
+/** Solo para tests: el hook es un singleton memoizado por diseño. */
+export function _resetIdentityWriteHook() { _hook = null; }
 
 /** Bootstrap idempotente: corre migraciones si IDENTITY_SQLITE_ENABLED. */
 export async function bootstrapIdentityDb(log = () => {}) {

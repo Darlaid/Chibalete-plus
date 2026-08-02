@@ -69,6 +69,17 @@ function readJsonAtomic(file) {
 }
 
 function writeJsonAtomic(file, data) {
+    // CHP-IDDB-02B-A — esta vía NO pasa por el seam writeJSON de server.js, así
+    // que no puede espejarse en identity.db. Ningún módulo del servidor la
+    // invoca (solo scripts). Con el dual-write encendido, escribir por aquí
+    // divergiría en silencio, de modo que se BLOQUEA expresamente en vez de
+    // dejar el espejo atrás. Sin dual-write, comportamiento intacto.
+    if (process.env.IDENTITY_DUAL_WRITE === '1' || String(process.env.IDENTITY_DUAL_WRITE).toLowerCase() === 'true') {
+        throw new Error(
+            'IDENTITY_WRITE_SURFACE_BLOCKED_UNDER_DUAL_WRITE: '
+            + 'esta escritura no pasa por el espejo de identidad; usa las rutas del API '
+            + 'o apaga IDENTITY_DUAL_WRITE antes de ejecutar el script');
+    }
     const tmp = `${file}.tmp.${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
     fs.renameSync(tmp, file);
