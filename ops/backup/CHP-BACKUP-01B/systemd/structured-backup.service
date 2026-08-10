@@ -30,6 +30,17 @@ RuntimeDirectoryMode=0700
 ReadWritePaths=/var/backups/chibalete-backup
 ReadWritePaths=/var/www/chibalete/data
 ReadWritePaths=/var/www/chibalete/data-critical
+# CHP-IDDB-02B-B-H2 — identity.db, por el mismo motivo y ni un palmo mas.
+# Hoy la base esta en journal de rollback y se captura sin sidecars, pero
+# server/db/identityDb.js fija `journal_mode = WAL` al abrirla: en cuanto
+# IDENTITY_SQLITE_ENABLED pase a `on`, el lector necesitara crear
+# identity.db-shm y, sin esta linea, la captura fallaria con SQLITE_CANTOPEN
+# justo cuando la base empiece a recibir escrituras.
+# Se autoriza SOLO el directorio dedicado de identidad: NUNCA
+# /var/www/chibalete completo, que abriria en escritura todo el arbol web.
+# Los permisos del directorio (0700 root:root) y de la base (0600) no cambian:
+# esto es politica de sandbox, no de filesystem.
+ReadWritePaths=/var/www/chibalete/identity
 # Los uploads no los toca este runner: se mantienen en solo lectura.
 ReadOnlyPaths=/var/www/chibalete/public/uploads
 

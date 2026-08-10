@@ -2072,6 +2072,109 @@ def test_d_no_merge():
 
 
 # --------------------------------------------------------------------------
+# Casos IW01-IW02 — sandbox de systemd e identity.db en WAL (CHP-IDDB-02B-B-H2)
+# --------------------------------------------------------------------------
+#
+# `structured-backup.service` corre con ProtectSystem=strict: todo el
+# filesystem queda de solo lectura salvo lo declarado en ReadWritePaths, y eso
+# lo aplica el kernel aunque el proceso sea root.
+#
+# Un lector de una base SQLite en WAL necesita el indice de memoria compartida
+# `<db>-shm`. Medido en H2 sobre copias de la base real, bajo el confinamiento
+# efectivo del servicio:
+#
+#   - con `-wal` y `-shm` ya en disco, la captura funciona sin permiso de
+#     escritura: SQLite reutiliza el indice existente;
+#   - con `-wal` presente y `-shm` AUSENTE, el lector tiene que crearlo y la
+#     captura falla con "unable to open database file" si el directorio no
+#     esta en ReadWritePaths.
+#
+# El segundo caso es alcanzable en produccion en cuanto identity.db pase a WAL
+# (server/db/identityDb.js fija journal_mode=WAL al abrirla). Por eso el
+# directorio dedicado de identidad entra en la allowlist, y solo el.
+
+SYSTEMD_IDENTITY_RW = "ReadWritePaths=/var/www/chibalete/identity"
+
+
+def _structured_unit_lines():
+    """Directivas efectivas de structured-backup.service, sin comentarios."""
+    path = os.path.join(SYSTEMD_DIR, "structured-backup.service")
+    lines = []
+    for raw in open(path, encoding="utf-8"):
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            lines.append(line)
+    return lines
+
+
+@case("IW01", "sandbox: identity/ esta en ReadWritePaths y el arbol web NO")
+def test_iw_identity_readwrite():
+    lines = _structured_unit_lines()
+
+    assert SYSTEMD_IDENTITY_RW in lines, (
+        "structured-backup.service debe autorizar el directorio dedicado de "
+        f"identidad; ReadWritePaths declarados: {[l for l in lines if l.startswith('ReadWritePaths')]}"
+    )
+
+    rw = [l.split("=", 1)[1] for l in lines if l.startswith("ReadWritePaths=")]
+    # El arbol web completo NUNCA: abriria en escritura uploads, server y todo
+    # lo demas para un proceso cuyo unico trabajo es leer stores.
+    assert "/var/www/chibalete" not in rw, f"allowlist demasiado amplia: {rw}"
+    assert "/" not in rw and "/var" not in rw and "/var/www" not in rw, rw
+    # La allowlist es exactamente la esperada: ni un path de mas.
+    assert sorted(rw) == sorted([
+        "/var/backups/chibalete-backup",
+        "/var/www/chibalete/data",
+        "/var/www/chibalete/data-critical",
+        "/var/www/chibalete/identity",
+    ]), rw
+
+    # identity/ no puede estar a la vez en solo lectura: se anularia el arreglo.
+    ro = [l.split("=", 1)[1] for l in lines if l.startswith("ReadOnlyPaths=")]
+    assert "/var/www/chibalete/identity" not in ro, ro
+    assert "/var/www/chibalete" not in ro, (
+        f"ReadOnlyPaths sobre el arbol web dejaria identity/ en solo lectura: {ro}"
+    )
+
+
+@case("IW02", "sandbox: el hardening del servicio no se relajo para conseguirlo")
+def test_iw_hardening_intacto():
+    lines = _structured_unit_lines()
+    exigido = {
+        "ProtectSystem=strict": "el confinamiento de filesystem es el que hace necesaria la allowlist",
+        "NoNewPrivileges=true": None,
+        "PrivateTmp=true": None,
+        "PrivateDevices=true": None,
+        "ProtectHome=true": None,
+        "LockPersonality=true": None,
+        "RestrictNamespaces=true": None,
+        "RestrictSUIDSGID=true": None,
+        "RestrictRealtime=true": None,
+        "CapabilityBoundingSet=CAP_DAC_READ_SEARCH": None,
+        "AmbientCapabilities=": None,
+        "UMask=0077": None,
+        "ProtectKernelModules=true": None,
+        "ProtectKernelTunables=true": None,
+        "ProtectControlGroups=true": None,
+    }
+    for directiva, motivo in exigido.items():
+        assert directiva in lines, f"se perdio {directiva}" + (f" — {motivo}" if motivo else "")
+
+    # Ni ProtectSystem degradado a full/true, ni usuario dinamico, ni root
+    # aumentado con capacidades nuevas.
+    for prohibido in ("ProtectSystem=full", "ProtectSystem=true", "ProtectSystem=no",
+                      "DynamicUser=yes", "NoNewPrivileges=false", "PrivateTmp=false"):
+        assert prohibido not in lines, f"hardening relajado: {prohibido}"
+    for line in lines:
+        if line.startswith("AmbientCapabilities="):
+            assert line == "AmbientCapabilities=", f"se concedieron capacidades ambientales: {line}"
+
+    # El servicio sigue ejecutando el mismo runner, sin envoltorios nuevos.
+    execs = [l for l in lines if l.startswith("ExecStart")]
+    assert execs == ["ExecStart=/usr/bin/python3 /opt/chibalete-backup/runners/structured_backup.py"], execs
+
+
+# --------------------------------------------------------------------------
 # Casos ID01-ID04 — ruta canonica de identity.db (CHP-IDDB-02B-B-H1)
 # --------------------------------------------------------------------------
 #
