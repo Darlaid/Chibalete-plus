@@ -221,11 +221,10 @@ rm -f ops/backup/CHP-BACKUP-01B/runners/chibalete_backup/s3_preflight.py
 
 ## 4-ter. Inventario de stores (CHP-BACKUP-01D)
 
-> **Estado: IMPLEMENTED LOCALLY — NOT DEPLOYED.** Producción sigue ejecutando los
-> artefactos de `ec625b3`, que respaldan 17 stores. Este inventario ampliado
-> **no está desplegado** y sólo entra en vigor con CHP-BACKUP-01D-R2.
+> **Estado: DESPLEGADO** desde CHP-BACKUP-01D-R2 (2026-07-27). Producción ejecuta
+> este inventario ampliado. Ver §4-quater para el store 25 (`identity.db`).
 
-**4 SQLite + 20 JSON = 24 stores.**
+**4 SQLite + 20 JSON = 24 stores** (25 con `identity.db` presente: ver §4-quater).
 
 `VPS-STORAGE-AUDIT-01` encontró siete JSON que producción lee pero el inventario
 original no respaldaba. Se añaden como stores **independientes**:
@@ -254,6 +253,34 @@ resolver**: es una unidad aparte.
 `data/bundles_db.json` está referenciado por el código pero **no existe en
 disco**. No se crea, no se respalda y no entra en este inventario: queda
 registrado como deuda separada.
+
+## 4-quater. `identity.db` — store 25 (CHP-IDDB-02B-B-H1)
+
+| Store | Ruta lógica | Cat. | Conteo | Requerido |
+|---|---|---|---|---|
+| `identity.db` | `identity/identity.db` | CANON, no reconstruible | — | **no** |
+
+**La ruta canónica es `identity/identity.db`, en su propio directorio dedicado
+(`/var/www/chibalete/identity/`, `0700 root:root`).** No es
+`data-critical/identity.db`: ese default histórico lo rechaza fail-closed el
+resolutor de `IDENTITY_DB` (contrato CHP-IDDB-02B-PATH-01) y ya no aparece en
+este inventario. Un runner que declare la ruta vieja deja la base de identidad
+**fuera del backup sin emitir ningún error**, porque el store es `required=False`.
+
+`required=False` es deliberado: mientras `IDENTITY_SQLITE_ENABLED` siga en `off`,
+la ausencia de la base no debe tumbar el respaldo de los otros 24 stores. La
+contrapartida es que su omisión es silenciosa, y por eso los casos **ID01-ID04**
+de la suite fijan la ruta: ID01 exige que `identity/identity.db` esté declarada y
+que ninguna variante bajo `data-critical/` sobreviva; ID02 comprueba el snapshot
+de 25 stores con la fuente intacta; ID03 restaura la copia y valida
+`quick_check`, `integrity_check`, `foreign_key_check` y conteos; ID04 demuestra
+que un archivo en la ruta vieja **no** entra al snapshot.
+
+No lleva adaptador de conteo: el manifiesto registra ruta lógica, bytes, sha256 e
+integridad, nunca cardinalidades de identidad.
+
+Con `identity.db` presente el snapshot es de **25 stores** (5 SQLite + 20 JSON);
+sin ella, de 24. Ambos son `result=ok`.
 
 ### Preservación byte a byte
 

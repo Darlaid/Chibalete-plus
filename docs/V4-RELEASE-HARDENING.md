@@ -204,7 +204,7 @@ Detalle completo: `docs/V4-SECURITY-AUDIT.md §10`.
 |---|---|---|---|
 | events.db | `data-critical/events.db` | ✅ WAL | 5000ms |
 | insights.db | `data-critical/insights.db` | ✅ WAL | 5000ms |
-| identity.db (si flag ON) | `data-critical/identity.db` | ✅ WAL | configurado |
+| identity.db (si flag ON) | `identity/identity.db` (`IDENTITY_DB`) | ✅ WAL | configurado |
 
 Dedup atómico: `INSERT OR IGNORE` por `event_id` UNIQUE → multi-instance (api_1 + api_2) safe.
 Scheduler: leader-election via SQLite lock + TTL → un solo runner aún con 2 APIs.

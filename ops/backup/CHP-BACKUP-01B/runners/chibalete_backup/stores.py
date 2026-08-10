@@ -56,8 +56,10 @@ SQLITE_STORES: tuple[SqliteStore, ...] = (
     SqliteStore("data/progress.db", "CANON", reconstructible=False),
     SqliteStore("data/offline_assignments.db", "CANON", reconstructible=False),
     SqliteStore("data-critical/insights.db", "PROJ", reconstructible=True),
-    # Futuro (inventario §2.4): entra automaticamente cuando exista el archivo.
-    SqliteStore("data-critical/identity.db", "CANON", reconstructible=False, required=False),
+    # CHP-IDDB-02B-B-R1: identity.db vive en su propio directorio dedicado
+    # (`identity/`), no bajo data-critical. La ruta la fija el contrato de
+    # CHP-IDDB-02B-PATH-01 y la declara IDENTITY_DB en el compose.
+    SqliteStore("identity/identity.db", "CANON", reconstructible=False, required=False),
 )
 
 # --- JSON canonicos (inventario §2.2) ----------------------------------------

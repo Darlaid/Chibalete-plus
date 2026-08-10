@@ -75,9 +75,13 @@ Leyenda de autoridad: **CANON** = fuente de verdad no reconstruible · **PROJ** 
 | `data/public/uploads` (`/app/public/uploads`) | **5.1 G** | **3 137** | Sin extensión (content-addressed). 0 symlinks rotos. **UP — no reconstruible.** |
 | `uploads/` (dir aparte) | 76 K | 8 | secundario |
 
-### 2.4 `identity.db` (futuro)
+### 2.4 `identity.db`
 
-`identity_sqlite.state=disabled`; **no existe físicamente**. Se registra como **store obligatorio del backup desde su introducción futura**; el diseño ya lo contempla.
+> Actualizado en CHP-IDDB-02B-B-H1. En el momento de este inventario (2026-07) `identity_sqlite.state=disabled` y la base **no existía físicamente**.
+
+Existe desde 2026-08-02 en **`identity/identity.db`** — directorio dedicado `/var/www/chibalete/identity/` (`0700 root:root`, base `0600 root:root`), montado en el contenedor como `/app/identity/identity.db`. **No** cuelga de `data-critical/`: ese default histórico lo rechaza fail-closed el resolutor de `IDENTITY_DB` (contrato CHP-IDDB-02B-PATH-01).
+
+Se respalda desde ya, con el flag todavía en `off`, como CANON no reconstruible. Declarada `required=False` para que su ausencia no tumbe los otros 24 stores; la ruta la fijan los casos ID01-ID04 de la suite de 01B.
 
 ### 2.5 Secretos (solo existencia)
 

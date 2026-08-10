@@ -121,7 +121,7 @@ La Application Key **sí** tiene permiso de borrado (restic lo necesita para sus
 
 **Fallback `VACUUM INTO`** — solo si el principal falla, y exige: **preflight de espacio** (§7) · **lock controlado** · **integridad posterior** · **justificación registrada** en el log.
 
-Cubre `events.db`, `progress.db`, `offline_assignments.db`, `insights.db` (PROJ, marcado reconstruible) y el futuro `identity.db`.
+Cubre `events.db`, `progress.db`, `offline_assignments.db`, `insights.db` (PROJ, marcado reconstruible) e `identity.db` (§17; ruta `identity/identity.db`).
 
 ## 7. Espacio y caché — cálculo dinámico (Corrección 5)
 
@@ -228,6 +228,10 @@ Ningún paso de rollback toca producción ni el bucket de forma destructiva.
 
 La ejecución exitosa de 01B **no cierra CHP-BACKUP-01**. El gate solo será **GREEN** tras **CHP-BACKUP-01C** (restauración aislada satisfactoria + verificación de consistencia del punto Hostinger). La **retención destructiva** (`forget`/`prune`) permanece **bloqueada** hasta 01C GREEN y una unidad posterior explícita que la habilite.
 
-## 17. `identity.db` (futuro)
+## 17. `identity.db`
 
-Cuando `identity_sqlite` → `enabled`, entra en §6 (Online Backup API) como CANON no reconstruible de máxima criticidad; ya contemplado en manifest y en el orden de restore de 01C.
+Ruta lógica canónica: **`identity/identity.db`** (host `/var/www/chibalete/identity/`, `0700 root:root`), no `data-critical/identity.db`. La fija el contrato CHP-IDDB-02B-PATH-01 y la declara `IDENTITY_DB` en el compose; el resolutor rechaza el default histórico fail-closed.
+
+Ya existe en producción, inerte, y **entra en §6 (Online Backup API) desde ahora**, no cuando `identity_sqlite` → `enabled`: una base creada y no respaldada es peor que una base ausente. Es CANON no reconstruible de máxima criticidad, contemplada en manifest y en el orden de restore de 01C.
+
+Se declara `required=False` mientras el flag siga en `off`. Esa tolerancia hace que una ruta equivocada la omita **en silencio**, así que la ruta está fijada por los casos ID01-ID04 de la suite (ver README §4-quater).

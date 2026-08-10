@@ -2072,6 +2072,154 @@ def test_d_no_merge():
 
 
 # --------------------------------------------------------------------------
+# Casos ID01-ID04 — ruta canonica de identity.db (CHP-IDDB-02B-B-H1)
+# --------------------------------------------------------------------------
+#
+# `identity.db` dejo de ser un store futuro bajo `data-critical/` y pasa a su
+# propio directorio dedicado `identity/` (contrato CHP-IDDB-02B-PATH-01, que es
+# tambien lo que declara IDENTITY_DB en el compose).
+#
+# La correccion se aplico primero a mano sobre el runner instalado. Estos casos
+# existen para que una reinstalacion del runner desde el repositorio no pueda
+# revertirla en silencio y dejar la base de identidad fuera del backup.
+
+IDENTITY_LOGICAL_PATH = fixtures.IDENTITY_REL
+IDENTITY_LEGACY_PATH = fixtures.IDENTITY_LEGACY_REL
+
+
+@case("ID01", "inventario: identity.db se declara en identity/, nunca en data-critical/")
+def test_id_inventory_path():
+    from chibalete_backup import stores as S
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+
+    assert IDENTITY_LOGICAL_PATH in sqlite_paths, (
+        f"identity.db debe declararse en {IDENTITY_LOGICAL_PATH}; hay {sqlite_paths}"
+    )
+    assert IDENTITY_LEGACY_PATH not in sqlite_paths, "la ruta legacy sigue declarada como SQLite"
+    assert IDENTITY_LEGACY_PATH not in json_paths, "la ruta legacy sigue declarada como JSON"
+
+    # Una sola declaracion en todo el inventario, cuelgue de donde cuelgue.
+    declaradas = [p for p in sqlite_paths + json_paths if os.path.basename(p) == "identity.db"]
+    assert declaradas == [IDENTITY_LOGICAL_PATH], declaradas
+
+    store = next(s for s in S.SQLITE_STORES if s.logical_path == IDENTITY_LOGICAL_PATH)
+    assert store.category == "CANON", store
+    assert store.reconstructible is False, store
+    # required=False a proposito: mientras identity_sqlite siga OFF, la ausencia
+    # de la base no debe tumbar el backup de los otros 24 stores.
+    assert store.required is False, store
+
+    assert len(S.SQLITE_STORES) == 5, sqlite_paths
+    assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
+
+
+@case("ID02", "snapshot de 25 stores con identity.db presente, integra y sin tocar la fuente")
+def test_id_snapshot_25():
+    env = Env("id02")
+    fixtures.build_identity_db(env.base)
+    before = fixtures.snapshot_tree(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    assert len(manifest["stores"]) == 25, len(manifest["stores"])
+    kinds = {}
+    for s in manifest["stores"]:
+        kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
+    assert kinds == {"sqlite": 5, "json": 20}, kinds
+
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert paths.count(IDENTITY_LOGICAL_PATH) == 1, paths
+    assert IDENTITY_LEGACY_PATH not in paths, paths
+    # Los otros 24 stores siguen ahi: identity.db se suma, no sustituye a nadie.
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+
+    entry = {s["logical_path"]: s for s in manifest["stores"]}[IDENTITY_LOGICAL_PATH]
+    assert entry["kind"] == "sqlite", entry
+    assert entry["category"] == "CANON", entry
+    assert entry["integrity_result"] == "ok", entry
+    assert entry["bytes"] > 0, entry
+    assert len(entry["sha256"]) == 64, entry
+    # Ningun conteo de identidad viaja al manifiesto (design §8: solo metadata).
+    assert "aggregate_count" not in entry, entry
+
+    # La base productiva es de solo lectura para el backup, y al no estar en WAL
+    # no debe aparecer ningun sidecar junto a ella.
+    assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "ID02")
+    identity_dir = os.path.dirname(os.path.join(env.base, IDENTITY_LOGICAL_PATH))
+    assert sorted(os.listdir(identity_dir)) == ["identity.db"], os.listdir(identity_dir)
+
+
+@case("ID03", "restore real de identity.db: integridad, claves foraneas y conteos")
+def test_id_restore():
+    env = Env("id03")
+    fixtures.build_identity_db(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+
+    staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+              if os.path.isdir(p)][0]
+    man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
+    assert len(man["stores"]) == 25, len(man["stores"])
+
+    # El staging nombra cada copia por basename: la copia restaurada es
+    # sqlite/identity.db, venga de donde venga su ruta logica.
+    restaurada = os.path.join(staged, "sqlite", "identity.db")
+    assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "sqlite")))
+
+    conn = sqlite3.connect(f"file:{restaurada}?mode=ro", uri=True)
+    try:
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        conteos = {
+            "users": conn.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+            "institutions": conn.execute("SELECT COUNT(*) FROM institutions").fetchone()[0],
+            "groups": conn.execute("SELECT COUNT(*) FROM groups_v2").fetchone()[0],
+            "memberships": conn.execute("SELECT COUNT(*) FROM memberships").fetchone()[0],
+            "tombstones": conn.execute("SELECT COUNT(*) FROM tombstones").fetchone()[0],
+        }
+    finally:
+        conn.close()
+    assert conteos == fixtures.IDENTITY_COUNTS, conteos
+
+
+@case("ID04", "la ruta legacy no se respalda, y la ausencia de identity.db no rompe nada")
+def test_id_legacy_path_ignored():
+    env = Env("id04")
+    # Senuelo en la ubicacion historica: existe en disco pero YA NO esta en el
+    # inventario, asi que no debe entrar al snapshot por ninguna via.
+    senuelo = fixtures.build_identity_db(env.base, rel=IDENTITY_LEGACY_PATH)
+    assert os.path.isfile(senuelo)
+
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    paths = [s["logical_path"] for s in manifest["stores"]]
+
+    assert IDENTITY_LEGACY_PATH not in paths, "se respaldo la ruta legacy de identity.db"
+    assert IDENTITY_LOGICAL_PATH not in paths, "no habia identity.db en la ruta canonica"
+    # Sin identity.db en su sitio, el backup sigue siendo el de 24 stores.
+    assert len(manifest["stores"]) == 24, len(manifest["stores"])
+    assert manifest["result"] == "ok", manifest["result"]
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+
+
+# --------------------------------------------------------------------------
 # Casos L01-L08 — cierre del auto-init local (CHP-BACKUP-01B-1-R3A)
 # --------------------------------------------------------------------------
 #

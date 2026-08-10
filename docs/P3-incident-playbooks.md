@@ -23,7 +23,7 @@ rollback**. Acciones = comandos concretos. Default de toda acción dudosa:
 **Verif:** `chibalete_runtime_crash_total{source=v2}` plano 15m; usuarios en V1.
 
 ## shadow-inconsistency  (alert: ShadowInconsistency, critical)
-**Diag:** `sqlite3 data-critical/identity.db "SELECT * FROM shadow_audit ORDER BY id DESC LIMIT 20"` → ¿qué dominio, json_count vs sqlite_count?
+**Diag:** `sqlite3 "$IDENTITY_DB" "SELECT * FROM shadow_audit ORDER BY id DESC LIMIT 20"` → ¿qué dominio, json_count vs sqlite_count? (`IDENTITY_DB` = `/app/identity/identity.db` en el contenedor, `/var/www/chibalete/identity/identity.db` en el host; **no** `data-critical/`.)
 **Acción:** **NO hacer cutover de lectura** (`IDENTITY_READ` queda en `json`). Mantener `IDENTITY_DUAL_WRITE=1` para seguir auditando, o ponerlo OFF si el espejo causa ruido (JSON intacto). Investigar el write divergente vía pino request-id.
 **Recovery drill:** re-sync forzado = cualquier write del dominio re-sincroniza full (diseño P1). Si DB corrupta: borrar `identity.db*`, restart con `IDENTITY_SQLITE_ENABLED=1` → migra limpio, el primer write re-pobla.
 **Cutover-readiness (criterio P3-E):** promover `IDENTITY_READ=sqlite` SOLO si: `shadow_consistency_ok==1` sostenido ≥7 días, 0 alertas ShadowInconsistency, `integrity_check=ok`, drill de restart probado, snapshot JSON respaldado.
