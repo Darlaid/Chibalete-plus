@@ -23,6 +23,8 @@ import {
     mirrorSnapshotV2, assertShadowCapable, projectUsers, projectGroups,
     projectMemberships, projectInstitutions,
 } from '../../server/db/identityShadowV2.js';
+import { composeWriterId } from '../../server/db/identityWriteSurface.mjs';
+import { runtimeInstanceId } from '../../server/healthHandler.js';
 import { loadManifest, canonicalJson, ImportError } from './importIdentityCandidate.mjs';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -247,7 +249,11 @@ export async function reconcileIdentityShadow({
             reports.push(mirrorSnapshotV2(db, {
                 domain, records,
                 sourceVersion: { hash: sha(canonicalJson(records)).slice(0, 32) + ':' + stamp, seq: Date.now() },
-                writerId: 'server.writeJSON', at: stamp,
+                // El reconciliador NO es el seam HTTP: se atribuye como el
+                // escritor fuera de banda que es (CHP-IDDB-02B-D-A).
+                writerId: composeWriterId({ runtimeInstance: runtimeInstanceId(),
+                    callSite: 'reconcileIdentityShadow.apply' }),
+                at: stamp,
             }));
         }
         const after = diagnose(db, sources, stamp);

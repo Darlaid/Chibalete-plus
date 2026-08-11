@@ -104,6 +104,20 @@ function readDeployInfo() {
  * Diseñado para llamarse una sola vez al startup. Robusto a fallos:
  * cualquier read/parse error devuelve fallback 'unknown' o null.
  */
+/**
+ * Identidad de la instancia de runtime. Fuente ÚNICA: quien necesite decir
+ * "qué proceso hizo esto" —health, o la atribución del espejo de identidad—
+ * entra por aquí, para que no puedan divergir dos nociones de instancia.
+ *
+ * Es el HOSTNAME del container. Con `docker compose` sin `hostname:` explícito
+ * equivale al ID corto del container, así que CAMBIA cada vez que se recrea:
+ * identifica la instancia VIVA, no el servicio. El mapa instancia→api_1/api_2
+ * se resuelve fuera (`docker inspect`), que es donde vive esa verdad.
+ */
+export function runtimeInstanceId() {
+    return process.env.HOSTNAME || 'unknown';
+}
+
 export function getHealthDefaults() {
     // service: constante del servicio en el ecosistema Chibalete+.
     const service = 'chibalete-api';
@@ -111,7 +125,7 @@ export function getHealthDefaults() {
     // instance: HOSTNAME del container o proceso. En Docker, cada container
     // tiene HOSTNAME único (ej. "chibalete_api_1"). En dev local típicamente
     // es el hostname de la máquina.
-    const instance = process.env.HOSTNAME || 'unknown';
+    const instance = runtimeInstanceId();
 
     // .deploy-info: fuente canónica D2 del Sprint 022 Fase 2B.7. Si está
     // presente, sus valores prevalecen sobre env vars y package.json.

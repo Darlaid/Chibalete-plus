@@ -22,7 +22,43 @@
  *   detectan por reconciliación, no por hook.
  */
 
-export const WRITE_SURFACE_CONTRACT_VERSION = '1.0.0';
+export const WRITE_SURFACE_CONTRACT_VERSION = '1.1.0';
+
+/**
+ * ATRIBUCIÓN DEL ESCRITOR (CHP-IDDB-02B-D-A)
+ *
+ * Con dos API escribiendo el mismo espejo hay que poder decir QUIÉN aplicó
+ * cada operación. Eso es diagnóstico, y se mantiene deliberadamente separado
+ * de la identidad de la operación:
+ *
+ *   operation_id     — QUÉ hecho lógico. Determinístico sobre (entidad, tipo,
+ *                      clave canónica, versión de origen). NO depende del
+ *                      proceso, del PID, de la instancia ni del escritor: es
+ *                      justo lo que permite que api_1 y api_2 reconozcan la
+ *                      misma operación y una de las dos quede en NOOP.
+ *   writer_id        — QUIÉN. `<instancia de runtime>::<call-site>`. Cambiarlo
+ *                      no puede alterar jamás la idempotencia.
+ *
+ * El separador `::` no aparece en un hostname ni en los ids de call-site, así
+ * que la descomposición es inequívoca. Los `writer_id` históricos (anteriores
+ * a esta unidad) son solo el call-site, y `parseWriterId` los sigue leyendo
+ * sin inventarles una instancia.
+ */
+export const WRITER_ID_SEPARATOR = '::';
+
+/** @param {{runtimeInstance:string, callSite:string}} parts */
+export function composeWriterId({ runtimeInstance, callSite }) {
+    const inst = String(runtimeInstance ?? '').trim() || 'unknown';
+    return `${inst}${WRITER_ID_SEPARATOR}${callSite}`;
+}
+
+/** @returns {{runtimeInstance:string|null, callSite:string}} */
+export function parseWriterId(writerId) {
+    const s = String(writerId ?? '');
+    const i = s.indexOf(WRITER_ID_SEPARATOR);
+    if (i < 0) return { runtimeInstance: null, callSite: s };   // formato histórico
+    return { runtimeInstance: s.slice(0, i), callSite: s.slice(i + WRITER_ID_SEPARATOR.length) };
+}
 
 /** Dominios de identidad espejables. `access` se conserva del modelo v1. */
 export const IDENTITY_DOMAINS = ['users', 'groups', 'access', 'institutions'];
@@ -37,6 +73,11 @@ export const WRITE_SURFACES = Object.freeze([
     { id: 'groupMembershipService.writeJsonAtomic', kind: 'BLOCKED_WHEN_DUAL_WRITE',
       module: 'server/groupMembershipService.js', domains: ['users', 'groups'],
       note: 'sin llamadores en el servidor; solo scripts. Se bloquea con dual-write activo' },
+    { id: 'reconcileIdentityShadow.apply', kind: 'OUT_OF_BAND',
+      module: 'scripts/identity/reconcileIdentityShadow.mjs',
+      domains: ['users', 'groups', 'institutions'],
+      note: 'converge el espejo desde fuera del proceso del API; se atribuye como '
+          + 'tal y NO se hace pasar por el seam HTTP' },
     { id: 'out-of-band.script', kind: 'OUT_OF_BAND', module: '(fuera del proceso del API)',
       domains: ['users', 'groups', 'access', 'institutions'],
       note: 'no interceptable; se detecta por reconciliación' },

@@ -18,9 +18,25 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { flags } from '../lib/flags.js';
-import { domainOf, assertRegisteredWriter } from './identityWriteSurface.mjs';
+import { domainOf, assertRegisteredWriter, composeWriterId } from './identityWriteSurface.mjs';
+import { runtimeInstanceId } from '../healthHandler.js';
 
-let _hook = null;
+/**
+ * CHP-IDDB-02B-D-A — qué se memoiza y qué NO.
+ *
+ * Antes se memoizaba el hook ENTERO, con su `cfg` dentro. Como `server.js`
+ * construye el hook desde dos call-sites distintos (`writeJSON` y
+ * `writeJSONAsync`), el primero que corriera capturaba su `writerId` para
+ * todo el proceso y las escrituras del otro quedaban atribuidas a él. Con un
+ * solo escritor eso no rompía la convergencia; con dos escritores productivos
+ * haría imposible saber qué instancia aplicó qué.
+ *
+ * Ahora solo se memoiza `_shared`: los módulos perezosos y la conexión SQLite,
+ * que sí son globales del proceso y sí son caros. El hook se construye por
+ * llamada —25 ns medidos, frente a un `writeFileSync`+`rename`— de modo que
+ * NINGÚN dato del llamador puede quedar capturado por otro.
+ */
+let _shared = null;
 
 /**
  * Versión de la instantánea canónica: hash del contenido + una secuencia
@@ -40,34 +56,31 @@ function sourceVersionOf(file, data) {
  * @returns {(file:string,data:any)=>void}
  */
 export function makeIdentityWriteHook(cfg) {
-    if (_hook) return _hook;
     const { usersDb, groupsDb, accessDb, schoolsDb = null, log = () => {},
         writerId = 'server.writeJSON', now = () => new Date().toISOString() } = cfg;
+    // `writerId` identifica el CALL-SITE, y es lo único que valida el registro
+    // de superficies. La instancia se añade después, al atribuir.
+    const callSite = writerId;
     const paths = { usersDb, groupsDb, accessDb, schoolsDb };
-    // Imports perezosos: si SQLITE no está activo nunca se cargan.
-    let _db = null, _mirror = null, _mirrorV2 = null;
-    async function ensure() {
-        if (_db && _mirror && _mirrorV2) return true;
-        const { getIdentityDb } = await import('./identityDb.js');
-        _mirror = await import('./identityShadow.js');
-        _mirrorV2 = await import('./identityShadowV2.js');
-        _db = getIdentityDb();
-        return true;
-    }
-    _hook = (file, data) => {
+    return (file, data) => {
         if (!flags.identityDualWrite()) return;
         const domain = domainOf(file, paths);
         if (!domain) return;
-        const unregistered = assertRegisteredWriter(writerId);
+        const unregistered = assertRegisteredWriter(callSite);
         if (unregistered) {
-            log(`[identity-shadow] ${domain}: escritor no registrado (${writerId}) → espejo omitido`, 'WARN');
+            log(`[identity-shadow] ${domain}: escritor no registrado (${callSite}) → espejo omitido`, 'WARN');
             return;
         }
+        // La atribución se resuelve por operación, con el call-site REAL de
+        // esta llamada y la instancia viva. Nunca se hereda de otro llamador.
+        const attributedWriterId = composeWriterId({
+            runtimeInstance: runtimeInstanceId(), callSite,
+        });
         // No-bloqueante: el espejo NO está en el path crítico de la respuesta.
         // El write JSON ya está confirmado; pase lo que pase aquí, no se revierte.
         Promise.resolve()
-            .then(ensure)
-            .then(() => {
+            .then(ensureShared)
+            .then(({ db: _db, mirror: _mirror, mirrorV2: _mirrorV2 }) => {
                 const isV2 = Number(_db.pragma('user_version', { simple: true })) >= 2;
                 if (!isV2) {
                     if (domain === 'users') _mirror.mirrorUsers(_db, data, log);
@@ -83,22 +96,36 @@ export function makeIdentityWriteHook(cfg) {
                 }
                 const report = _mirrorV2.mirrorSnapshotV2(_db, {
                     domain, records: data, sourceVersion: sourceVersionOf(file, data),
-                    writerId, at: now(),
+                    writerId: attributedWriterId, at: now(),
                 });
                 if (report.status === 'FAILED_RECONCILABLE') {
                     // Nunca silencioso: queda en shadow_operations, en
                     // shadow_state y en el log operacional.
                     log(`[identity-shadow] ${domain}: espejo FAILED_RECONCILABLE `
-                        + `(${report.classification}); el write JSON ya está confirmado`, 'ERROR');
+                        + `(${report.classification}${report.detail ? `: ${report.detail}` : ''}) `
+                        + `por ${attributedWriterId}; el write JSON ya está confirmado`, 'ERROR');
                 }
             })
             .catch(e => log(`[identity-shadow] mirror ${domain} failed: ${e.message}`, 'WARN'));
     };
-    return _hook;
 }
 
-/** Solo para tests: el hook es un singleton memoizado por diseño. */
-export function _resetIdentityWriteHook() { _hook = null; }
+/**
+ * Recursos globales del proceso: los módulos perezosos y la conexión SQLite.
+ * Si SQLITE no está activo no se cargan nunca. No contiene NADA propio de un
+ * llamador — esa es justamente la invariante que hace seguro memoizarlo.
+ */
+async function ensureShared() {
+    if (_shared) return _shared;
+    const { getIdentityDb } = await import('./identityDb.js');
+    const mirror = await import('./identityShadow.js');
+    const mirrorV2 = await import('./identityShadowV2.js');
+    _shared = { db: getIdentityDb(), mirror, mirrorV2 };
+    return _shared;
+}
+
+/** Solo para tests: descarta los recursos compartidos memoizados. */
+export function _resetIdentityWriteHook() { _shared = null; }
 
 /** Bootstrap idempotente: corre migraciones si IDENTITY_SQLITE_ENABLED. */
 export async function bootstrapIdentityDb(log = () => {}) {

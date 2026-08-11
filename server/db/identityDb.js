@@ -34,6 +34,46 @@ const DEFAULT_DB_PATH = IDENTITY_DB_LEGACY_DEFAULT;
 
 let _db = null;
 
+const isBusy = (e) => /SQLITE_BUSY|database is locked/i.test(String(e?.message ?? ''));
+/** Pausa síncrona y acotada; no hay bucle de eventos que ceder en la apertura. */
+const sleepSync = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+/**
+ * Fija `journal_mode = WAL` de forma resistente a la contención
+ * (CHP-IDDB-02B-D-A).
+ *
+ * CAMBIAR el journal mode exige un lock exclusivo y, a diferencia de casi todo
+ * lo demás, **NO respeta `busy_timeout`**: si otro proceso tiene la base
+ * tomada, SQLite devuelve SQLITE_BUSY en el acto. Medido con dos procesos
+ * abriendo a la vez una base recién creada: fallo en 9 ms desde la propia
+ * apertura, antes de tocar el espejo.
+ *
+ * En producción la base YA está en WAL, así que el caso normal es la primera
+ * rama: se comprueba y no se intenta ningún cambio, lo que además evita pedir
+ * un lock exclusivo en cada apertura. El reintento acotado cubre el caso real
+ * que queda —dos instancias arrancando contra una identity.db recién creada—
+ * y falla claro si no lo consigue, en vez de seguir con la base en modo
+ * `delete`, que es justamente el modo que no soporta dos escritores.
+ */
+export function enableWalMode(db, { attempts = 20, waitMs = 50 } = {}) {
+    const current = () => {
+        try { return String(db.pragma('journal_mode', { simple: true })).toLowerCase(); }
+        catch (e) { if (isBusy(e)) return null; throw e; }
+    };
+    if (current() === 'wal') return 'wal';
+    for (let i = 0; i < attempts; i++) {
+        try {
+            if (String(db.pragma('journal_mode = WAL', { simple: true })).toLowerCase() === 'wal') {
+                return 'wal';
+            }
+        } catch (e) { if (!isBusy(e)) throw e; }
+        sleepSync(waitMs);
+        if (current() === 'wal') return 'wal';   // lo fijó el otro proceso
+    }
+    throw new Error('IDENTITY_DB_WAL_UNAVAILABLE: no se pudo fijar journal_mode=WAL '
+        + `tras ${attempts} intentos (la base sigue tomada por otro proceso)`);
+}
+
 /**
  * @param {string} [dbPath] override explícito (los tests usan un temporal). En
  *        producción queda sujeto a las mismas validaciones que `IDENTITY_DB`.
@@ -43,10 +83,18 @@ export function getIdentityDb(dbPath = undefined) {
     if (_db) return _db;
     const resolved = resolveIdentityDbPath({ explicitPath: dbPath ?? null, forOpen: true });
     _db = new Database(resolved);
-    // PRAGMA set idéntico al de eventsService.js (probado en prod).
-    _db.pragma('journal_mode = WAL');     // readers concurrentes + 1 writer sin lock
-    _db.pragma('synchronous = NORMAL');   // fsync en checkpoints (seguro con WAL)
+    // `busy_timeout` va PRIMERO (CHP-IDDB-02B-D-A). No adquiere ningún lock,
+    // pero los pragma que vienen detrás sí: `journal_mode` necesita el lock de
+    // la base, y con el timeout todavía en 0 falla en seco con SQLITE_BUSY si
+    // otro proceso está escribiendo. Reproducido con dos escritores abriendo la
+    // misma base a la vez: `database is locked` lanzado desde la propia
+    // apertura, antes de tocar el espejo.
     _db.pragma('busy_timeout = 5000');    // 5s ante write-lock (contención dual-api)
+    // Resto del set idéntico al de eventsService.js (probado en prod), que
+    // conserva el orden histórico: allí solo hay un abridor por proceso y el
+    // mismo riesgo es mucho menor, así que no se toca desde esta unidad.
+    enableWalMode(_db);                   // readers concurrentes + 1 writer sin lock
+    _db.pragma('synchronous = NORMAL');   // fsync en checkpoints (seguro con WAL)
     _db.pragma('foreign_keys = ON');      // integridad referencial real
     _db.pragma('cache_size = -2000');     // 2 MB page cache
     _db.pragma('temp_store = MEMORY');

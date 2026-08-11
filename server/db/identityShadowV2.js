@@ -120,10 +120,16 @@ function bumpState(db, domain, sourceVersion, at, delta, opts = {}) {
         return;
     }
     if (!cur) {
+        // Primer registro del dominio. Si el intento NO debe mover la versión
+        // (instantánea obsoleta o fallida), se inserta con versión vacía: una
+        // instantánea fallida jamás puede quedar como la última vista buena,
+        // tampoco cuando es la primera que ve el dominio.
+        const seed = opts.countersOnly
+            ? { version: '', seq: 0 } : { version: sourceVersion.hash, seq: Number(sourceVersion.seq) };
         db.prepare(`INSERT INTO shadow_state(domain,last_source_version,last_source_seq,last_applied_at,
                     attempted_count,applied_count,noop_count,failed_count,last_failure_class)
                     VALUES (?,?,?,?,?,?,?,?,?)`)
-            .run(domain, sourceVersion.hash, Number(sourceVersion.seq), at,
+            .run(domain, seed.version, seed.seq, at,
                 delta.attempted, delta.applied, delta.noop, delta.failed, delta.lastFailure ?? null);
         return;
     }
@@ -265,7 +271,7 @@ export function projectInstitutions(records, at) {
 export function mirrorSnapshotV2(db, input) {
     const { domain, records, sourceVersion, writerId, at } = input;
     const report = { domain, writerId, attempted: 0, applied: 0, noop: 0, failed: 0,
-        rejected: [], status: 'APPLIED', classification: null, operations: [] };
+        rejected: [], status: 'APPLIED', classification: null, detail: null, operations: [] };
 
     const incapable = assertShadowCapable(db);
     if (incapable) {
@@ -373,6 +379,8 @@ export function mirrorSnapshotV2(db, input) {
                 report.status = 'NOOP_ALREADY_APPLIED';
                 report.classification = 'DOMAIN_NOT_MIRRORED_IN_V2';
                 report.noop = 1;
+                bumpState(db, domain, sourceVersion, at,
+                    { attempted: 0, applied: 0, noop: 1, failed: 0 });
                 return;
             }
 
@@ -461,13 +469,32 @@ export function mirrorSnapshotV2(db, input) {
                 }
                 for (const rj of mem.rejected) report.rejected.push(rj);
             }
+
+            // La contabilidad del dominio entra en la MISMA transacción que las
+            // filas que describe (CHP-IDDB-02B-D-A). Antes se hacía después del
+            // COMMIT y dentro del mismo try: con dos escritores, una contención
+            // en ese UPDATE marcaba como FAILED_RECONCILABLE un espejo que YA
+            // estaba confirmado, e insertaba una operación de fallo espuria.
+            bumpState(db, domain, sourceVersion, at, { attempted: report.attempted,
+                applied: report.applied, noop: report.noop, failed: 0 });
         });
-        tx();
-        bumpState(db, domain, sourceVersion, at, { attempted: report.attempted,
-            applied: report.applied, noop: report.noop, failed: 0 });
+        // BEGIN IMMEDIATE, no diferido (CHP-IDDB-02B-D-A). El cuerpo LEE antes
+        // de ESCRIBIR (exclusiones, tombstones, padrón vivo), así que con una
+        // transacción diferida SQLite tiene que ascender el lock de lectura a
+        // escritura, y ese ascenso NO respeta `busy_timeout`: medido, falla en
+        // 1 ms con SQLITE_BUSY en cuanto hay un segundo escritor. Tomando el
+        // lock de escritura desde el principio, la contención se convierte en
+        // una espera ACOTADA por `busy_timeout` (5 s, frente a los ~600 ms que
+        // tarda la proyección completa de 247 identidades).
+        tx.immediate();
     } catch (e) {
         report.status = 'FAILED_RECONCILABLE';
         report.classification = e instanceof ShadowRejection ? e.classification : 'MIRROR_WRITE_FAILED';
+        // La clasificación sola no basta para diagnosticar un fallo con dos
+        // escritores vivos. El mensaje de SQLite nombra tablas y restricciones,
+        // nunca valores de fila, así que es seguro exponerlo al log operacional.
+        // No se persiste: es diagnóstico en memoria para quien llama.
+        report.detail = e.message;
         report.failed = 1;
         try {
             db.prepare(`INSERT INTO shadow_operations(operation_id,entity_type,operation_type,
