@@ -1,0 +1,34 @@
+# /etc/cron.d/docker-image-prune — limpieza automatica de imagenes Docker.
+#
+# CHP-OPS-ROLLBACK-IMAGE-RETENTION-01.
+#
+# ATENCION — por que NO lleva `-a`:
+#
+# `docker image prune -a` elimina "all unused images, not just dangling ones".
+# Una imagen deja de estar "in use" en el instante en que el ultimo contenedor
+# que la referenciaba pasa a otra version. Es decir: **la imagen de rollback
+# N-1 se vuelve elegible en cuanto se despliega N**, y con `--filter until=24h`
+# desaparece al dia siguiente sin aviso.
+#
+# Eso ocurrio de verdad: el 2026-08-11 a las 00:45 este job borro
+# `chibalete/api:2945fa8`, que era el rollback del despliegue vivo. El artefacto
+# inmutable se perdio; reconstruirlo desde el mismo commit NO produce el mismo
+# artefacto, asi que no es un sustituto.
+#
+# Sin `-a`, `docker image prune` elimina unicamente imagenes DANGLING (las que
+# no tienen ninguna etiqueta), que es residuo real de build. Cualquier imagen
+# etiquetada —produccion, rollback, candidates— se conserva.
+#
+# PROHIBIDO en esta tarea, y verificado por ops/maintenance/__tests__:
+#   - `docker image prune -a` / `--all`
+#   - `docker system prune` (arrastra contenedores, redes y potencialmente
+#     volumenes: nunca como tarea automatica)
+#   - cualquier forma que incluya `--volumes`
+#
+# La retencion de multiples releases, el limite de disco y la limpieza del
+# build cache son una unidad de lifecycle aparte; esto solo cierra el agujero
+# que borraba rollbacks.
+#
+# Instalar en /etc/cron.d/docker-image-prune con modo 0644 root:root.
+
+45 0 * * * root docker image prune -f --filter "until=24h" > /dev/null 2>&1
