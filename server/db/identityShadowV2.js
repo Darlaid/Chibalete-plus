@@ -145,9 +145,15 @@ function recordOp(db, op, at) {
     const existing = db.prepare(`SELECT status, attempt_count FROM shadow_operations
                                  WHERE operation_id = ?`).get(op.operation_id);
     if (existing) {
-        db.prepare(`UPDATE shadow_operations SET status=?, attempt_count=attempt_count+1,
-                    applied_at=?, error_classification=? WHERE operation_id=?`)
-            .run(op.status, op.applied_at, op.error_classification ?? null, op.operation_id);
+        // Solo se cuenta el intento (CHP-IDDB-02B-D-A). Antes se reescribía la
+        // fila a PENDING con applied_at=NULL antes de saber qué se iba a hacer
+        // con ella: las ramas de usuarios/grupos volvían a fijar el estado
+        // después, pero las de MEMBRESÍAS y DESACTIVACIÓN se limitan a
+        // `continue`, así que la operación quedaba colgada en PENDING para
+        // siempre. Detectado en el canary sobre datos reales: 227 membresías
+        // ya aplicadas figuraban como en vuelo tras volver a espejar.
+        db.prepare(`UPDATE shadow_operations SET attempt_count=attempt_count+1
+                    WHERE operation_id=?`).run(op.operation_id);
         return existing.status;
     }
     db.prepare(`INSERT INTO shadow_operations(operation_id,entity_type,operation_type,canonical_key_hash,

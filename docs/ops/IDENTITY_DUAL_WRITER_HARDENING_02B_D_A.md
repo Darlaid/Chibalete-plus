@@ -184,6 +184,47 @@ Ambos entran en `npm run test:identity`, es decir, en el gate bloqueante
 
 ---
 
+### 2.8 Un replay degradaba a PENDING una operación ya terminal — *R2*
+
+Lo destapó el canary de esta misma unidad sobre datos reales, después de
+construir la imagen: volver a espejar el padrón dejaba **227 membresías ya
+aplicadas marcadas como `PENDING` con `applied_at` a NULL**, mientras la
+reconciliación seguía diciendo `MATCH`. El dominio estaba bien; el libro de
+operaciones mentía.
+
+`recordOp()` degradaba la fila existente a `PENDING` **antes** de saber qué se
+iba a hacer con ella. Las ramas de upsert de usuarios y grupos volvían a fijar
+el estado unas líneas más abajo, así que allí no se notaba; las de **membresía**
+y **desactivación** se limitan a `continue`, de modo que la degradación quedaba
+confirmada en el COMMIT y la operación se quedaba en vuelo para siempre.
+
+Ahora la rama de operación existente **solo cuenta el intento**: no toca
+`status`, ni `applied_at`, ni `error_classification`. El estado terminal es del
+primer escritor que lo alcanzó, y un replay no puede retirarlo.
+
+Lo que NO cambia, y hay test que lo fija:
+
+- un `PENDING` genuino preexistente **sigue recuperándose** en el siguiente
+  replay (el fix no lo congela);
+- un `FAILED_RECONCILABLE` **sigue recuperándose** igual;
+- `operation_id` sigue siendo ciego al escritor.
+
+Queda una asimetría deliberada, documentada aquí para que no sorprenda: la rama
+de upsert refresca `applied_at` al reconocer un no-op, mientras que membresía y
+desactivación conservan el `applied_at` original. En ambos casos el estado es
+terminal y `applied_at` nunca vuelve a ser NULL, que es el invariante que
+importa.
+
+`server/__test__/identityShadowReplayTerminal.test.mjs` fija ese contrato. Sobre
+el runtime de `c4d0a8c` el test falla con 17 aserciones rojas —228 membresías y
+2 desactivaciones en vuelo—; con el arreglo pasa 63/63.
+
+**Invariante que sostiene todo lo anterior:** ninguna transacción confirmada
+puede dejar filas en `PENDING`. Un fallo aborta la transacción entera y las
+filas ni siquiera existen; un éxito las deja terminales.
+
+---
+
 ## 4. Lo que esta unidad NO hace
 
 - No enciende el shadow-write en `api_2` (sigue `off/off/json`).

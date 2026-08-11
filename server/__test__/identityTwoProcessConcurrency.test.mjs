@@ -401,6 +401,44 @@ try {
             && db.pragma('foreign_key_check').length === 0);
         db.close();
     }
+    // ── [7] Reespejar no puede dejar operaciones colgadas en PENDING ─────
+    console.log('\n[7] reespejar el mismo padrón no deja operaciones en vuelo');
+    {
+        const p = freshDb('pending.db');
+        const db = new Database(p);
+        db.pragma('foreign_keys = ON');
+        const w = composeWriterId({ runtimeInstance: 'writer-A', callSite: 'server.writeJSON' });
+        const groups = [{ id: 'g1', organizationId: 'org_1', type: 'course', name: 'Primero A',
+            studentIds: realUsers.slice(0, 30).map(u => u.id), mediatorIds: [realUsers[1].id] }];
+        const mirror = (domain, records, hash, seq) => mirrorSnapshotV2(db, { domain, records,
+            sourceVersion: { hash, seq }, writerId: w, at: '2026-01-01T00:00:00Z' });
+        mirror('institutions', INSTITUTIONS, 'sv-i', 1);
+        mirror('users', realUsers, 'sv-u', 1);
+        const first = mirror('groups', groups, 'sv-g', 1);
+        const pendingAfterFirst = db.prepare(
+            `SELECT COUNT(*) c FROM shadow_operations WHERE status='PENDING'`).get().c;
+        ok('el primer espejo aplica grupo y membresías',
+            first.status === 'APPLIED' && first.applied === 32, `${first.status}/${first.applied}`);
+        ok('y no deja nada en PENDING', pendingAfterFirst === 0, String(pendingAfterFirst));
+
+        // Misma instantánea otra vez: todo debe reconocerse como ya hecho.
+        const second = mirror('groups', groups, 'sv-g', 1);
+        const pendingAfterSecond = db.prepare(
+            `SELECT COUNT(*) c FROM shadow_operations WHERE status='PENDING'`).get().c;
+        ok('el reespejo es íntegramente idempotente',
+            second.applied === 0 && second.noop === 32, `${second.applied}/${second.noop}`);
+        ok('y TAMPOCO deja operaciones colgadas en PENDING',
+            pendingAfterSecond === 0, `${pendingAfterSecond} operaciones en vuelo`);
+        ok('las membresías siguen intactas',
+            db.prepare(`SELECT COUNT(*) c FROM memberships`).get().c === 31,
+            String(db.prepare(`SELECT COUNT(*) c FROM memberships`).get().c));
+        ok('el contador de intentos sí refleja las dos pasadas',
+            db.prepare(`SELECT MIN(attempt_count) m FROM shadow_operations
+                        WHERE entity_type='membership'`).get().m === 2);
+        ok('quick_check=ok y FK=0', db.pragma('quick_check', { simple: true }) === 'ok'
+            && db.pragma('foreign_key_check').length === 0);
+        db.close();
+    }
 } catch (e) {
     console.error('  ✗ excepción no esperada:', e.stack || e.message);
     fail++;
