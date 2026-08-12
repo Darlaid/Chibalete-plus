@@ -24,7 +24,7 @@ import { initErrorTracking } from './observability/errorTracking.js';
 // P3-E — dual-write shadow real (gated IDENTITY_DUAL_WRITE; default OFF).
 import { makeIdentityWriteHook, bootstrapIdentityDb } from './db/identityWriteHook.js';
 // P4-A — cutover de LECTURA gated + fallback-safe (default IDENTITY_READ=json).
-import { tryIdentitySqliteRead, markJsonRead, warmupReadFacade } from './db/identityReadFacade.js';
+import { tryIdentitySqliteRead, markJsonRead, warmupReadFacade, assertWritableIdentityPayload } from './db/identityReadFacade.js';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -512,11 +512,18 @@ if (!fs.existsSync(TEMP_DIR)) {
 // USERS_DB and GROUPS_DB imported from ./config.js — do not redefine here
 // (CHP-ID-01-FIX-01 H1: única resolución en config.js).
 const PROGRESS_DB = path.resolve(__dirname, '../data/progress_db.json');
-const DB_FILE = path.resolve(__dirname, '../data/content.json');
+// CHP-IDDB-READ-RMW-SEAM-01: DB_FILE/SCHOOLS_DB/ACCESS_DB admiten override por
+// env (mismo precedente que USERS_DB/GROUPS_DB en config.js). Producción no
+// define estas vars → ruta idéntica. Lo exige el harness de test que bootea el
+// server real contra stores temporales sin tocar data/ del repositorio.
+const DB_FILE = process.env.CONTENT_DB
+    || path.resolve(__dirname, '../data/content.json');
 const SECTIONS_DB = path.resolve(__dirname, '../data/sections.json'); // Added likely missing definition based on context
 const SCHOOL_CONFIGS_DB = path.resolve(__dirname, '../data/school_configs.json');
-const SCHOOLS_DB = path.resolve(__dirname, '../data/schools_db.json');
-const ACCESS_DB = path.resolve(__dirname, '../data/access_db.json'); // FASE E6: Motor de Accesos por Scopes
+const SCHOOLS_DB = process.env.SCHOOLS_DB
+    || path.resolve(__dirname, '../data/schools_db.json');
+const ACCESS_DB = process.env.ACCESS_DB
+    || path.resolve(__dirname, '../data/access_db.json'); // FASE E6: Motor de Accesos por Scopes
 const LEO_MEMORY_DB = path.resolve(__dirname, '../data/leo_memory_db.json'); // LEO SESSION PERSISTENCE
 const BUNDLES_DB = path.resolve(__dirname, '../data/bundles_db.json');       // Fase 7: Bundles comerciales
 const SUBMISSIONS_DB = path.resolve(__dirname, '../data/submissions_db.json'); // Exportación académica
@@ -524,7 +531,8 @@ const ANALYTICS_DB = path.resolve(__dirname, '../data/analytics_db.json');    //
 const PLAYBACK_EVENTS_LOG = path.resolve(__dirname, '../data/playback_events.log'); // Ritmo narrativo — append-only JSONL
 const LEO_INTERACTIONS_DB = path.resolve(__dirname, '../data/leo_interactions_db.json'); // Leo interaction log (metadata only)
 const INTERVENTIONS_DB = path.resolve(__dirname, '../data/interventions_db.json'); // Mediator interventions
-const USER_AUDIT_DB = path.resolve(__dirname, '../data/user_audit_log.json'); // Auditoría de mutaciones de usuarios
+const USER_AUDIT_DB = process.env.USER_AUDIT_DB
+    || path.resolve(__dirname, '../data/user_audit_log.json'); // Auditoría de mutaciones de usuarios (override: harness RMW-SEAM-01)
 
 // In-memory idempotency locks for content save operations.
 // Key: `${actorId}:${contentId}`, TTL: 2 s. Prevents duplicate saves from network retries.
@@ -736,6 +744,11 @@ const readJSON = (file) => {
 
 const writeJSON = (file, data) => {
     try {
+        // CHP-IDDB-READ-RMW-SEAM-01 — guard de regresión: jamás persistir en un
+        // store de identidad un array servido por el seam SQLite (ver
+        // assertWritableIdentityPayload). Con IDENTITY_READ=json es un no-op.
+        assertWritableIdentityPayload(file, data,
+            { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB });
         const tempFile = `${file}.tmp`;
         fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
         fs.renameSync(tempFile, file); // Atomic move
@@ -749,6 +762,9 @@ const writeJSON = (file, data) => {
 };
 
 const writeJSONAsync = async (file, data) => {
+    // CHP-IDDB-READ-RMW-SEAM-01 — mismo guard que writeJSON.
+    assertWritableIdentityPayload(file, data,
+        { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB });
     const tmp = `${file}.tmp`;
     await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
     await fs.promises.rename(tmp, file);
@@ -757,10 +773,46 @@ const writeJSONAsync = async (file, data) => {
     try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSONAsync' })(file, data); } catch { /* shadow nunca rompe el write */ }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CHP-IDDB-READ-RMW-SEAM-01 — LECTURA BASE DE MUTACIÓN (canónico físico).
+//
+// Toda operación read-modify-write reescribe el store COMPLETO, así que su
+// lectura base debe ser el JSON canónico FÍSICO:
+//   - nunca el seam conmutable (IDENTITY_READ / IDENTITY_READ_DOMAINS);
+//   - nunca la caché (podría contener un array servido desde SQLite);
+//   - sin fallback de ningún tipo.
+// Si SQLite sirviera la base (subconjunto canónico SIN credenciales, sin
+// sintéticos, sin grupos legacy), la primera mutación truncaría el padrón
+// (647→247) y destruiría las credenciales. FAIL-CLOSED: si el canónico falta,
+// está vacío o no parsea, la mutación FALLA — no se continúa con un
+// subconjunto ni se crea un store vacío.
+// ─────────────────────────────────────────────────────────────────────────────
+const readCanonicalStoreForMutation = (file) => {
+    let raw;
+    try {
+        raw = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+        throw new Error(`CANONICAL_MUTATION_READ_FAILED: ${path.basename(file)}: ${e.code || e.message}`);
+    }
+    if (!raw.trim()) {
+        throw new Error(`CANONICAL_MUTATION_READ_FAILED: ${path.basename(file)}: EMPTY_FILE`);
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        throw new Error(`CANONICAL_MUTATION_READ_FAILED: ${path.basename(file)}: PARSE_ERROR`);
+    }
+    if (!Array.isArray(parsed)) {
+        throw new Error(`CANONICAL_MUTATION_READ_FAILED: ${path.basename(file)}: NOT_ARRAY`);
+    }
+    return parsed;
+};
+
 async function mutateUsers(fn) {
     return withUsersLock(USERS_DB, () => {
         _jsonCache.delete(USERS_DB);
-        const users = readJSON(USERS_DB);
+        const users = readCanonicalStoreForMutation(USERS_DB);
         return fn(users);
     });
 }
@@ -769,7 +821,7 @@ async function mutateUsers(fn) {
 async function mutateGroups(fn) {
     return withFileLock(GROUPS_DB, () => {
         _jsonCache.delete(GROUPS_DB);
-        const data = readJSON(GROUPS_DB);
+        const data = readCanonicalStoreForMutation(GROUPS_DB);
         return fn(Array.isArray(data) ? data : []);
     }, 'groupsLock');
 }
@@ -797,7 +849,7 @@ async function mutateSchoolConfigs(fn) {
 async function mutateAccessRules(fn) {
     return withFileLock(ACCESS_DB, () => {
         _jsonCache.delete(ACCESS_DB);
-        const data = readJSON(ACCESS_DB);
+        const data = readCanonicalStoreForMutation(ACCESS_DB);
         return fn(Array.isArray(data) ? data : []);
     }, 'accessLock');
 }
@@ -2783,7 +2835,7 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
     const { email, password } = req.body;
     const normalizedEmail = normalizeEmail(email);
 
-    const users = readJSON(USERS_DB);
+    const users = readCanonicalStoreForMutation(USERS_DB);
     const userIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
 
     if (userIndex !== -1) {
@@ -2913,8 +2965,8 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const users  = readJSON(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readCanonicalStoreForMutation(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
 
             const existingIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
             if (existingIndex !== -1) {
@@ -3242,8 +3294,8 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const users  = readJSON(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readCanonicalStoreForMutation(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
 
             if (users.some(u => normalizeEmail(u.email) === normalizedEmail)) { conflict = { conflict: 'dup_email' }; return; }
             if (users.some(u => u.id === userToSave.id))                      { conflict = { conflict: 'dup_id' };    return; }
@@ -3314,8 +3366,8 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const users  = readJSON(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readCanonicalStoreForMutation(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
             const index  = users.findIndex(u => u.id === id);
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
             if (updates.email && updates.email !== normalizeEmail(users[index].email)) {
@@ -3416,8 +3468,8 @@ app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const users  = readJSON(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
+            const users  = readCanonicalStoreForMutation(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
             const index  = users.findIndex(u => u.id === id);
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
             deletedUser = users[index];
@@ -3632,8 +3684,8 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
             const index  = groups.findIndex(g => g.id === id);
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
 
@@ -3796,8 +3848,8 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
             const index  = groups.findIndex(g => g.id === id);
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
             groupMeta = _extractGroupMeta(groups[index]);
@@ -3938,8 +3990,8 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
             const index  = groups.findIndex(g => g.id === id);
             if (index === -1) { outcome = { conflict: 'not_found' }; return; }
             const group = groups[index];
@@ -4438,8 +4490,8 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
 
             const group = groups.find(g => g?.id === groupId);
             if (!group) { outcome = { conflict: 'group_not_found' }; return; }
@@ -4630,8 +4682,8 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
 
             const idx = groups.findIndex(g => g?.id === groupId);
             if (idx === -1) { outcome = { conflict: 'group_not_found' }; return; }
@@ -4805,8 +4857,8 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
 
             // Lookup ambos grupos en el MISMO lock — sin race con admin paralelo.
             const fromIdx = groups.findIndex(g => g?.id === fromGroupId);
@@ -5144,8 +5196,8 @@ app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
             _jsonCache.delete(USERS_DB);
-            const groups = readJSON(GROUPS_DB) || [];
-            const users  = readJSON(USERS_DB);
+            const groups = readCanonicalStoreForMutation(GROUPS_DB);
+            const users  = readCanonicalStoreForMutation(USERS_DB);
             const userById = new Map(users.map(u => [u?.id, u]).filter(([id]) => id));
 
             // ── PHASE 2 — Group resolution ─────────────────────────────────

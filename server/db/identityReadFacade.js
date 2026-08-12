@@ -22,6 +22,36 @@ import {
     identityReadSource as mSrc, identityReadFallback as mFb,
 } from '../observability/metrics.js';
 
+/**
+ * CHP-IDDB-READ-RMW-SEAM-01 — marca de procedencia. Todo array servido desde
+ * SQLite por esta facade queda etiquetado (Symbol no enumerable: invisible
+ * para JSON.stringify, res.json y los consumidores de lectura). El seam de
+ * ESCRITURA lo usa para rehusar persistir un array servido desde SQLite sobre
+ * el JSON canónico: una mutación cuya base fuera el espejo (subconjunto sin
+ * credenciales) truncaría el padrón. Ver assertWritableIdentityPayload.
+ */
+export const IDENTITY_SQLITE_SERVED = Symbol.for('chp.identity.sqliteServed');
+
+/**
+ * Guard de regresión del seam RMW: lanza si `data` (el payload que va a
+ * persistirse en un store de identidad) es un array que la facade sirvió
+ * desde SQLite. Con IDENTITY_READ=json nunca existe la marca → no-op.
+ * @throws {Error} IDENTITY_MUTATION_SQLITE_GUARD
+ */
+export function assertWritableIdentityPayload(file, data, paths) {
+    let domain = null;
+    if (file === paths.usersDb) domain = 'users';
+    else if (file === paths.groupsDb) domain = 'groups';
+    else if (file === paths.accessDb) domain = 'access';
+    if (!domain) return;
+    if (data && data[IDENTITY_SQLITE_SERVED] === true) {
+        throw new Error(
+            `IDENTITY_MUTATION_SQLITE_GUARD: intento de persistir en '${domain}' un array `
+            + 'servido desde SQLite; la base de una mutación debe leerse del JSON canónico '
+            + 'físico (readCanonicalStoreForMutation), nunca del seam conmutable');
+    }
+}
+
 let _repo = null;
 function domainsAllowed() {
     return new Set(String(process.env.IDENTITY_READ_DOMAINS || '')
@@ -72,6 +102,8 @@ export function tryIdentitySqliteRead(file, paths, log = () => {}) {
             try { mFb.labels(domain, 'bad_shape').inc(); } catch {}
             return null;
         }
+        // CHP-IDDB-READ-RMW-SEAM-01: marca de procedencia para el guard RMW.
+        Object.defineProperty(arr, IDENTITY_SQLITE_SERVED, { value: true });
         try { mSrc.labels(domain, 'sqlite').inc(); } catch {}
         return arr;
     } catch (e) {
