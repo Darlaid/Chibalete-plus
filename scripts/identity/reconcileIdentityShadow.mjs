@@ -26,6 +26,7 @@ import {
 import { composeWriterId } from '../../server/db/identityWriteSurface.mjs';
 import { runtimeInstanceId } from '../../server/healthHandler.js';
 import { loadManifest, canonicalJson, ImportError } from './importIdentityCandidate.mjs';
+import { resolveLiveSources } from './identityLiveSources.mjs';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const h16 = (s) => sha(s).slice(0, 16);
@@ -187,6 +188,19 @@ export function classifyCandidateDrift(db, manifest, sources, at) {
         counts: d.counts };
 }
 
+/**
+ * Modo FROZEN — atestación de migración histórica.
+ *
+ * Fija el contenido contra el sha256 del manifiesto: reproduce exactamente los
+ * bytes con los que se hizo la importación. NO se relaja nunca; un solo byte
+ * distinto en cualquiera de las tres fuentes debe seguir abortando aquí. Es lo
+ * que hace demostrable qué se migró en CHP-IDDB-02A.
+ *
+ * Para reconciliar contra el estado canónico de HOY existe el modo LIVE
+ * (`identityLiveSources.mjs`), que tiene garantías propias y no depende de
+ * conocer el contenido de antemano. Ver
+ * docs/ops/IDENTITY_RECONCILE_LIVE_SOURCES_01.md.
+ */
 export function readSources(manifest) {
     const read = (entry, label) => {
         assertReadableSource(entry.path);
@@ -203,24 +217,86 @@ export function readSources(manifest) {
     };
 }
 
+export const SOURCE_MODES = ['frozen', 'live'];
+
+/**
+ * Resuelve las fuentes según el modo pedido. El modo es SIEMPRE explícito en la
+ * llamada y por defecto es `frozen`, el más estricto: nunca se puede caer en
+ * LIVE por accidente ni inferirlo de un detalle de la invocación.
+ */
+function resolveSourcesForMode({ sourceMode, manifest, sourcesRoot }) {
+    if (!SOURCE_MODES.includes(sourceMode)) {
+        throw new ImportError('SOURCE_MODE_UNKNOWN',
+            `"${sourceMode}" no es un modo válido (${SOURCE_MODES.join(' | ')})`);
+    }
+    if (sourceMode === 'frozen') {
+        if (sourcesRoot) {
+            throw new ImportError('SOURCE_MODE_AMBIGUOUS',
+                'frozen no admite --sources-root: un modo no puede suplantar al otro');
+        }
+        return {
+            sources: readSources(manifest),
+            syntheticIds: [],
+            attestation: {
+                sourceMode: 'frozen',
+                manifestRunId: manifest.runId,
+                canonicalSourceIdentity: Object.fromEntries(
+                    Object.entries(manifest.sources).map(([role, e]) =>
+                        [role, { path: e.path, sha256: e.sha256 }])),
+                hashesArePinned: true,
+                note: 'hashes FIJADOS contra el manifiesto histórico; cualquier byte distinto aborta',
+            },
+        };
+    }
+    return resolveLiveSources({ sourcesRoot });
+}
+
 export async function reconcileIdentityShadow({
-    mode = 'check', manifestPath, identityDbPath, at = null, log = () => {}, allowProduction = false,
+    mode = 'check', sourceMode = 'frozen', manifestPath, sourcesRoot, identityDbPath,
+    at = null, log = () => {}, allowProduction = false, allowLiveApply = false,
 } = {}) {
-    const manifest = loadManifest(manifestPath);
+    // LIVE + APPLY queda EXPLÍCITAMENTE GATEADO. Esta unidad
+    // (CHP-IDDB-RECONCILE-LIVE-SOURCES-01) no amplía el permiso productivo de
+    // apply: converger el espejo sigue exigiendo una atestación congelada, que
+    // es lo que hace auditable contra qué bytes se escribió. Abrir esta puerta
+    // requiere una unidad propia, no una bandera de conveniencia.
+    if (sourceMode === 'live' && mode === 'apply' && !allowLiveApply) {
+        throw new ImportError('LIVE_APPLY_NOT_AUTHORIZED',
+            'apply en modo live no está autorizado: usa frozen con manifiesto atestado');
+    }
+    // El manifiesto solo se carga —y por tanto solo se exige— en modo frozen.
+    const manifest = sourceMode === 'frozen' ? loadManifest(manifestPath) : null;
+    if (sourceMode === 'live' && manifestPath) {
+        throw new ImportError('SOURCE_MODE_AMBIGUOUS',
+            'live no admite --source-manifest: un modo no puede suplantar al otro');
+    }
     const abs = assertIdentityDbPath(identityDbPath, { allowProduction });
-    const stamp = at ?? manifest.generatedAt;
-    const sources = readSources(manifest);
+    const { sources, syntheticIds, attestation } =
+        resolveSourcesForMode({ sourceMode, manifest, sourcesRoot });
+    const stamp = at ?? manifest?.generatedAt ?? new Date(0).toISOString();
 
     const db = new Database(abs, { readonly: mode !== 'apply' });
     try {
         const incapable = assertShadowCapable(db);
         if (incapable) throw new ImportError('SHADOW_NOT_CAPABLE', incapable);
         const before = diagnose(db, sources, stamp);
+        // (9) La cohorte sintética es una exclusión CONTRACTUAL, no un efecto
+        // colateral de la proyección: se verifica que ninguna de las identidades
+        // marcadas llegó a la proyección canónica.
+        if (sourceMode === 'live' && syntheticIds.length) {
+            const synth = new Set(syntheticIds);
+            const leaked = before.expected.users.filter(u => synth.has(u.canonical_id));
+            if (leaked.length) {
+                throw new ImportError('LIVE_SYNTHETIC_COHORT_LEAKED', String(leaked.length));
+            }
+        }
         if (mode === 'check') {
-            return { mode, state: before.state, counts: before.counts, violations: before.violations };
+            return { mode, sourceMode, state: before.state, counts: before.counts,
+                violations: before.violations, attestation };
         }
         if (mode === 'plan') {
-            return { mode, state: before.state, counts: before.counts, violations: before.violations,
+            return { mode, sourceMode, state: before.state, counts: before.counts,
+                violations: before.violations, attestation,
                 plannedOperations: {
                     institutions: before.counts.institutions.MISSING_IN_SQLITE
                         + before.counts.institutions.STALE_IN_SQLITE,
@@ -234,6 +310,14 @@ export async function reconcileIdentityShadow({
                 } };
         }
 
+        // La corrida de apply se identifica por el manifiesto que la atestigua.
+        // Sin manifiesto no hay identidad de corrida trazable, así que apply no
+        // puede existir: el gate de arriba ya lo impide por la vía normal y esta
+        // aserción cierra también la puerta del escape `allowLiveApply`.
+        if (!manifest) {
+            throw new ImportError('APPLY_REQUIRES_ATTESTED_MANIFEST',
+                'apply exige un manifiesto atestado que identifique la corrida');
+        }
         const reconciliationId = 'rec_' + sha(canonicalJson({ manifest: manifest.runId, stamp })).slice(0, 16);
         db.prepare(`INSERT INTO reconciliation_runs(reconciliation_id,mode,source_version,status,
                     counts_json,started_at) VALUES (?,?,?,?,?,?)
@@ -262,7 +346,8 @@ export async function reconcileIdentityShadow({
             .run(after.state === 'MATCH' ? 'completed' : 'failed',
                 canonicalJson(after.counts), stamp, reconciliationId);
         log(`[reconcile] ${before.state} → ${after.state}`);
-        return { mode, reconciliationId, before: before.counts, after: after.counts,
+        return { mode, sourceMode, attestation, reconciliationId,
+            before: before.counts, after: after.counts,
             state: after.state, violations: after.violations,
             applied: reports.reduce((a, r) => a + r.applied, 0),
             noops: reports.reduce((a, r) => a + r.noop, 0),
@@ -273,14 +358,22 @@ export async function reconcileIdentityShadow({
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────
-function parseArgs(argv) {
-    const a = { mode: 'check' };
+/**
+ * `--source-mode` es explícito y por omisión vale `frozen`, el contrato más
+ * estricto. Nunca se deduce del resto de banderas: pedir el modo LIVE exige
+ * escribirlo. Así una invocación histórica sigue comportándose igual y nadie
+ * cae en LIVE sin haberlo pedido.
+ */
+export function parseArgs(argv) {
+    const a = { mode: 'check', sourceMode: 'frozen' };
     for (let i = 0; i < argv.length; i++) {
         const t = argv[i];
         if (t === '--check') a.mode = 'check';
         else if (t === '--plan') a.mode = 'plan';
         else if (t === '--apply') a.mode = 'apply';
+        else if (t === '--source-mode') a.sourceMode = argv[++i];
         else if (t === '--source-manifest') a.manifestPath = argv[++i];
+        else if (t === '--sources-root') a.sourcesRoot = argv[++i];
         else if (t === '--identity-db') a.identityDbPath = argv[++i];
     }
     return a;
