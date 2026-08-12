@@ -119,6 +119,23 @@ fs.writeFileSync(P.content, '[]');
     ok('fixture: espejo 247/4 vs JSON 647/20', u === 247 && g === 4, `sqlite users=${u} groups=${g}`);
 }
 
+// ── Hermeticidad: el harness no debe crear ni tocar data/ del repo ───────────
+const REPO_DATA = path.join(REPO, 'data');
+const snapshotRepoData = () => {
+    if (!fs.existsSync(REPO_DATA)) return null;                 // CI: checkout limpio
+    const out = [];
+    const walk = (d) => {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+            const full = path.join(d, e.name);
+            if (e.isDirectory()) walk(full);
+            else out.push(path.relative(REPO_DATA, full));
+        }
+    };
+    walk(REPO_DATA);
+    return out.sort().join('\n');
+};
+const dataBefore = snapshotRepoData();
+
 // ── Server real, flags de cutover simulado en LOS TRES dominios ──────────────
 const PORT = 4100 + (process.pid % 400);
 const base = `http://127.0.0.1:${PORT}`;
@@ -128,6 +145,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         ...process.env,
         NODE_ENV: 'test',
         PORT: String(PORT),
+        CHP_DATA_DIR: path.join(tmp, 'data'),
         USERS_DB: P.users,
         GROUPS_DB: P.groups,
         SCHOOLS_DB: P.schools,
@@ -233,6 +251,10 @@ try {
     child.kill();
     await sleep(500);
 }
+
+console.log('\n[H] HERMETICIDAD: el harness no creó ni tocó data/ del repo');
+ok('data/ del repositorio queda exactamente como estaba (o sigue ausente)',
+   snapshotRepoData() === dataBefore);
 
 console.log('\n[5] ACCESS: el seam serviría [] y canónico+guard lo neutralizan');
 {

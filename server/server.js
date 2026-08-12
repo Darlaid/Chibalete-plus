@@ -511,28 +511,29 @@ if (!fs.existsSync(TEMP_DIR)) {
 // --- DATABASE FILES ---
 // USERS_DB and GROUPS_DB imported from ./config.js — do not redefine here
 // (CHP-ID-01-FIX-01 H1: única resolución en config.js).
-const PROGRESS_DB = path.resolve(__dirname, '../data/progress_db.json');
-// CHP-IDDB-READ-RMW-SEAM-01: DB_FILE/SCHOOLS_DB/ACCESS_DB admiten override por
-// env (mismo precedente que USERS_DB/GROUPS_DB en config.js). Producción no
-// define estas vars → ruta idéntica. Lo exige el harness de test que bootea el
-// server real contra stores temporales sin tocar data/ del repositorio.
-const DB_FILE = process.env.CONTENT_DB
-    || path.resolve(__dirname, '../data/content.json');
-const SECTIONS_DB = path.resolve(__dirname, '../data/sections.json'); // Added likely missing definition based on context
-const SCHOOL_CONFIGS_DB = path.resolve(__dirname, '../data/school_configs.json');
-const SCHOOLS_DB = process.env.SCHOOLS_DB
-    || path.resolve(__dirname, '../data/schools_db.json');
-const ACCESS_DB = process.env.ACCESS_DB
-    || path.resolve(__dirname, '../data/access_db.json'); // FASE E6: Motor de Accesos por Scopes
-const LEO_MEMORY_DB = path.resolve(__dirname, '../data/leo_memory_db.json'); // LEO SESSION PERSISTENCE
-const BUNDLES_DB = path.resolve(__dirname, '../data/bundles_db.json');       // Fase 7: Bundles comerciales
-const SUBMISSIONS_DB = path.resolve(__dirname, '../data/submissions_db.json'); // Exportación académica
-const ANALYTICS_DB = path.resolve(__dirname, '../data/analytics_db.json');    // Reading event analytics
-const PLAYBACK_EVENTS_LOG = path.resolve(__dirname, '../data/playback_events.log'); // Ritmo narrativo — append-only JSONL
-const LEO_INTERACTIONS_DB = path.resolve(__dirname, '../data/leo_interactions_db.json'); // Leo interaction log (metadata only)
-const INTERVENTIONS_DB = path.resolve(__dirname, '../data/interventions_db.json'); // Mediator interventions
+// CHP-IDDB-READ-RMW-SEAM-01: los stores de server.js resuelven bajo
+// CHP_DATA_DIR (default: data/ del repo, byte-idéntico a la ruta histórica) y
+// los stores de identidad/contenido admiten además override individual —
+// mismo precedente que USERS_DB/GROUPS_DB en config.js. Producción no define
+// ninguna de estas vars → rutas idénticas. Lo exige el harness de test que
+// bootea el server real 100% hermético contra stores temporales, sin crear ni
+// tocar data/ del repositorio (el boot auto-crea varios de estos archivos).
+const DATA_DIR = process.env.CHP_DATA_DIR || path.resolve(__dirname, '../data');
+const PROGRESS_DB = path.join(DATA_DIR, 'progress_db.json');
+const DB_FILE = process.env.CONTENT_DB || path.join(DATA_DIR, 'content.json');
+const SECTIONS_DB = path.join(DATA_DIR, 'sections.json'); // Added likely missing definition based on context
+const SCHOOL_CONFIGS_DB = path.join(DATA_DIR, 'school_configs.json');
+const SCHOOLS_DB = process.env.SCHOOLS_DB || path.join(DATA_DIR, 'schools_db.json');
+const ACCESS_DB = process.env.ACCESS_DB || path.join(DATA_DIR, 'access_db.json'); // FASE E6: Motor de Accesos por Scopes
+const LEO_MEMORY_DB = path.join(DATA_DIR, 'leo_memory_db.json'); // LEO SESSION PERSISTENCE
+const BUNDLES_DB = path.join(DATA_DIR, 'bundles_db.json');       // Fase 7: Bundles comerciales
+const SUBMISSIONS_DB = path.join(DATA_DIR, 'submissions_db.json'); // Exportación académica
+const ANALYTICS_DB = path.join(DATA_DIR, 'analytics_db.json');    // Reading event analytics
+const PLAYBACK_EVENTS_LOG = path.join(DATA_DIR, 'playback_events.log'); // Ritmo narrativo — append-only JSONL
+const LEO_INTERACTIONS_DB = path.join(DATA_DIR, 'leo_interactions_db.json'); // Leo interaction log (metadata only)
+const INTERVENTIONS_DB = path.join(DATA_DIR, 'interventions_db.json'); // Mediator interventions
 const USER_AUDIT_DB = process.env.USER_AUDIT_DB
-    || path.resolve(__dirname, '../data/user_audit_log.json'); // Auditoría de mutaciones de usuarios (override: harness RMW-SEAM-01)
+    || path.join(DATA_DIR, 'user_audit_log.json'); // Auditoría de mutaciones de usuarios
 
 // In-memory idempotency locks for content save operations.
 // Key: `${actorId}:${contentId}`, TTL: 2 s. Prevents duplicate saves from network retries.

@@ -50,11 +50,14 @@ usuarios, 0 credenciales, 0 sintéticos. Equivalente con groups (20 → 4).
      cachea y el default es JSON).
    - `writeJSON`/`writeJSONAsync` invocan `assertWritableIdentityPayload`
      (guard de regresión, ver abajo) antes de persistir.
-   - `DB_FILE`/`SCHOOLS_DB`/`ACCESS_DB` admiten override por env
-     (`CONTENT_DB`/`SCHOOLS_DB`/`ACCESS_DB`) — mismo precedente que
-     `USERS_DB`/`GROUPS_DB` en `config.js`; producción no define esas vars.
-     Lo exige el harness de test que bootea el server real contra stores
-     temporales.
+   - Los stores de server.js resuelven bajo `CHP_DATA_DIR` (default `data/`
+     del repo, byte-idéntico) y `DB_FILE`/`SCHOOLS_DB`/`ACCESS_DB`/
+     `USER_AUDIT_DB` admiten además override individual (`CONTENT_DB`/
+     `SCHOOLS_DB`/`ACCESS_DB`/`USER_AUDIT_DB`) — mismo precedente que
+     `USERS_DB`/`GROUPS_DB` en `config.js`; producción no define ninguna.
+     Lo exige el harness que bootea el server real 100% hermético contra
+     stores temporales (el boot auto-crea varios stores auxiliares); la
+     suite verifica la hermeticidad con un snapshot de `data/`.
 2. `server/db/identityReadFacade.js`
    - Todo array servido desde SQLite queda marcado con el Symbol no enumerable
      `IDENTITY_SQLITE_SERVED` (invisible para `JSON.stringify`/`res.json`).
