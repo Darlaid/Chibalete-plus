@@ -428,17 +428,24 @@ console.log('\n[6] COMPARADOR ALINEADO: tokens jamás divergen; canónicos MATCH
     CMP.observeIdentityShadowRead(P.users, jsonNow, PATHS, {});
     const u = CMP.getShadowCompareSnapshot().byDomain.users;
     ok('RU241 con resetToken en JSON y sin token en espejo → MATCH (stripCredentials '
-       + 'alineado con sanitizeUser: la lista compartida evita divergencias falsas)',
-       u.entities.unexpected === 0 && u.entities.security === 0, JSON.stringify(u.entities));
-    ok('gaps: SYNTHETIC_USER=400 atestado + fantasma como gap estructural '
-       + '(no proyectable), jamás escondidos',
+       + 'alineado con sanitizeUser) y 0 divergencias de seguridad',
+       u.entities.security === 0, JSON.stringify(u.entities));
+    // M1-RELEASE-TRAIN-R1: EXPECTED exige atestación. El fantasma (no
+    // proyectable pero NO atestado) es UNEXPECTED con diagnóstico — jamás gap.
+    ok('gaps SOLO atestados: SYNTHETIC_USER=400; el fantasma NO se esconde '
+       + 'como expected → 1 UNEXPECTED con diagnóstico estructural',
        u.entities.gaps.SYNTHETIC_USER === 400
-       && (u.entities.gaps.NOT_PROJECTABLE_BY_POLICY ?? 0) >= 1,
-       JSON.stringify(u.entities.gaps));
+       && (u.entities.gaps.NOT_PROJECTABLE_BY_POLICY ?? 0) === 0
+       && u.entities.unexpected === 1
+       && (u.samples || []).some(s => (s.fields || [])
+           .some(f => String(f).startsWith('UNPROJECTABLE_'))),
+       JSON.stringify({ gaps: u.entities.gaps, unexpected: u.entities.unexpected }));
     ok('247 canónicos MATCH', u.entities.match === 247, JSON.stringify(u.entities));
     delete process.env.IDENTITY_SHADOW_COMPARE;
     CMP.__resetShadowCompare(); closeIdentityDb();
-    M1.comparator = u.entities.match === 247 && u.entities.unexpected === 0;
+    // R1: el fantasma DEBE aflorar como unexpected (drift detectado, no
+    // escondido) — eso ES el comportamiento correcto del comparador.
+    M1.comparator = u.entities.match === 247 && u.entities.unexpected === 1;
 }
 
 console.log('\n[7] M1_USER_AUTHORITY_CONTRACT');

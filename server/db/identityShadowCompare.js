@@ -292,15 +292,40 @@ function makeAbsencePolicy(db, projectUsers, projectGroups, at) {
     const exclGroups = attestedGroupExclusionMap(db);
 
     return {
-        /** @returns {{gap:string, policy:string}|null} null ⇒ ausencia NO explicada */
+        /**
+         * M1-RELEASE-TRAIN-R1 — EXPECTED exige ATESTACIÓN, jamás estructura.
+         *
+         * «Expected coverage gap» ≠ «el registro no es proyectable». Expected
+         * significa «divergencia permitida por una decisión/atestación
+         * explícita»: migration_exclusions, identity_tombstones o el contrato
+         * de credenciales. Un rechazo estructural (sin organizationId, sin
+         * email, institución no registrada, forma legacy) explica POR QUÉ el
+         * espejo no lo escribió — WHY_NOT_PROJECTED — pero NO autoriza la
+         * divergencia: sin atestación es UNEXPECTED, con el motivo estructural
+         * conservado como diagnóstico en la muestra.
+         *
+         * @returns {{gap:string, policy:string}                       expected
+         *        | {gap:null, diagnostic:string}   unexpected con diagnóstico
+         *        | null                            unexpected sin diagnóstico}
+         */
         user(record) {
             const id = String(record?.id ?? '');
-            if (record?._loadtest_marker) return { gap: GAP.SYNTHETIC_USER, policy: 'loadtest_marker' };
-            if (tombs.has(h16(id))) return { gap: GAP.TOMBSTONED_IDENTITY, policy: 'tombstone' };
-            if (exclUsers.has(h16(id))) return { gap: GAP.EXCLUDED_BY_DISPOSITION, policy: 'migration_exclusion' };
+            const hash = h16(id);
+            if (tombs.has(hash)) return { gap: GAP.TOMBSTONED_IDENTITY, policy: 'tombstone' };
+            const attested = exclUsers.has(hash);
+            if (record?._loadtest_marker) {
+                if (attested) {
+                    return { gap: GAP.SYNTHETIC_USER,
+                        policy: 'loadtest_marker+migration_exclusion' };
+                }
+                // Un marcador que NADIE atestó jamás puede esconderse como
+                // expected: sería el vector perfecto de drift auto-marcado.
+                return { gap: null, diagnostic: 'MARKER_WITHOUT_ATTESTATION' };
+            }
+            if (attested) return { gap: GAP.EXCLUDED_BY_DISPOSITION, policy: 'migration_exclusion' };
             const { rejected } = projectUsers([record], at, { hash: 'shadow-compare', seq: 0 });
             if (rejected.length) {
-                return { gap: GAP.NOT_PROJECTABLE_BY_POLICY, policy: String(rejected[0].reason) };
+                return { gap: null, diagnostic: `UNPROJECTABLE_${String(rejected[0].reason)}` };
             }
             return null;
         },
@@ -312,13 +337,13 @@ function makeAbsencePolicy(db, projectUsers, projectGroups, at) {
                     policy: `migration_exclusion:${disposition === DISPOSITION_SYNTHETIC ? 'synthetic' : 'legacy'}` };
             }
             const { rejected } = projectGroups([record], at);
-            if (rejected.length) return { gap: GAP.LEGACY_GROUP, policy: String(rejected[0].reason) };
-            // Proyectable pero su institución no está registrada en el espejo:
-            // misma regla que aplica mirrorSnapshotV2 antes de insertar.
+            if (rejected.length) {
+                return { gap: null, diagnostic: `UNPROJECTABLE_${String(rejected[0].reason)}` };
+            }
             try {
                 const oid = String(record?.organizationId ?? '');
                 const inst = db.prepare(`SELECT 1 FROM institutions WHERE institution_id = ?`).get(oid);
-                if (!inst) return { gap: GAP.LEGACY_GROUP, policy: 'institution_not_registered' };
+                if (!inst) return { gap: null, diagnostic: 'INSTITUTION_NOT_REGISTERED' };
             } catch { /* sin tabla */ }
             return null;
         },
@@ -488,8 +513,11 @@ function evalUsers(officialArray, repo, policy, stale) {
         const s = shadowById.get(id);
         if (!s) {
             const p = policy.user(rec);
-            if (p) acc.gap(p.gap, h16(id), p.policy);
-            else acc.bad('MISSING_IN_SQLITE', h16(id), null, false);
+            // R1: solo un gap ATESTADO es expected; el diagnóstico estructural
+            // (por qué no se proyectó) viaja en la muestra, no en la severidad.
+            if (p?.gap) acc.gap(p.gap, h16(id), p.policy);
+            else acc.bad('MISSING_IN_SQLITE', h16(id),
+                p?.diagnostic ? [p.diagnostic] : null, false);
             continue;
         }
         const fields = divergentFields(stripCredentials(rec), s);
@@ -519,8 +547,10 @@ function evalGroups(officialArray, repo, policy, stale) {
         const s = shadowById.get(id);
         if (!s) {
             const p = policy.group(rec);
-            if (p) acc.gap(p.gap, h16(id), p.policy);
-            else acc.bad('MISSING_IN_SQLITE', h16(id), null, false);
+            // R1: ídem users — atestación o unexpected, con diagnóstico.
+            if (p?.gap) acc.gap(p.gap, h16(id), p.policy);
+            else acc.bad('MISSING_IN_SQLITE', h16(id),
+                p?.diagnostic ? [p.diagnostic] : null, false);
             continue;
         }
         const fields = divergentFields(rec, s);

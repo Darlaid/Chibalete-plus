@@ -115,6 +115,29 @@ closeIdentityDb();
         sourceVersion: { hash: hashOf(P.users), seq: 1 }, writerId: 'fx', at });
     mirrorSnapshotV2(db, { domain: 'groups', records: groups,
         sourceVersion: { hash: hashOf(P.groups), seq: 1 }, writerId: 'fx', at });
+    // M1-RELEASE-TRAIN-R1: EXPECTED exige ATESTACIÓN. La fixture ahora incluye
+    // las exclusiones atestadas de los 400 sintéticos y los 16 grupos legacy,
+    // igual que producción (01B/01C-R1/02A): sin ellas, el comparador los
+    // clasifica UNEXPECTED — que es exactamente el endurecimiento probado.
+    db.prepare(`INSERT OR IGNORE INTO migration_runs(run_id,schema_version,source_hashes_json,
+        plan_hash,status,started_at) VALUES ('r-fx','v2','{}','p','completed',?)`).run(at);
+    {
+        const h16fx = (s) => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 16);
+        const ins = db.prepare(`INSERT INTO migration_exclusions(exclusion_id,run_id,entity,
+            disposition,reference_hash,provenance,created_at) VALUES (?,?,?,?,?,?,?)`);
+        for (const u of users) {
+            if (u._loadtest_marker) {
+                ins.run(`exc_${u.id}`, 'r-fx', 'user', 'SYNTHETIC_LOADTEST_QUARANTINED',
+                    h16fx(u.id), 'fx:01b', at);
+            }
+        }
+        for (const g of groups) {
+            if (!g.organizationId) {
+                ins.run(`exc_${g.id}`, 'r-fx', 'group', 'LEGACY_TEST_GROUP_PENDING_RETIREMENT',
+                    h16fx(g.id), 'fx:01c', at);
+            }
+        }
+    }
     const c = (t) => db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c;
     ok('fixture: espejo 247 users / 4 groups / 1 institution / 0 access_rules',
        c('users') === 247 && c('groups') === 4 && c('institutions') === 1 && c('access_rules') === 0,
@@ -701,8 +724,13 @@ try {
     ok('EVIDENCIA GAP-1: con cutover de users, un principal solo-JSON pierde la sesión (401)',
        synthSession.status === 401, String(synthSession.status));
     const legacyGroup = await fetch(`${baseB}/api/groups/g-leg-3/members`, { headers: admin });
-    ok('EVIDENCIA GAP-3: con cutover de groups, un grupo legacy deja de existir (404)',
-       legacyGroup.status === 404, String(legacyGroup.status));
+    // M1-RELEASE-TRAIN: GAP-3 quedó CERRADO por la frontera de compat — un
+    // legacy ATESTADO se sirve explícitamente vía compat bajo cutover (200).
+    // La evidencia histórica del 404 era el coste del gap ABIERTO; hoy el
+    // contrato es el inverso, y el fail-closed vive en los grupos NO atestados
+    // (probado en identityGroupDomains/m1ReleaseTrain con el rogue → 404).
+    ok('GAP-3 CERRADO: legacy ATESTADO sigue existiendo vía compat bajo cutover (200)',
+       legacyGroup.status === 200, String(legacyGroup.status));
 
     ok('data/ del repositorio intacto (harness hermético)', snapshotRepoData() === dataBefore);
 } catch (e) {
