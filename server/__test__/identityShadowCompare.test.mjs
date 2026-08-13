@@ -128,6 +128,10 @@ const enable = (domains) => {
     process.env.IDENTITY_SHADOW_COMPARE = '1';
     process.env.IDENTITY_SHADOW_COMPARE_DOMAINS = domains;
     process.env.IDENTITY_SHADOW_COMPARE_TTL_MS = '0';   // sin memo temporal en tests
+    // Sin gracia de propagación por defecto: aquí el JSON se edita a mano (no
+    // hay dual-write), así que todo retraso del espejo debe contar como
+    // divergencia real. La gracia se activa solo donde se prueba.
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = '0';
     process.env.IDENTITY_DB = P.identity;
 };
 const disable = () => { delete process.env.IDENTITY_SHADOW_COMPARE; };
@@ -312,8 +316,10 @@ console.log('\n[6] PII-SAFE');
     ok('sin nombres propios', !/Usuario Real|Colegio Fixture|Curso Canónico/.test(blob));
     ok('sin contraseñas', !/pw-secret|pw-syn|password/.test(blob));
     ok('sin ids crudos de usuario/grupo', !/RU0\d\d|SYN\d\d\d|g-can-|g-leg-/.test(blob));
-    ok('las referencias van hasheadas (h16)',
-       snap().byDomain.users.samples.every(s => !s.ref || /^[0-9a-f]{16}$/.test(s.ref)));
+    ok('las referencias van hasheadas (h16) o son marcadores fijos de dominio',
+       snap().byDomain.users.samples.every(s => !s.ref
+           || /^[0-9a-f]{16}$/.test(s.ref) || /^domain:[a-z]+$/.test(s.ref)),
+       JSON.stringify(snap().byDomain.users.samples.map(s => s.ref)));
 }
 
 console.log('\n[7] MEMOIZACIÓN: no oculta un cambio de fuente');
@@ -338,6 +344,71 @@ console.log('\n[7] MEMOIZACIÓN: no oculta un cambio de fuente');
     ok('y la divergencia de seguridad SÍ se detecta',
        s2.byDomain.users.results.security_relevant_divergence === 1);
     fs.writeFileSync(P.users, JSON.stringify(users, null, 2));
+}
+
+console.log('\n[7b] VENTANA DE PROPAGACIÓN DEL DUAL-WRITE (hallazgo del image canary)');
+{
+    // El JSON se escribe primero y el espejo va detrás unos ms. En esa ventana
+    // la diferencia es REAL pero transitoria: debe contarse aparte, jamás como
+    // divergencia inesperada y jamás como MATCH.
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = '5000';   // gracia productiva
+    // Estado ASENTADO: el JSON es más viejo que lo último espejado.
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(P.users, old, old);
+    CMP.observeIdentityShadowRead(P.users, users, PATHS, {});
+    ok('con el espejo asentado no hay ventana de propagación',
+       (dom('users').staleEvaluations ?? 0) === 0);
+    const withLogin = users.map(u => u.id === 'RU007'
+        ? { ...u, lastLoginAt: '2026-08-13T00:00:00.000Z' } : u);
+    fs.writeFileSync(P.users, JSON.stringify(withLogin, null, 2));   // JSON avanza
+    await sleep(15);                                                  // espejo aún no
+    CMP.observeIdentityShadowRead(P.users, withLogin, PATHS, {});
+    const u = dom('users');
+    ok('espejo retrasado → NO se declara divergencia inesperada',
+       u.entities.unexpected === 0 && u.entities.security === 0, JSON.stringify(u.entities));
+    ok('se contabiliza como ventana de propagación',
+       u.entities.stale_window === 1 && u.entities.gaps.WRITE_PROPAGATION === 1,
+       JSON.stringify(u.entities));
+    ok('la evaluación queda marcada como stale', u.lastEvaluation?.stale === true);
+    ok('el snapshot expone stale_mirror_evaluations',
+       snap().totals.stale_mirror_evaluations === 1
+       && snap().totals.stale_mirror_entities === 1, JSON.stringify(snap().totals));
+    ok('WRITE_PROPAGATION se publica FUERA de los cuatro gaps aprobados',
+       snap().gaps_outside_approved.includes('users:WRITE_PROPAGATION'),
+       JSON.stringify(snap().gaps_outside_approved));
+    ok('la muestra conserva la forma original de la diferencia',
+       u.samples.some(s => s.gap === 'WRITE_PROPAGATION' && s.shape === 'unexpected_divergence'
+           && s.fields?.includes('lastLoginAt')), JSON.stringify(u.samples.slice(-2)));
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2));
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = '0';
+}
+
+console.log('\n[7c] EL MUESTRARIO NO PIERDE LA EVIDENCIA GRAVE');
+{
+    // Una evaluación limpia posterior NO puede borrar la muestra de una
+    // divergencia anterior (defecto que el image canary destapó: samples=[]).
+    await fresh('users');
+    const tampered = users.map(u => u.id === 'RU010' ? { ...u, roles: ['administrador'] } : u);
+    CMP.observeIdentityShadowRead(P.users, tampered, PATHS, {});
+    ok('divergencia de seguridad registrada con muestra',
+       dom('users').samples.some(s => s.class === 'security_relevant_divergence'));
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2));   // fuente cambia → re-evalúa limpio
+    // mtime explícito: en Windows dos escrituras seguidas pueden compartir
+    // marca y el memo reutilizaría el veredicto anterior (test flaky).
+    const t = new Date(Date.now() - 30_000);
+    fs.utimesSync(P.users, t, t);
+    CMP.observeIdentityShadowRead(P.users, users, PATHS, {});
+    ok('la última evaluación ya es limpia',
+       dom('users').lastEvaluation?.result === 'expected_coverage_gap',
+       JSON.stringify(dom('users').lastEvaluation));
+    ok('tras una evaluación limpia la muestra grave SIGUE disponible',
+       dom('users').samples.some(s => s.class === 'security_relevant_divergence'),
+       JSON.stringify(dom('users').samples.map(s => s.class)));
+    ok('y los contadores acumulados conservan la divergencia',
+       dom('users').results.security_relevant_divergence === 1,
+       JSON.stringify(dom('users').results));
+    ok('las muestras llevan marca temporal', dom('users').samples.every(s => !!s.at));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

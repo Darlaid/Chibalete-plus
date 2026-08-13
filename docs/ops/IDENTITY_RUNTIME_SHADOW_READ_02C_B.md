@@ -28,6 +28,7 @@ cuenta `COMPARATOR_ERROR` y el runtime continúa idéntico.
 | `IDENTITY_SHADOW_COMPARE` | *(off)* | activa la comparación |
 | `IDENTITY_SHADOW_COMPARE_DOMAINS` | `users,groups,institutions,memberships,access` | allowlist del observador |
 | `IDENTITY_SHADOW_COMPARE_TTL_MS` | `1000` | ventana de memoización de la huella de fuentes |
+| `IDENTITY_SHADOW_COMPARE_STALE_MS` | `5000` | gracia máxima de propagación del dual-write (`0` la desactiva) |
 
 `IDENTITY_READ` / `IDENTITY_READ_DOMAINS` son **otro eje**: este módulo no los
 lee ni los escribe. Encender el comparador no puede cambiar el backend oficial;
@@ -73,8 +74,39 @@ Si el espejo no sabe explicar la ausencia → `UNEXPECTED_DIVERGENCE`.
 | `ACCESS_RULES` | GAP-4 — dominio sin backfill |
 
 Cualquier otra clase (`TOMBSTONED_IDENTITY`, `EXCLUDED_BY_DISPOSITION`,
-`NOT_PROJECTABLE_BY_POLICY`) se publica en `gaps_outside_approved`: es una
-ausencia explicada por política pero **no prevista**, y exige investigación.
+`NOT_PROJECTABLE_BY_POLICY`, `WRITE_PROPAGATION`) se publica en
+`gaps_outside_approved`: es una ausencia explicada por política pero **no
+prevista**, y exige investigación.
+
+### Ventana de propagación del dual-write (hallazgo del image canary)
+
+El primer image canary reportó dos `UNEXPECTED_DIVERGENCE` en `users`. La causa,
+reproducida y aislada: un login escribe `lastLoginAt` en el JSON y el espejo
+aplica esa instantánea unos milisegundos después; una lectura en medio ve una
+diferencia **real pero transitoria** que se cura sola.
+
+Se detecta a coste cero: `shadow_state.last_source_seq` guarda el `mtime` que
+tenía el JSON cuando el hook espejó esa instantánea, y el `mtime` actual ya se
+lee para la huella. Si el fichero es más nuevo **y la escritura acaba de
+ocurrir** (≤ `STALE_MS`), el espejo no está equivocado: va por detrás. Esas
+diferencias se cuentan como `WRITE_PROPAGATION` (`stale_mirror_evaluations`,
+`stale_mirror_entities`), conservando en la muestra la forma original
+(`shape`), y el veredicto **no se memoiza** para que la siguiente lectura mire
+de nuevo ya asentado.
+
+La gracia está **acotada en el tiempo a propósito**: pasado ese plazo, que el
+espejo siga por detrás ya no es latencia sino divergencia real. Sin ese límite,
+una edición fuera de banda del JSON (script, restore) dejaría al comparador
+ciego para siempre.
+
+### Retención de muestras
+
+El mismo canary destapó un segundo defecto: el muestrario se sustituía en cada
+evaluación, así que una evaluación limpia posterior **borraba la evidencia** de
+la divergencia anterior (`samples: []` justo cuando había 2 divergencias
+contadas). Ahora las muestras se retienen por gravedad a lo largo de todas las
+evaluaciones, con marca temporal, cupo para los gaps de volumen y desalojo
+únicamente de muestras menos graves.
 
 ## Coste y memoización (no oculta divergencias)
 

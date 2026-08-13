@@ -98,6 +98,15 @@ export const GAP = Object.freeze({
     TOMBSTONED_IDENTITY: 'TOMBSTONED_IDENTITY',
     EXCLUDED_BY_DISPOSITION: 'EXCLUDED_BY_DISPOSITION',
     NOT_PROJECTABLE_BY_POLICY: 'NOT_PROJECTABLE_BY_POLICY',
+    /**
+     * Ventana de propagación del dual-write: el JSON ya se escribió y el espejo
+     * todavía no ha aplicado ESA instantánea. Detectado por el image canary de
+     * 02C-B (un login escribía `lastLoginAt` y la siguiente lectura veía la
+     * diferencia). No es una inconsistencia del espejo sino su latencia, y se
+     * cura sola. Se clasifica aparte —nunca como MATCH y nunca como uno de los
+     * cuatro gaps aprobados— para que quede contado y visible.
+     */
+    WRITE_PROPAGATION: 'WRITE_PROPAGATION',
 });
 export const APPROVED_GAPS = Object.freeze([
     GAP.SYNTHETIC_USER, GAP.LEGACY_GROUP, GAP.CREDENTIAL_AUTHORITY, GAP.ACCESS_RULES,
@@ -130,6 +139,18 @@ const ttlMs = () => {
     const n = Number.parseInt(process.env.IDENTITY_SHADOW_COMPARE_TTL_MS ?? '', 10);
     return Number.isFinite(n) && n >= 0 ? n : 1000;
 };
+/**
+ * Ventana máxima que se acepta como "propagación del dual-write". Es
+ * DELIBERADAMENTE corta: el espejo escribe en el mismo tick del write JSON, así
+ * que unos segundos sobran. Pasado ese plazo, que el espejo siga por detrás YA
+ * NO es latencia sino divergencia real y debe reportarse como tal — si no, una
+ * edición fuera de banda del JSON (script, restore) dejaría al comparador ciego
+ * para siempre. `0` desactiva la gracia por completo.
+ */
+const staleWindowMs = () => {
+    const n = Number.parseInt(process.env.IDENTITY_SHADOW_COMPARE_STALE_MS ?? '', 10);
+    return Number.isFinite(n) && n >= 0 ? n : 5000;
+};
 
 // ── Estado agregado en proceso (cardinalidad acotada, sin PII) ───────────────
 const MAX_SAMPLES = 20;
@@ -144,8 +165,9 @@ function domainSlot(d) {
             comparisons: 0, evaluations: 0,
             results: { match: 0, expected_coverage_gap: 0, unexpected_divergence: 0,
                 security_relevant_divergence: 0, comparator_error: 0 },
-            entities: { compared: 0, match: 0, unexpected: 0, security: 0, gaps: {} },
-            lastEvaluation: null, samples: [],
+            entities: { compared: 0, match: 0, unexpected: 0, security: 0,
+                stale_window: 0, gaps: {} },
+            lastEvaluation: null, samples: [], staleEvaluations: 0,
         };
     }
     return STATE.byDomain[d];
@@ -173,21 +195,38 @@ const MEMO = new Map();   // domain → { fingerprint, at, verdict }
 function jsonFingerprint(file) {
     try {
         const st = fs.statSync(file);
-        return `${st.mtimeMs}:${st.size}`;
+        return { fp: `${st.mtimeMs}:${st.size}`, mtimeMs: st.mtimeMs };
     } catch (e) {
-        return `nofile:${e.code || 'ERR'}`;
+        return { fp: `nofile:${e.code || 'ERR'}`, mtimeMs: null };
     }
 }
-function sqliteFingerprint(db, domain, table) {
-    let version = '-';
+/**
+ * Huella del espejo + detección de RETRASO. `shadow_state.last_source_seq` es
+ * el mtime que tenía el JSON cuando el hook de escritura espejó esa
+ * instantánea (ver `sourceVersionOf` en identityWriteHook). Si el fichero es
+ * más nuevo que ese sello, el espejo todavía no ha aplicado lo que acabamos de
+ * leer: no está equivocado, va por detrás. Cuesta cero: el mtime ya se leyó
+ * para la huella del JSON.
+ */
+function sqliteFingerprint(db, domain, table, jsonMtimeMs) {
+    let version = '-', lagging = false;
     try {
         const row = db.prepare(
             `SELECT last_source_version, last_source_seq FROM shadow_state WHERE domain = ?`).get(domain);
-        if (row) version = `${row.last_source_version}:${row.last_source_seq}`;
+        if (row) {
+            version = `${row.last_source_version}:${row.last_source_seq}`;
+            const grace = staleWindowMs();
+            if (grace > 0 && jsonMtimeMs !== null && Number.isFinite(row.last_source_seq)) {
+                // Retraso REAL y RECIENTE: el JSON es más nuevo que lo espejado
+                // y la escritura acaba de ocurrir. Fuera de esa ventana, no.
+                lagging = jsonMtimeMs > row.last_source_seq
+                    && (Date.now() - jsonMtimeMs) <= grace;
+            }
+        }
     } catch { /* dominio sin estado de espejo: la cardinalidad basta */ }
     let count = -1;
     try { count = db.prepare(`SELECT COUNT(*) c FROM ${table}`).get().c; } catch { /* tabla ausente */ }
-    return `${version}#${count}`;
+    return { fp: `${version}#${count}`, lagging };
 }
 
 // ── Políticas de ausencia (delegadas a las MISMAS reglas del espejo) ─────────
@@ -270,6 +309,44 @@ function divergentFields(a, b) {
     return out;
 }
 
+/**
+ * Conserva las muestras MÁS GRAVES vistas por el dominio a lo largo de TODAS
+ * las evaluaciones. Sustituir el muestrario en cada evaluación borraba la
+ * evidencia de una divergencia transitoria en cuanto la siguiente evaluación
+ * salía limpia — justo lo que hay que poder mirar. Defecto detectado por el
+ * image canary de 02C-B.
+ */
+const BULK_SAMPLE_SLOTS = 6;
+/**
+ * Prioridad de retención. Los gaps de volumen (400 sintéticos, 16 grupos
+ * legacy) son informativos pero repetitivos: no pueden ocupar el muestrario y
+ * dejar fuera la única muestra que hay que mirar.
+ *   0 = divergencia real (error/seguridad/inesperada)
+ *   1 = diferencia atribuida a la ventana de propagación (conserva su forma)
+ *   2 = gap de volumen
+ */
+function retentionRank(s) {
+    if (s.class !== RESULT.EXPECTED_COVERAGE_GAP) return 0;
+    return s.shape ? 1 : 2;
+}
+function retainSamples(slot, incoming) {
+    for (const s of incoming) {
+        const stamped = { ...s, at: new Date().toISOString() };
+        const rank = retentionRank(stamped);
+        if (rank === 2) {
+            const bulk = slot.samples.filter(x => retentionRank(x) === 2);
+            if (bulk.length >= BULK_SAMPLE_SLOTS) continue;          // cupo de volumen agotado
+        }
+        if (slot.samples.length < MAX_SAMPLES) { slot.samples.push(stamped); continue; }
+        let victim = -1, victimRank = rank;
+        for (let i = 0; i < slot.samples.length; i++) {
+            const r = retentionRank(slot.samples[i]);
+            if (r > victimRank) { victim = i; victimRank = r; }
+        }
+        if (victim >= 0) slot.samples[victim] = stamped;
+    }
+}
+
 /** Acumulador de una evaluación completa de un dominio. */
 function makeAcc(domain) {
     const slot = domainSlot(domain);
@@ -292,7 +369,10 @@ function makeAcc(domain) {
         acc.compared++;
         acc.gaps[gapClass] = (acc.gaps[gapClass] ?? 0) + 1;
         acc.result = worst(acc.result, RESULT.EXPECTED_COVERAGE_GAP);
-        addSample({ class: RESULT.EXPECTED_COVERAGE_GAP, gap: gapClass, ref, policy });
+        // De un gap de volumen bastan unas pocas muestras: son todas iguales.
+        if (acc.gaps[gapClass] <= 3) {
+            addSample({ class: RESULT.EXPECTED_COVERAGE_GAP, gap: gapClass, ref, policy });
+        }
     };
     acc.bad = (kind, ref, fields, security) => {
         acc.compared++;
@@ -301,25 +381,49 @@ function makeAcc(domain) {
         acc.result = worst(acc.result, cls);
         addSample({ class: cls, kind, ref, fields: fields ? fields.slice(0, 6) : undefined });
     };
+    /**
+     * @param {{stale?:boolean}} extra  `stale` ⇒ el espejo aún no ha aplicado la
+     * instantánea JSON que acabamos de leer: toda diferencia se atribuye a la
+     * ventana de propagación, se cuenta aparte y NO se declara divergencia real.
+     */
     acc.flush = (extra) => {
+        const stale = !!extra?.stale;
         slot.evaluations++;
         slot.entities.compared += acc.compared;
         slot.entities.match += acc.match;
-        slot.entities.unexpected += acc.unexpected;
-        slot.entities.security += acc.security;
+        if (stale) {
+            slot.staleEvaluations++;
+            const moved = acc.unexpected + acc.security;
+            slot.entities.stale_window += moved;
+            if (moved > 0) {
+                acc.gaps[GAP.WRITE_PROPAGATION] = (acc.gaps[GAP.WRITE_PROPAGATION] ?? 0) + moved;
+                acc.result = RESULT.EXPECTED_COVERAGE_GAP;
+                for (const s of acc.samples) {
+                    if (s.class === RESULT.UNEXPECTED_DIVERGENCE
+                        || s.class === RESULT.SECURITY_RELEVANT_DIVERGENCE) {
+                        s.shape = s.class;                    // se conserva la forma original
+                        s.class = RESULT.EXPECTED_COVERAGE_GAP;
+                        s.gap = GAP.WRITE_PROPAGATION;
+                    }
+                }
+            }
+        } else {
+            slot.entities.unexpected += acc.unexpected;
+            slot.entities.security += acc.security;
+        }
         for (const [g, n] of Object.entries(acc.gaps)) {
             slot.entities.gaps[g] = (slot.entities.gaps[g] ?? 0) + n;
             try { mEnt.labels(domain, g).inc(n); } catch { /* métricas jamás rompen */ }
         }
         slot.lastEvaluation = { at: new Date().toISOString(), ...extra, result: acc.result };
-        slot.samples = acc.samples;
+        retainSamples(slot, acc.samples);
         return acc.result;
     };
     return acc;
 }
 
 // ── Evaluadores por dominio ─────────────────────────────────────────────────
-function evalUsers(officialArray, repo, policy) {
+function evalUsers(officialArray, repo, policy, stale) {
     const acc = makeAcc('users');
     const json = Array.isArray(officialArray) ? officialArray : [];
     const shadow = repo.users.all();
@@ -347,10 +451,10 @@ function evalUsers(officialArray, repo, policy) {
     // la autoridad de login no puede servirse desde él (una entrada por
     // evaluación, no por usuario).
     acc.gap(GAP.CREDENTIAL_AUTHORITY, 'domain:users', 'credential_excluded');
-    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length });
+    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length, stale });
 }
 
-function evalGroups(officialArray, repo, policy) {
+function evalGroups(officialArray, repo, policy, stale) {
     const acc = makeAcc('groups');
     const json = Array.isArray(officialArray) ? officialArray : [];
     const shadow = repo.groups.all();
@@ -373,11 +477,11 @@ function evalGroups(officialArray, repo, policy) {
     for (const id of shadowById.keys()) {
         if (!jsonIds.has(id)) acc.bad('EXTRA_IN_SQLITE', h16(id), null, true);
     }
-    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length });
+    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length, stale });
 }
 
 /** Membresías: se derivan del MISMO array de grupos que acaba de leerse. */
-function evalMemberships(officialArray, db, repo, projectGroups, projectMemberships, policy, at) {
+function evalMemberships(officialArray, db, repo, projectGroups, projectMemberships, policy, at, stale) {
     const acc = makeAcc('memberships');
     const json = Array.isArray(officialArray) ? officialArray : [];
     const proj = projectGroups(json, at);
@@ -411,10 +515,10 @@ function evalMemberships(officialArray, db, repo, projectGroups, projectMembersh
         // que lo explique (el grupo sí se espeja) ⇒ divergencia, dirección negar.
         if (!seen.has(key)) acc.bad('MISSING_IN_SQLITE', h16(key), null, false);
     }
-    return acc.flush({ jsonCount: expKeys.size, sqliteCount: shadow.length });
+    return acc.flush({ jsonCount: expKeys.size, sqliteCount: shadow.length, stale });
 }
 
-function evalInstitutions(officialArray, repo) {
+function evalInstitutions(officialArray, repo, stale) {
     const acc = makeAcc('institutions');
     const json = Array.isArray(officialArray) ? officialArray : [];
     let shadow = [];
@@ -439,10 +543,10 @@ function evalInstitutions(officialArray, repo) {
     for (const id of shadowById.keys()) {
         if (!jsonIds.has(id)) acc.bad('EXTRA_IN_SQLITE', h16(id), null, true);
     }
-    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length });
+    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length, stale });
 }
 
-function evalAccess(officialArray, repo) {
+function evalAccess(officialArray, repo, stale) {
     const acc = makeAcc('access');
     const json = Array.isArray(officialArray) ? officialArray : [];
     let shadow = [];
@@ -466,7 +570,7 @@ function evalAccess(officialArray, repo) {
     for (const id of shadowById.keys()) {
         if (!jsonIds.has(id)) acc.bad('EXTRA_IN_SQLITE', h16(id), null, true);
     }
-    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length });
+    return acc.flush({ jsonCount: json.length, sqliteCount: shadow.length, stale });
 }
 
 // ── Entrada pública ─────────────────────────────────────────────────────────
@@ -540,9 +644,11 @@ export function observeIdentityShadowRead(file, officialArray, paths, opts = {})
             verdict = memo.verdict;                          // dentro de la ventana
             STATE.memoHits++;
         } else {
-            const fp = `${jsonFingerprint(file)}|${sqliteFingerprint(db, domain, table)}`;
-            if (memo && memo.fingerprint === fp) {
-                verdict = memo.verdict;                      // fuentes intactas
+            const jf = jsonFingerprint(file);
+            const sf = sqliteFingerprint(db, domain, table, jf.mtimeMs);
+            const fp = `${jf.fp}|${sf.fp}`;
+            if (memo && memo.fingerprint === fp && !sf.lagging) {
+                verdict = memo.verdict;                      // fuentes intactas y asentadas
                 MEMO.set(domain, { fingerprint: fp, at: now, verdict });
                 STATE.memoHits++;
             } else {
@@ -550,17 +656,21 @@ export function observeIdentityShadowRead(file, officialArray, paths, opts = {})
                 const repo = _mods.makeIdentityRepo(db);
                 const at = new Date(0).toISOString();        // proyección determinista
                 const policy = makeAbsencePolicy(db, _mods.projectUsers, _mods.projectGroups, at);
-                verdict = domain === 'users' ? evalUsers(officialArray, repo, policy)
-                    : domain === 'groups' ? evalGroups(officialArray, repo, policy)
-                    : domain === 'access' ? evalAccess(officialArray, repo)
-                    : evalInstitutions(officialArray, repo);
+                const stale = sf.lagging;
+                verdict = domain === 'users' ? evalUsers(officialArray, repo, policy, stale)
+                    : domain === 'groups' ? evalGroups(officialArray, repo, policy, stale)
+                    : domain === 'access' ? evalAccess(officialArray, repo, stale)
+                    : evalInstitutions(officialArray, repo, stale);
                 STATE.evaluations++;
-                MEMO.set(domain, { fingerprint: fp, at: now, verdict });
+                // Un veredicto tomado con el espejo retrasado NO se memoiza: la
+                // siguiente lectura debe volver a mirar cuando ya haya asentado.
+                if (stale) MEMO.delete(domain);
+                else MEMO.set(domain, { fingerprint: fp, at: now, verdict });
 
                 // Membresías: derivadas del MISMO array de grupos ya leído.
                 if (domain === 'groups' && shadowCompareDomains().has('memberships')) {
                     const mv = evalMemberships(officialArray, db, repo, _mods.projectGroups,
-                        _mods.projectMemberships, policy, at);
+                        _mods.projectMemberships, policy, at, stale);
                     STATE.evaluations++;
                     const ms = domainSlot('memberships');
                     ms.comparisons++; ms.results[mv]++;
@@ -608,7 +718,10 @@ export function getShadowCompareSnapshot() {
         if (v && v.n) lat[k] = { n: v.n, avg_ms: +(v.sum / v.n).toFixed(4), max_ms: +v.max.toFixed(4) };
     }
     const gapsOutsideApproved = [];
+    let staleEvaluations = 0, staleEntities = 0;
     for (const [d, s] of Object.entries(STATE.byDomain)) {
+        staleEvaluations += s.staleEvaluations ?? 0;
+        staleEntities += s.entities.stale_window ?? 0;
         for (const g of Object.keys(s.entities.gaps)) {
             if (!APPROVED_GAPS.includes(g)) gapsOutsideApproved.push(`${d}:${g}`);
         }
@@ -622,7 +735,12 @@ export function getShadowCompareSnapshot() {
         official_sqlite_responses: 0,
         since: STATE.since,
         totals: { comparisons: STATE.comparisons, evaluations: STATE.evaluations,
-            memo_hits: STATE.memoHits, comparator_errors: STATE.errors },
+            memo_hits: STATE.memoHits, comparator_errors: STATE.errors,
+            // Evaluaciones tomadas mientras el espejo iba por detrás del JSON
+            // recién escrito: sus diferencias se atribuyen a la propagación del
+            // dual-write, no al espejo. Se cura sola.
+            stale_mirror_evaluations: staleEvaluations,
+            stale_mirror_entities: staleEntities },
         byDomain: STATE.byDomain,
         bySurface: STATE.bySurface,
         latency: lat,
