@@ -40,6 +40,10 @@ const P = {
     padron: path.join(ROOT, 'data-critical', 'usuarios_colegios_oro.json'),
     groups: path.join(ROOT, 'data', 'groups_db.json'),
     institutions: path.join(ROOT, 'data', 'schools_db.json'),
+    // CHP-IDDB-GAP4: el contrato LIVE incluye ahora las reglas de acceso.
+    // Vacío = estado canónico legal; espejo vacío ⇒ access en MATCH y ninguna
+    // aserción previa de este archivo cambia de resultado.
+    access: path.join(ROOT, 'data', 'access_db.json'),
 };
 const writeAt = (p, o) => { fs.writeFileSync(p, JSON.stringify(o, null, 1)); return p; };
 const F = (n) => path.join(tmp, n);
@@ -62,6 +66,7 @@ const USERS = [
     { id: 'u-synth', email: 'lt@x.cl', roles: ['lector'], accountStatus: 'active', _loadtest_marker: true },
 ];
 writeAt(P.padron, USERS); writeAt(P.groups, GROUPS); writeAt(P.institutions, INST);
+writeAt(P.access, []);
 
 // Artefactos congelados mínimos para poder construir un manifiesto 02A válido.
 const MAPPING = { groups: [
@@ -106,9 +111,10 @@ db.close();
 const snapshotDb = () => { const c = F('copy-' + Math.abs(sha(String(fs.readFileSync(DBP).length + Date.now()))
     .slice(0, 8)) + '.db'); fs.copyFileSync(DBP, c); return c; };
 const restore = { padron: fs.readFileSync(P.padron), groups: fs.readFileSync(P.groups),
-    institutions: fs.readFileSync(P.institutions) };
+    institutions: fs.readFileSync(P.institutions), access: fs.readFileSync(P.access) };
 const restoreAll = () => { fs.writeFileSync(P.padron, restore.padron);
-    fs.writeFileSync(P.groups, restore.groups); fs.writeFileSync(P.institutions, restore.institutions); };
+    fs.writeFileSync(P.groups, restore.groups); fs.writeFileSync(P.institutions, restore.institutions);
+    fs.writeFileSync(P.access, restore.access); };
 
 try {
     // ── FASE 5 — el freeze histórico NO se debilita ──────────────────────

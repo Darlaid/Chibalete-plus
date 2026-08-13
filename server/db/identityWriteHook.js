@@ -91,7 +91,11 @@ export function makeIdentityWriteHook(cfg) {
                 if (domain === 'access') {
                     // `access` no forma parte del modelo v2; se sigue espejando
                     // con el escritor v1, cuya tabla v2 conserva intacta.
-                    _mirror.mirrorAccess(_db, data, log);
+                    // CHP-IDDB-GAP4: la atribución del writer y la versión de la
+                    // instantánea viajan como provenance del audit (ok=1).
+                    const sv = sourceVersionOf(file, data);
+                    _mirror.mirrorAccess(_db, data, log,
+                        `${attributedWriterId} src=${sv.hash} seq=${sv.seq}`);
                     return;
                 }
                 const report = _mirrorV2.mirrorSnapshotV2(_db, {

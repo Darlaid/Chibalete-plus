@@ -22,7 +22,7 @@
  *   detectan por reconciliación, no por hook.
  */
 
-export const WRITE_SURFACE_CONTRACT_VERSION = '1.1.0';
+export const WRITE_SURFACE_CONTRACT_VERSION = '1.2.0';
 
 /**
  * ATRIBUCIÓN DEL ESCRITOR (CHP-IDDB-02B-D-A)
@@ -78,6 +78,11 @@ export const WRITE_SURFACES = Object.freeze([
       domains: ['users', 'groups', 'institutions'],
       note: 'converge el espejo desde fuera del proceso del API; se atribuye como '
           + 'tal y NO se hace pasar por el seam HTTP' },
+    { id: 'backfillAccessRules.apply', kind: 'OUT_OF_BAND',
+      module: 'scripts/identity/backfillAccessRules.mjs',
+      domains: ['access'],
+      note: 'CHP-IDDB-GAP4: puebla access_rules desde el JSON canónico con el MISMO '
+          + 'mirrorAccess del runtime; se atribuye como escritor fuera de banda' },
     { id: 'out-of-band.script', kind: 'OUT_OF_BAND', module: '(fuera del proceso del API)',
       domains: ['users', 'groups', 'access', 'institutions'],
       note: 'no interceptable; se detecta por reconciliación' },

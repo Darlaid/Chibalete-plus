@@ -138,6 +138,26 @@ export function diagnose(db, sources, at) {
             violations.push({ kind: 'EXCLUDED_IDENTITY_PRESENT', ref: h16(u.canonical_id) });
         }
     }
+    // CHP-IDDB-GAP4 — dominio access. SOLO cuando la corrida trae la fuente
+    // canónica de reglas (modo LIVE). El modo FROZEN atesta la migración 02A,
+    // que no incluye access: su comportamiento no cambia ni un byte.
+    // El espejo es una copia lossless (mirrorAccess guarda raw_json íntegro),
+    // así que la equivalencia exigida es la del registro completo. El estado
+    // de access participa del veredicto global Y queda reportado como sección
+    // propia en counts.access: no se esconde bajo el MATCH de otros dominios.
+    if (Array.isArray(sources.access)) {
+        const expAccess = sources.access.map(r => ({ id: String(r?.id ?? ''), rule: r }));
+        const rows = db.prepare(
+            `SELECT id, raw_json FROM access_rules WHERE deleted_at IS NULL`).all();
+        const actAccess = [];
+        for (const row of rows) {
+            try { actAccess.push({ id: String(row.id), rule: JSON.parse(row.raw_json) }); }
+            catch {
+                violations.push({ kind: 'ACCESS_RAW_JSON_MALFORMED', ref: h16(String(row.id)) });
+            }
+        }
+        result.access = compare(expAccess, actAccess, r => r.id, r => r.rule);
+    }
     const counts = {};
     for (const [entity, r] of Object.entries(result)) {
         counts[entity] = Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v.length]));

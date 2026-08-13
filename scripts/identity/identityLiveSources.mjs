@@ -61,7 +61,14 @@ export const CANONICAL_LIVE_SOURCES = {
     padron: { dir: 'data-critical', basename: 'usuarios_colegios_oro.json', label: 'padrón' },
     groups: { dir: 'data', basename: 'groups_db.json', label: 'grupos' },
     institutions: { dir: 'data', basename: 'schools_db.json', label: 'instituciones' },
+    // CHP-IDDB-GAP4: reglas de acceso. A diferencia del padrón, un array VACÍO
+    // es un estado canónico legal (ausencia de reglas ⇒ fallback del motor),
+    // así que la reja LIVE_SOURCE_EMPTY no aplica a este rol.
+    access: { dir: 'data', basename: 'access_db.json', label: 'reglas de acceso', allowEmpty: true },
 };
+
+/** Scopes que el contrato del Scope Engine admite (accessService/E6-E7). */
+export const ACCESS_RULE_SCOPES = ['user', 'group', 'organization'];
 
 /**
  * Basenames que jamás pueden actuar como fuente viva, por encima de la
@@ -120,7 +127,7 @@ function readLiveSource(sourcesRoot, role) {
         throw new ImportError('LIVE_SOURCE_SHAPE_INVALID',
             `${label}: se esperaba un array, llegó ${json === null ? 'null' : typeof json}`);
     }
-    if (json.length === 0) throw new ImportError('LIVE_SOURCE_EMPTY', label);
+    if (json.length === 0 && !spec.allowEmpty) throw new ImportError('LIVE_SOURCE_EMPTY', label);
 
     // (7) claves requeridas
     for (const [i, rec] of json.entries()) {
@@ -132,6 +139,18 @@ function readLiveSource(sourcesRoot, role) {
         }
         if (role === 'institutions' && !String(rec.name ?? '').trim()) {
             throw new ImportError('LIVE_SOURCE_INSTITUTION_WITHOUT_NAME', `${label}: índice ${i}`);
+        }
+        if (role === 'access') {
+            // Contrato del Scope Engine: una regla con scope desconocido o
+            // scopeId vacío no tiene semántica definida — fail-closed, igual
+            // que el resto de rejas de forma de este módulo.
+            if (!ACCESS_RULE_SCOPES.includes(rec.scope)) {
+                throw new ImportError('LIVE_SOURCE_ACCESS_RULE_INVALID_SCOPE',
+                    `${label}: índice ${i} scope="${String(rec.scope)}"`);
+            }
+            if (!String(rec.scopeId ?? '').trim()) {
+                throw new ImportError('LIVE_SOURCE_ACCESS_RULE_WITHOUT_SCOPE_ID', `${label}: índice ${i}`);
+            }
         }
     }
 
@@ -167,6 +186,7 @@ export function resolveLiveSources({ sourcesRoot } = {}) {
     const padron = readLiveSource(root, 'padron');
     const groups = readLiveSource(root, 'groups');
     const institutions = readLiveSource(root, 'institutions');
+    const access = readLiveSource(root, 'access');
 
     // (9) cohorte sintética: se contabiliza aquí y el reconciliador verifica
     // después que NINGUNA de estas identidades sobrevivió a la proyección.
@@ -196,7 +216,8 @@ export function resolveLiveSources({ sourcesRoot } = {}) {
     }
 
     return {
-        sources: { users: padron.json, groups: groups.json, institutions: institutions.json },
+        sources: { users: padron.json, groups: groups.json, institutions: institutions.json,
+            access: access.json },
         syntheticIds,
         // (11)(12) evidencia de la corrida: rol → ruta → hash actual.
         attestation: {
@@ -207,6 +228,7 @@ export function resolveLiveSources({ sourcesRoot } = {}) {
                 groups: { path: groups.path, sha256: groups.sha256, records: groups.count },
                 institutions: { path: institutions.path, sha256: institutions.sha256,
                     records: institutions.count },
+                access: { path: access.path, sha256: access.sha256, records: access.count },
             },
             accounting: {
                 padronRecords: padron.count,
@@ -215,6 +237,7 @@ export function resolveLiveSources({ sourcesRoot } = {}) {
                 groupRecords: groups.count,
                 groupsResolvableToInstitution: resolvable.length,
                 institutionRecords: institutions.count,
+                accessRuleRecords: access.count,
             },
             hashesArePinned: false,
             note: 'hashes registrados como evidencia de la corrida; NUNCA como allowlist histórica',

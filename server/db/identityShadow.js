@@ -125,8 +125,15 @@ export function mirrorGroups(db, groups, log = () => {}) {
     } catch (e) { log(`[identityShadow] groups mirror failed: ${e.message}`); return false; }
 }
 
-/** Full re-sync access_rules JSON → SQLite. */
-export function mirrorAccess(db, rules, log = () => {}) {
+/**
+ * Full re-sync access_rules JSON → SQLite.
+ *
+ * `provenance` (opcional) queda registrado en shadow_audit.detail cuando el
+ * espejo converge (ok=1): permite atribuir QUIÉN disparó la sincronización
+ * (writer del seam HTTP, backfill GAP-4, etc.) sin cambiar el contrato del
+ * gate de lectura, que solo consulta `ok`. En fallo, detail conserva la causa.
+ */
+export function mirrorAccess(db, rules, log = () => {}, provenance = null) {
     try {
         const arr = Array.isArray(rules) ? rules : [];
         const tx = db.transaction(() => {
@@ -151,7 +158,7 @@ export function mirrorAccess(db, rules, log = () => {}) {
         tx();
         const cnt = db.prepare(`SELECT COUNT(*) c FROM access_rules WHERE deleted_at IS NULL`).get().c;
         const ok = cnt === arr.filter(Boolean).length;
-        audit(db, 'access', arr.length, cnt, ok, ok ? null : 'count_mismatch');
+        audit(db, 'access', arr.length, cnt, ok, ok ? provenance : 'count_mismatch');
         return ok;
     } catch (e) { log(`[identityShadow] access mirror failed: ${e.message}`); return false; }
 }

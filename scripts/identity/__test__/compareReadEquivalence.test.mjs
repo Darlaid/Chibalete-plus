@@ -30,6 +30,8 @@ const P = {
     padron: path.join(ROOT, 'data-critical', 'usuarios_colegios_oro.json'),
     groups: path.join(ROOT, 'data', 'groups_db.json'),
     institutions: path.join(ROOT, 'data', 'schools_db.json'),
+    // CHP-IDDB-GAP4: el contrato LIVE exige también access_db.json (vacío legal).
+    access: path.join(ROOT, 'data', 'access_db.json'),
 };
 const writeAt = (p, o) => fs.writeFileSync(p, JSON.stringify(o, null, 1));
 
@@ -48,6 +50,7 @@ const USERS = [
     { id: 'u-synth', email: 'lt@x.cl', roles: ['lector'], accountStatus: 'active', _loadtest_marker: true },
 ];
 writeAt(P.padron, USERS); writeAt(P.groups, GROUPS); writeAt(P.institutions, INST);
+writeAt(P.access, []);
 
 const DBP = path.join(tmp, 'identity.db');
 const db = new Database(DBP);
