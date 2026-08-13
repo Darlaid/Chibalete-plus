@@ -367,19 +367,130 @@ console.log('\n[7b] VENTANA DE PROPAGACIÓN DEL DUAL-WRITE (hallazgo del image c
     const u = dom('users');
     ok('espejo retrasado → NO se declara divergencia inesperada',
        u.entities.unexpected === 0 && u.entities.security === 0, JSON.stringify(u.entities));
-    ok('se contabiliza como ventana de propagación',
-       u.entities.stale_window === 1 && u.entities.gaps.WRITE_PROPAGATION === 1,
-       JSON.stringify(u.entities));
+    ok('se contabiliza como ventana de propagación con clase propia',
+       u.entities.stale_window === 1 && u.results.write_propagation === 1,
+       JSON.stringify({ entities: u.entities, results: u.results }));
     ok('la evaluación queda marcada como stale', u.lastEvaluation?.stale === true);
     ok('el snapshot expone stale_mirror_evaluations',
        snap().totals.stale_mirror_evaluations === 1
        && snap().totals.stale_mirror_entities === 1, JSON.stringify(snap().totals));
-    ok('WRITE_PROPAGATION se publica FUERA de los cuatro gaps aprobados',
-       snap().gaps_outside_approved.includes('users:WRITE_PROPAGATION'),
-       JSON.stringify(snap().gaps_outside_approved));
+    ok('la propagación NO contamina los cuatro gaps aprobados',
+       snap().gaps_outside_approved.length === 0
+       && !('WRITE_PROPAGATION' in u.entities.gaps),
+       JSON.stringify({ outside: snap().gaps_outside_approved, gaps: u.entities.gaps }));
     ok('la muestra conserva la forma original de la diferencia',
-       u.samples.some(s => s.gap === 'WRITE_PROPAGATION' && s.shape === 'unexpected_divergence'
-           && s.fields?.includes('lastLoginAt')), JSON.stringify(u.samples.slice(-2)));
+       u.samples.some(s => s.class === 'write_propagation'
+           && s.shape === 'unexpected_divergence' && s.fields?.includes('lastLoginAt')),
+       JSON.stringify(u.samples.filter(s => s.class === 'write_propagation')));
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2));
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = '0';
+}
+
+console.log('\n[7b-R1] LA VENTANA DE PROPAGACIÓN ESTÁ ACOTADA (no enmascara drift)');
+{
+    // Control temporal DETERMINISTA: en vez de esperar, se envejece el mtime
+    // del JSON, que es exactamente el sello que el comparador consulta.
+    const THRESHOLD = 5000;
+    const setAge = (ms) => {
+        const t = new Date(Date.now() - ms);
+        fs.utimesSync(P.users, t, t);
+    };
+    const drifted = users.map(u => u.id === 'RU007'
+        ? { ...u, lastLoginAt: '2026-08-13T00:00:00.000Z' } : u);
+    fs.writeFileSync(P.users, JSON.stringify(drifted, null, 2));
+
+    // CASO A — diferencia MÁS JOVEN que el umbral ⇒ WRITE_PROPAGATION.
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = String(THRESHOLD);
+    setAge(500);
+    CMP.observeIdentityShadowRead(P.users, drifted, PATHS, {});
+    let u = dom('users');
+    ok('CASO A: dentro del umbral → write_propagation (clase propia)',
+       u.results.write_propagation === 1 && u.results.unexpected_divergence === 0,
+       JSON.stringify(u.results));
+    ok('CASO A: NO se cuenta como MATCH', u.results.match === 0);
+    ok('CASO A: la muestra conserva la forma original de la diferencia',
+       u.samples.some(s => s.class === 'write_propagation'
+           && s.shape === 'unexpected_divergence' && s.fields?.includes('lastLoginAt')),
+       JSON.stringify(u.samples.filter(s => s.class === 'write_propagation')));
+
+    // CASO A (cont.) — el espejo converge: la MISMA lectura pasa a MATCH.
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = String(THRESHOLD);
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2));   // fuente converge
+    setAge(500);
+    CMP.observeIdentityShadowRead(P.users, users, PATHS, {});
+    u = dom('users');
+    ok('CASO A: tras converger dentro de la ventana → sin propagación pendiente',
+       u.results.write_propagation === 0 && u.entities.unexpected === 0
+       && u.entities.security === 0, JSON.stringify(u.results));
+
+    // CASO B — MISMA diferencia, pero MÁS VIEJA que el umbral ⇒ divergencia real.
+    fs.writeFileSync(P.users, JSON.stringify(drifted, null, 2));
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = String(THRESHOLD);
+    setAge(THRESHOLD + 2000);
+    CMP.observeIdentityShadowRead(P.users, drifted, PATHS, {});
+    u = dom('users');
+    ok('CASO B: pasado el umbral → UNEXPECTED_DIVERGENCE, no propagación',
+       u.results.unexpected_divergence === 1 && u.results.write_propagation === 0,
+       JSON.stringify(u.results));
+    ok('CASO B: PERSISTENT_DRIFT_NOT_MASKED', u.entities.unexpected === 1);
+
+    // Desfase de reloj: mtime en el FUTURO no puede comprar gracia.
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = String(THRESHOLD);
+    setAge(-60_000);                                    // mtime 60 s en el futuro
+    CMP.observeIdentityShadowRead(P.users, drifted, PATHS, {});
+    u = dom('users');
+    ok('clock skew (mtime futuro) → sin gracia, divergencia reportada',
+       u.results.unexpected_divergence === 1 && u.results.write_propagation === 0,
+       JSON.stringify(u.results));
+
+    // Umbral 0 ⇒ gracia desactivada por completo.
+    await fresh('users');
+    setAge(100);
+    CMP.observeIdentityShadowRead(P.users, drifted, PATHS, {});
+    ok('umbral 0 → ninguna diferencia se atribuye a propagación',
+       dom('users').results.unexpected_divergence === 1
+       && dom('users').results.write_propagation === 0);
+
+    ok('el snapshot publica el contrato: umbral finito y acotado',
+       snap().propagation.bounded === true
+       && Number.isFinite(snap().propagation.threshold_ms)
+       && snap().propagation.beyond_threshold === 'unexpected_divergence',
+       JSON.stringify(snap().propagation));
+
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2));
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = '0';
+}
+
+console.log('\n[7b-R1b] CAMBIO FUERA DE BANDA: se enmascara como mucho el umbral');
+{
+    // Un script o un restore modifican el JSON sin pasar por el dual-write. El
+    // espejo NUNCA convergerá: la divergencia debe aflorar al vencer el umbral.
+    const THRESHOLD = 5000;
+    const outOfBand = users.map(u => u.id === 'RU033'
+        ? { ...u, organizationId: 'inst-inventada' } : u);   // campo de AUTHZ
+    fs.writeFileSync(P.users, JSON.stringify(outOfBand, null, 2));
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = String(THRESHOLD);
+    const t1 = new Date(Date.now() - 300);
+    fs.utimesSync(P.users, t1, t1);
+    CMP.observeIdentityShadowRead(P.users, outOfBand, PATHS, {});
+    ok('fuera de banda, recién escrito → todavía propagación',
+       dom('users').results.write_propagation === 1, JSON.stringify(dom('users').results));
+
+    await fresh('users');
+    process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = String(THRESHOLD);
+    const t2 = new Date(Date.now() - (THRESHOLD + 3000));
+    fs.utimesSync(P.users, t2, t2);
+    CMP.observeIdentityShadowRead(P.users, outOfBand, PATHS, {});
+    const u = dom('users');
+    ok('vencido el umbral → aflora como SECURITY_RELEVANT (campo de authz)',
+       u.results.security_relevant_divergence === 1 && u.results.write_propagation === 0,
+       JSON.stringify(u.results));
+    ok('PROPAGATION_CLASSIFICATION_DOES_NOT_MASK_DRIFT', u.entities.security === 1);
     fs.writeFileSync(P.users, JSON.stringify(users, null, 2));
     process.env.IDENTITY_SHADOW_COMPARE_STALE_MS = '0';
 }
@@ -409,6 +520,41 @@ console.log('\n[7c] EL MUESTRARIO NO PIERDE LA EVIDENCIA GRAVE');
        dom('users').results.security_relevant_divergence === 1,
        JSON.stringify(dom('users').results));
     ok('las muestras llevan marca temporal', dom('users').samples.every(s => !!s.at));
+}
+
+console.log('\n[7d] RETENCIÓN BAJO VOLUMEN Y SECUENCIA COMPLETA');
+{
+    // Secuencia exigida: UNEXPECTED → MATCH → EXPECTED_GAP → MATCH.
+    // La muestra grave debe sobrevivir a TODO lo posterior, y el muestrario
+    // debe seguir acotado pese al volumen de gaps conocidos (400 sintéticos).
+    await fresh('users,groups');
+    const setAge = (p, ms) => { const t = new Date(Date.now() - ms); fs.utimesSync(p, t, t); };
+
+    const tampered = users.map(u => u.id === 'RU041' ? { ...u, nombre_completo: 'X' } : u);
+    fs.writeFileSync(P.users, JSON.stringify(tampered, null, 2)); setAge(P.users, 60_000);
+    CMP.observeIdentityShadowRead(P.users, tampered, PATHS, {});          // 1) UNEXPECTED
+    const afterUnexpected = dom('users').samples.filter(s => s.class === 'unexpected_divergence').length;
+
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2)); setAge(P.users, 60_000);
+    CMP.observeIdentityShadowRead(P.users, users, PATHS, {});             // 2) MATCH/gap
+    CMP.observeIdentityShadowRead(P.groups, groups, PATHS, {});           // 3) EXPECTED_GAP (16 legacy)
+    fs.writeFileSync(P.users, JSON.stringify(users, null, 2)); setAge(P.users, 61_000);
+    CMP.observeIdentityShadowRead(P.users, users, PATHS, {});             // 4) MATCH/gap
+
+    const u = dom('users');
+    ok('CRITICAL_SAMPLE_SURVIVES_LATER_MATCH',
+       afterUnexpected >= 1
+       && u.samples.filter(s => s.class === 'unexpected_divergence').length === afterUnexpected,
+       JSON.stringify(u.samples.map(s => s.class)));
+    ok('SAMPLE_CARDINALITY_BOUNDED: users ≤ 20 pese a 400 gaps repetidos',
+       u.samples.length <= 20, `n=${u.samples.length}`);
+    ok('SAMPLE_CARDINALITY_BOUNDED: groups ≤ 20 pese a 16 gaps repetidos',
+       dom('groups').samples.length <= 20, `n=${dom('groups').samples.length}`);
+    ok('el muestrario reserva sitio: los gaps de volumen no lo copan',
+       u.samples.filter(s => s.class === 'expected_coverage_gap').length <= 6,
+       JSON.stringify(u.samples.map(s => s.gap || s.class)));
+    ok('sin PII en el muestrario retenido',
+       !/@fixture\.test|Usuario Real|RU0\d\d|SYN\d\d\d/.test(JSON.stringify(u.samples)));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -43,6 +43,32 @@
  * Ambos contadores se publican por separado: nada se declara "comparado" sin
  * decir cuántas evaluaciones reales lo respaldan.
  *
+ * CONTRATO DE LA VENTANA DE PROPAGACIÓN (02C-B-R1)
+ * -------------------------------------------------
+ * El dual-write escribe primero el JSON y espeja después, así que existe una
+ * ventana de milisegundos en la que una lectura ve JSON nuevo + espejo anterior.
+ * Esa diferencia es REAL pero transitoria y se clasifica como WRITE_PROPAGATION,
+ * clase propia con contador propio: nunca MATCH, nunca gap de cobertura.
+ *
+ *   sello del espejo   `shadow_state.last_source_seq`, que el hook de escritura
+ *                      fija con `statSync(file).mtimeMs` de la instantánea que
+ *                      espejó (ver `sourceVersionOf` en identityWriteHook).
+ *   sello de la fuente `statSync(file).mtimeMs` actual. MISMO reloj que el
+ *                      anterior: comparar "quién es más nuevo" no cruza relojes.
+ *   umbral             IDENTITY_SHADOW_COMPARE_STALE_MS (default 5000 ms, `0`
+ *                      desactiva la gracia por completo). FINITO por contrato.
+ *   edad               `Date.now() - mtime`. Aquí sí se cruza el reloj de pared
+ *                      con el del filesystem; en el mismo host es la misma
+ *                      fuente. Edad NEGATIVA (mtime futuro) ⇒ desfase de reloj
+ *                      ⇒ NO se concede gracia.
+ *   sellos ausentes    sin fila en `shadow_state` o sin mtime ⇒ NO hay gracia.
+ *   pasado el umbral   la gracia CADUCA: la misma diferencia pasa a
+ *                      UNEXPECTED_DIVERGENCE (o SECURITY_RELEVANT). Sin ese
+ *                      límite, una edición del JSON fuera del flujo dual-write
+ *                      (script, restore) quedaría enmascarada para siempre.
+ * Un veredicto tomado con el espejo retrasado NO se memoiza: la siguiente
+ * lectura vuelve a mirar cuando ya haya asentado.
+ *
  * POLÍTICA DE GAPS CONOCIDOS (por regla, jamás por lista de IDs)
  * -------------------------------------------------------------
  * La ausencia de una entidad en el espejo solo es ESPERADA si la MISMA regla
@@ -72,6 +98,14 @@ export const RESULT = Object.freeze({
     COMPARATOR_ERROR: 'comparator_error',
     SECURITY_RELEVANT_DIVERGENCE: 'security_relevant_divergence',
     UNEXPECTED_DIVERGENCE: 'unexpected_divergence',
+    /**
+     * Ventana de propagación del dual-write: el JSON ya se escribió y el espejo
+     * todavía no ha aplicado ESA instantánea. CLASE PROPIA, con contador propio:
+     * no es MATCH (hay diferencia real) y no es un gap de cobertura (no responde
+     * a ninguna política de exclusión). Está ACOTADA en el tiempo — ver el
+     * contrato en la cabecera del módulo.
+     */
+    WRITE_PROPAGATION: 'write_propagation',
     EXPECTED_COVERAGE_GAP: 'expected_coverage_gap',
     MATCH: 'match',
 });
@@ -79,6 +113,7 @@ const PRECEDENCE = [
     RESULT.COMPARATOR_ERROR,
     RESULT.SECURITY_RELEVANT_DIVERGENCE,
     RESULT.UNEXPECTED_DIVERGENCE,
+    RESULT.WRITE_PROPAGATION,
     RESULT.EXPECTED_COVERAGE_GAP,
     RESULT.MATCH,
 ];
@@ -98,15 +133,6 @@ export const GAP = Object.freeze({
     TOMBSTONED_IDENTITY: 'TOMBSTONED_IDENTITY',
     EXCLUDED_BY_DISPOSITION: 'EXCLUDED_BY_DISPOSITION',
     NOT_PROJECTABLE_BY_POLICY: 'NOT_PROJECTABLE_BY_POLICY',
-    /**
-     * Ventana de propagación del dual-write: el JSON ya se escribió y el espejo
-     * todavía no ha aplicado ESA instantánea. Detectado por el image canary de
-     * 02C-B (un login escribía `lastLoginAt` y la siguiente lectura veía la
-     * diferencia). No es una inconsistencia del espejo sino su latencia, y se
-     * cura sola. Se clasifica aparte —nunca como MATCH y nunca como uno de los
-     * cuatro gaps aprobados— para que quede contado y visible.
-     */
-    WRITE_PROPAGATION: 'WRITE_PROPAGATION',
 });
 export const APPROVED_GAPS = Object.freeze([
     GAP.SYNTHETIC_USER, GAP.LEGACY_GROUP, GAP.CREDENTIAL_AUTHORITY, GAP.ACCESS_RULES,
@@ -157,14 +183,15 @@ const MAX_SAMPLES = 20;
 let STATE = freshState();
 function freshState() {
     return { since: new Date().toISOString(), comparisons: 0, evaluations: 0, memoHits: 0,
-        errors: 0, byDomain: {}, bySurface: {} };
+        errors: 0, propagationWindowMaxAgeMs: 0, byDomain: {}, bySurface: {} };
 }
 function domainSlot(d) {
     if (!STATE.byDomain[d]) {
         STATE.byDomain[d] = {
             comparisons: 0, evaluations: 0,
-            results: { match: 0, expected_coverage_gap: 0, unexpected_divergence: 0,
-                security_relevant_divergence: 0, comparator_error: 0 },
+            results: { match: 0, write_propagation: 0, expected_coverage_gap: 0,
+                unexpected_divergence: 0, security_relevant_divergence: 0,
+                comparator_error: 0 },
             entities: { compared: 0, match: 0, unexpected: 0, security: 0,
                 stale_window: 0, gaps: {} },
             lastEvaluation: null, samples: [], staleEvaluations: 0,
@@ -174,8 +201,9 @@ function domainSlot(d) {
 }
 function surfaceSlot(s) {
     if (!STATE.bySurface[s]) {
-        STATE.bySurface[s] = { comparisons: 0, match: 0, expected_coverage_gap: 0,
-            unexpected_divergence: 0, security_relevant_divergence: 0, comparator_error: 0 };
+        STATE.bySurface[s] = { comparisons: 0, match: 0, write_propagation: 0,
+            expected_coverage_gap: 0, unexpected_divergence: 0,
+            security_relevant_divergence: 0, comparator_error: 0 };
     }
     return STATE.bySurface[s];
 }
@@ -209,24 +237,34 @@ function jsonFingerprint(file) {
  * para la huella del JSON.
  */
 function sqliteFingerprint(db, domain, table, jsonMtimeMs) {
-    let version = '-', lagging = false;
+    let version = '-', lagging = false, ageMs = null;
     try {
         const row = db.prepare(
             `SELECT last_source_version, last_source_seq FROM shadow_state WHERE domain = ?`).get(domain);
         if (row) {
             version = `${row.last_source_version}:${row.last_source_seq}`;
             const grace = staleWindowMs();
+            // Gate 1 — sin sello de espejo o sin mtime NO hay gracia: se
+            //           clasifica como divergencia real (fail hacia reportar).
             if (grace > 0 && jsonMtimeMs !== null && Number.isFinite(row.last_source_seq)) {
-                // Retraso REAL y RECIENTE: el JSON es más nuevo que lo espejado
-                // y la escritura acaba de ocurrir. Fuera de esa ventana, no.
-                lagging = jsonMtimeMs > row.last_source_seq
-                    && (Date.now() - jsonMtimeMs) <= grace;
+                // Gate 2 — el JSON es efectivamente más nuevo que lo espejado.
+                //           Ambos lados son el MISMO reloj (mtime del fichero:
+                //           `sourceVersionOf` sella `statSync(file).mtimeMs` al
+                //           escribir), así que esta comparación no cruza relojes.
+                const newer = jsonMtimeMs > row.last_source_seq;
+                // Gate 3 — y la escritura es RECIENTE. Aquí sí se cruza el reloj
+                //           de pared con el del sistema de ficheros; en el mismo
+                //           host es la misma fuente. Una edad NEGATIVA (mtime en
+                //           el futuro) solo puede ser desfase de reloj: NO se
+                //           concede gracia, se reporta como divergencia.
+                ageMs = Date.now() - jsonMtimeMs;
+                lagging = newer && ageMs >= 0 && ageMs <= grace;
             }
         }
     } catch { /* dominio sin estado de espejo: la cardinalidad basta */ }
     let count = -1;
     try { count = db.prepare(`SELECT COUNT(*) c FROM ${table}`).get().c; } catch { /* tabla ausente */ }
-    return { fp: `${version}#${count}`, lagging };
+    return { fp: `${version}#${count}`, lagging, ageMs };
 }
 
 // ── Políticas de ausencia (delegadas a las MISMAS reglas del espejo) ─────────
@@ -326,8 +364,9 @@ const BULK_SAMPLE_SLOTS = 6;
  *   2 = gap de volumen
  */
 function retentionRank(s) {
+    if (s.class === RESULT.WRITE_PROPAGATION) return 1;
     if (s.class !== RESULT.EXPECTED_COVERAGE_GAP) return 0;
-    return s.shape ? 1 : 2;
+    return 2;
 }
 function retainSamples(slot, incoming) {
     for (const s of incoming) {
@@ -396,14 +435,12 @@ function makeAcc(domain) {
             const moved = acc.unexpected + acc.security;
             slot.entities.stale_window += moved;
             if (moved > 0) {
-                acc.gaps[GAP.WRITE_PROPAGATION] = (acc.gaps[GAP.WRITE_PROPAGATION] ?? 0) + moved;
-                acc.result = RESULT.EXPECTED_COVERAGE_GAP;
+                acc.result = RESULT.WRITE_PROPAGATION;        // clase propia, nunca MATCH
                 for (const s of acc.samples) {
                     if (s.class === RESULT.UNEXPECTED_DIVERGENCE
                         || s.class === RESULT.SECURITY_RELEVANT_DIVERGENCE) {
                         s.shape = s.class;                    // se conserva la forma original
-                        s.class = RESULT.EXPECTED_COVERAGE_GAP;
-                        s.gap = GAP.WRITE_PROPAGATION;
+                        s.class = RESULT.WRITE_PROPAGATION;
                     }
                 }
             }
@@ -657,6 +694,8 @@ export function observeIdentityShadowRead(file, officialArray, paths, opts = {})
                 const at = new Date(0).toISOString();        // proyección determinista
                 const policy = makeAbsencePolicy(db, _mods.projectUsers, _mods.projectGroups, at);
                 const stale = sf.lagging;
+                if (stale) STATE.propagationWindowMaxAgeMs =
+                    Math.max(STATE.propagationWindowMaxAgeMs ?? 0, sf.ageMs ?? 0);
                 verdict = domain === 'users' ? evalUsers(officialArray, repo, policy, stale)
                     : domain === 'groups' ? evalGroups(officialArray, repo, policy, stale)
                     : domain === 'access' ? evalAccess(officialArray, repo, stale)
@@ -731,6 +770,15 @@ export function getShadowCompareSnapshot() {
         enabled: shadowCompareEnabled(),
         domains: [...shadowCompareDomains()],
         ttl_ms: ttlMs(),
+        // Contrato de la ventana de propagación, publicado para que la
+        // telemetría se pueda auditar sin leer el código.
+        propagation: {
+            threshold_ms: staleWindowMs(),
+            bounded: true,
+            max_observed_age_ms: STATE.propagationWindowMaxAgeMs ?? 0,
+            clock: 'file mtime (mismo reloj que shadow_state.last_source_seq); edad negativa ⇒ sin gracia',
+            beyond_threshold: 'unexpected_divergence',
+        },
         official_read_backend: 'json',
         official_sqlite_responses: 0,
         since: STATE.since,

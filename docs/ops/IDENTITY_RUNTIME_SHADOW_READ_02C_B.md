@@ -39,12 +39,14 @@ apagarlo es el rollback primario y no toca el dual-write.
 | Clasificación | Significado |
 |---|---|
 | `MATCH` | JSON y SQLite equivalentes bajo el contrato |
+| `WRITE_PROPAGATION` | diferencia real pero transitoria: el espejo aún no aplicó la instantánea recién escrita. **Clase propia con contador propio**: nunca MATCH, nunca gap de cobertura |
 | `EXPECTED_COVERAGE_GAP` | diferencia prevista por una política conocida |
 | `UNEXPECTED_DIVERGENCE` | diferencia que ninguna política explica |
 | `SECURITY_RELEVANT_DIVERGENCE` | podría cambiar authn/authz/scope/rol/membresía |
 | `COMPARATOR_ERROR` | el observador no pudo calcular |
 
-Precedencia por lectura: `error > security > unexpected > gap > match`.
+Precedencia por lectura:
+`error > security > unexpected > propagation > gap > match`.
 
 Es `SECURITY_RELEVANT` toda entidad presente **solo** en el espejo (dirección
 conceder), toda membresía extra o duplicada, y toda divergencia en campos que
@@ -85,19 +87,28 @@ reproducida y aislada: un login escribe `lastLoginAt` en el JSON y el espejo
 aplica esa instantánea unos milisegundos después; una lectura en medio ve una
 diferencia **real pero transitoria** que se cura sola.
 
-Se detecta a coste cero: `shadow_state.last_source_seq` guarda el `mtime` que
-tenía el JSON cuando el hook espejó esa instantánea, y el `mtime` actual ya se
-lee para la huella. Si el fichero es más nuevo **y la escritura acaba de
-ocurrir** (≤ `STALE_MS`), el espejo no está equivocado: va por detrás. Esas
-diferencias se cuentan como `WRITE_PROPAGATION` (`stale_mirror_evaluations`,
-`stale_mirror_entities`), conservando en la muestra la forma original
-(`shape`), y el veredicto **no se memoiza** para que la siguiente lectura mire
-de nuevo ya asentado.
+Contrato explícito, publicado en el propio snapshot bajo `propagation`:
 
-La gracia está **acotada en el tiempo a propósito**: pasado ese plazo, que el
-espejo siga por detrás ya no es latencia sino divergencia real. Sin ese límite,
-una edición fuera de banda del JSON (script, restore) dejaría al comparador
-ciego para siempre.
+| | |
+|---|---|
+| sello del espejo | `shadow_state.last_source_seq` = `mtime` del JSON cuando el hook espejó esa instantánea |
+| sello de la fuente | `mtime` actual del JSON — **el mismo reloj**, así que «quién es más nuevo» no cruza relojes |
+| umbral | `IDENTITY_SHADOW_COMPARE_STALE_MS`, default 5000 ms, **finito por contrato** (`0` desactiva la gracia) |
+| edad | `Date.now() - mtime`; edad **negativa** (mtime futuro) = desfase de reloj ⇒ **sin gracia** |
+| sellos ausentes | sin fila en `shadow_state` o sin `mtime` ⇒ **sin gracia** |
+| pasado el umbral | la gracia **caduca**: la misma diferencia pasa a `UNEXPECTED_DIVERGENCE` (o `SECURITY_RELEVANT`) |
+
+Se detecta a coste cero (el `mtime` ya se lee para la huella). El veredicto
+tomado con el espejo retrasado **no se memoiza**, para que la siguiente lectura
+mire de nuevo ya asentado, y la muestra conserva la forma original (`shape`).
+Contadores: `stale_mirror_evaluations`, `stale_mirror_entities` y
+`propagation.max_observed_age_ms`.
+
+Sin ese límite temporal, una edición del JSON **fuera del flujo dual-write**
+(script, restore) quedaría enmascarada para siempre. Está probado en ambos
+sentidos: dentro del umbral la diferencia se clasifica como propagación; pasado
+el umbral **la misma diferencia** aflora como divergencia real (y como
+`SECURITY_RELEVANT` si toca un campo de autorización).
 
 ### Retención de muestras
 
