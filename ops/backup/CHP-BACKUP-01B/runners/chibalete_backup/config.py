@@ -33,7 +33,9 @@ REQUIRED_VARS = (
 
 # Unicas claves aceptadas. Cualquier otra aborta: impide, por ejemplo, colar
 # RESTIC_PASSWORD dentro de backup.env (la passphrase va en su propio archivo).
-OPTIONAL_VARS = ("RESTIC_CACHE_DIR",)
+# CHP-BACKUP-CAPACITY-01B: presupuesto Class B OPCIONAL (default: sin definir).
+# Son configuracion operacional, no secretos; se validan en validate_budget().
+OPTIONAL_VARS = ("RESTIC_CACHE_DIR", "B2_DAILY_OPERATION_BUDGET", "B2_EMERGENCY_RESERVE")
 ALLOWED_VARS = frozenset(REQUIRED_VARS + OPTIONAL_VARS)
 
 # Claves prohibidas de forma explicita, para dar un error claro.
@@ -64,7 +66,43 @@ class BackupConfig:
 
     @property
     def cache_dir(self) -> str | None:
-        return self._values.get("RESTIC_CACHE_DIR")
+        # CHP-BACKUP-CAPACITY-01B: la cache puede llegar por backup.env o por
+        # el entorno de la unit (drop-in `Environment=RESTIC_CACHE_DIR=...`
+        # emparejado con `CacheDirectory=`). `restic_env()` construye el
+        # entorno de restic desde cero, asi que sin este fallback el valor del
+        # drop-in jamas llegaria al proceso restic. backup.env tiene prioridad.
+        return self._values.get("RESTIC_CACHE_DIR") or os.environ.get("RESTIC_CACHE_DIR") or None
+
+    def validate_budget(self) -> tuple[int | None, int | None]:
+        """Presupuesto Class B declarado, validado. (None, None) si no esta.
+
+        Reglas (CHP-BACKUP-CAPACITY-01B F11): si se declara CUALQUIERA de las
+        dos claves, ambas deben ser enteros con budget > 0, reserve >= 0 y
+        reserve < budget. Config invalida => ConfigError (fail-closed para los
+        gates de mutacion). Sin declarar => presupuesto UNKNOWN, jamas un RED
+        inventado.
+        """
+        raw_budget = self._values.get("B2_DAILY_OPERATION_BUDGET")
+        raw_reserve = self._values.get("B2_EMERGENCY_RESERVE")
+        if raw_budget is None and raw_reserve is None:
+            return None, None
+        if raw_budget is None or raw_reserve is None:
+            raise ConfigError(
+                "presupuesto Class B incompleto: B2_DAILY_OPERATION_BUDGET y "
+                "B2_EMERGENCY_RESERVE deben declararse juntos"
+            )
+        try:
+            budget = int(raw_budget)
+            reserve = int(raw_reserve)
+        except ValueError as exc:
+            raise ConfigError("presupuesto Class B no numerico en backup.env") from exc
+        if budget <= 0:
+            raise ConfigError("B2_DAILY_OPERATION_BUDGET debe ser > 0")
+        if reserve < 0:
+            raise ConfigError("B2_EMERGENCY_RESERVE debe ser >= 0")
+        if reserve >= budget:
+            raise ConfigError("B2_EMERGENCY_RESERVE debe ser menor que el budget")
+        return budget, reserve
 
     def restic_env(self) -> dict[str, str]:
         """Entorno minimo para restic. La passphrase va por archivo, no por valor."""

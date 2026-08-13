@@ -1,0 +1,40 @@
+# CHP-BACKUP-CAPACITY-01B — valida el toolchain de capacidad de backup.
+#
+# Solo stdlib de Python: sin restic, sin red, sin credenciales. La parte que
+# exige systemd+restic reales (cache sandbox, serializacion con procesos) vive
+# en tests/capacity_harness.sh y se ejecuta en el toolchain Linux aislado /
+# VPS, no aqui.
+name: backup-capacity
+
+on:
+  push:
+    paths:
+      - 'ops/backup/**'
+      - '.github/workflows/backup-capacity.yml'
+  pull_request:
+    paths:
+      - 'ops/backup/**'
+      - '.github/workflows/backup-capacity.yml'
+
+jobs:
+  capacity-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar todos los .py del toolchain de backup
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          bad = []
+          for path in sorted(pathlib.Path('ops/backup').rglob('*.py')):
+              try:
+                  compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+              except SyntaxError as exc:
+                  bad.append(f'{path}: {exc}')
+          for entry in bad:
+              print('  ', entry)
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Suite de capacity (stdlib, sin red)
+        run: python3 ops/backup/CHP-BACKUP-01B/tests/test_capacity.py
