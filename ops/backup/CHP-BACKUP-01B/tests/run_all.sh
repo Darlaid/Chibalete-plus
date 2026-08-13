@@ -130,6 +130,13 @@ else
   fail "suite funcional RED"
 fi
 
+step "8. Suite de capacity (CHP-BACKUP-CAPACITY-01B: preflight, budget, recovery points)"
+if python3 "$UNIT_DIR/tests/test_capacity.py"; then
+  pass "suite de capacity GREEN"
+else
+  fail "suite de capacity RED"
+fi
+
 printf '\n=== VALIDACION GLOBAL: %s ===\n' "$([ "$FAILURES" -eq 0 ] && echo GREEN || echo RED)"
 printf 'FAILURES=%s\n' "$FAILURES"
 exit "$FAILURES"
