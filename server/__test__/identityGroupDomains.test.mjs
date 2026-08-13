@@ -58,8 +58,10 @@ for (let i = 2; i <= 12; i++) {
         organizationId: 'inst-fx-1', colegio: 'Colegio FX' });
 }
 for (let i = 1; i <= 5; i++) {
+    // M1 RELEASE TRAIN (post-GAP1): la cohorte sintética está RETIRADA —
+    // cuentas disabled y regla expirada. El grupo sigue siendo compat atestada.
     users.push({ id: `SYN${i}`, email: `s${i}@fx.test`, password: `pw-s${i}`,
-        roles: ['lector'], accountStatus: 'active', _loadtest_marker: 'fx' });
+        roles: ['lector'], accountStatus: 'disabled', _loadtest_marker: 'fx' });
 }
 // Miembro del grupo DESCONOCIDO (para el caso authz fail-closed):
 users.push({ id: 'RU099', email: 'x@fx.test', password: 'pw-x', roles: ['lector'],
@@ -89,7 +91,7 @@ fs.writeFileSync(P.groups, JSON.stringify(groups21, null, 2));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: 'inst-fx-1', name: 'Colegio FX' }], null, 2));
 fs.writeFileSync(P.access, JSON.stringify([
     { id: 'lt-access-fx', scope: 'group', scopeId: 'lt-group-fx',
-      titleIds: ['t-synth'], collectionIds: [], expiresAt: null },
+      titleIds: ['t-synth'], collectionIds: [], expiresAt: 1 },   // post-GAP1: expirada
     // Regla hacia el grupo DESCONOCIDO: en modo JSON concede; bajo cutover el
     // grupo es UNKNOWN ⇒ la membresía no resuelve ⇒ DENY (dirección segura).
     { id: 'rule-rogue', scope: 'group', scopeId: 'g-rogue-nuevo',
@@ -268,11 +270,13 @@ try {
         const dRogue = await decide(sJson.base, 'RU099', 't-rogue');
         const dLibre = await decide(sJson.base, 'RU099', 't-libre');
         jsonBaseline = { dSyn, dRogue, dLibre };
-        ok('regla sintética concede en modo JSON (baseline)', dSyn.allowed === true);
+        ok('SYNTHETIC_ACCESS_INACTIVE=true en modo JSON (post-GAP1: regla expirada '
+           + 'no concede)', dSyn.allowed === false, JSON.stringify(dSyn));
         ok('regla hacia grupo no atestado concede HOY en modo JSON (baseline a preservar '
            + 'solo en dirección DENY bajo cutover)', dRogue.allowed === true);
-        ok('CURRENT_JSON_BEHAVIOR_UNCHANGED=true (lista completa + decisiones actuales)',
-           list.length === 21 && dSyn.allowed && dRogue.allowed);
+        ok('CURRENT_JSON_BEHAVIOR_UNCHANGED=true (lista completa + decisiones del '
+           + 'estado post-GAP1)', list.length === 21 && dSyn.allowed === false
+           && dRogue.allowed === true);
     } finally { sJson.child.kill(); await sleep(300); }
 
     // ════════════════════════════════════════════════════════════════════
@@ -296,8 +300,11 @@ try {
            rUnk.status === 404, String(rUnk.status));
 
         const dSyn = await decide(sCut.base, 'SYN1', 't-synth');
-        ok('SYNTHETIC_ACCESS_COMPAT_PRESERVED=true (lt-access via compat sigue concediendo)',
-           dSyn.allowed === true && jsonBaseline.dSyn.allowed === true);
+        ok('SYNTHETIC_COMPAT_PRESENT=true ∧ SYNTHETIC_ACCESS_INACTIVE=true '
+           + '(post-GAP1: el grupo se sirve por compat pero la regla expirada '
+           + 'no concede en NINGÚN modo — misma dirección DENY)',
+           ids.has(SYNTH.id) && dSyn.allowed === false
+           && jsonBaseline.dSyn.allowed === false, JSON.stringify(dSyn));
         const dRogue = await decide(sCut.base, 'RU099', 't-rogue');
         ok('UNKNOWN jamás concede bajo cutover (JSON ALLOW → cutover DENY: dirección segura)',
            dRogue.allowed === false, JSON.stringify(dRogue));
