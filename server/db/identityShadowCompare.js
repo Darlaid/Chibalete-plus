@@ -90,6 +90,7 @@ import {
     identityShadowCompareEntities as mEnt,
     identityShadowCompareDuration as mDur,
 } from '../observability/metrics.js';
+import { CREDENTIAL_FIELDS, attestedUserExclusionMap } from './identityUserDomains.js';
 
 export const SHADOW_COMPARE_VERSION = 'chp-iddb-02c-b/1';
 
@@ -281,7 +282,10 @@ function makeAbsencePolicy(db, projectUsers, projectGroups, at) {
         tombs = new Set(db.prepare(`SELECT legacy_identity_hash FROM identity_tombstones`).all()
             .map(r => r.legacy_identity_hash));
     } catch { /* sin tabla: ninguna ausencia se explicará por tombstone */ }
-    const exclUsers = excluded('user');
+    // CHP-IDDB-GAP2-01: exclusiones de USERS desde la MISMA fuente atestada
+    // que usa el clasificador de dominios (identityUserDomains) — una sola
+    // regla. El Set conserva el contrato previo del policy (solo hashes).
+    const exclUsers = new Set(attestedUserExclusionMap(db).keys());
     const exclGroups = excluded('group');
 
     return {
@@ -316,9 +320,14 @@ function makeAbsencePolicy(db, projectUsers, projectGroups, at) {
 
 // ── Comparación semántica por entidad ───────────────────────────────────────
 const stripCredentials = (u) => {
+    // CHP-IDDB-GAP2-01: misma lista compartida que sanitizeUser (proyección):
+    // si la proyección excluye un campo de credencial, el comparador lo
+    // excluye también — imposible que un token ausente-en-espejo aflore como
+    // divergencia, e imposible que una divergencia real de credencial se
+    // compare (las credenciales no viajan al espejo por diseño).
     const out = {};
     for (const k of Object.keys(u ?? {})) {
-        if (k === 'password' || k === 'passwordHash') continue;
+        if (CREDENTIAL_FIELDS.includes(k)) continue;
         out[k] = u[k];
     }
     return out;

@@ -20,7 +20,9 @@
 import { flags } from '../lib/flags.js';
 import {
     identityReadSource as mSrc, identityReadFallback as mFb,
+    identityUserDomainReads as mUsrDom,
 } from '../observability/metrics.js';
+import { composeCanonicalUserView, composeUserAdminView } from './identityUserDomains.js';
 
 /**
  * CHP-IDDB-READ-RMW-SEAM-01 — marca de procedencia. Todo array servido desde
@@ -95,7 +97,15 @@ export function tryIdentitySqliteRead(file, paths, log = () => {}) {
             return null;
         }
         if (!_repo) _repo = makeIdentityRepo(db);
-        const arr = domain === 'users' ? _repo.users.all()
+        // CHP-IDDB-GAP2-01 — el dominio `users` bajo cutover sirve la vista
+        // OPERACIONAL: exclusivamente canónicos (SQLite), clasificados ANTES
+        // de elegir backend. Sintéticos/tombstones/unknown quedan fuera del
+        // universo operativo; la superficie ADMIN/HISTÓRICA usa su entrada
+        // explícita (tryIdentityUserAdminRead). Jamás fallback silencioso.
+        const arr = domain === 'users' ? composeCanonicalUserView({
+                        db, repo: _repo, log,
+                        onCount: (cls, n) => { try { if (n) mUsrDom.labels(cls).inc(n); } catch {} },
+                    })
                   : domain === 'groups' ? _repo.groups.all()
                   : _repo.access.all();
         if (!Array.isArray(arr)) {
@@ -110,6 +120,36 @@ export function tryIdentitySqliteRead(file, paths, log = () => {}) {
         // Gate 4: cualquier error → JSON. El cutover JAMÁS rompe lecturas.
         try { mFb.labels(domain, 'exception').inc(); } catch {}
         log(`[identity-read] ${domain} sqlite read failed → fallback JSON: ${e.message}`, 'WARN');
+        return null;
+    }
+}
+
+/**
+ * CHP-IDDB-GAP2-01 — superficie ADMIN/HISTÓRICA de users bajo cutover:
+ * canónico (SQLite) ∪ compat sintética ATESTADA (JSON, etiquetada y SIN
+ * material de credencial). Con flags json (o cualquier gate fallido) devuelve
+ * `null` y el llamador usa su lectura oficial actual: no-op garantizado.
+ * Mismos gates que la lectura ordinaria (flag, dominio, shadow ok).
+ */
+export function tryIdentityUserAdminRead(paths, log = () => {}) {
+    if (flags.identityReadSource() !== 'sqlite') return null;
+    if (!domainsAllowed().has('users')) return null;
+    try {
+        if (!flags.identitySqliteEnabled()) return null;
+        const { getIdentityDb } = requireSync('./identityDb.js');
+        const { makeIdentityRepo } = requireSync('../repositories/identityRepo.js');
+        const db = getIdentityDb();
+        if (!lastAuditOk(db, 'users')) return null;
+        if (!_repo) _repo = makeIdentityRepo(db);
+        const arr = composeUserAdminView({
+            db, repo: _repo, usersJsonPath: paths.usersDb, log,
+            onCount: (cls, n) => { try { if (n) mUsrDom.labels(cls).inc(n); } catch {} },
+        });
+        if (!Array.isArray(arr)) return null;
+        Object.defineProperty(arr, IDENTITY_SQLITE_SERVED, { value: true });
+        return arr;
+    } catch (e) {
+        log(`[identity-read] users admin view failed → fallback JSON: ${e.message}`, 'WARN');
         return null;
     }
 }
