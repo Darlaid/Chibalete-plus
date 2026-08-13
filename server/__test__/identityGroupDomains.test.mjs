@@ -367,11 +367,17 @@ try {
         await CMP.warmupShadowCompare();
         CMP.observeIdentityShadowRead(P.groups, withOob, PATHS, {});
         let g = CMP.getShadowCompareSnapshot().byDomain.groups;
-        ok('oficial JSON: 17 gaps LEGACY_GROUP = 16 atestados + 1 estructural '
-           + '(el rogue sin org no es proyectable: política preexistente, motivo distinto)',
-           g.entities.gaps.LEGACY_GROUP === 17, JSON.stringify(g.entities.gaps));
-        ok('el grupo org-válido fuera de banda NO se esconde → 1 divergencia inesperada',
-           g.entities.unexpected === 1 && g.entities.match === 4, JSON.stringify(g.entities));
+        // M1-RELEASE-TRAIN-R1: EXPECTED exige atestación — los 16 atestados
+        // son gap; el rogue org-less NO (unexpected con diagnóstico), igual
+        // que el org-válido fuera de banda.
+        ok('oficial JSON: EXACTAMENTE 16 gaps LEGACY_GROUP (los atestados)',
+           g.entities.gaps.LEGACY_GROUP === 16, JSON.stringify(g.entities.gaps));
+        ok('ni el rogue org-less ni el org-válido fuera de banda se esconden → '
+           + '2 divergencias inesperadas (una con diagnóstico estructural)',
+           g.entities.unexpected === 2 && g.entities.match === 4
+           && (g.samples || []).some(s => (s.fields || [])
+               .some(f => String(f).startsWith('UNPROJECTABLE_'))),
+           JSON.stringify(g.entities));
         const policies = (g.samples || []).map(s => String(s.policy || ''));
         ok('el motivo del gap declara la clase compat (migration_exclusion:legacy/synthetic)',
            policies.some(p => p === 'migration_exclusion:legacy')

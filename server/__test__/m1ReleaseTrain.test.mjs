@@ -248,29 +248,51 @@ console.log('\n[M1] COMPARADOR integrado: 0 inesperadas / 0 seguridad / 0 errore
     const CMP = await import('../db/identityShadowCompare.js');
     const PATHS = { usersDb: P.users, groupsDb: P.groups, accessDb: P.access,
         schoolsDb: P.schools };
-    CMP.__resetShadowCompare(); closeIdentityDb(); getIdentityDb(P.identity);
-    await CMP.warmupShadowCompare();
     // Esperar settle de los espejos de las mutaciones del server (async).
     await sleep(1500);
-    CMP.observeIdentityShadowRead(P.users, JSON.parse(fs.readFileSync(P.users, 'utf8')), PATHS, {});
-    CMP.observeIdentityShadowRead(P.groups, JSON.parse(fs.readFileSync(P.groups, 'utf8')), PATHS, {});
-    CMP.observeIdentityShadowRead(P.access, JSON.parse(fs.readFileSync(P.access, 'utf8')), PATHS, {});
+    const usersNow = JSON.parse(fs.readFileSync(P.users, 'utf8'));
+    const groupsNow = JSON.parse(fs.readFileSync(P.groups, 'utf8'));
+    const accessNow = JSON.parse(fs.readFileSync(P.access, 'utf8'));
+
+    // ── ESCENARIO ARTIFICIAL (con rogue+fantasma): el drift DEBE aflorar ────
+    // R1: EXPECTED exige atestación — un comparador solo es creíble si
+    // detecta lo no atestado, no porque nunca vea divergencias.
+    CMP.__resetShadowCompare(); closeIdentityDb(); getIdentityDb(P.identity);
+    await CMP.warmupShadowCompare();
+    CMP.observeIdentityShadowRead(P.users, usersNow, PATHS, {});
+    CMP.observeIdentityShadowRead(P.groups, groupsNow, PATHS, {});
+    const sr = CMP.getShadowCompareSnapshot();
+    ok('ROGUE_GROUP_UNEXPECTED=1 y PHANTOM_USER_UNEXPECTED=1 (jamás expected; '
+       + 'diagnóstico estructural en la muestra)',
+       sr.byDomain.groups.entities.unexpected === 1
+       && sr.byDomain.users.entities.unexpected === 1
+       && (sr.byDomain.groups.samples || []).some(x => (x.fields || [])
+           .some(f => String(f).startsWith('UNPROJECTABLE_')))
+       && (sr.byDomain.users.samples || []).some(x => (x.fields || [])
+           .some(f => String(f).startsWith('UNPROJECTABLE_'))),
+       JSON.stringify({ g: sr.byDomain.groups.entities, u: sr.byDomain.users.entities }));
+
+    // ── ESCENARIO SANO (sin rogue/fantasma): 0/0/0 con conteos EXACTOS ─────
+    const usersHealthy = usersNow.filter(u => u.id !== 'u-fantasma');
+    const groupsHealthy = groupsNow.filter(g => g.id !== 'g-rogue');
+    CMP.__resetShadowCompare(); closeIdentityDb(); getIdentityDb(P.identity);
+    await CMP.warmupShadowCompare();
+    CMP.observeIdentityShadowRead(P.users, usersHealthy, PATHS, {});
+    CMP.observeIdentityShadowRead(P.groups, groupsHealthy, PATHS, {});
+    CMP.observeIdentityShadowRead(P.access, accessNow, PATHS, {});
     const s = CMP.getShadowCompareSnapshot();
     const tot = ['users', 'groups', 'access', 'memberships'].map(d => s.byDomain[d])
         .filter(Boolean);
     const unexpected = tot.reduce((a, d) => a + d.entities.unexpected, 0);
     const security = tot.reduce((a, d) => a + d.entities.security, 0);
-    ok('UNEXPECTED=0, SECURITY=0, ERRORS=0 en el árbol integrado',
+    ok('HEALTHY_M1: UNEXPECTED=0, SECURITY=0, ERRORS=0',
        unexpected === 0 && security === 0 && s.totals.comparator_errors === 0,
-       JSON.stringify({ unexpected, security,
-           gaps: Object.fromEntries(tot.map((d, i) =>
-               [['users', 'groups', 'access', 'memberships'][i], d.entities.gaps])) }));
-    ok('gaps solo los contractuales: SYNTHETIC_USER=400 + fantasma estructural; '
-       + 'LEGACY_GROUP=17 (16 atestados + 1 estructural del rogue org-less, '
-       + 'motivo distinto — semántica verificada en GAP3)',
+       JSON.stringify({ unexpected, security }));
+    ok('conteos contractuales EXACTOS: SYNTHETIC_USER=400 y LEGACY_GROUP=16 '
+       + '(15 legacy + 1 sintético atestados — ni 401 ni 17)',
        s.byDomain.users.entities.gaps.SYNTHETIC_USER === 400
-       && (s.byDomain.users.entities.gaps.NOT_PROJECTABLE_BY_POLICY ?? 0) === 1
-       && s.byDomain.groups.entities.gaps.LEGACY_GROUP === 17,
+       && s.byDomain.groups.entities.gaps.LEGACY_GROUP === 16
+       && (s.byDomain.users.entities.gaps.NOT_PROJECTABLE_BY_POLICY ?? 0) === 0,
        JSON.stringify({ u: s.byDomain.users.entities.gaps,
            g: s.byDomain.groups.entities.gaps }));
     ok('access: 2 reglas MATCH (espejo de la integración converge)',
