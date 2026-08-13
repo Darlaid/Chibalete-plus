@@ -106,6 +106,67 @@ preservando auditabilidad, CI exacto, hotfix lineal y rollback por unidad:
 - Tras CADA merge productivo: `npm run test:identity` completo antes del
   build de esa ventana.
 
+## R1 — Endurecimiento de expected-gaps (`ba4fde3`)
+
+**Defecto confirmado y corregido**: la absence policy convertía rechazos
+ESTRUCTURALES en expected — un rogue org-less se escondía como
+`LEGACY_GROUP`, un usuario no-proyectable como `NOT_PROJECTABLE_BY_POLICY`,
+y un marcador `_loadtest_marker` SIN exclusión atestada como
+`SYNTHETIC_USER` (vector de drift auto-marcado). Contrato vinculante desde
+R1: **EXPECTED ⇔ atestación explícita** (migration_exclusions /
+identity_tombstones / contrato de credenciales); `WHY_NOT_PROJECTED` es
+diagnóstico en la muestra (`UNPROJECTABLE_*`, `MARKER_WITHOUT_ATTESTATION`,
+`INSTITUTION_NOT_REGISTERED`), jamás severidad. Matriz negativa completa
+probada (11 casos); severidad de ausencias = dirección DENY (unexpected,
+no security: una ausencia no puede conceder). Fixture M1 partido:
+escenario rogue (drift DETECTADO ≥1 por dominio) + sano (0/0/0 con conteos
+contractuales EXACTOS: `SYNTHETIC_USER=400`, `LEGACY_GROUP=16`). Baseline
+productivo re-verificado read-only: 0 entidades no atestadas en ambos
+dominios ⇒ el endurecimiento no introduce divergencias hoy. La evidencia
+histórica «GAP-3: legacy 404 bajo cutover» se invirtió al contrato nuevo
+(legacy ATESTADO → 200 vía compat; fail-closed vive en los NO atestados).
+
+**Delta a reaplicar en producción**: `ba4fde3` viaja con la integración de
+GAP2 (su punto natural de dependencia: usa el loader de users). Ventana
+GAP3→GAP2 con la política laxa de grupos: sin impacto productivo (0 no
+atestados, verificado) — documentado y aceptado.
+
+## R1 — Estrategia de integración productiva FINAL (auditada)
+
+**Práctica real del hotfix** (auditada en git): linaje estrictamente LINEAL
+— 0 merge-commits en `eec39e9..f885e31`; cada unidad avanzó por ff puro
+porque eran SECUENCIALES. Con 4 preps paralelas basadas en `f885e31`, el ff
+puro solo es posible para la primera.
+
+**Estrategia seleccionada (por evidencia, no estética): HÍBRIDA**
+- **ff puro donde es posible** (preserva la práctica histórica):
+  BACKUP `72d5f5e` es descendiente directo de `f885e31` → el hotfix avanza
+  por ff sin commit nuevo.
+- **`merge --no-ff` para el resto** (preps no descendientes del tip móvil):
+  preserva el SHA prep auditado con su CI propio, el merge-commit es el
+  punto de resolución (recetas byte a byte de este rehearsal) y el punto de
+  rollback por unidad (revert del merge). Cherry-pick/regeneración quedan
+  DESCARTADOS: pierden provenance del SHA preparado.
+- **Sin force-push jamás** de ramas prep.
+
+**GATE EXPLÍCITO DE CI (F14)**: el ÁRBOL EXACTO que va a build productiva
+debe tener CI GREEN DESPUÉS de resolver conflictos. «La rama original tenía
+CI GREEN» NO es sustituto. Este rehearsal lo demuestra viable: los 3
+workflows están GREEN sobre el árbol integrado completo.
+
+## R1 — Contrato de SHAs del release train (placeholders, no inventados)
+
+| Unidad | BASE SHA | SOURCE SHA | INTEGRATION SHA | CI SHA | BUILD SHA | ROLLBACK |
+|---|---|---|---|---|---|---|
+| BACKUP | `f885e31` (hotfix) | `72d5f5e` | = `72d5f5e` (ff puro) | `72d5f5e` | n/a (deploy systemd, sin imagen API) | retirar drop-ins + hotfix previo |
+| GAP1 | H₁ := `72d5f5e` | `806fce4` | M₁ := merge(H₁, `806fce4`) | M₁ | M₁ (git-archive) | imagen `f885e31`* + revert M₁ |
+| GAP3 | H₂ := M₁ | `a8e5ae0` | M₂ := merge + receta package.json (`2e13253`) + replay `035e176` | M₂ | M₂ | imagen M₁ + revert M₂ |
+| GAP2 | H₃ := M₂ | `1a9fec5` | M₃ := merge + recetas `ab1a771` + replay `d1fbd3a` (fixture M1) + replay `ba4fde3` (strictness) | M₃ | M₃ | imagen M₂ + revert M₃ |
+
+\* BACKUP no produce imagen API: la imagen N-1 de GAP1 sigue siendo
+`f885e31`. Tras cada merge: `npm run test:identity` local + CI exact-tree
+GREEN antes del build de esa ventana.
+
 ## Riesgos restantes
 
 - El rehearsal usa merges directos entre preps; en producción cada unidad se
