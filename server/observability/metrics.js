@@ -91,6 +91,25 @@ export const identityReadFallback = M(() => new client.Counter({
     name: 'chibalete_identity_read_fallback_total', help: 'SQLite→JSON read fallbacks',
     labelNames: ['domain', 'reason'], registers: [registry],
 }));
+// CHP-IDDB-02C-B — comparación runtime JSON↔SQLite en modo sombra. JSON sigue
+// siendo la respuesta oficial: estas series solo describen al observador.
+// Cardinalidad fija: domain∈5, surface∈2, result∈5, gap∈enum corto.
+export const identityShadowCompareTotal = M(() => new client.Counter({
+    name: 'chibalete_identity_shadow_compare_total',
+    help: 'Shadow JSON/SQLite read comparisons by classification',
+    labelNames: ['domain', 'surface', 'result'], registers: [registry],
+}));
+export const identityShadowCompareEntities = M(() => new client.Counter({
+    name: 'chibalete_identity_shadow_compare_entities_total',
+    help: 'Entities classified as an expected coverage gap, by gap class',
+    labelNames: ['domain', 'gap'], registers: [registry],
+}));
+export const identityShadowCompareDuration = M(() => new client.Histogram({
+    name: 'chibalete_identity_shadow_compare_duration_seconds',
+    help: 'Shadow comparison overhead per eligible read',
+    labelNames: ['domain'], buckets: [0.00005, 0.0002, 0.001, 0.005, 0.02, 0.1],
+    registers: [registry],
+}));
 // P5 — canonicalización analítica (eventRegistry + shadow). Cardinalidad fija:
 // `event` ∈ EVENT_NAMES (~30), `mode` ∈ {immersive,guided,pdf,album,accessible,
 // audio,unknown}, `code` ∈ codes del registry, `version` int corta. NUNCA

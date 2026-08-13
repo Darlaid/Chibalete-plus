@@ -46,10 +46,16 @@ import {
     classifyGroup,
 } from './organizationScope.mjs';
 import { tryIdentitySqliteRead, markJsonRead } from '../db/identityReadFacade.js';
+import { observeIdentityShadowRead } from '../db/identityShadowCompare.js';
 
 // Mapa de paths para la fachada de cutover (accessDb fuera del alcance de
 // esta unidad). Mismos valores que usa el resto del server vía config.
 const FACADE_PATHS = Object.freeze({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: null });
+// CHP-IDDB-02C-B: el comparador sombra sí cubre schools, porque observa sin
+// servir. Que una superficie sea observable NO la hace elegible para cutover.
+const COMPARE_PATHS = Object.freeze({
+    usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: null, schoolsDb: SCHOOLS_DB,
+});
 
 export { GROUP_CLASS, SCOPE_REASON };
 
@@ -109,6 +115,12 @@ function readIdentityArray(file, domain) {
         throw new IdentityUnavailableError('inconsistent_store', { domain, shape: typeof parsed });
     }
     markJsonRead(file, FACADE_PATHS);
+    // 02C-B — observación sombra de una superficie de AUTORIZACIÓN. `parsed` ya
+    // es el resultado oficial y se devuelve intacto: el comparador no lo muta,
+    // no lo sustituye y no puede lanzar.
+    try {
+        observeIdentityShadowRead(file, parsed, COMPARE_PATHS, { surface: 'cis' });
+    } catch { /* la observación jamás altera una decisión de autorización */ }
     return parsed;
 }
 

@@ -25,13 +25,16 @@ import { initErrorTracking } from './observability/errorTracking.js';
 import { makeIdentityWriteHook, bootstrapIdentityDb } from './db/identityWriteHook.js';
 // P4-A — cutover de LECTURA gated + fallback-safe (default IDENTITY_READ=json).
 import { tryIdentitySqliteRead, markJsonRead, warmupReadFacade, assertWritableIdentityPayload } from './db/identityReadFacade.js';
+import {
+    observeIdentityShadowRead, warmupShadowCompare, getShadowCompareSnapshot,
+} from './db/identityShadowCompare.js';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { fileTypeFromFile } from 'file-type';
 import archiver from 'archiver';
 
-import { buildHealthPayload, getHealthDefaults } from './healthHandler.js';
+import { buildHealthPayload, getHealthDefaults, runtimeInstanceId } from './healthHandler.js';
 import { ingestPedagogicalFile } from './leoIngester.js';
 import { normalizeRequest, dispatchInteraction } from './leoOrchestrator.js';
 import { getMediatorStudentSummary, getMediatorContentHistory } from './leoMediatorViewService.js';
@@ -204,6 +207,10 @@ try { initErrorTracking(); } catch (e) { log(`[error-tracking] ${e.message}`, 'W
 bootstrapIdentityDb(log)
   .then(() => warmupReadFacade())   // P4-A: precarga ESM si cutover habilitado
   .then(w => { if (w) log('[identity-read] facade warmed (cutover armable)'); })
+  // 02C-B: precarga del comparador sombra. Independiente del cutover: observa,
+  // nunca sirve. Si falla queda inerte y el runtime sigue idéntico.
+  .then(() => warmupShadowCompare())
+  .then(w => { if (w) log('[identity-shadow-compare] armed (observer only; JSON sigue oficial)'); })
   .catch(e => log(`[identity-db] ${e.message}`, 'WARN'));
 
 // --- SECURITY MIDDLEWARE ---
@@ -708,7 +715,7 @@ const _setCachedJSON = (file, data) => {
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
-const readJSON = (file) => {
+const _readJSONOfficial = (file) => {
     const cached = _getCachedJSON(file);
     if (cached !== null) return cached;
     // P4-A — cutover de lectura: SOLO si IDENTITY_READ=sqlite + dominio
@@ -741,6 +748,28 @@ const readJSON = (file) => {
         }
         return file === PROGRESS_DB ? { progressMap: {} } : [];
     }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHP-IDDB-02C-B — COMPARACIÓN SOMBRA (observador, jamás autoridad).
+//
+// `_readJSONOfficial` ya produjo el resultado OFICIAL: es el único que puede
+// llegar a una respuesta HTTP, a una decisión de authn/authz o a una mutación.
+// Aquí solo se OBSERVA esa lectura y, si el comparador está encendido, se
+// calcula en paralelo la respuesta que daría el espejo SQLite para clasificar
+// la diferencia. `observeIdentityShadowRead` devuelve void, no muta el array y
+// no lanza; el `try` exterior es defensa en profundidad. Con el comparador
+// apagado (default) el coste es una lectura de env.
+// ─────────────────────────────────────────────────────────────────────────────
+const readJSON = (file) => {
+    const _t0 = performance.now();
+    const official = _readJSONOfficial(file);
+    try {
+        observeIdentityShadowRead(file, official,
+            { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB },
+            { surface: 'seam', jsonMs: performance.now() - _t0 });
+    } catch { /* la observación JAMÁS puede afectar a la lectura oficial */ }
+    return official;
 };
 
 const writeJSON = (file, data) => {
@@ -1178,6 +1207,24 @@ app.get('/api/admin/system/metrics/request-context', requireOperationalAdminSecr
     res.status(200).json({
         ok: true,
         metricsRequestContext: getMetricsRequestContextTelemetrySnapshot(),
+    });
+});
+
+// ---------------------------------------------------------------------------
+// TELEMETRÍA DEL COMPARADOR SOMBRA — CHP-IDDB-02C-B
+//
+// Agregados por dominio/superficie de la comparación JSON↔SQLite. Misma
+// autorización secret-only y las mismas razones que la ruta de arriba (un
+// `requireAdminAccess` dejaría leer esto a cualquier sesión, incluida la de un
+// lector). Solo lectura: no abre stores, no dispara comparaciones y no reinicia
+// contadores. Sin PII: las referencias van hasheadas por el propio comparador.
+// ---------------------------------------------------------------------------
+app.get('/api/admin/system/identity/shadow-compare', requireOperationalAdminSecret, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({
+        ok: true,
+        instance: runtimeInstanceId(),
+        identityShadowCompare: getShadowCompareSnapshot(),
     });
 });
 
