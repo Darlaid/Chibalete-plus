@@ -20,7 +20,9 @@
 import { flags } from '../lib/flags.js';
 import {
     identityReadSource as mSrc, identityReadFallback as mFb,
+    identityGroupDomainReads as mGrpDom,
 } from '../observability/metrics.js';
+import { composeGroupReadView } from './identityGroupDomains.js';
 
 /**
  * CHP-IDDB-READ-RMW-SEAM-01 — marca de procedencia. Todo array servido desde
@@ -95,8 +97,15 @@ export function tryIdentitySqliteRead(file, paths, log = () => {}) {
             return null;
         }
         if (!_repo) _repo = makeIdentityRepo(db);
+        // CHP-IDDB-GAP3-01 — el dominio `groups` NO se sirve como espejo pelado:
+        // se compone canónico (SQLite) ∪ compat ATESTADA (JSON ∩ exclusiones de
+        // migración), con UNKNOWN excluido fail-closed. La clasificación ocurre
+        // ANTES de elegir backend: jamás «SQLite miss → JSON fallback» mudo.
         const arr = domain === 'users' ? _repo.users.all()
-                  : domain === 'groups' ? _repo.groups.all()
+                  : domain === 'groups' ? composeGroupReadView({
+                        db, repo: _repo, groupsJsonPath: file, log,
+                        onCount: (cls, n) => { try { if (n) mGrpDom.labels(cls).inc(n); } catch {} },
+                    })
                   : _repo.access.all();
         if (!Array.isArray(arr)) {
             try { mFb.labels(domain, 'bad_shape').inc(); } catch {}
