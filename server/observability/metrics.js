@@ -91,6 +91,14 @@ export const identityReadFallback = M(() => new client.Counter({
     name: 'chibalete_identity_read_fallback_total', help: 'SQLite→JSON read fallbacks',
     labelNames: ['domain', 'reason'], registers: [registry],
 }));
+// CHP-IDDB-GAP3-01 — frontera canónico/compat del dominio groups. Cardinalidad
+// fija: class∈{canonical,compat_legacy,compat_synthetic,unknown_excluded}.
+// Los contadores compat son la señal futura de retiro de los grupos legacy.
+export const identityGroupDomainReads = M(() => new client.Counter({
+    name: 'chibalete_identity_group_domain_reads_total',
+    help: 'Composed group read-view records by domain class',
+    labelNames: ['class'], registers: [registry],
+}));
 // CHP-IDDB-02C-B — comparación runtime JSON↔SQLite en modo sombra. JSON sigue
 // siendo la respuesta oficial: estas series solo describen al observador.
 // Cardinalidad fija: domain∈5, surface∈2, result∈5, gap∈enum corto.
