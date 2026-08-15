@@ -69,11 +69,14 @@ function safeJson(res, fn, fallbackBody = null) {
  * Crea el router. Se reciben los middleware de auth por inyección desde
  * server.js para evitar acoplamiento del módulo a los closures internos.
  */
-export function createOperationalRouter({ requireUserAuth }) {
+export function createOperationalRouter({ requireUserAuth, studentTenantGuard }) {
     const router = express.Router();
+    // CHP-IDDB-M1-B: guard de scope de estudiante inyectado por server.js. Default
+    // no-op (compat con tests que no lo inyectan / modo 'off').
+    const studentGuard = typeof studentTenantGuard === 'function' ? studentTenantGuard : (req, res, next) => next();
 
     // ── STUDENT scope ────────────────────────────────────────────────────
-    router.get('/students/:userId/timeline', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/timeline', requireUserAuth, studentGuard, (req, res) => {
         instrument('aulaViva.student_timeline', () => {
             const data = reader.getProfileTimeline(req.params.userId);
             try { studentTimelineRenderMs.observe(0); } catch {}
@@ -99,17 +102,17 @@ export function createOperationalRouter({ requireUserAuth }) {
         });
     });
 
-    router.get('/students/:userId/feature-vector', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/feature-vector', requireUserAuth, studentGuard, (req, res) => {
         safeJson(res, () => reader.getLatestFeatureVector(req.params.userId)
             ?? { user_id: req.params.userId, features: null, stale: true });
     });
 
-    router.get('/students/:userId/risk-history', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/risk-history', requireUserAuth, studentGuard, (req, res) => {
         const limit = Math.min(200, Number(req.query.limit) || 50);
         safeJson(res, () => reader.getRiskHistory(req.params.userId, { limit }), []);
     });
 
-    router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, studentGuard, (req, res) => {
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
         safeJson(res, () => reader.getSignalTimeline('user', req.params.userId,
             req.params.signalId, sinceTs), []);

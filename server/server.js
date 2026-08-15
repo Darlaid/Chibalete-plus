@@ -23,7 +23,14 @@ import { cleanupExpiredSessions } from './db/sessionStore.js';
 import {
     authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
     authSessionSubjectMismatch, authSessionRevoked,
+    tenantAuthzDecision, membershipGovernanceDecision,
 } from './observability/metrics.js';
+import {
+    tenantAuthzMode, tenantAuthzEnabled, tenantAuthzEnforcing,
+    buildActorContext, resolveUserInstitutionScope, scopeList, DECISION,
+    requireGlobalAdmin, requireSameInstitution, requireGroupScope,
+    requireSelfOrScopedMediator, requireMembershipManagementScope,
+} from './lib/tenantAuthz.js';
 import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
@@ -1243,7 +1250,14 @@ registerRumRoute(app);
 // (inyectada). El scheduler queda OFF salvo AULA_VIVA_SCHEDULER_ENABLED=1.
 try {
     const { createOperationalRouter } = await import('./aulaViva/operationalRouter.mjs');
-    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth }));
+    // Wrapper LAZY: el mount corre en top-level await (antes de que `tenantGuard`
+// se inicialice más abajo). Construir el guard aquí daría TDZ; se difiere a
+// tiempo de request, cuando el módulo ya está evaluado.
+    const studentTenantGuard = (req, res, next) => tenantGuard(
+        (ctx, r) => requireSelfOrScopedMediator(ctx, r.params.userId, 'aula_viva'),
+        { notFoundReasons: ['target_out_of_mediator_scope', 'not_mediator', 'actor_unscoped', 'actor_ambiguous'] },
+    )(req, res, next);
+    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth, studentTenantGuard }));
     log('[PASO5] /api/aula-viva router mounted', 'INFO');
 } catch (e) {
     log(`[PASO5] aula-viva router mount failed: ${e.message}`, 'WARN');
@@ -2462,6 +2476,85 @@ async function issueSessionCookie(res, user) {
     }
 }
 
+// ── CHP-IDDB-M1-B — aislamiento tenant + gobernanza de membership ──────────────
+// Autoridad = institución, resuelta server-side desde memberships (grupos JSON
+// físico) + organizationId registrado. Consume la identidad autenticada
+// (req.auth.userId de M1-A; en transición previa a M1-A enforce, req.user.id /
+// x-user-id que server.js ya resolvió). Modo 'off' (default) = NO-OP total.
+const tenantActorId = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'] ?? null;
+const tenantCtx = (req) => buildActorContext(tenantActorId(req), {
+    users: readJSON(USERS_DB), groups: readJSON(GROUPS_DB), schools: getSchoolsForNormalization(),
+});
+const emitTenantDecision = (resClass, d) => {
+    try { tenantAuthzDecision.labels(tenantAuthzMode(), resClass, d.decision, d.reason || 'na').inc(); } catch { /* noop */ }
+};
+/**
+ * Middleware de scope tenant. `policy(ctx, req) → {decision, reason, resourceClass}`.
+ * off: no-op. shadow: computa + telemetría, NO bloquea. enforce: 403/404 si deny.
+ * `notFoundReasons`: razones que deben responder 404 (anti-enumeración) en vez de 403.
+ */
+const tenantGuard = (policy, { notFoundReasons = [] } = {}) => (req, res, next) => {
+    if (!tenantAuthzEnabled()) return next();
+    let d;
+    try { d = policy(tenantCtx(req), req); }
+    catch (e) { log(`[TENANT_AUTHZ] policy error: ${e.message}`, 'WARN'); d = { decision: 'deny', reason: 'policy_error', resourceClass: 'unknown' }; }
+    emitTenantDecision(d.resourceClass, d);
+    if (d.decision === 'allow') return next();
+    if (!tenantAuthzEnforcing()) {
+        // shadow: registrar el would-deny sin alterar la respuesta.
+        try { writeAuditLog({ action: 'TENANT_AUTHZ_SHADOW_DENY', targetUserId: tenantActorId(req) || null, details: { route: req.path, method: req.method, reason: d.reason, resourceClass: d.resourceClass } }); } catch { /* noop */ }
+        return next();
+    }
+    try { writeAuditLog({ action: 'TENANT_AUTHZ_DENIED', targetUserId: tenantActorId(req) || null, details: { route: req.path, method: req.method, reason: d.reason, resourceClass: d.resourceClass } }); } catch { /* noop */ }
+    const status = notFoundReasons.includes(d.reason) ? 404 : 403;
+    return res.status(status).json({ error: status === 404 ? 'No encontrado' : 'Fuera de alcance institucional' });
+};
+const findGroupById = (gid) => (readJSON(GROUPS_DB) || []).find(g => g?.id === gid) || null;
+
+/**
+ * Guard de MUTACIÓN de membership. En off/shadow delega a `requireAdminAccess`
+ * (admin-only actual, byte-idéntico). En enforce concede a admin global (secret
+ * o rol) O a un mediador con scope sobre el grupo (misma institución, no otorga
+ * rol mediador/admin) — y deniega el resto con 403. Emite decisión de gobernanza.
+ */
+const membershipMutationGuard = (groupIdParam, roleFrom = () => 'member') => async (req, res, next) => {
+    if (!tenantAuthzEnforcing()) return requireAdminAccess(req, res, next);
+    // enforce: máquina o admin global pasan.
+    if (await isAdminRequest(req)) return next();
+    const actorId = tenantActorId(req);
+    const actor = actorId ? (readJSON(USERS_DB) || []).find(u => u?.id === actorId) : null;
+    if (!actor || !isUserActive(actor)) return res.status(401).json({ error: 'Auth requerida' });
+    const ctx = tenantCtx(req);
+    const group = findGroupById(req.params[groupIdParam]);
+    const d = requireMembershipManagementScope(ctx, group, { targetRole: roleFrom(req) }, 'membership');
+    try { membershipGovernanceDecision.labels(req.method.toLowerCase(), d.decision, d.reason || 'na').inc(); } catch { /* noop */ }
+    if (d.decision === DECISION.ALLOW) return next();
+    try { writeAuditLog({ action: 'TENANT_AUTHZ_DENIED', targetUserId: actorId, details: { route: req.path, method: req.method, reason: d.reason, resourceClass: 'membership' } }); } catch { /* noop */ }
+    return res.status(403).json({ error: 'Fuera de alcance de gobernanza de membership' });
+};
+
+/**
+ * Filtrado de listas al scope del actor. En 'off' y 'shadow' la RESPUESTA NO
+ * cambia (shadow solo emite telemetría de lo que se ocultaría); en 'enforce'
+ * devuelve la vista filtrada. Filtrado server-side, nunca en el frontend.
+ */
+const scopeUsersForActor = (req, users) => {
+    if (!tenantAuthzEnabled()) return users;
+    const ctx = tenantCtx(req);
+    const view = scopeList(ctx, users, (u) =>
+        requireSelfOrScopedMediator(ctx, u?.id, 'users_list').decision === DECISION.ALLOW);
+    emitTenantDecision('users_list', { decision: view.hidden ? 'deny' : 'allow', reason: `hidden_${view.hidden}` });
+    return tenantAuthzEnforcing() ? view.items : users;
+};
+const scopeGroupsForActor = (req, groups) => {
+    if (!tenantAuthzEnabled()) return groups;
+    const ctx = tenantCtx(req);
+    const view = scopeList(ctx, groups, (g) =>
+        requireGroupScope(ctx, g, 'groups_list').decision === DECISION.ALLOW);
+    emitTenantDecision('groups_list', { decision: view.hidden ? 'deny' : 'allow', reason: `hidden_${view.hidden}` });
+    return tenantAuthzEnforcing() ? view.items : groups;
+};
+
 const sanitizeUserForClient = (user) => {
     const { password, inviteToken, inviteExpiresAt, resetToken, resetExpiresAt, ...safeUser } = user;
     return safeUser;
@@ -2686,7 +2779,7 @@ const ensureLeoMemoryDbShape = (db) => {
 
 // 1. GET ALL PROGRESS POR USUARIO (Útil para Admin/Dashboard)
 // Auth: owner (mismo userId) OR admin secret OR rol administrador/mediador
-app.get('/api/progress/user/:userId', async (req, res) => {
+app.get('/api/progress/user/:userId', tenantGuard((ctx, req) => requireSelfOrScopedMediator(ctx, req.params.userId, 'progress'), { notFoundReasons: ['target_out_of_mediator_scope', 'not_mediator', 'actor_unscoped', 'actor_ambiguous'] }), async (req, res) => {
     try {
         const { userId } = req.params;
         const users = readJSON(USERS_DB);
@@ -2713,7 +2806,7 @@ app.get('/api/progress/user/:userId', async (req, res) => {
 
 // 2. GET SINGLE PROGRESS (Resolviendo colisión de rutas previa)
 // Auth: owner OR admin secret OR rol administrador/mediador
-app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
+app.get('/api/progress/item/:userId/:contentId', tenantGuard((ctx, req) => requireSelfOrScopedMediator(ctx, req.params.userId, 'progress'), { notFoundReasons: ['target_out_of_mediator_scope', 'not_mediator', 'actor_unscoped', 'actor_ambiguous'] }), async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const users = readJSON(USERS_DB);
@@ -3036,7 +3129,10 @@ app.get('/api/users', requireAuth, (req, res) => {
         const users = readUsersAdminHistorical();
         // Aplicamos normalizeUser en lectura para limpiar posibles estados corruptos pasados
         const normalizedUsers = users.map(normalizeUser);
-        res.json(sanitizeUsersForClient(normalizedUsers));
+        // CHP-IDDB-M1-B: en shadow/enforce, filtra el listado al scope institucional
+        // del actor (admin ve todo; mediador su institución; otros nada). off = intacto.
+        const scoped = scopeUsersForActor(req, normalizedUsers);
+        res.json(sanitizeUsersForClient(scoped));
     } catch (e) {
         res.status(500).json({ error: 'Internal Server Error' });
     }
@@ -3855,8 +3951,10 @@ const { resolveUserContentAccess, canUserAccessContent, getAccessibleContentIds 
 app.get('/api/groups', requireAuth, (req, res) => {
     try {
         const groups = readJSON(GROUPS_DB);
+        // CHP-IDDB-M1-B: filtra al scope del actor en shadow/enforce (off = intacto).
+        const scoped = scopeGroupsForActor(req, groups);
         // Normalizar la salida para que el frontend siempre reciba datos consistentes
-        res.json(groups.map(normalizeGroup));
+        res.json(scoped.map(normalizeGroup));
     } catch (e) {
         res.status(500).json({ error: 'Internal Server Error' });
     }
@@ -4549,7 +4647,7 @@ const _readFallbackOverride = (req) => {
 // Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
 // y admins (requireAuth). Filtra por misma institución y excluye a los que
 // ya son miembros (vía la fuente única getGroupMembers).
-app.get('/api/groups/:groupId/candidates', requireAuth, (req, res) => {
+app.get('/api/groups/:groupId/candidates', requireAuth, tenantGuard((ctx, req) => requireGroupScope(ctx, findGroupById(req.params.groupId), 'group'), { notFoundReasons: ['group_not_found', 'out_of_group_scope'] }), (req, res) => {
     try {
         const { groupId } = req.params;
         const groups = readJSON(GROUPS_DB) || [];
@@ -4621,7 +4719,7 @@ app.get('/api/groups/:groupId/candidates', requireAuth, (req, res) => {
 //
 // groupType: 'course' | 'club' — type === undefined → 'course' legacy
 // (modelo unificado: clubs y cursos son la misma entidad group).
-app.get('/api/groups/:groupId/members', requireAuth, (req, res) => {
+app.get('/api/groups/:groupId/members', requireAuth, tenantGuard((ctx, req) => requireGroupScope(ctx, findGroupById(req.params.groupId), 'group'), { notFoundReasons: ['group_not_found', 'out_of_group_scope'] }), (req, res) => {
     try {
         const { groupId } = req.params;
         const groups = readJSON(GROUPS_DB) || [];
@@ -4699,7 +4797,7 @@ app.get('/api/groups/:groupId/members', requireAuth, (req, res) => {
 // La transacción (groups + users) escribe AMBOS archivos en el mismo
 // lock anidado o ninguno — ningún estado parcial inconsistente.
 // Reporta por user: assigned (con alreadyMember si era idempotente) y failed.
-app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) => {
+app.post('/api/groups/:groupId/members', membershipMutationGuard('groupId', (req) => req.body?.role || 'member'), async (req, res) => {
     const { groupId } = req.params;
     const body = req.body || {};
     if (!Array.isArray(body.userIds)) {
@@ -4906,7 +5004,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
 // DELETE /api/groups/:groupId/members/:userId
 // Remoción individual con bidireccional cerrado. 404 si grupo o user no
 // existen; idempotente (responde 200 con removed:false si ya no era miembro).
-app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (req, res) => {
+app.delete('/api/groups/:groupId/members/:userId', membershipMutationGuard('groupId'), async (req, res) => {
     const { groupId, userId } = req.params;
 
     let outcome      = null;
@@ -5057,7 +5155,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
 // explícito" — el endpoint lo rechaza con reason='not_in_source_group'. El
 // admin debe primero asignarlo explícitamente con POST /members, y luego
 // moverlo. Esto preserva la semántica del fallback (es lectura, no mutación).
-app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, res) => {
+app.post('/api/groups/:toGroupId/members/move', membershipMutationGuard('toGroupId'), async (req, res) => {
     const { toGroupId } = req.params;
     const body = req.body || {};
 
@@ -5404,7 +5502,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
 //
 // Auth: requireAdminAccess (operación con alcance institucional irreversible).
 // ============================================================================
-app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess, async (req, res) => {
+app.post('/api/groups/:groupId/members/materialize-fallback', membershipMutationGuard('groupId'), async (req, res) => {
     const { groupId } = req.params;
     const body = req.body || {};
 
@@ -6195,7 +6293,7 @@ app.get('/api/membership-governance/groups', requireAdminAccess, (req, res) => {
 // getExplicitGroupMembers, applyLegacyColegioFallback) — este endpoint solo
 // orquesta lectura + helper. requireAuth (mediadores y admins).
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/groups/:id/diagnosis', requireAuth, (req, res) => {
+app.get('/api/groups/:id/diagnosis', requireAuth, tenantGuard((ctx, req) => requireGroupScope(ctx, findGroupById(req.params.id), 'group'), { notFoundReasons: ['group_not_found', 'out_of_group_scope'] }), (req, res) => {
     try {
         const { id } = req.params;
         const groups = readJSON(GROUPS_DB) || [];
@@ -6248,7 +6346,7 @@ app.get('/api/groups/:id/diagnosis', requireAuth, (req, res) => {
 // La lógica de transición de estado vive en utils/studentStatus.mjs (fuente
 // única). Este endpoint solo orquesta lectura + helper.
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/students/:id/status', requireAuth, (req, res) => {
+app.get('/api/students/:id/status', requireAuth, tenantGuard((ctx, req) => requireSelfOrScopedMediator(ctx, req.params.id, 'student'), { notFoundReasons: ['target_out_of_mediator_scope', 'not_mediator', 'actor_unscoped', 'actor_ambiguous'] }), (req, res) => {
     try {
         const { id } = req.params;
         const users  = readJSON(USERS_DB)  || [];
@@ -7023,7 +7121,7 @@ app.post('/api/leo/recap', requireUserAuth, async (req, res) => {
 // Note: requireAuth lets GET through without the admin secret (existing pattern).
 // D7 should introduce a requireMediatorAuth middleware scoped to mediador/administrador roles.
 
-app.get('/api/leo/mediator/student/:userId', requireAuth, (req, res) => {
+app.get('/api/leo/mediator/student/:userId', requireAuth, tenantGuard((ctx, req) => requireSelfOrScopedMediator(ctx, req.params.userId, 'leo_mediator'), { notFoundReasons: ['target_out_of_mediator_scope', 'not_mediator', 'actor_unscoped', 'actor_ambiguous'] }), (req, res) => {
     try {
         const { userId } = req.params;
         if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
@@ -7035,7 +7133,7 @@ app.get('/api/leo/mediator/student/:userId', requireAuth, (req, res) => {
     }
 });
 
-app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, (req, res) => {
+app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, tenantGuard((ctx, req) => requireSelfOrScopedMediator(ctx, req.params.userId, 'leo_mediator'), { notFoundReasons: ['target_out_of_mediator_scope', 'not_mediator', 'actor_unscoped', 'actor_ambiguous'] }), (req, res) => {
     try {
         const { userId, contentId } = req.params;
         if (!userId || !contentId) {

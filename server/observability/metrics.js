@@ -128,6 +128,16 @@ export const authSessionRevoked = M(() => new client.Counter({
     name: 'chibalete_auth_session_revoked_total', help: 'Sessions revoked',
     labelNames: ['kind'], registers: [registry],
 }));
+// CHP-IDDB-M1-B — aislamiento tenant + gobernanza de membership. Cardinalidad
+// fija; NUNCA userId/groupId/institutionId como labels.
+export const tenantAuthzDecision = M(() => new client.Counter({
+    name: 'chibalete_tenant_authz_decision_total', help: 'Tenant authorization decisions',
+    labelNames: ['mode', 'resource_class', 'decision', 'reason'], registers: [registry],
+}));
+export const membershipGovernanceDecision = M(() => new client.Counter({
+    name: 'chibalete_membership_governance_decision_total', help: 'Membership governance decisions',
+    labelNames: ['action', 'decision', 'reason'], registers: [registry],
+}));
 // CHP-IDDB-02C-B — comparación runtime JSON↔SQLite en modo sombra. JSON sigue
 // siendo la respuesta oficial: estas series solo describen al observador.
 // Cardinalidad fija: domain∈5, surface∈2, result∈5, gap∈enum corto.
