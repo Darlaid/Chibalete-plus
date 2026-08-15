@@ -95,6 +95,12 @@ jobs:
       - name: Canonicidad de la fuente de usuarios
         run: npm run test:identity
 
+      # CHP-IDDB-M1-B: integraciones tenant que levantan servidor real. Fuera de
+      # test:identity para no re-ejecutarlas bajo el store-isolation guard (que
+      # re-corre test:identity y acumula spawns). Son store-herméticas (probado).
+      - name: Integraciones tenant/sesión (server real)
+        run: npm run test:identity-integration
+
       - name: Contrato de grupos y memberships (creación + edición)
         run: npm run test:memberships
 

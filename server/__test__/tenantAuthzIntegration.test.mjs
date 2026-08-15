@@ -64,6 +64,7 @@ function spawnApi(mode) {
             USER_AUDIT_DB: path.join(tmp, 'audit.json'),
             IDENTITY_DB: P.identity, IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json',
             SESSION_AUTH_MODE: 'off', TENANT_AUTHZ_MODE: mode,
+            INSIGHTS_SQLITE_PATH: path.join(tmp, 'insights.db'), EVENTS_SQLITE_PATH: path.join(tmp, 'events.db'),
         },
     });
     let boot = ''; c.stdout.on('data', d => boot += d); c.stderr.on('data', d => boot += d); c._boot = () => boot;

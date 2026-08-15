@@ -53,6 +53,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         IDENTITY_DB: P.identity, IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json',
         SESSIONS_DB: P.sessions, SESSION_KEY_CURRENT_PATH: P.key,
         SESSION_AUTH_MODE: 'compat', TENANT_AUTHZ_MODE: 'enforce',
+        INSIGHTS_SQLITE_PATH: path.join(tmp, 'insights.db'), EVENTS_SQLITE_PATH: path.join(tmp, 'events.db'),
     },
 });
 let boot = ''; child.stdout.on('data', d => boot += d); child.stderr.on('data', d => boot += d);
