@@ -90,6 +90,7 @@ import {
     identityShadowCompareEntities as mEnt,
     identityShadowCompareDuration as mDur,
 } from '../observability/metrics.js';
+import { attestedGroupExclusionMap, DISPOSITION_SYNTHETIC } from './identityGroupDomains.js';
 
 export const SHADOW_COMPARE_VERSION = 'chp-iddb-02c-b/1';
 
@@ -282,7 +283,11 @@ function makeAbsencePolicy(db, projectUsers, projectGroups, at) {
             .map(r => r.legacy_identity_hash));
     } catch { /* sin tabla: ninguna ausencia se explicará por tombstone */ }
     const exclUsers = excluded('user');
-    const exclGroups = excluded('group');
+    // CHP-IDDB-GAP3-01: la exclusión de GRUPOS viene de la MISMA fuente
+    // atestada que usa el clasificador de dominios (identityGroupDomains):
+    // una sola regla, imposible que diverjan. El mapa conserva la disposition
+    // para que el motivo del gap declare la clase de compatibilidad.
+    const exclGroups = attestedGroupExclusionMap(db);
 
     return {
         /** @returns {{gap:string, policy:string}|null} null ⇒ ausencia NO explicada */
@@ -299,7 +304,11 @@ function makeAbsencePolicy(db, projectUsers, projectGroups, at) {
         },
         group(record) {
             const id = String(record?.id ?? '');
-            if (exclGroups.has(h16(id))) return { gap: GAP.LEGACY_GROUP, policy: 'migration_exclusion' };
+            const disposition = exclGroups.get(h16(id));
+            if (disposition !== undefined) {
+                return { gap: GAP.LEGACY_GROUP,
+                    policy: `migration_exclusion:${disposition === DISPOSITION_SYNTHETIC ? 'synthetic' : 'legacy'}` };
+            }
             const { rejected } = projectGroups([record], at);
             if (rejected.length) return { gap: GAP.LEGACY_GROUP, policy: String(rejected[0].reason) };
             // Proyectable pero su institución no está registrada en el espejo:
