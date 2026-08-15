@@ -312,3 +312,188 @@ M1-A es un gate crítico de 3 puntos; su cierre sube el overall pero deja M1-B y
 Ejecutar **CHP-IDDB-M1-A-SESSION-IDENTITY-01** (implementación) — pero **no antes** de cerrar o
 resolver el canary GROUPS en curso (evitar dos cambios de identidad solapados en observación).
 Orden global: [canary GROUPS close] → **M1-A** → M1-B → M1-C (access/users canaries) → M1-D closeout.
+
+---
+
+# R1 (2026-08-15) — disposición del CI evidence-hardening + modelo de revocación cerrado
+
+Veredicto R1: **GREEN — M1-A CI EVIDENCE GATE CLOSED AND SESSION REVOCATION MODEL IS
+IMPLEMENTATION-READY.**
+
+## R1-C/D. Security workflow y fallo exacto de evidence-hardening
+
+Run `security` de `b229146` (RUN_ID 31890542789): gitleaks-head/osv/trivy(fs)/image-integrity
+GREEN; gitleaks-history y trivy-image RED **heredados**; **evidence-hardening RED NUEVO**.
+Paso fallido: `npm run lint:evidence` → `scripts/security/evidence-ratchet.mjs`. Assertion:
+**1 violación**, `docs/ops/M1_A_SESSION_IDENTITY_00.md:11` regla **`docker-inspect-raw`**
+(la regla marca el subcomando de inspección de contenedor cuando falta `--format`). EXIT 1.
+**Categoría C/B**: la prosa contenía ese patrón (documentación de la propia auditoría), no un
+secreto volcado. **NEW_FAILURE=true, ATTRIBUTABLE_TO_B229146=true.**
+
+## R1-E. Baseline comparison
+
+`cf36852` no contiene el doc → evidence-hardening estaba GREEN en baseline; el rojo lo introduce
+`b229146`. Debía corregirse (no es heredado).
+
+## R1-F. Minimal evidence fix
+
+**M1_A_EVIDENCE_FIX_SHA=`630db62`.** Reescritura de la línea 11 para reflejar la verdad operativa
+(la inspección real usó `--format` acotado, sin volcar entorno) → el patrón desaparece. **Sin**
+deshabilitar el job, sin `allow_failure`, sin reducir assertions, sin excluir el documento, sin
+tocar el workflow, sin usar la anotación `allow`. `lint:evidence` local: **0 violaciones / 736
+archivos**.
+
+## R1-H. Inherited security jobs
+
+gitleaks-history: 10 leaks, fingerprints del set baseline (secretos ya rotados) →
+`NEW_HISTORY_SECRET_FINDINGS=0`. trivy-image: CVE rows idénticas al baseline →
+`NEW_IMAGE_VULNERABILITIES_ATTRIBUTABLE_TO_B229146=0`. No se reabre su remediación.
+
+## R1-I/J. Ambigüedad de revocación y límite stateless (resuelto)
+
+El diseño 00 dejaba el store "opcional" mientras prometía "logout server-side" — contradicción.
+**Demostración (stateless puro):** sin registro de revocación, tras un logout el servidor **no
+puede distinguir** un token T que debería estar revocado de ese mismo T aún criptográficamente
+válido, salvo que cambie `credentialVersion` (global) o la signing key. Por tanto
+**COOKIE_DELETION_ONLY ≠ SERVER_SIDE_SESSION_REVOCATION** (borrar la cookie solo afecta a ESE
+navegador; un token copiado sobrevive hasta exp).
+
+## R1-K/L/M. Opciones y colocación del store
+
+- **A. Global-CV only:** logout normal ⇒ `credentialVersion++` ⇒ revoca **todas** las sesiones del
+  usuario (todas las pestañas/dispositivos). Simple, sin store. Coste: un mediador/admin con varios
+  dispositivos se desconecta de todos al cerrar uno — UX inaceptable para esos roles.
+- **B. Per-session store (elegida):** tabla de sesiones; logout normal revoca **solo** ese `sid`;
+  logout-all/disable/reset usan `credentialVersion++`.
+- **Colocación:** **`sessions.db` SQLite DEDICADA**, NO `identity.db`. Motivos: las sesiones son
+  efímeras y write-on-login; `identity.db` es autoridad canónica y ahora recovery-critical —
+  mezclar radios de impacto es peor. `sessions.db` hereda la seguridad two-process ya probada
+  (WAL + patrón 02B-D-B), sin credenciales/cookies almacenadas.
+
+## R1-N. SELECTED_SESSION_MODEL (inequívoco)
+
+**`SIGNED_HTTPONLY_COOKIE_PLUS_REVOCATION_STORE`.** Token HMAC-SHA256 (clave file-only) en cookie
+HttpOnly/Secure/SameSite=Strict; claims `{sub, sid, iat, exp, cv}`; verificación por request =
+firma válida ∧ exp válido ∧ `sid` existe y `revoked_at IS NULL` en `sessions.db` ∧ usuario canónico
+`isUserActive` ∧ `cv === user.credentialVersion`. Roles/tenant/memberships resueltos server-side.
+
+## R1-O/P/Q. Semántica de eventos (separada)
+
+- **logout normal:** `UPDATE sessions SET revoked_at=now WHERE sid=?` + borrar cookie. Solo esa sesión.
+- **logout-all:** `credentialVersion++` (invalida todas por cv mismatch) + revoca sus sid.
+- **disable user:** `credentialVersion++` → **todas** las sesiones fallan en la siguiente request
+  (independiente de exp). Además `isUserActive=false` ya rechaza.
+- **password reset / forced revoke:** `credentialVersion++`.
+
+## R1-R. Backup policy
+
+**BACKUP_REQUIRED=false** para `sessions.db`. Pérdida/reset ⇒ **fail-closed** ⇒ los usuarios
+re-inician sesión — preferible a restaurar sesiones ya revocadas desde un backup. No se añade a los
+25 stores críticos. La signing key va por el canal de secretos (no restic-data), como admin_secret.
+
+## R1-S. SID semantics
+
+Con store obligatorio, **`sid` es authority pointer / primitiva de revocación** (no mero
+correlador). Sin él no habría logout por-sesión.
+
+## R1-T. Expiration contract
+
+**Absoluta 12 h, sin idle-timeout.** La verificación por request lee `sessions.db` (lectura barata,
+no escritura) → no hay write-per-request. El idle-timeout se descarta para M1 (complejidad sin
+necesidad: disable/logout/cv dan la revocación real). Renovación = re-login.
+
+## R1-U. credentialVersion data model
+
+Campo **`credentialVersion`** en el registro de usuario del padrón JSON (camelCase, como
+`lastLoginAt`/`accountStatus`). **Ausente ⇒ 0** (versión segura determinística; se normaliza lazy
+igual que `accountStatus` en `normalizeUser`). Writer = misma autoridad de mutación JSON
+(`withUsersLock` + `readCanonicalStoreForMutation`), incremento atómico bajo lock. El espejo
+identity.db NO necesita el campo para la sesión (login/sesión leen JSON físico, RMW-SEAM-01);
+si se espeja, no es credencial → fuera de `CREDENTIAL_FIELDS`. Sintéticos disabled: `credentialVersion=0`
+por defecto, sin caso especial (el disable ya los bloquea). **No se ejecuta migración aquí.**
+
+## R1-V. Central active enforcement
+
+El middleware único de sesión hace lookup canónico + `isUserActive` en **toda** ruta autenticada →
+**cierra el gap de `requireProgressOwner`** (server.js:454-466, hoy sin active check). Test
+obligatorio: sesión viva + usuario luego disabled ⇒ 401 en sync/complete de progreso.
+
+## R1-W. Final authority chain
+
+`cookie → verificación de firma (current|previous key) → sub → estado de revocación en sessions.db
+→ lookup canónico de usuario → active check → cv check → req.auth`. **Nunca** rol/tenant desde
+cookie, **nunca** override por `x-user-id`.
+
+## R1-X. x-user-id transition (gate medible)
+
+Counter `auth_session_legacy_x_user_id_total{source_class}` (browser|internal|test, sin userId).
+Cierre de legacy = **browser class → 0** sostenido; internal/test por allowlist explícita. Tras el
+enforcement, `x-user-id` externo se rechaza (no autoritativo).
+
+## R1-Y. CSRF contract
+
+SameSite=Strict **no es la única defensa**: para métodos mutantes (POST/PUT/DELETE con auth por
+cookie) se valida `Origin`/`Sec-Fetch-Site` (y/o double-submit token). Rutas de máquina con
+`x-admin-secret` **exentas** (no usan cookie).
+
+## R1-Z. Key rotation
+
+`{current, previous}` desde archivos file-only 0400; firmar con `current`, verificar contra ambas;
+selección por intento (current→previous) sin exponer secreto (kid opcional no-secreto). **Grace =
+vida máxima de sesión (12 h).** Rotación/rollback por runbook de ops; **no se generan claves aquí**.
+
+## R1-AA. Failure mode
+
+`sessions.db` no disponible ⇒ **FAIL CLOSED** (401/503 según ruta), **nunca** fallback a
+`x-user-id`. Un restart que pierda el store ⇒ todos re-login (aceptable).
+
+## R1-AB. M1 requirements check
+
+server-issued ✓, tamper-proof ✓, expiration ✓, **server-side per-session revocation real** ✓,
+disabled immediate reject ✓, roles server-side ✓, tenant server-side (M1-B) ✓, cross-instance
+(key+cv+sessions.db compartidos) ✓, no mutable client authority ✓, x-user-id conflict deny ✓,
+HttpOnly ✓, Secure ✓, CSRF-safe ✓, key rotation ✓, fail-closed ✓. **Cumple el contrato — no STOP.**
+
+## R1-AC. Updated security tests (añadidos)
+
+logout normal→ese sid 401 y otros sid del usuario siguen 200; cookie robada usada tras logout→401
+(sid revocado); logout-all→todas 401; disable con sesión viva→401 inmediato (incl. progreso);
+password reset con sesión viva→401; session replay (token viejo, sid revocado)→401; pérdida de
+`sessions.db`→fail-closed (nunca x-user-id); revocación cross-instance (revoco en api_1, api_2 lo
+ve)→401; carrera de `credentialVersion++`→consistente bajo lock; `x-user-id` ≠ sub→deny+telemetría.
+
+## R1-AD. Revised implementation unit — CHP-IDDB-M1-A-SESSION-IDENTITY-01
+
+Sigue siendo **una unidad coherente**, ahora con alcance cerrado: (1) migración lazy de
+`credentialVersion` (default 0 en `normalizeUser`); (2) `sessions.db` schema + servicio
+(issue/verify/revoke) con WAL two-process; (3) emisión en login (set-cookie) + logout + logout-all;
+(4) middleware `resolveSession`→`req.auth` con active+cv+revocation; (5) cierre del gap
+`requireProgressOwner`; (6) CSRF guard; (7) frontend AuthContext/dataService (cookie en vez de
+header); (8) telemetría; (9) observación/enforcement de `x-user-id`; (10) suite R1-AC. Split solo
+si el frontend exige su propia ventana de release (posible front/back).
+
+## R1-AE. Deploy phases (derivadas, no ejecutar)
+
+A. `sessions.db` schema desplegado dormido + migración lazy de `credentialVersion`;
+B. emisión + verificación en modo compat (dual-auth: sujeto firmado gana, x-user-id aún aceptado);
+C. migración de cookie en el frontend;
+D. observar `legacy_x_user_id{browser}` → 0;
+E. **canary de enforcement en api_2** (rechazar x-user-id externo cuando hay sesión), api_1 control;
+F. enforcement en ambas;
+G. rechazo de x-user-id externo. Rollback tras E/F que reabra x-user-id externo autoritativo exige
+`--acknowledge-security-risk`.
+
+## R1-AF. M1-B handoff
+
+M1-A entrega `req.auth.userId` confiable; M1-B resuelve institution/roles/memberships/scope
+server-side. Nada de tenant en el token.
+
+## R1-AG. Groups-canary non-interference
+
+Verificado solo por `docker inspect --format` (sin group probes): api_1 `READ=json`, api_2
+`READ=sqlite`+`DOMAINS=groups`, ambos `cf36852` healthy, restarts=0 → **RUNNING, no cerrado**.
+
+## R1-AI. M1_A_IMPLEMENTATION_ALLOWED = **true**
+
+Con CI evidence GREEN, sin findings nuevos, heredados sin cambio, revocación server-side real y
+modelo inequívoco, la implementación (01) queda autorizada — **tras** cerrar el canary GROUPS.
