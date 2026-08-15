@@ -136,3 +136,82 @@ Sin migración de datos requerida (E=0; D/externado por deny-closed seguro).
 TENANT_ISOLATION RED→GREEN, MEMBERSHIP_GOVERNANCE YELLOW→GREEN, ROLE_GOVERNANCE
 YELLOW→GREEN, `CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01`. No completa M1 (siguen
 controlled canaries + closeout M1-D).
+
+---
+
+# R1 — CI reconciliation (identity-preflight #69 FAILED → #70 GREEN)
+
+Trazabilidad documental del intermedio fallido al árbol final. Sin cambio de código
+de seguridad; solo hermeticidad de tests y orquestación de CI.
+
+## Run fallido (root cause)
+
+- **identity-preflight run #69** — `RUN_ID=31895989760`, `JOB_ID=95039274145`,
+  `FAILED_SHA=48e0644`, conclusion **failure**.
+- **FAILED_STEP**: #15 «La suite no escribe stores reales».
+- **FAILED_COMMAND**: `node scripts/verify-test-store-isolation.mjs test:identity test:memberships`.
+- **FAILED_ASSERTION**: `✗ archivos modificados: 1 — data-critical/insights.db-shm (contenido)`.
+- **EXPECTED**: 0 archivos modificados. **ACTUAL**: 1 (`data-critical/insights.db-shm`).
+  `FAIL — suites fallidas: 0; stores alterados: sí` → **EXIT_CODE 1**.
+- Las suites en sí pasaron (`test:identity` ✓, `test:memberships` ✓, `suites fallidas: 0`):
+  el único fallo fue la escritura de un store real.
+
+## Clasificación: **A (store-isolation por path real)** — no B
+
+No fue doble-ejecución (suites fallidas=0). Causa: la integración
+`tenantAuthzIntegration.test.mjs` ejerce rutas de Aula Viva (`/students/:userId/*`)
+que abren `getInsightsExtDb()`; con `INSIGHTS_SQLITE_PATH` ausente, ese repo resuelve
+a `DEFAULT_PATH = data-critical/insights.db` (insightsDbExt.mjs:19-20) y, en modo WAL,
+crea/actualiza el sidecar `insights.db-shm`. El store-isolation lo detectó bajo el
+snapshot de `data-critical/`.
+
+## Fix mapping (diff `48e0644..7f05ed7`, 4 archivos / +12 −3)
+
+| Archivo | Cambio | Cierra |
+|---|---|---|
+| `server/__test__/tenantAuthzIntegration.test.mjs` (+1) | `INSIGHTS_SQLITE_PATH`/`EVENTS_SQLITE_PATH` → temp | la escritura de `insights.db-shm` (#69) |
+| `server/__test__/tenantAuthzM1aIntegration.test.mjs` (+1) | ídem | misma clase, preventivo |
+| `package.json` | `test:identity-integration` separado de `test:identity` | robustez: evita re-ejecutar las integraciones server-real bajo el store-guard |
+| `.github/workflows/identity-preflight.yml` (+6) | paso propio `npm run test:identity-integration` | mantiene las integraciones en CI, una vez, fuera del store-guard |
+
+`INSIGHTS_SQLITE_PATH` presente: **0** en 48e0644 → **1** en 7f05ed7 (verificado).
+
+## Commit chain (sin reescribir historia)
+
+`48e0644` (M1-B, con el bug de path) → **`7f05ed7`** (fix único, fast-forward,
+sin force). Los amends intermedios locales no se publicaron; origin fue
+`48e0644 → 7f05ed7` por ff.
+
+## Reproducción (por evidencia determinística)
+
+Ejecutar el test viejo escribiría `data-critical/insights.db-shm` en el working tree
+(mutación de store real), por lo que se declara por diff+log determinístico
+(FASE 5 fallback): (1) 48e0644 carece de `INSIGHTS_SQLITE_PATH`; (2)
+`DB_PATH = process.env.INSIGHTS_SQLITE_PATH || data-critical/insights.db`; (3) el log
+#69 muestra exactamente `data-critical/insights.db-shm (contenido)`. El árbol final se
+validó además en imagen `cf36852` aislada (`--network none`, /tmp): store-isolation
+**archivos modificados: 0**.
+
+## Run final (GREEN)
+
+- **identity-preflight run #70** — `FINAL_RUN_ID=31896611028`, `FINAL_SHA=7f05ed7`,
+  conclusion **success** (incluye el paso store-isolation, no excluido; línea 131 del
+  workflow: `verify-test-store-isolation.mjs test:identity test:memberships`).
+- **security run #107** (`31896611040`): delta gate GREEN — evidence-hardening,
+  image-integrity, gitleaks-head, trivy(fs), osv. Heredados
+  `gitleaks-history` (10 leaks) y `trivy-image` (CVE-2026-44902/45447/59892)
+  **baseline-idénticos**, `NEW_FINDINGS=0`.
+
+## Auditoría de no-debilitamiento
+
+`SECURITY_TEST_STRENGTH_UNCHANGED_OR_STRONGER=true`. El diff `48e0644..7f05ed7` **no**
+toca `tenantAuthz.js`, `server.js`, ni las aserciones de la golden matrix / route-coverage
+/ unit; **no** hay `continue-on-error`/`allow_failure`/`.skip`/exclusión del store-guard
+/ eliminación de tests. Grep de debilitamiento: vacío. La golden matrix ya pasaba en
+48e0644 (el fallo fue solo el sidecar de store); el fix añade hermeticidad, no relaja.
+
+## Disposición
+
+**GREEN — M1-B FAILED INTERMEDIATE PREFLIGHT ROOT-CAUSED AND FINAL PREP TREE VERIFIED
+GREEN.** `FAILED_SHA=48e0644`, `FINAL_SHA=7f05ed7`, `FINAL_IDENTITY_PREFLIGHT=GREEN`,
+`PRODUCTION_STORE_WRITES_FROM_TESTS=0`, `M1_B_PREP_VALID=true`. Canary GROUPS intacto.
