@@ -7,8 +7,9 @@ Baseline de código: `cf36852`. No se desplegó nada; el canary GROUPS quedó in
 ## B. Production / canary freeze
 
 api_1 `READ=json` (control), api_2 `READ=sqlite`+`DOMAINS=groups` (canary RUNNING), ambos
-`cf36852` healthy restarts=0. Esta auditoría fue 100 % lectura de código + un único
-`docker inspect` no intrusivo (sin requests a `/api/groups`, sin flags, sin recreate).
+`cf36852` healthy restarts=0. Esta auditoría fue 100 % lectura de código + una única
+inspección de contenedor con `--format` acotado (sin volcar `Config.Env` en crudo, sin
+requests a `/api/groups`, sin flags, sin recreate).
 
 ## C. Authentication mechanisms (inventario real)
 
