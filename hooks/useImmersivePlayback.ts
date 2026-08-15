@@ -555,7 +555,6 @@ function pbLog(event: PlaybackEvent, data?: Record<string, unknown>): void {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-user-id':    userIdHeader,
                 },
                 body,
                 keepalive: true,
@@ -1654,7 +1653,7 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
                         });
                         return await fetch('/api/tts', {
                             method:  'POST',
-                            headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+                            headers: { 'Content-Type': 'application/json' },
                             body:    JSON.stringify({ text }),
                             signal:  attemptCtrl.signal,
                         });

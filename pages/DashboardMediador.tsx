@@ -971,7 +971,7 @@ const InterventionModal: React.FC<InterventionModalProps> = ({ student, mediator
         try {
             const res = await fetch('/api/interventions', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-user-id': mediatorId },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     mediatorId,
                     studentId: student.userId,
@@ -1568,7 +1568,7 @@ const DashboardMediador: React.FC = () => {
             setLoading(true);
             setError(null);
             try {
-                const headers: Record<string, string> = { 'x-user-id': user.id };
+                const headers: Record<string, string> = {};
                 const [metricsRes, interventionsRes, effectivenessRes] = await Promise.all([
                     fetch(`/api/metrics/course/${encodeURIComponent(courseId)}`, { headers }),
                     fetch(`/api/interventions/course/${encodeURIComponent(courseId)}`, { headers }),

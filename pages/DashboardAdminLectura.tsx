@@ -505,8 +505,7 @@ const DashboardAdminLectura: React.FC = () => {
         if (!user) return;
 
         const headers: Record<string, string> = {
-            'x-user-id': user.id,
-        };
+            };
 
         const load = async () => {
             setLoading(true);

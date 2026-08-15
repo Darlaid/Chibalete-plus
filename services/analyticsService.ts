@@ -48,7 +48,6 @@ function send(batch: ReadingEvent[]): void {
     body: JSON.stringify(batch),
     headers: {
       'Content-Type': 'application/json',
-      ...(userId ? { 'x-user-id': userId } : {}),
     },
     keepalive: true,
   }).catch(() => {}); // never let analytics errors surface

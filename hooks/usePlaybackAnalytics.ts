@@ -69,7 +69,7 @@ export function usePlaybackAnalytics(
         const batch = bufferRef.current.splice(0); // drain atómico
         fetch(ENDPOINT, {
             method:  'POST',
-            headers: { 'Content-Type': 'application/json', 'x-user-id': uid },
+            headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ events: batch }),
             keepalive: true, // sobrevive a navegación / cierre de tab
         }).catch(() => {}); // fire-and-forget — nunca propagar errores de red

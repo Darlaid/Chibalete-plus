@@ -233,7 +233,7 @@ export function useA11yAnalytics(config: UseA11yAnalyticsConfig): UseA11yAnalyti
                     // Fallback: fetch keepalive con headers correctos.
                     fetch(ENDPOINT, {
                         method:    'POST',
-                        headers:   { 'Content-Type': 'application/json', 'x-user-id': uid },
+                        headers:   { 'Content-Type': 'application/json' },
                         body,
                         keepalive: true,
                     })
@@ -251,7 +251,7 @@ export function useA11yAnalytics(config: UseA11yAnalyticsConfig): UseA11yAnalyti
 
             fetch(ENDPOINT, {
                 method:    'POST',
-                headers:   { 'Content-Type': 'application/json', 'x-user-id': uid },
+                headers:   { 'Content-Type': 'application/json' },
                 body,
                 keepalive: true,
             })

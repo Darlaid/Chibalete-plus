@@ -840,7 +840,6 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 method:  'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-user-id':    user?.id ?? '',
                 },
                 body: JSON.stringify({ text: textToRead }),
             });

@@ -55,7 +55,7 @@ async function get<T>(path: string, fallback: T): Promise<T & { _meta?: { cached
     try {
         const res = await fetch(url, {
             method: 'GET',
-            headers: userId ? { 'x-user-id': userId } : {},
+            headers:{},
             signal: ctrl.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -80,8 +80,7 @@ async function post<T>(path: string, body: unknown): Promise<T | { ok: false; er
     try {
         const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json',
-                       ...(userId ? { 'x-user-id': userId } : {}) },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });
@@ -103,8 +102,7 @@ async function patch<T>(path: string, body: unknown): Promise<T | { ok: false; e
     try {
         const res = await fetch(url, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json',
-                       ...(userId ? { 'x-user-id': userId } : {}) },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });

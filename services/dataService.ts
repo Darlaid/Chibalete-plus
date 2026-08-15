@@ -180,11 +180,10 @@ class DataService {
      * No embebe secretos en el bundle.
      */
     private get adminWriteHeaders(): Record<string, string> {
-        const userId = this.getSessionUserId();
-        // Resiliencia: sin sesión activa, devolver objeto vacío en lugar de
-        // un header `x-user-id: ''` ruidoso. El backend rechaza ambos por
-        // igual (401) — esto evita logs falsos durante el bootstrap pre-login.
-        return userId ? { 'x-user-id': userId } : {};
+        // CHP-IDDB-M1-A: la autoridad de identidad es la COOKIE de sesión HttpOnly
+        // (same-origin, enviada automáticamente). El navegador ya NO construye
+        // x-user-id; el backend valida rol/sesión server-side.
+        return {};
     }
 
     constructor() {
@@ -333,7 +332,7 @@ class DataService {
             // keepalive: true survives page-unload; supports custom headers (unlike sendBeacon)
             fetch(`${this.apiUrl}/progress/${usuario_id}/${contenido_id}/sync`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-user-id': usuario_id },
+                headers: { 'Content-Type': 'application/json' },
                 body: hash,
                 keepalive: true
             }).then(res => {
@@ -391,7 +390,7 @@ class DataService {
             // Attempt retry — fire-and-forget with success/failure callbacks.
             fetch(`${this.apiUrl}/progress/${entry.userId}/${entry.contentId}/sync`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-user-id': entry.userId },
+                headers: { 'Content-Type': 'application/json' },
                 body: entry.payload,
                 keepalive: true
             }).then(res => {
@@ -604,7 +603,7 @@ class DataService {
     // --- SYNC METHODS ---
     async syncUserProgress(userId: string) {
         try {
-            const res = await fetch(`${this.apiUrl}/progress/user/${userId}`, { headers: { 'x-user-id': userId } });
+            const res = await fetch(`${this.apiUrl}/progress/user/${userId}`, { headers: {} });
             if (res.ok) {
                 const data = await res.json();
                 const apiProgress = data.progressList || [];
@@ -688,7 +687,7 @@ class DataService {
         return new Promise<string>((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open('POST', url);
-            xhr.setRequestHeader('x-user-id', uploadUserId);
+            xhr.withCredentials = true; // CHP-IDDB-M1-A: identidad por cookie de sesión (same-origin)
 
             if (onProgress && xhr.upload) {
                 xhr.upload.addEventListener('progress', (ev) => {
@@ -751,7 +750,6 @@ class DataService {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-user-id': purgeUserId,
                 },
                 body: JSON.stringify({ url })
             });
@@ -779,7 +777,6 @@ class DataService {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-user-id': saveUserId,
             },
             body: JSON.stringify(contentItem)
         });
@@ -800,8 +797,7 @@ class DataService {
         const response = await fetch(`${this.apiUrl}/content/${id}`, {
             method: 'DELETE',
             headers: {
-                'x-user-id': deleteUserId,
-            }
+                }
         });
 
         if (!response.ok) {
@@ -818,8 +814,7 @@ class DataService {
         const response = await fetch(`${this.apiUrl}/content/${id}/retry`, {
             method: 'POST',
             headers: {
-                'x-user-id': retryUserId,
-            }
+                }
         });
 
         if (!response.ok) {
@@ -1325,8 +1320,7 @@ class DataService {
         const response = await fetch(`${this.apiUrl}/groups/${groupId}/join`, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'x-user-id': userId
+                'Content-Type': 'application/json'
             }
         });
 
@@ -2182,7 +2176,7 @@ class DataService {
             if (!userId || !contentId) return null;
             const res = await fetch(`/api/leo/memory/${userId}/${contentId}`, {
                 method: 'GET',
-                headers: { 'x-user-id': userId }
+                headers: {}
             });
             if (!res.ok) return null;
             const data = await res.json();
@@ -2198,8 +2192,7 @@ class DataService {
             await fetch(`/api/leo/memory/${userId}/${contentId}`, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'x-user-id': userId
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(memory)
             });
@@ -2327,7 +2320,7 @@ class DataService {
             const timeoutId = setTimeout(() => controller.abort(), 3000);
             const res = await fetch(
                 `${this.apiUrl}/progress/item/${userId}/${contentId}`,
-                { headers: { 'x-user-id': userId }, signal: controller.signal }
+                { headers: {}, signal: controller.signal }
             );
             clearTimeout(timeoutId);
 
@@ -2624,7 +2617,7 @@ class DataService {
         const payload = { updatedAt: new Date().toISOString() };
         fetch(`${this.apiUrl}/progress/${userId}/${contentId}/complete`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
             keepalive: true
         }).catch(e => console.warn('Sync Complete failed', e));
@@ -2931,7 +2924,6 @@ class DataService {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-user-id': studentId,
             },
             body: JSON.stringify({
                 taskId,
@@ -2956,7 +2948,7 @@ class DataService {
     async getGroupDiagnosis(groupId: string): Promise<GroupDiagnosis> {
         const userId = this.getSessionUserId();
         const r = await fetch(`${this.apiUrl}/groups/${encodeURIComponent(groupId)}/diagnosis`, {
-            headers: userId ? { 'x-user-id': userId } : {},
+            headers:{},
         });
         if (!r.ok) {
             // Mantener el cuerpo del backend (ya viene con healthStatus + summary)
@@ -2980,7 +2972,7 @@ class DataService {
     async getStudentStatus(userId: string): Promise<StudentStatus> {
         const requesterId = this.getSessionUserId();
         const r = await fetch(`${this.apiUrl}/students/${encodeURIComponent(userId)}/status`, {
-            headers: requesterId ? { 'x-user-id': requesterId } : {},
+            headers:{},
         });
         // 404 y 500 traen un body con shape StudentStatus (state TECH_ISSUE) — lo retornamos.
         // Solo lanzamos cuando el body no es JSON parseable (network/timeout reales).

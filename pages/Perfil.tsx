@@ -176,7 +176,7 @@ const Perfil: React.FC = () => {
         if (!user?.id || !currentUser?.id || currentUser.id !== user.id) return;
         setIcdliLoading(true);
         fetch(`/api/metrics/student/${user.id}`, {
-            headers: { 'x-user-id': currentUser.id },
+            headers: {},
         })
             .then(res => (res.ok ? res.json() : null))
             .then(data => {

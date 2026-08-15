@@ -160,8 +160,7 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
             const res = await fetch('/api/leo/ask', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    ...(userId ? { 'x-user-id': userId } : {})
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     contentId, chunkIndex: currentIndex, interactionType: type, payload, exactSentence,

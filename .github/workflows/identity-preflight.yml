@@ -95,6 +95,12 @@ jobs:
       - name: Canonicidad de la fuente de usuarios
         run: npm run test:identity
 
+      # CHP-IDDB-M1-A-R1: flujos de producto cookie-only (server real). Fuera de
+      # test:identity para no re-ejecutarse bajo el store-isolation guard.
+      # Store-hermético (INSIGHTS/EVENTS/SESSIONS/stores en temp).
+      - name: Sesión — flujos de navegador cookie-only (server real)
+        run: npm run test:session-browser
+
       - name: Contrato de grupos y memberships (creación + edición)
         run: npm run test:memberships
 

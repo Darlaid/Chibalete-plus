@@ -60,8 +60,7 @@ export function useAccessCheck(contentId: string, userId: string | undefined): A
                         // coincide con el query param userId. Un atacante que inyecte un userId
                         // ajeno en la URL también tendría que controlar este header, lo que
                         // requiere que el fetch lo emita el propio cliente autenticado.
-                        'x-user-id': userId,
-                    },
+                        },
                 });
                 if (cancelled) return;
 

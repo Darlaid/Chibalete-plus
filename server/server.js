@@ -322,7 +322,7 @@ const _albumWindows  = new Map(); // userId → timestamp[]
 
 function makeTtsRateLimiter(windowMap, maxPerMinute) {
     return (req, res, next) => {
-        const userId = req.headers['x-user-id'];
+        const userId = reqUserId(req);
         if (!userId) return next(); // requireUserAuth will reject it
         const now  = Date.now();
         const hits = (windowMap.get(userId) ?? []).filter(t => now - t < 60_000);
@@ -501,7 +501,7 @@ const requireUserAuth = async (req, res, next) => {
         return next();
     }
 
-    const userId = req.headers['x-user-id'];
+    const userId = reqUserId(req);
     if (!userId) {
         return res.status(401).json({ error: 'Auth requerida: x-user-id missing' });
     }
@@ -545,7 +545,7 @@ const requireProgressOwner = async (req, res, next) => {
         return next();
     }
 
-    const userIdFromHeader = req.headers['x-user-id'];
+    const userIdFromHeader = reqUserId(req);
     if (!userIdFromHeader || userIdFromHeader !== userIdFromParam) {
         log(`Progress auth rejected: header=${userIdFromHeader} param=${userIdFromParam}`, 'WARN');
         return res.status(401).json({ error: 'No autorizado: x-user-id requerido y debe coincidir con el usuario' });
@@ -569,10 +569,19 @@ const requireProgressOwner = async (req, res, next) => {
  * Requires x-user-id header and verifies the user has role 'administrador'.
  * GET requests pass through (read-only ops don't require upload rights).
  */
-const requireAdminRole = (req, res, next) => {
+const requireAdminRole = async (req, res, next) => {
     if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
 
-    const userId = req.headers['x-user-id'];
+    // CHP-IDDB-M1-A: en compat/enforce la identidad viene de la sesión firmada
+    // (el navegador ya no envía x-user-id). En 'off' se conserva el header.
+    let userId;
+    if (sessionIssuanceEnabled()) {
+        const d = await sessionAuth.authenticate(req);
+        if (!d.ok) return res.status(d.status).json({ error: 'Auth requerida' });
+        userId = d.userId;
+    } else {
+        userId = req.headers['x-user-id'];
+    }
     if (!userId) {
         log(`[AUTH_MISSING] method=${req.method} path=${req.path} ip=${req.ip}`, 'WARN');
         return res.status(401).json({ error: 'Auth requerida: x-user-id missing' });
@@ -1469,15 +1478,23 @@ app.get('/api/content', (req, res) => {
 // GET /api/content/:id/access?userId=...
 // Árbitro server-side mínimo. Responde { allowed: true } o { allowed: false, reason: '...' }
 // No depende del reloj del cliente. Utiliza Date.now() del servidor.
-app.get('/api/content/:id/access', (req, res) => {
+app.get('/api/content/:id/access', async (req, res) => {
     const { id: contentId } = req.params;
     const { userId } = req.query;
 
-    // --- Micro-Parche E2: Anti-Spoofing de userId ---
-    // El frontend envía x-user-id como header desde la sesión activa.
-    // Si el header no existe o no coincide con el query param, alguien está
-    // intentando consultar permisos con el ID de otro usuario.
-    const sessionUserId = req.headers['x-user-id'];
+    // --- Anti-Spoofing de userId ---
+    // CHP-IDDB-M1-A: la identidad autenticada es la COOKIE de sesión firmada en
+    // compat/enforce (el navegador ya no envía x-user-id); en 'off' se conserva
+    // el contrato histórico (x-user-id). El query `userId` debe coincidir con la
+    // identidad autenticada — nunca es autoridad por sí mismo.
+    let sessionUserId;
+    if (sessionIssuanceEnabled()) {
+        const d = await sessionAuth.authenticate(req);
+        if (!d.ok) return res.status(d.status).json({ allowed: false, reason: 'Sesión no válida.' });
+        sessionUserId = d.userId;
+    } else {
+        sessionUserId = req.headers['x-user-id'];
+    }
     if (!sessionUserId || sessionUserId !== userId) {
         return res.status(401).json({ allowed: false, reason: 'Sesión no válida.' });
     }
@@ -2444,6 +2461,12 @@ sessionAuth.attachMetrics({
     legacy: authSessionLegacyXUserId,
     mismatch: authSessionSubjectMismatch,
 });
+
+// CHP-IDDB-M1-A — identidad autenticada de un handler. Prioridad: sesión firmada
+// (req.auth, M1-A) → req.user (poblado por los middlewares de auth) → x-user-id
+// (solo transición/off; el navegador cookie-only ya no lo envía). Nunca es
+// autoridad por sí mismo el header en compat/enforce: la sesión ya validó antes.
+const reqUserId = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
 
 /**
  * Emite cookie de sesión firmada tras un login válido (solo si el modo lo
@@ -6545,7 +6568,7 @@ app.post('/api/tts', requireUserAuth, ttsUserLimiter, async (req, res) => {
     // Respetar el límite de tokens del engine para TTS (2000 chars)
     const trimmed = text.trim().substring(0, 2000);
 
-    const userId = req.headers['x-user-id'];
+    const userId = reqUserId(req);
 
     if (_ttsSemaphore.queueDepth >= 50) {
         return res.status(503).json({ error: 'TTS temporalmente no disponible' });
@@ -6599,7 +6622,7 @@ app.post('/api/album/tts', requireUserAuth, albumTtsUserLimiter, async (req, res
     }
 
     const trimmed = text.trim().substring(0, 500);
-    const userId  = req.headers['x-user-id'];
+    const userId  = reqUserId(req);
 
     try {
         const { url, provider, cached } = await getOrGenerateAlbumRegionAudio(contentId ?? 'global', trimmed);
@@ -6840,14 +6863,14 @@ app.post('/api/admin/album-cache/gc', requireAdminAccess, async (req, res) => {
 // --- LEO PEDAGOGICAL ENGINE (Fase 5 / D1) ---
 app.post('/api/leo/ask', requireUserAuth, async (req, res) => {
     try {
-        const leoReq = normalizeRequest(req.body, 'companion', req.headers['x-user-id']);
+        const leoReq = normalizeRequest(req.body, 'companion', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
         res.status(200).json({ success: true, answer: result.answer });
 
         // Persist Leo interaction metadata (fire-and-forget, never blocks response)
         (async () => {
             try {
-                const userId = req.headers['x-user-id'];
+                const userId = reqUserId(req);
                 const contentId = req.body?.contentId ?? null;
                 const interactionType = req.body?.interactionType ?? 'chat';
                 const surface = req.body?.surface ?? 'reader';
@@ -6986,7 +7009,7 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
 // --- LEO CHAT (Fase 6 / D1) ---
 app.post('/api/leo/chat', requireUserAuth, async (req, res) => {
     try {
-        const leoReq = normalizeRequest(req.body, 'chatbot', req.headers['x-user-id']);
+        const leoReq = normalizeRequest(req.body, 'chatbot', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
         res.status(200).json({ success: true, answer: result.answer });
     } catch (error) {
@@ -7004,7 +7027,7 @@ app.post('/api/leo/chat', requireUserAuth, async (req, res) => {
 // --- LEO RECAP (Fase 6 / D1) ---
 app.post('/api/leo/recap', requireUserAuth, async (req, res) => {
     try {
-        const leoReq = normalizeRequest(req.body, 'recap', req.headers['x-user-id']);
+        const leoReq = normalizeRequest(req.body, 'recap', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
         res.status(200).json({ success: true, answer: result.answer });
     } catch (error) {
@@ -7494,7 +7517,7 @@ app.post('/api/analytics/events', async (req, res) => {
 
         // Security: x-user-id header is required. Reject requests without it.
         // Events claiming a different userId than the header are discarded and logged.
-        const headerUserId = req.headers['x-user-id'];
+        const headerUserId = reqUserId(req);
         if (!headerUserId) {
             return res.status(401).json({ error: 'x-user-id required' });
         }
@@ -7593,7 +7616,7 @@ function loadAndInitMetrics() {
  * Returns null if header is missing or user not found.
  */
 function resolveRequester(req, users) {
-    const id = req.headers['x-user-id'];
+    const id = reqUserId(req);
     if (!id) return null;
     return users.find(u => u.id === id) ?? null;
 }
@@ -9092,7 +9115,7 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/api/playback-events', (req, res) => {
     try {
-        const userId = req.headers['x-user-id'];
+        const userId = reqUserId(req);
         if (!userId) return res.status(401).end();
 
         const events = req.body?.events;
@@ -9139,7 +9162,7 @@ app.post('/api/playback-events', (req, res) => {
 // Requiere x-user-id para correlación — rechaza sin él (evita spam anónimo).
 app.post('/api/events', (req, res) => {
     try {
-        const userId = req.headers['x-user-id'];
+        const userId = reqUserId(req);
         if (!userId) return res.status(400).end();
         const { event, ts, ...rest } = req.body ?? {};
         if (typeof event !== 'string') return res.status(400).json({ error: 'event required' });
@@ -9175,7 +9198,7 @@ app.post('/api/events', (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/api/v1/events', (req, res) => {
     try {
-        const headerUserId = req.headers['x-user-id'];
+        const headerUserId = reqUserId(req);
         if (!headerUserId) {
             return res.status(401).json({ error: 'x-user-id required' });
         }

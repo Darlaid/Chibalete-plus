@@ -219,8 +219,8 @@ const BackbonePersistentAlertsSection: React.FC<BackbonePersistentAlertsSectionP
     const [actionKey, setActionKey] = useState<string | null>(null);
 
     const headers = useCallback((): HeadersInit => {
+        // CHP-IDDB-M1-A: autenticación por cookie de sesión (same-origin); sin x-user-id.
         const h: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (userId) h['x-user-id'] = userId;
         return h;
     }, [userId]);
 

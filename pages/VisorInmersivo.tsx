@@ -1224,7 +1224,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             try {
                 const res = await fetch(
                     `/api/content/${encodeURIComponent(content.id)}/access?userId=${encodeURIComponent(user.id)}`,
-                    { headers: { 'x-user-id': user.id } }
+                    { headers: {} }
                 );
                 if (cancelled) return;
                 const data = await res.json();

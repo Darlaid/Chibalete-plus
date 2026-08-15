@@ -175,7 +175,6 @@ export const generarMicroResumenRecordatorio = async (
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                ...(userId ? { 'x-user-id': userId } : {}),
             },
             body: JSON.stringify({ textoPagina, tituloLibro }),
         });
@@ -310,7 +309,7 @@ export const generarAudioTTS = async (texto: string): Promise<string | undefined
       if (!userId) return undefined;
       const res = await fetch(`${dataService.apiUrl}/album/tts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: texto }),
       });
       if (!res.ok) return undefined;
@@ -652,7 +651,6 @@ export const chatConBibliotecario = async (
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                ...(userId ? { 'x-user-id': userId } : {}),
             },
             body: JSON.stringify({
                 mensaje: mensajeUsuario,

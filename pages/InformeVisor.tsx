@@ -276,7 +276,7 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     useEffect(() => {
         if (!user || !id) return;
 
-        const headers: Record<string, string> = { 'x-user-id': user.id };
+        const headers: Record<string, string> = {};
 
         const url = type === 'course'
             ? `/api/reports/course/${encodeURIComponent(id)}`

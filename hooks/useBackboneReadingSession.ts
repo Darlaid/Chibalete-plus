@@ -172,7 +172,7 @@ export function useBackboneReadingSession(
         try {
             fetch(ENDPOINT, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-user-id': uid },
+                headers: { 'Content-Type': 'application/json' },
                 body,
                 keepalive: true,
             }).catch(() => { /* fail silencioso */ });

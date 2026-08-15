@@ -454,7 +454,7 @@ const AulaViva: React.FC = () => {
         setStudentDownloadError(null);
         try {
             const res = await fetch(`/api/students/${studentId}/export-submissions`, {
-                headers: { 'x-user-id': user.id },
+                headers: {},
             });
             if (!res.ok) throw new Error(`Error del servidor (${res.status})`);
             const blob = await res.blob();
@@ -481,7 +481,7 @@ const AulaViva: React.FC = () => {
         setDownloadError(null);
         try {
             const res = await fetch(`/api/tasks/${taskId}/export-submissions`, {
-                headers: { 'x-user-id': user.id },
+                headers: {},
             });
             if (!res.ok) throw new Error(`Error del servidor (${res.status})`);
             const blob = await res.blob();

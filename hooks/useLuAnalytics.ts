@@ -104,7 +104,7 @@ export function useLuAnalytics(config: UseLuAnalyticsConfig): UseLuAnalyticsApi 
                 if (!sent) {
                     fetch(ENDPOINT, {
                         method:  'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-user-id': uid },
+                        headers: { 'Content-Type': 'application/json' },
                         body, keepalive: true,
                     }).catch(() => { /* fail silencioso */ });
                 }
@@ -112,7 +112,7 @@ export function useLuAnalytics(config: UseLuAnalyticsConfig): UseLuAnalyticsApi 
             }
             fetch(ENDPOINT, {
                 method:  'POST',
-                headers: { 'Content-Type': 'application/json', 'x-user-id': uid },
+                headers: { 'Content-Type': 'application/json' },
                 body, keepalive: true,
             }).catch(() => { /* fail silencioso */ });
         } catch {

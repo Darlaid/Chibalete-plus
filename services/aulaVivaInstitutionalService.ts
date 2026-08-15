@@ -47,7 +47,7 @@ async function get<T>(path: string, fallback: T): Promise<T> {
     try {
         const res = await fetch(BASE + path, {
             method: 'GET',
-            headers: userId ? { 'x-user-id': userId } : {},
+            headers:{},
             signal: ctrl.signal,
         });
         if (!res.ok) {
@@ -73,8 +73,7 @@ async function post<T>(path: string, body: unknown): Promise<T | { ok: false; er
     try {
         const res = await fetch(BASE + path, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json',
-                       ...(userId ? { 'x-user-id': userId } : {}) },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body), signal: ctrl.signal,
         });
         if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
