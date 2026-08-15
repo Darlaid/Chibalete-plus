@@ -9563,6 +9563,24 @@ if (IS_PROD) {
     });
 }
 
+// CHP-IDDB-M1-B — guard de combinación de modos (fail-fast). TENANT_AUTHZ_MODE=
+// enforce con SESSION_AUTH_MODE!=enforce autorizaría el scope de tenant sobre una
+// identidad AUTOAFIRMADA (x-user-id / req.user legacy) → inseguro. Se rechaza al
+// arranque SIEMPRE, salvo el bypass EXPLÍCITO de test `TENANT_AUTHZ_ALLOW_UNSAFE=1`
+// (los tests herméticos ejercen off/compat+enforce para probar la lógica de scoping
+// sin claves de sesión; producción nunca fija ese bypass).
+// M1_B_ENFORCE_REQUIRES_M1_A_ENFORCE=true.
+if (tenantAuthzMode() === 'enforce' && sessionAuthMode() !== 'enforce') {
+    const msg = 'MODE_GUARD: TENANT_AUTHZ_MODE=enforce exige SESSION_AUTH_MODE=enforce '
+        + `(actual session=${sessionAuthMode()}) — identidad autoafirmada no es autoridad segura para tenant.`;
+    if (process.env.TENANT_AUTHZ_ALLOW_UNSAFE === '1') {
+        log(`[WARN] ${msg} (bypass de test TENANT_AUTHZ_ALLOW_UNSAFE=1)`, 'WARN');
+    } else {
+        log(`[FATAL] ${msg}`, 'ERROR');
+        throw new Error(msg);
+    }
+}
+
 app.listen(PORT, '0.0.0.0', () => {
     log(`Server running on port ${PORT}`);
     setTimeout(checkMissingTTS, 2000);

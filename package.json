@@ -43,7 +43,7 @@
     "test:metrics-api": "node server/__test__/metricsApiV2.test.js",
     "test:metrics-shadow": "node server/__test__/metricsShadowBoundary.test.js",
     "test:legacy-perf": "node scripts/perf/request-index.test.mjs && node scripts/perf/target-guard.test.mjs && node scripts/perf/productionCanaryCorpus.test.mjs && node scripts/perf/productionCanaryRuntimeBinding.test.mjs && node server/__test__/metricsRequestContext.test.js && node server/__test__/metricsContextRatchet.test.js && node server/__test__/metricsEquivalenceHarness.test.js",
-    "test:identity-integration": "node server/__test__/tenantAuthzIntegration.test.mjs && node server/__test__/tenantAuthzM1aIntegration.test.mjs",
+    "test:identity-integration": "node server/__test__/tenantAuthzIntegration.test.mjs && node server/__test__/tenantAuthzM1aIntegration.test.mjs && node server/__test__/modeInteractionMatrix.test.mjs",
     "test:session-browser": "node server/__test__/sessionBrowserCookieOnly.test.mjs"
   },
   "dependencies": {

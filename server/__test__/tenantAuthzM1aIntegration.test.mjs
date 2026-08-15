@@ -52,7 +52,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         USER_AUDIT_DB: path.join(tmp, 'audit.json'),
         IDENTITY_DB: P.identity, IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json',
         SESSIONS_DB: P.sessions, SESSION_KEY_CURRENT_PATH: P.key,
-        SESSION_AUTH_MODE: 'compat', TENANT_AUTHZ_MODE: 'enforce',
+        SESSION_AUTH_MODE: 'compat', TENANT_AUTHZ_MODE: 'enforce', TENANT_AUTHZ_ALLOW_UNSAFE: '1',
         INSIGHTS_SQLITE_PATH: path.join(tmp, 'insights.db'), EVENTS_SQLITE_PATH: path.join(tmp, 'events.db'),
     },
 });

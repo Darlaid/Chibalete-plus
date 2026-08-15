@@ -63,7 +63,7 @@ function spawnApi(mode) {
             CONTENT_DB: P.content, UPLOADS_ROOT: P.uploads, OFFLINE_ASSIGNMENT_DB_PATH: P.offline,
             USER_AUDIT_DB: path.join(tmp, 'audit.json'),
             IDENTITY_DB: P.identity, IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json',
-            SESSION_AUTH_MODE: 'off', TENANT_AUTHZ_MODE: mode,
+            SESSION_AUTH_MODE: 'off', TENANT_AUTHZ_MODE: mode, TENANT_AUTHZ_ALLOW_UNSAFE: '1',
             INSIGHTS_SQLITE_PATH: path.join(tmp, 'insights.db'), EVENTS_SQLITE_PATH: path.join(tmp, 'events.db'),
         },
     });
