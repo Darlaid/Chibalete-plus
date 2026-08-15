@@ -15,6 +15,18 @@
  */
 
 import { getGroupMembers } from './groupMembershipService.js';
+import {
+  EXCLUSION_MODE,
+  ATTESTATION,
+  resolveExclusionMode,
+  getAnalyticsExcludedUserIds,
+  getAnalyticsAttestationState,
+  isMarkerAuthorityProven,
+  isAnalyticsExcludedUser,
+  isAnalyticsExcludedGroup as isAnalyticsExcludedGroupPure,
+  filterCanonicalMemberIds,
+  classifyDifferential,
+} from './metrics/analyticsExclusion.mjs';
 
 // ---------------------------------------------------------------------------
 // MODULE STATE
@@ -27,6 +39,102 @@ let _progress         = { progressMap: {} };
 let _groups           = [];
 let _users            = [];
 let _initialized      = false;
+
+// ---------------------------------------------------------------------------
+// CHP-STATS-SYNTHETIC-COHORT-EXCLUSION-01 — cohorte sintética
+//
+// Toda la exclusión vive en el BORDE DE SELECCIÓN DE COHORTE de este motor.
+// Con `off` (default) nada se filtra y el comportamiento es idéntico. El estado
+// se construye una sola vez por `init()`.
+// ---------------------------------------------------------------------------
+
+let _exclusionMode      = resolveExclusionMode();
+let _excludedUserIds    = new Set();
+let _attestationState   = ATTESTATION.DEGRADED;
+let _excludedProgressRows = 0;
+
+/** Contadores acotados de exclusión. Sin ids/labels de alta cardinalidad. */
+export const analyticsExclusionCounters = {
+  analytics_excluded_users: 0,
+  analytics_excluded_progress_rows: 0,
+  analytics_excluded_groups: 0,
+  analytics_legacy_group_records: 0,
+  analytics_shadow_differences: 0,
+  analytics_shadow_unexpected_regressions: 0,
+};
+
+/** Estado de atestación en formato gauge {ok,degraded,drift,invalid}. */
+function attestationGauge() {
+  return {
+    ok:      _attestationState === ATTESTATION.OK ? 1 : 0,
+    degraded:_attestationState === ATTESTATION.DEGRADED ? 1 : 0,
+    drift:   _attestationState === ATTESTATION.DRIFT ? 1 : 0,
+    invalid: _attestationState === ATTESTATION.AUTHORITY_INVALID ? 1 : 0,
+  };
+}
+
+export class AnalyticsExclusionAuthorityError extends Error {
+  constructor(state) {
+    super(`ANALYTICS_EXCLUSION_AUTHORITY_UNSAFE: attestation=${state} — no se sirven métricas canónicas filtradas (fail-closed)`);
+    this.name = 'AnalyticsExclusionAuthorityError';
+    this.code = 'ANALYTICS_EXCLUSION_AUTHORITY_UNSAFE';
+    this.attestationState = state;
+  }
+}
+
+/** Sólo para tests: fija el modo sin releer el entorno. */
+export function __setExclusionModeForTests(mode) {
+  _exclusionMode = mode;
+}
+export function getExclusionMode() { return _exclusionMode; }
+export function getAttestationState() { return _attestationState; }
+
+/**
+ * Decide si filtrar la cohorte para esta computación.
+ *  - override (o modo) != 'on'  => no filtra (shadow sirve == off).
+ *  - 'on' + OK                  => filtra.
+ *  - 'on' + DEGRADED            => filtra SÓLO si la integridad del marcador
+ *                                  está probada (política de -00: marcador es
+ *                                  autoridad PRIMARIA), con telemetría degradada.
+ *  - 'on' + DRIFT/INVALID       => FAIL CLOSED (lanza). Nunca fallback contaminado.
+ */
+function exclusionFilterActive(override) {
+  const mode = override ?? _exclusionMode;
+  if (mode !== EXCLUSION_MODE.ON) return false;
+  if (_attestationState === ATTESTATION.OK) return true;
+  if (_attestationState === ATTESTATION.DEGRADED &&
+      isMarkerAuthorityProven({ users: _users, excludedUserIds: _excludedUserIds })) {
+    return true;
+  }
+  throw new AnalyticsExclusionAuthorityError(_attestationState);
+}
+
+/** Cuenta filas de progreso pertenecientes a usuarios excluidos (no borra nada). */
+function countExcludedProgressRows(progress, excludedIds) {
+  if (excludedIds.size === 0) return 0;
+  let n = 0;
+  for (const p of Object.values(progress?.progressMap || {})) {
+    if (p && excludedIds.has(String(p.userId))) n += 1;
+  }
+  return n;
+}
+
+/** Forma canónica-vacía de un StudentMetrics (entidad sintética servida en ON). */
+function emptyStudentMetrics(userId) {
+  return {
+    userId,
+    behavioral:    zeroBehavioral(),
+    readingLevels: { literal: 0, inferential: 0, critical: 0, reflective: 0, composite: 0 },
+    icdli: { comprehension: 1, integration: 1, inference: 1, criticalThinking: 1,
+             contextConnection: 1, metacognition: 1, ideaProduction: 1, oralWriting: 1 },
+    leoMetrics: { totalLeoInteractions: 0, totalLeoOfflineAttempts: 0, byType: {}, dominantType: null, byContent: {} },
+    contentStats: { total: 0, inProgress: 0, completed: 0, abandoned: 0, contents: [] },
+    dataWindow: null,
+    lastAccessAt: null,
+    computedAt: Date.now(),
+    canonicalExcluded: true,
+  };
+}
 
 /**
  * Generación de los datos cargados. Se incrementa en cada `init()`.
@@ -48,6 +156,25 @@ export function init(raw) {
   _users           = Array.isArray(raw.users)  ? raw.users  : [];
   _initialized     = true;
   _generation     += 1;
+
+  // CHP-STATS-SYNTHETIC-COHORT-EXCLUSION-01 — cohorte + atestación una sola vez.
+  // Con `off` no se construye nada (comportamiento intacto). `raw.attestedExclusionHashes`
+  // es OPCIONAL: sin él la atestación queda DEGRADED (marcador es autoridad primaria).
+  if (_exclusionMode === EXCLUSION_MODE.OFF) {
+    _excludedUserIds = new Set();
+    _attestationState = ATTESTATION.DEGRADED;
+    _excludedProgressRows = 0;
+  } else {
+    _excludedUserIds = getAnalyticsExcludedUserIds(_users);
+    _attestationState = getAnalyticsAttestationState({
+      users: _users,
+      excludedUserIds: _excludedUserIds,
+      attestedHashes: raw.attestedExclusionHashes ?? null,
+    });
+    _excludedProgressRows = countExcludedProgressRows(_progress, _excludedUserIds);
+    analyticsExclusionCounters.analytics_excluded_users = _excludedUserIds.size;
+    analyticsExclusionCounters.analytics_excluded_progress_rows = _excludedProgressRows;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,8 +732,24 @@ function computeICDLI(rl, b, sessions, leoEntries) {
 // Wrapper liviano que pasa el state de módulo (_users, _groups) al servicio
 // canónico. Mantiene la firma `(group) => string[]` para que los call sites
 // existentes no cambien.
-function resolveGroupMemberIds(group) {
-  return getGroupMembers(group, _users, { allGroups: _groups });
+function resolveGroupMemberIds(group, exclude = false) {
+  const ids = getGroupMembers(group, _users, { allGroups: _groups });
+  // Borde de selección de cohorte: se filtra por IDENTIDAD (id ∈ excluidos),
+  // ANTES de agregar. Nunca por resta posterior. Con exclude=false, intacto.
+  return exclude ? filterCanonicalMemberIds(ids, _excludedUserIds) : ids;
+}
+
+/**
+ * ¿El grupo es sintético-compat para analítica? (todos sus miembros excluidos).
+ * Determinista por IDENTIDAD, no por nombre del grupo. Un grupo legacy con ≥1
+ * miembro real devuelve false (su actividad real se conserva). Sólo tiene efecto
+ * cuando el estado de exclusión está construido (modo != off).
+ */
+export function isSyntheticCompatGroup(group) {
+  return isAnalyticsExcludedGroupPure(
+    group, _excludedUserIds,
+    (g) => getGroupMembers(g, _users, { allGroups: _groups })
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +940,14 @@ function computeStudentMetricsUncached(userId, ctx) {
 export function computeStudentMetrics(userId, options = {}) {
   if (!_initialized) throw new Error('metricsService: call init() before computing metrics');
 
+  // Guard de entidad sintética consultada directamente. En ON (con atestación
+  // segura) un usuario excluido no produce analítica canónica como si fuera
+  // población legítima: se devuelve la forma canónica-vacía.
+  if (exclusionFilterActive(options.exclusionOverride)) {
+    const u = _users.find(x => x && String(x.id) === String(userId));
+    if (u && isAnalyticsExcludedUser(u)) return emptyStudentMetrics(userId);
+  }
+
   const ctx = options?.context ?? null;
   if (!ctx) {
     metricsContextCounters.metrics_legacy_fallback_calls_total += 1;
@@ -826,9 +977,10 @@ export function computeCourseMetrics(courseId, options = {}) {
   const group = _groups.find(g => g.id === courseId);
   if (!group) throw new Error(`metricsService: group "${courseId}" not found`);
 
+  const exclude = exclusionFilterActive(options.exclusionOverride);
   const { ctx, owned } = contextForTopLevel(options);
   try {
-    return courseMetricsFrom(group, courseId, ctx);
+    return courseMetricsFrom(group, courseId, ctx, exclude);
   } finally {
     // El contexto solo se libera si lo creó ESTA llamada. Si vino del caller,
     // el caller decide su vida.
@@ -836,9 +988,9 @@ export function computeCourseMetrics(courseId, options = {}) {
   }
 }
 
-function courseMetricsFrom(group, courseId, ctx) {
-  const studentIds     = resolveGroupMemberIds(group);
-  const allStudents    = studentIds.map(id => computeStudentMetrics(id, { context: ctx }));
+function courseMetricsFrom(group, courseId, ctx, exclude = false) {
+  const studentIds     = resolveGroupMemberIds(group, exclude);
+  const allStudents    = studentIds.map(id => computeStudentMetrics(id, { context: ctx, exclusionOverride: exclude ? 'on' : 'off' }));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
   const { top, bottom } = topBottomByComposite(activeStudents, 0.20);
 
@@ -874,32 +1026,34 @@ export function computeSchoolMetrics(schoolId, options = {}) {
     throw new Error(`metricsService: no groups found for school "${schoolId}"`);
   }
 
+  const exclude = exclusionFilterActive(options.exclusionOverride);
   const { ctx, owned } = contextForTopLevel(options);
   try {
-    return schoolMetricsFrom(schoolGroups, schoolId, ctx);
+    return schoolMetricsFrom(schoolGroups, schoolId, ctx, exclude);
   } finally {
     if (owned && ctx) ctx.dispose();
   }
 }
 
-function schoolMetricsFrom(schoolGroups, schoolId, ctx) {
+function schoolMetricsFrom(schoolGroups, schoolId, ctx, exclude = false) {
   const allStudentIds = new Set();
   for (const group of schoolGroups) {
-    for (const id of resolveGroupMemberIds(group)) allStudentIds.add(id);
+    for (const id of resolveGroupMemberIds(group, exclude)) allStudentIds.add(id);
   }
 
   // Aquí estaba el coste cuadrático: cada alumno se calculaba una vez para
   // `allStudents` y OTRA dentro de `courseBreakdown`. Con contexto, la segunda
   // pasada es un acierto de memo; sin contexto, el comportamiento es el de
   // siempre.
-  const allStudents    = [...allStudentIds].map(id => computeStudentMetrics(id, { context: ctx }));
+  const studentOpts    = { context: ctx, exclusionOverride: exclude ? 'on' : 'off' };
+  const allStudents    = [...allStudentIds].map(id => computeStudentMetrics(id, studentOpts));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
 
   const courseBreakdown = schoolGroups
-    .filter(g => resolveGroupMemberIds(g).length > 0)
+    .filter(g => resolveGroupMemberIds(g, exclude).length > 0)
     .map(g => {
-      const groupStudentIds = resolveGroupMemberIds(g);
-      const groupStudents   = groupStudentIds.map(id => computeStudentMetrics(id, { context: ctx }));
+      const groupStudentIds = resolveGroupMemberIds(g, exclude);
+      const groupStudents   = groupStudentIds.map(id => computeStudentMetrics(id, studentOpts));
       const active          = groupStudents.filter(s => s.behavioral.totalSessions > 0);
       const compScores      = active.map(s => s.readingLevels.composite);
       return {
@@ -928,5 +1082,119 @@ function schoolMetricsFrom(schoolGroups, schoolId, ctx) {
     distributions:  buildScoreDistributions(activeStudents),
     courseBreakdown,
     computedAt:     Date.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CHP-STATS-SYNTHETIC-COHORT-EXCLUSION-01 — DIFERENCIAL SOMBRA + OBSERVABILIDAD
+// ---------------------------------------------------------------------------
+
+/** Métricas escalares comparables por tipo de superficie. */
+function comparableScalars(kind, m) {
+  if (kind === 'course') {
+    return {
+      studentCount:       m.studentCount,
+      activeStudentCount: m.activeStudentCount,
+      completionRate:     m.averages?.behavioral?.completionRate ?? 0,
+      totalReadingTimeMs: m.averages?.behavioral?.totalReadingTimeMs ?? 0,
+      avgComposite:       m.averages?.readingLevels?.composite ?? 0,
+    };
+  }
+  // school
+  return {
+    courseCount:        m.courseCount,
+    studentCount:       m.studentCount,
+    activeStudentCount: m.activeStudentCount,
+    completionRate:     m.averages?.behavioral?.completionRate ?? 0,
+    totalReadingTimeMs: m.averages?.behavioral?.totalReadingTimeMs ?? 0,
+  };
+}
+
+/**
+ * Diferencial SOMBRA: recomputa la métrica con exclusión OFF y ON sobre los
+ * MISMOS datos y clasifica cada escalar. NUNCA resta valores: cada arma se
+ * recomputa desde su propia cohorte (ratios, únicos, tiempos incluidos). No
+ * altera ninguna respuesta servida; es una capacidad explícita para tests y
+ * para la etapa de despliegue en modo shadow.
+ *
+ * `removedSynthetic` se marca cuando la cohorte ON efectivamente retiró ids.
+ * Devuelve estados de atestación si la autoridad no es segura (sin lanzar).
+ *
+ * @returns {{kind, id, attestation, entries: Array<{metric, old, filtered, classification}>, unexpectedRegressions}}
+ */
+export function computeCohortExclusionDifferential({ kind, id }) {
+  if (!_initialized) throw new Error('metricsService: call init() before differential');
+
+  // Cohorte cruda (OFF) — no filtra.
+  const compute = kind === 'course'
+    ? (ov) => computeCourseMetrics(id, { exclusionOverride: ov })
+    : (ov) => computeSchoolMetrics(id, { exclusionOverride: ov });
+
+  const oldM = compute('off');
+
+  // ¿Retiró ids esta cohorte? (marca `removedSynthetic` para clasificar bajas).
+  let removed = 0;
+  try {
+    if (kind === 'course') {
+      const g = _groups.find(x => x.id === id);
+      if (g) removed = resolveGroupMemberIds(g, false).length - resolveGroupMemberIds(g, true).length;
+    } else {
+      const sg = _groups.filter(x => x.school?.toLowerCase() === String(id).toLowerCase());
+      const before = new Set(); const after = new Set();
+      for (const g of sg) { resolveGroupMemberIds(g, false).forEach(x => before.add(x)); resolveGroupMemberIds(g, true).forEach(x => after.add(x)); }
+      removed = before.size - after.size;
+    }
+  } catch { /* conteo best-effort */ }
+  const removedSynthetic = removed > 0;
+
+  // Arma ON — puede lanzar fail-closed si atestación DRIFT/INVALID.
+  let newM;
+  try {
+    newM = compute('on');
+  } catch (e) {
+    if (e instanceof AnalyticsExclusionAuthorityError) {
+      const cls = _attestationState === ATTESTATION.DRIFT
+        ? 'ATTESTATION_DRIFT' : 'AUTHORITY_INVALID';
+      return { kind, id, attestation: _attestationState, entries: [], unexpectedRegressions: 0, failClosed: cls };
+    }
+    throw e;
+  }
+
+  const oldS = comparableScalars(kind, oldM);
+  const newS = comparableScalars(kind, newM);
+  const entries = [];
+  let unexpected = 0;
+  for (const metric of Object.keys(oldS)) {
+    const classification = classifyDifferential(oldS[metric], newS[metric], { removedSynthetic });
+    if (oldS[metric] !== newS[metric]) analyticsExclusionCounters.analytics_shadow_differences += 1;
+    if (classification === 'UNEXPECTED_REGRESSION') { unexpected += 1; analyticsExclusionCounters.analytics_shadow_unexpected_regressions += 1; }
+    entries.push({ metric, old: oldS[metric], filtered: newS[metric], classification });
+  }
+  return {
+    kind, id,
+    attestation: _attestationState,
+    degraded: _attestationState === ATTESTATION.DEGRADED,
+    removedCount: removed,
+    entries,
+    unexpectedRegressions: unexpected,
+  };
+}
+
+/**
+ * Fotografía READ-ONLY de la exclusión analítica. Sin ids/labels de alta
+ * cardinalidad. No lee disco, no muta contadores.
+ */
+export function getAnalyticsExclusionSnapshot() {
+  const c = analyticsExclusionCounters;
+  return {
+    mode: _exclusionMode,
+    attestation: _attestationState,
+    attestationGauge: attestationGauge(),
+    excludedUsers: c.analytics_excluded_users,
+    excludedProgressRows: c.analytics_excluded_progress_rows,
+    excludedGroups: c.analytics_excluded_groups,
+    legacyGroupRecords: c.analytics_legacy_group_records,
+    shadowDifferences: c.analytics_shadow_differences,
+    shadowUnexpectedRegressions: c.analytics_shadow_unexpected_regressions,
   };
 }

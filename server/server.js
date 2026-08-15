@@ -46,6 +46,8 @@ import {
     computeCourseMetrics,
     computeSchoolMetrics,
     getMetricsRequestContextTelemetrySnapshot,
+    getExclusionMode as getMetricsExclusionMode,
+    isSyntheticCompatGroup,
 } from './metricsService.js';
 import { UPLOADS_ROOT, USERS_DB, GROUPS_DB } from './config.js';
 import { withUsersLock, withFileLock } from './usersLock.js';
@@ -7894,6 +7896,14 @@ const legacyMetricsSchoolsHandler = async (req, res) => {
     let relevantGroups = groups;
     if (!adminAccess && requester && isMediatorRole(requester)) {
         relevantGroups = groups.filter(g => isMediatorOfCourse(requester, g.id, groups));
+    }
+
+    // CHP-STATS-SYNTHETIC-COHORT-EXCLUSION-01 — en modo `on`, un grupo cuya
+    // membresía es 100% sintética no aporta su string `school` como dimensión
+    // analítica (fix de contaminación por school compartido, por IDENTIDAD no
+    // por texto). No-op en `off`/`shadow`: comportamiento productivo intacto.
+    if (getMetricsExclusionMode() === 'on') {
+        relevantGroups = relevantGroups.filter(g => !isSyntheticCompatGroup(g));
     }
 
     // Deduplicate by canonical name, return { schoolId (slug), schoolName } pairs
