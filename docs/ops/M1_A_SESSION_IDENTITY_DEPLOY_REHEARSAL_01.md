@@ -109,3 +109,62 @@ Verificado por `docker inspect --format` (sin probes): api_1 `cf36852` json, api
 ## Exact next step
 
 **CHP-IDDB-M1-C1-GROUPS-CANARY-CLOSE-01** (tras resume 2026-08-16T14:25Z) → **M1-A-DEPLOY** (este runbook, sobre el tip post-close) → M1-B-DEPLOY (requiere M1-A enforce) → M1-C → M1-D.
+
+---
+
+# R1 — retiro de x-user-id del navegador + semántica off + secuenciación compat
+
+Corrige tres inconsistencias del ensayo antes de autorizar el deploy. **`M1_A_FINAL_SOURCE_SHA=0ff76b6`** (commit lineal sobre `f1c002b` en `chp/m1-a-session-identity-01`, sin force-push; f1c002b intacto).
+
+## R1-D/E. Contradicción del header (reproducida)
+
+Inventario real en `f1c002b`: **46 emisores de x-user-id en 22 archivos de producto** (services/pages/components/hooks), NO cubiertos por el M1-A PREP (que solo tocó AuthContext + dataService parcial). Con el frontend previo, una request con cookie de sesión válida **seguía enviando x-user-id** → `legacy_x_user_id{browser}` no podía drenar. `CURRENT_BROWSER_LEGACY_HEADER_DRAIN_POSSIBLE=false` sin cambio de frontend.
+
+## R1-F/G. Contrato final y retiro
+
+Contrato: tras la migración de frontend, el navegador autentica **solo por cookie HttpOnly**; nunca construye x-user-id como header. `user.id` puede vivir en estado UI para render, pero `USER_ID_IN_UI != AUTHORITY`. Retirados los **46 emisores → 0** (`PRODUCT_BROWSER_X_USER_ID_EMITTERS=0`, guard estático `browserNoXUserIdGuard.test.mjs`, 127 archivos escaneados). XHR de upload usa `withCredentials=true` (cookie same-origin). Sin header de reemplazo.
+
+## R1-backend. Lectores inline session-aware (completa el retiro)
+
+El retiro del header rompía backend que leía identidad del header inline. Corregido sin redesign: helper **`reqUserId(req) = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']`** (sesión primero; header solo fallback off), aplicado a ~14 lectores de handler + args de Leo; **`/api/content/:id/access`** (preflight de todo visor) y **`requireAdminRole`** (upload/content admin) resuelven identidad por sesión en compat/enforce, header en off. Los middlewares de auth (requireUserAuth/requireProgressOwner/requireAdminAccess) ya eran session-aware.
+
+## R1-H/I/J. Bootstrap, logout, guard
+
+Bootstrap por `GET /api/auth/me` (cookie) sin depender de `localStorage`; logout por `POST /api/auth/logout` (revoca sid + borra cookie) → `/auth/me` 401. Guard estático falla si vuelve un emisor de producto (distingue producto de tests/tooling).
+
+## R1-K/L/M. Pruebas cookie-only (13/13, imagen aislada)
+
+`sessionBrowserCookieOnly.test.mjs` (server real, POSIX): **COMPAT** cookie-only sin x-user-id → `/auth/me`, `/api/users`, `/api/groups`, **`/api/content/:id/access` (preflight)**, `/api/content/my-catalog` todos 200; preflight sin identidad → 401; query userId≠sesión → 401. **ENFORCE**: cookie-only 200; solo x-user-id externo → 401 (incl. preflight); cookie + x-user-id mismatch → 401. Compat sigue aceptando cliente viejo con x-user-id (rolling), marcado `source_class=browser`, no estado final.
+
+## R1-N. Métrica de drenaje (contador monotónico)
+
+Un counter monotónico NUNCA "vuelve a 0". `BROWSER_LEGACY_DRAIN_METRIC = rate(auth_session_legacy_x_user_id_total{source_class="browser"}[15m]) == 0` sostenido durante la ventana. Criterio de cierre: `NEW_BROWSER_LEGACY_REQUESTS=0` durante una ventana ≥ propagación de caché de frontend + un ciclo de sesión activo (evidencia: caché edge/navegador ~horas + sesión 12 h → **ventana ≥ 24 h**). No usar `total==0`.
+
+## R1-O. Allowlist interno/test
+
+Clientes legítimos que sigan usando x-user-id (tests/smokes/scripts internos) entran en ENFORCE solo por `SESSION_LEGACY_ALLOW` (mecanismo ya implementado). No allowlist por IP; ningún navegador externo permitido.
+
+## R1-P/Q/R/S. Semántica OFF (auditada)
+
+**`OFF_MODE_BYTE_IDENTICAL=false`**: `requireProgressOwner` en M1-A añade un active-check **incondicional** — un usuario deshabilitado con x-user-id legacy que en `cf36852` podía escribir progreso, en M1-A OFF → **401**. Clasificado **INTENTIONAL_SECURITY_TIGHTENING**. Impacto: `ACTIVE_REAL_USER_REGRESSION=0` (247 activos intactos; 400 sintéticos disabled ya no pueden escribir progreso — deseado). **DEPLOY A ≠ "zero auth change"**; su contrato real = **DORMANT SESSION INFRASTRUCTURE + DISABLED_USER_PROGRESS_DENIAL** (`DEPLOY_A_EXPECTED_BEHAVIOR_CHANGE=DISABLED_USER_PROGRESS_DENIAL_ONLY`). El smoke de A debe verificar explícitamente que un usuario deshabilitado NO escribe progreso, y que reader/mediador/admin-secret/login legacy activos quedan intactos.
+
+## R1-T/U/V. Secuenciación compat corregida
+
+**B1**: api_2→COMPAT, api_1→OFF control. Probar SOLO api_2 (emisión, `/auth/me`, logout/revoke local, compat legacy, health). **NO** afirmar aún `CROSS_INSTANCE_SESSION_GREEN`. **B2**: tras B1 GREEN, api_1→COMPAT (ambas compat, key + sessions.db compartidas). **Solo AHORA** probar cross-instance: login api_1→cookie vale api_2, logout api_2→rechazado api_1, logout-all api_1→rechazado api_2. `CROSS_INSTANCE_SESSION_GREEN=true` **solo en esta fase**. Orden definitivo: A(off ambas) → B1(api_2 compat) → **B2(api_1 compat + verificación cross-instance)** → C(frontend cookie-only) → observación drenaje → D(api_2 enforce) → E(api_1 enforce) → CLOSE. **No adelantar frontend antes de B2.**
+
+## R1-W. Contrato de cierre de M1-A
+
+M1-A cierra solo con: ambas API ENFORCE; frontend cookie-only; `PRODUCT_BROWSER_X_USER_ID_EMITTERS=0`; x-user-id-only externo→401; subject mismatch→401; drenaje de navegador legacy según la métrica de tasa; cross-instance GREEN; logout/revocación GREEN; disabled→401; admin-secret machine authority intacta.
+
+## R1-X/Y. Source final e impacto M1-B
+
+`M1_A_FINAL_SOURCE_SHA=0ff76b6`. M1-B PREP (`7f05ed7` + doc `102643a`) se construyó sobre M1-A pre-R1; el delta R1 es frontend + backend inline-readers. Conflictos potenciales con el frontend de M1-B (si lo hubiera) y con `server.js` (M1-B añadió tenant guards; R1 tocó lectores de identidad — regiones distintas, conflicto improbable). **Antes del deploy de M1-B**: rehearsal de integración contra el tip productivo FINAL de M1-A + CI exact-tree. M1-B NO queda invalidada.
+
+## R1-CI
+
+Tree `0ff76b6`: guard estático + cookie-only en CI (paso propio `test:session-browser`, store-hermético); store-isolation `test:identity` sigue presente. Delta gate esperado GREEN; heredados baseline. Ver run del push.
+
+## R1 disposición
+
+**GREEN — M1-A BROWSER AUTHORITY RETIREMENT AND DEPLOY SEQUENCING ARE PRODUCTION-READY.**
+`M1_A_PRODUCTION_DEPLOY_READY=true` (tras GROUPS-canary-close). Canary GROUPS intacto.
