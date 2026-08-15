@@ -24,7 +24,7 @@ import { initErrorTracking } from './observability/errorTracking.js';
 // P3-E — dual-write shadow real (gated IDENTITY_DUAL_WRITE; default OFF).
 import { makeIdentityWriteHook, bootstrapIdentityDb } from './db/identityWriteHook.js';
 // P4-A — cutover de LECTURA gated + fallback-safe (default IDENTITY_READ=json).
-import { tryIdentitySqliteRead, markJsonRead, warmupReadFacade, assertWritableIdentityPayload } from './db/identityReadFacade.js';
+import { tryIdentitySqliteRead, tryIdentityUserAdminRead, markJsonRead, warmupReadFacade, assertWritableIdentityPayload } from './db/identityReadFacade.js';
 import {
     observeIdentityShadowRead, warmupShadowCompare, getShadowCompareSnapshot,
 } from './db/identityShadowCompare.js';
@@ -761,6 +761,38 @@ const _readJSONOfficial = (file) => {
 // no lanza; el `try` exterior es defensa en profundidad. Con el comparador
 // apagado (default) el coste es una lectura de env.
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * CHP-IDDB-GAP2-01 — política por SUPERFICIE del dominio users.
+ *
+ * readUsersAdminHistorical(): superficie ADMIN/HISTÓRICA (listado admin y
+ * exports). Bajo cutover de users sirve canónico (SQLite) ∪ compat sintética
+ * atestada (etiquetada, sin credenciales); con flags json devuelve la lectura
+ * oficial actual: no-op absoluto.
+ *
+ * readJSONMetricsLegacy(): superficies de MÉTRICAS LEGACY. SIEMPRE el JSON
+ * físico — el universo/denominadores de las métricas existentes NO puede
+ * cambiar como efecto colateral de un cutover de identidad
+ * (METRICS_AUTHORITY=JSON_LEGACY; el cambio 647→247 pertenece a
+ * CHP-STATS-SYNTHETIC-COHORT-EXCLUSION-01 / Fase 2, como decisión explícita).
+ * Tolerante: ausencia/corrupción ⇒ [] (mismo contrato que readJSON para
+ * métricas de arranque).
+ */
+const readUsersAdminHistorical = () => {
+    const admin = tryIdentityUserAdminRead(
+        { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB }, log);
+    return admin ?? readJSON(USERS_DB);
+};
+const readJSONMetricsLegacy = (file) => {
+    try {
+        if (!fs.existsSync(file)) return [];
+        const raw = fs.readFileSync(file, 'utf8');
+        return raw.trim() ? JSON.parse(raw) : [];
+    } catch (e) {
+        log(`[metrics-legacy] lectura física fallida ${file}: ${e.message}`, 'WARN');
+        return [];
+    }
+};
+
 const readJSON = (file) => {
     const _t0 = performance.now();
     const official = _readJSONOfficial(file);
@@ -2869,7 +2901,9 @@ const normalizeUser = (user) => {
 // GET USERS
 app.get('/api/users', requireAuth, (req, res) => {
     try {
-        const users = readJSON(USERS_DB);
+        // CHP-IDDB-GAP2-01: superficie ADMIN/HISTÓRICA — bajo cutover sirve
+        // canónico ∪ compat sintética atestada; con flags json = readJSON.
+        const users = readUsersAdminHistorical();
         // Aplicamos normalizeUser en lectura para limpiar posibles estados corruptos pasados
         const normalizedUsers = users.map(normalizeUser);
         res.json(sanitizeUsersForClient(normalizedUsers));
@@ -7004,7 +7038,9 @@ app.get('/api/tasks/:taskId/export-submissions', requireUserAuth, (req, res) => 
     try {
         const { taskId } = req.params;
 
-        const users       = readJSON(USERS_DB);
+        // CHP-IDDB-GAP2-01: export = superficie ADMIN/HISTÓRICA (puede
+        // referenciar identidades sintéticas retiradas en el histórico).
+        const users       = readUsersAdminHistorical();
         const submissions = readJSON(SUBMISSIONS_DB);
 
         const taskSubs = submissions.filter(s => s.taskId === taskId && s.status === 'submitted');
@@ -7122,7 +7158,8 @@ app.get('/api/students/:studentId/export-submissions', requireUserAuth, (req, re
     try {
         const { studentId } = req.params;
 
-        const users       = readJSON(USERS_DB);
+        // CHP-IDDB-GAP2-01: export = superficie ADMIN/HISTÓRICA.
+        const users       = readUsersAdminHistorical();
         const submissions = readJSON(SUBMISSIONS_DB);
 
         const student = users.find(u => u.id === studentId) || null;
@@ -7375,7 +7412,10 @@ app.post('/api/analytics/events', async (req, res) => {
  */
 function loadAndInitMetrics() {
     const groups = readJSON(GROUPS_DB) || [];
-    const users  = readJSON(USERS_DB)  || [];
+    // CHP-IDDB-GAP2-01: MÉTRICAS LEGACY = JSON físico SIEMPRE. El universo de
+    // usuarios de las métricas existentes no cambia con el cutover de
+    // identidad (METRICS_CUTOVER_DEFERRED_TO_PHASE2).
+    const users  = readJSONMetricsLegacy(USERS_DB) || [];
     initMetrics({
         events:          readJSON(ANALYTICS_DB)       || [],
         leoMemory:       readJSON(LEO_MEMORY_DB)      || { memoryMap: {} },

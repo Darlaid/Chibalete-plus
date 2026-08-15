@@ -18,6 +18,7 @@
  * operation_id— sin necesidad de un log de eventos en el emisor.
  */
 import crypto from 'node:crypto';
+import { CREDENTIAL_FIELDS } from './identityUserDomains.js';
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const h16 = (s) => sha(s).slice(0, 16);
@@ -82,9 +83,13 @@ function userStatus(v) {
 }
 
 function sanitizeUser(u) {
+    // CHP-IDDB-GAP2-01: la lista de material de credencial es COMPARTIDA
+    // (identityUserDomains.CREDENTIAL_FIELDS) e incluye también los tokens de
+    // reset/invitación: NINGÚN secreto puede persistir en raw_json aunque
+    // aparezca en el registro físico. JSON sigue siendo credential authority.
     const out = {};
     for (const k of Object.keys(u).sort()) {
-        if (k === 'password' || k === 'passwordHash') continue;
+        if (CREDENTIAL_FIELDS.includes(k)) continue;
         out[k] = u[k];
     }
     return out;

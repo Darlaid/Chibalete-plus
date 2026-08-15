@@ -21,8 +21,10 @@ import { flags } from '../lib/flags.js';
 import {
     identityReadSource as mSrc, identityReadFallback as mFb,
     identityGroupDomainReads as mGrpDom,
+    identityUserDomainReads as mUsrDom,
 } from '../observability/metrics.js';
 import { composeGroupReadView } from './identityGroupDomains.js';
+import { composeCanonicalUserView, composeUserAdminView } from './identityUserDomains.js';
 
 /**
  * CHP-IDDB-READ-RMW-SEAM-01 — marca de procedencia. Todo array servido desde
@@ -97,11 +99,17 @@ export function tryIdentitySqliteRead(file, paths, log = () => {}) {
             return null;
         }
         if (!_repo) _repo = makeIdentityRepo(db);
-        // CHP-IDDB-GAP3-01 — el dominio `groups` NO se sirve como espejo pelado:
-        // se compone canónico (SQLite) ∪ compat ATESTADA (JSON ∩ exclusiones de
-        // migración), con UNKNOWN excluido fail-closed. La clasificación ocurre
-        // ANTES de elegir backend: jamás «SQLite miss → JSON fallback» mudo.
-        const arr = domain === 'users' ? _repo.users.all()
+        // M1 RELEASE TRAIN — GAP3-01 (groups) + GAP2-01 (users): ambos dominios
+        // se sirven CLASIFICADOS antes de elegir backend, jamás como espejo
+        // pelado ni con fallback silencioso.
+        //   users  → vista OPERACIONAL canónica (la superficie ADMIN usa
+        //            tryIdentityUserAdminRead);
+        //   groups → canónico (SQLite) ∪ compat ATESTADA (JSON ∩ exclusiones),
+        //            UNKNOWN excluido fail-closed.
+        const arr = domain === 'users' ? composeCanonicalUserView({
+                        db, repo: _repo, log,
+                        onCount: (cls, n) => { try { if (n) mUsrDom.labels(cls).inc(n); } catch {} },
+                    })
                   : domain === 'groups' ? composeGroupReadView({
                         db, repo: _repo, groupsJsonPath: file, log,
                         onCount: (cls, n) => { try { if (n) mGrpDom.labels(cls).inc(n); } catch {} },
@@ -119,6 +127,36 @@ export function tryIdentitySqliteRead(file, paths, log = () => {}) {
         // Gate 4: cualquier error → JSON. El cutover JAMÁS rompe lecturas.
         try { mFb.labels(domain, 'exception').inc(); } catch {}
         log(`[identity-read] ${domain} sqlite read failed → fallback JSON: ${e.message}`, 'WARN');
+        return null;
+    }
+}
+
+/**
+ * CHP-IDDB-GAP2-01 — superficie ADMIN/HISTÓRICA de users bajo cutover:
+ * canónico (SQLite) ∪ compat sintética ATESTADA (JSON, etiquetada y SIN
+ * material de credencial). Con flags json (o cualquier gate fallido) devuelve
+ * `null` y el llamador usa su lectura oficial actual: no-op garantizado.
+ * Mismos gates que la lectura ordinaria (flag, dominio, shadow ok).
+ */
+export function tryIdentityUserAdminRead(paths, log = () => {}) {
+    if (flags.identityReadSource() !== 'sqlite') return null;
+    if (!domainsAllowed().has('users')) return null;
+    try {
+        if (!flags.identitySqliteEnabled()) return null;
+        const { getIdentityDb } = requireSync('./identityDb.js');
+        const { makeIdentityRepo } = requireSync('../repositories/identityRepo.js');
+        const db = getIdentityDb();
+        if (!lastAuditOk(db, 'users')) return null;
+        if (!_repo) _repo = makeIdentityRepo(db);
+        const arr = composeUserAdminView({
+            db, repo: _repo, usersJsonPath: paths.usersDb, log,
+            onCount: (cls, n) => { try { if (n) mUsrDom.labels(cls).inc(n); } catch {} },
+        });
+        if (!Array.isArray(arr)) return null;
+        Object.defineProperty(arr, IDENTITY_SQLITE_SERVED, { value: true });
+        return arr;
+    } catch (e) {
+        log(`[identity-read] users admin view failed → fallback JSON: ${e.message}`, 'WARN');
         return null;
     }
 }

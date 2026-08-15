@@ -99,6 +99,13 @@ export const identityGroupDomainReads = M(() => new client.Counter({
     help: 'Composed group read-view records by domain class',
     labelNames: ['class'], registers: [registry],
 }));
+// CHP-IDDB-GAP2-01 — frontera canónico/compat del dominio users. Cardinalidad
+// fija: class∈{canonical,synthetic_compat,tombstoned,unknown_excluded}.
+export const identityUserDomainReads = M(() => new client.Counter({
+    name: 'chibalete_identity_user_domain_reads_total',
+    help: 'Composed user read-view records by domain class',
+    labelNames: ['class'], registers: [registry],
+}));
 // CHP-IDDB-02C-B — comparación runtime JSON↔SQLite en modo sombra. JSON sigue
 // siendo la respuesta oficial: estas series solo describen al observador.
 // Cardinalidad fija: domain∈5, surface∈2, result∈5, gap∈enum corto.
