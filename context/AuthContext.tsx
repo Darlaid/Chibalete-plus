@@ -26,7 +26,18 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         if (!active) return;
 
         // Check both storages. localStorage takes precedence if both exist
-        const storedUserId = localStorage.getItem('chibalete_user_id') || sessionStorage.getItem('chibalete_user_id');
+        let storedUserId = localStorage.getItem('chibalete_user_id') || sessionStorage.getItem('chibalete_user_id');
+
+        // CHP-IDDB-M1-A — la COOKIE de sesión firmada es la autoridad de bootstrap.
+        // Si no hay id local pero sí hay sesión (cookie HttpOnly), rehidratamos por
+        // /api/auth/me. El id local pasa a ser dato informativo/caché, no autoridad.
+        if (!storedUserId) {
+          const me = await dataService.fetchSessionMe();
+          if (me && me.id) {
+            storedUserId = me.id;
+            sessionStorage.setItem('chibalete_user_id', me.id);
+          }
+        }
 
         if (storedUserId) {
           const userFromDb = dataService.getUsuarioById(storedUserId);
@@ -112,6 +123,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = () => {
+    // CHP-IDDB-M1-A — revoca la sesión server-side (sid) y borra la cookie ANTES
+    // de limpiar el estado local. Best-effort: no bloquea el redirect.
+    dataService.serverLogout().catch(() => {});
     setUser(null);
     setAccessReady(false);
     localStorage.removeItem('chibalete_user_id');

@@ -14,6 +14,16 @@ import { loginSchema, resetRequestSchema, resetConfirmSchema } from './schemas/a
 // P0.6 — access-log estructurado con request-id + redaction (capa incremental).
 import { httpLogger } from './lib/logger.js';
 import { createAdminAuth } from './lib/adminAuth.js';
+import {
+    createSessionAuth, sessionAuthMode, sessionIssuanceEnabled, sessionCookieOptions,
+    csrfCheck, allowedOriginsFromEnv, bumpCredentialVersion, credentialVersionOf,
+    SESSION_COOKIE, DEFAULT_TTL_SEC,
+} from './lib/sessionAuth.js';
+import { cleanupExpiredSessions } from './db/sessionStore.js';
+import {
+    authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
+    authSessionSubjectMismatch, authSessionRevoked,
+} from './observability/metrics.js';
 import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
@@ -253,6 +263,20 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// CHP-IDDB-M1-A — guard CSRF para métodos mutantes autenticados por COOKIE de
+// sesión. No-op en modo 'off' y para requests sin cookie de sesión o de máquina
+// (x-admin-secret). Defensa: Sec-Fetch-Site + Origin allowlist (SESSION_ALLOWED_ORIGINS).
+app.use('/api/', (req, res, next) => {
+    if (!sessionIssuanceEnabled()) return next();
+    const verdict = csrfCheck(req, {
+        allowedOrigins: allowedOriginsFromEnv(),
+        isMachine: !!req.headers['x-admin-secret'],
+    });
+    if (verdict.ok) return next();
+    try { authSessionFailure.labels(`csrf_${verdict.reason}`).inc(); } catch { /* noop */ }
+    return res.status(403).json({ error: 'CSRF: origen no permitido para escritura autenticada por sesión' });
+});
+
 // --- AUTH HARDENING: Rate limiters específicos por endpoint sensible ---
 // En dev los límites son relajados para no bloquear pruebas manuales.
 // En prod se aplican límites estrictos contra fuerza bruta.
@@ -409,21 +433,74 @@ setInterval(async () => {
 const {
     isAdminRequest,
     getRequestHasValidPrincipal,
-    allowAuthenticatedGetOrReject,
-    requireAdminAccess,
-    requireAuth,
+    allowAuthenticatedGetOrReject: _allowGetLegacy,
+    requireAdminAccess: _requireAdminAccessLegacy,
+    requireAuth: _requireAuthLegacy,
 } = createAdminAuth({
     readUsers: () => readJSON(USERS_DB),
     isUserActive: (user) => isUserActive(user),
     log: (msg, type) => log(msg, type),
 });
 
+// CHP-IDDB-M1-A — envoltorios session-aware. En modo 'off' (default) delegan
+// BYTE-a-byte a los consumidores legacy (comportamiento actual intacto). En
+// compat/enforce la identidad la resuelve `sessionAuth.authenticate` (cookie
+// firmada; x-user-id legacy según modo). `sessionAuth`/`isUserActive`/`readJSON`
+// se capturan por closure e se invocan en tiempo de request (TDZ-safe).
+const _sessionAuthenticatedUser = async (req) => {
+    const d = await sessionAuth.authenticate(req);
+    if (!d.ok) { try { authSessionFailure.labels(d.reason || 'unknown').inc(); } catch { /* noop */ } return d; }
+    const user = readJSON(USERS_DB).find(u => u.id === d.userId);
+    if (!user || !isUserActive(user)) return { ok: false, status: 401, reason: 'unknown_subject' };
+    return { ok: true, user, req_auth: d.req_auth };
+};
+const allowAuthenticatedGetOrReject = async (req, res, next) => {
+    if (!sessionIssuanceEnabled()) return _allowGetLegacy(req, res, next);
+    const r = await _sessionAuthenticatedUser(req);
+    if (!r.ok) return res.status(r.status).json({ error: 'No autorizado: se requiere sesión activa' });
+    req.auth = r.req_auth;
+    return next();
+};
+const requireAuth = async (req, res, next) => {
+    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
+    return _requireAuthLegacy(req, res, next); // no-GET: autoridad de máquina (admin-secret)
+};
+const requireAdminAccess = async (req, res, next) => {
+    if (req.method === 'GET') return allowAuthenticatedGetOrReject(req, res, next);
+    // Máquina/operador: admin-secret file-only (se conserva íntegro).
+    if (await isAdminRequest(req)) return next();
+    if (!sessionIssuanceEnabled()) return _requireAdminAccessLegacy(req, res, next);
+    // Sesión humana con rol administrador (resuelto server-side, no por header).
+    const r = await _sessionAuthenticatedUser(req);
+    if (!r.ok) return res.status(r.status).json({ error: 'Unauthorized: se requiere admin secret o sesión de administrador' });
+    const roles = Array.isArray(r.user.roles) ? r.user.roles : (r.user.rol ? [r.user.rol] : []);
+    if (!roles.includes('administrador')) return res.status(403).json({ error: 'Requiere rol administrador' });
+    req.auth = r.req_auth;
+    return next();
+};
+
 /**
  * Surgical Auth Fix Phase 5: 
  * Middleware to validate a regular reader session via userId.
  * Used for pedagogical AI endpoints (Leo).
  */
-const requireUserAuth = (req, res, next) => {
+const requireUserAuth = async (req, res, next) => {
+    // CHP-IDDB-M1-A: en modo compat/enforce la identidad se resuelve por sesión
+    // firmada (con x-user-id legacy según modo). En 'off' (default) el camino de
+    // abajo es byte-idéntico al histórico.
+    if (sessionIssuanceEnabled()) {
+        const d = await sessionAuth.authenticate(req);
+        if (!d.ok) {
+            try { authSessionFailure.labels(d.reason || 'unknown').inc(); } catch { /* noop */ }
+            return res.status(d.status).json({ error: 'No autorizado' });
+        }
+        const user = readJSON(USERS_DB).find(u => u.id === d.userId);
+        if (!user || !isUserActive(user)) return res.status(401).json({ error: 'No autorizado' });
+        req.user = user;
+        req.auth = d.req_auth;
+        return next();
+    }
+
     const userId = req.headers['x-user-id'];
     if (!userId) {
         return res.status(401).json({ error: 'Auth requerida: x-user-id missing' });
@@ -451,16 +528,38 @@ const requireUserAuth = (req, res, next) => {
  * Validates that the authenticated user (x-user-id header) matches the :userId URL param.
  * Applied to progress write endpoints that are NOT sendBeacon-based.
  */
-const requireProgressOwner = (req, res, next) => {
-    const userIdFromHeader = req.headers['x-user-id'];
+const requireProgressOwner = async (req, res, next) => {
     const userIdFromParam = req.params.userId;
+    // CHP-IDDB-M1-A: en compat/enforce la identidad autoritativa es la sesión;
+    // debe coincidir con el :userId del path.
+    if (sessionIssuanceEnabled()) {
+        const d = await sessionAuth.authenticate(req);
+        if (!d.ok) {
+            try { authSessionFailure.labels(d.reason || 'unknown').inc(); } catch { /* noop */ }
+            return res.status(d.status).json({ error: 'No autorizado' });
+        }
+        if (String(d.userId) !== String(userIdFromParam)) {
+            return res.status(401).json({ error: 'No autorizado: la sesión no corresponde al usuario' });
+        }
+        req.auth = d.req_auth;
+        return next();
+    }
+
+    const userIdFromHeader = req.headers['x-user-id'];
     if (!userIdFromHeader || userIdFromHeader !== userIdFromParam) {
         log(`Progress auth rejected: header=${userIdFromHeader} param=${userIdFromParam}`, 'WARN');
         return res.status(401).json({ error: 'No autorizado: x-user-id requerido y debe coincidir con el usuario' });
     }
+    // CHP-IDDB-M1-A (active gap): existencia NO basta — una cuenta deshabilitada
+    // no debe poder escribir progreso. Antes solo se comprobaba la existencia.
     const users = readJSON(USERS_DB);
-    if (!users.find(u => u.id === userIdFromHeader)) {
+    const owner = users.find(u => u.id === userIdFromHeader);
+    if (!owner) {
         return res.status(401).json({ error: 'No autorizado: usuario no válido' });
+    }
+    if (!isUserActive(owner)) {
+        log(`Progress auth rejected: userId=${userIdFromHeader} accountStatus=${owner.accountStatus}`, 'ACCESS');
+        return res.status(401).json({ error: 'No autorizado: cuenta inactiva' });
     }
     next();
 };
@@ -2332,6 +2431,37 @@ const isUserActive = (user) => {
     return !status || status === 'active';
 };
 
+// CHP-IDDB-M1-A-SESSION-IDENTITY-01 — servicio de sesión firmada. Autoridad de
+// revocación = padrón FÍSICO (readCanonicalStoreForMutation, sin caché ni lag
+// del espejo). En modo 'off' (default) NO se emite ni verifica sesión: el
+// comportamiento actual (x-user-id) queda intacto. Cardinalidad de métricas fija.
+const sessionAuth = createSessionAuth({
+    readUsersPhysical: () => readCanonicalStoreForMutation(USERS_DB),
+    isUserActive,
+    log: (m, t) => log(m, t),
+});
+sessionAuth.attachMetrics({
+    legacy: authSessionLegacyXUserId,
+    mismatch: authSessionSubjectMismatch,
+});
+
+/**
+ * Emite cookie de sesión firmada tras un login válido (solo si el modo lo
+ * habilita). Best-effort: un fallo de emisión NO rompe el login (se responde
+ * igual; el cliente cae a compat legacy). Limpieza oportunista acotada.
+ */
+async function issueSessionCookie(res, user) {
+    if (!sessionIssuanceEnabled()) return;
+    try {
+        const { token } = await sessionAuth.issueSession(user);
+        res.cookie(SESSION_COOKIE, token, sessionCookieOptions({ isProd: IS_PROD, maxAgeSec: DEFAULT_TTL_SEC }));
+        try { authSessionSuccess.labels('session').inc(); } catch { /* noop */ }
+        try { cleanupExpiredSessions({ limit: 500 }); } catch { /* noop */ }
+    } catch (e) {
+        log(`[SESSION] issue failed (login continúa en compat): ${e.message}`, 'WARN');
+    }
+}
+
 const sanitizeUserForClient = (user) => {
     const { password, inviteToken, inviteExpiresAt, resetToken, resetExpiresAt, ...safeUser } = user;
     return safeUser;
@@ -2956,6 +3086,9 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
             users[userIndex] = user;
             writeJSONAsync(USERS_DB, users).catch(e => log(`lastLoginAt write error: ${e.message}`, 'ERROR'));
             log(`Login exitoso: ${normalizedEmail} ip=${req.ip}`, 'ACCESS');
+            // CHP-IDDB-M1-A: emite sesión firmada (cookie HttpOnly) si el modo lo
+            // habilita. En 'off' es no-op y el cliente sigue con x-user-id.
+            await issueSessionCookie(res, user);
             return res.json({ success: true, user: sanitizeUserForClient(user) });
         }
     }
@@ -3288,11 +3421,17 @@ const handleResetConfirm = async (req, res) => {
             return { conflict: 'expired' };
         }
         const { resetToken: _rt, resetExpiresAt: _re, ...rest } = user;
+        // CHP-IDDB-M1-A — un reset de password invalida toda sesión previa.
         updated = { ...rest, password: hashedPassword };
+        bumpCredentialVersion(updated);
         users[index] = updated;
         writeJSON(USERS_DB, users);
         return null;
     });
+    if (updated?.id) {
+        try { sessionAuth.revokeAllUserSessions(updated.id); authSessionRevoked.labels('password_reset').inc(); }
+        catch (e) { log(`[SESSION] revoke-on-reset error: ${e.message}`, 'WARN'); }
+    }
 
     if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Token inválido o ya utilizado' });
     if (conflict?.conflict === 'not_active') return res.status(409).json({ error: 'No se puede restablecer esta cuenta' });
@@ -3444,6 +3583,7 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     let oldRoles   = [];
     let conflict   = null;
     let groupDelta = { added: [], removed: [], missingGroupIds: [] };
+    let revokeUserSessions = false;
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
@@ -3489,10 +3629,24 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
             // si la escritura del grupo falla, el user no queda con groupIds que
             // ningún grupo reconoce.
             if (applied.touched) writeJSON(GROUPS_DB, groups);
+            // CHP-IDDB-M1-A — invalidación de sesión ante eventos de credencial:
+            // un disable (active→no-active) o un cambio de password debe romper
+            // toda sesión viva. credentialVersion++ (bajo este mismo users lock)
+            // y se revocan las filas del store tras el lock.
+            const becameDisabled = isUserActive(users[index]) && !isUserActive(mergedUser);
+            const passwordChanged = updates.password !== undefined;
+            if (becameDisabled || passwordChanged) {
+                bumpCredentialVersion(mergedUser);
+                revokeUserSessions = true;
+            }
             users[index] = mergedUser;
             writeJSON(USERS_DB, users);
         });
     }, 'groupsLock');
+    if (revokeUserSessions) {
+        try { sessionAuth.revokeAllUserSessions(id); authSessionRevoked.labels('credential_change').inc(); }
+        catch (e) { log(`[SESSION] revoke-on-update error: ${e.message}`, 'WARN'); }
+    }
     if (conflict?.conflict === 'not_found')    return res.status(404).json({ error: 'Usuario no encontrado' });
     if (conflict?.conflict === 'dup_email')    return res.status(409).json({ error: 'El nuevo email ya está en uso' });
     if (conflict?.conflict === 'group') {
@@ -8544,6 +8698,42 @@ app.get('/api/auth/me', requireUserAuth, (req, res) => {
         colegio: u.colegio ?? null,
         accountStatus: u.accountStatus ?? 'active',
     });
+});
+
+// CHP-IDDB-M1-A — LOGOUT: revoca SOLO la sesión actual + borra cookie.
+// Autoridad = sesión humana válida (requireUserAuth resuelve req.auth). En modo
+// 'off' no hay sesión que revocar: solo limpia la cookie por si existiera.
+app.post('/api/auth/logout', requireUserAuth, (req, res) => {
+    try {
+        const sid = req.auth?.sessionId;
+        if (sid) {
+            sessionAuth.revokeSession(sid);
+            try { authSessionRevoked.labels('logout').inc(); } catch { /* noop */ }
+        }
+    } catch (e) {
+        log(`[SESSION] logout revoke error: ${e.message}`, 'WARN');
+    }
+    res.clearCookie(SESSION_COOKIE, sessionCookieOptions({ isProd: IS_PROD }));
+    res.json({ success: true });
+});
+
+// CHP-IDDB-M1-A — LOGOUT-ALL: invalida TODAS las sesiones del usuario
+// (credentialVersion++ en el padrón físico + revoca sus filas vivas).
+app.post('/api/auth/logout-all', requireUserAuth, async (req, res) => {
+    const userId = req.user.id;
+    try {
+        await mutateUsers((users) => {
+            const idx = users.findIndex(u => u.id === userId);
+            if (idx >= 0) { bumpCredentialVersion(users[idx]); writeJSON(USERS_DB, users); }
+        });
+        sessionAuth.revokeAllUserSessions(userId);
+        try { authSessionRevoked.labels('logout_all').inc(); } catch { /* noop */ }
+    } catch (e) {
+        log(`[SESSION] logout-all error: ${e.message}`, 'ERROR');
+        return res.status(500).json({ error: 'No se pudo cerrar todas las sesiones' });
+    }
+    res.clearCookie(SESSION_COOKIE, sessionCookieOptions({ isProd: IS_PROD }));
+    res.json({ success: true });
 });
 
 // GET /api/content/my-catalog

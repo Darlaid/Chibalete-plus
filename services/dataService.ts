@@ -147,6 +147,34 @@ class DataService {
     }
 
     /**
+     * CHP-IDDB-M1-A — rehidratación por COOKIE de sesión firmada. GET /api/auth/me
+     * usa la cookie HttpOnly (autoridad); el x-user-id local deja de ser necesario.
+     * Same-origin ⇒ la cookie viaja automáticamente. Devuelve el user o null.
+     */
+    public async fetchSessionMe(): Promise<{ id: string; roles: string[] } | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/auth/me`, { credentials: 'same-origin' });
+            if (!res.ok) return null;
+            const me = await res.json();
+            return me && me.id ? me : null;
+        } catch { return null; }
+    }
+
+    /**
+     * CHP-IDDB-M1-A — logout server-side: revoca la sesión actual (sid) y borra
+     * la cookie. Best-effort; el caller limpia el estado local igualmente.
+     */
+    public async serverLogout(all: boolean = false): Promise<void> {
+        try {
+            await fetch(`${this.apiUrl}/auth/${all ? 'logout-all' : 'logout'}`, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { ...this.adminWriteHeaders },
+            });
+        } catch { /* el logout local procede igual */ }
+    }
+
+    /**
      * Headers para operaciones de escritura que requieren rol administrador.
      * Usa x-user-id del usuario logueado — el backend valida el rol.
      * No embebe secretos en el bundle.

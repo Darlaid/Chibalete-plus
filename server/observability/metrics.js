@@ -106,6 +106,28 @@ export const identityUserDomainReads = M(() => new client.Counter({
     help: 'Composed user read-view records by domain class',
     labelNames: ['class'], registers: [registry],
 }));
+// CHP-IDDB-M1-A — sesión firmada. Cardinalidad fija; NUNCA userId como label,
+// NUNCA token/cookie/clave en logs.
+export const authSessionSuccess = M(() => new client.Counter({
+    name: 'chibalete_auth_session_success_total', help: 'Signed-session authentications',
+    labelNames: ['auth_method'], registers: [registry],
+}));
+export const authSessionFailure = M(() => new client.Counter({
+    name: 'chibalete_auth_session_failure_total', help: 'Session auth failures',
+    labelNames: ['reason'], registers: [registry],
+}));
+export const authSessionLegacyXUserId = M(() => new client.Counter({
+    name: 'chibalete_auth_session_legacy_x_user_id_total', help: 'Legacy x-user-id authentications',
+    labelNames: ['source_class'], registers: [registry],
+}));
+export const authSessionSubjectMismatch = M(() => new client.Counter({
+    name: 'chibalete_auth_session_subject_mismatch_total', help: 'Session subject != x-user-id',
+    registers: [registry],
+}));
+export const authSessionRevoked = M(() => new client.Counter({
+    name: 'chibalete_auth_session_revoked_total', help: 'Sessions revoked',
+    labelNames: ['kind'], registers: [registry],
+}));
 // CHP-IDDB-02C-B — comparación runtime JSON↔SQLite en modo sombra. JSON sigue
 // siendo la respuesta oficial: estas series solo describen al observador.
 // Cardinalidad fija: domain∈5, surface∈2, result∈5, gap∈enum corto.
