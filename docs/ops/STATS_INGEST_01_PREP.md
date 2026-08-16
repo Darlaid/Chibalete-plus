@@ -55,7 +55,9 @@ events.db almacena HECHOS. No se excluye/borra por cohorte sintética/disabled/h
 
 ## 16. CI
 
-Tests cableados a `identity-preflight.yml` en esta misma unidad (paso «Ingestión canónica de eventos (01-PREP)») y el guard de store-isolation extendido a `test:canonical-ingest`. Se **evita** el problema de 01A/01B (tests no ejecutados por CI). Evidencia remota exact-tree: ver §CI-evidence tras el push.
+Tests cableados a `identity-preflight.yml` en esta misma unidad (paso «Ingestión canónica de eventos (01-PREP)») y el guard de store-isolation extendido a `test:canonical-ingest`. Se **evita** el problema de 01A/01B (tests no ejecutados por CI).
+
+**CI remoto exact-tree GREEN sobre `9fedb99` (attempt 1, sin flake):** identity-preflight (run `31977206914`) + security = **success**. Verificado a nivel de STEP: step 12 «Ingestión canónica de eventos (01-PREP)» = success (corre `test:canonical-ingest`), step 18 «La suite no escribe stores reales» = success (cubre `test:canonical-ingest`), typecheck + build = success. security = success → `NEW_FINDINGS=0` (baseline heredado separado). `INGEST_REMOTE_CI_GREEN=true`.
 
 ## 17. M1 no interferido
 
@@ -69,7 +71,7 @@ EVENTS_STORE_SCHEMA_READY = true   (events.db reutilizado; tenant necesita colum
 EVENT_IDEMPOTENCY_READY = true      (INSERT OR IGNORE + conflict detection)
 AUTH_ACTOR_AUTHORITY_READY = true   (verifiedContext.authenticatedUserId; sin x-user-id)
 TENANT_VERIFIED_CONTEXT_READY = partial  (punto de integración listo; persistencia requiere columna + M1-B desplegado)
-INGEST_REMOTE_CI_GREEN = <pendiente confirmación del run remoto>
+INGEST_REMOTE_CI_GREEN = true (run 31977206914, exact-tree 9fedb99, step-verified)
 ```
 
 **Dependencias reales de M1-B:** la persistencia de tenant/institución verificada necesita (a) M1-B desplegado para poblar el snapshot en `req.auth`, y (b) una columna `institution_id`/`group_id` en events.db (migración de schema). Mientras tanto el módulo valida no-spoof y acepta hechos personales sin tenant.
