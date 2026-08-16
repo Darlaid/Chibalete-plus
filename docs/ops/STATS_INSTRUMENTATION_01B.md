@@ -96,7 +96,34 @@ Read-only al cierre: api_1/api_2 `0ff76b6` COMPAT/json, front `m1a-0ff76b6`, hea
 
 **Hallazgo:** el CI de `05c6567` estaba GREEN (identity-preflight + security, attempt 1, exact-tree) pero **no ejecutaba** los tests nuevos (`test:event-transport`, `test:reader-instrumentation`) — no estaban cableados a ningún workflow (descuido de 01A/01B). typecheck:baseline y build sí compilaban el código, pero las aserciones de comportamiento (eventId/occurredAt estables, retry, offline, elapsedMs incremental, sesión por apertura, sin x-user-id, payload bounded) no corrían en CI.
 
-**Fix (config-only, sin tocar código de producto):** se añadió a `identity-preflight.yml` un paso que ejecuta ambas suites y se extendió el guard de store-isolation para cubrirlas (`verify-test-store-isolation.mjs … test:event-transport test:reader-instrumentation`). El SHA final avanza de `05c6567` a `INSTRUMENTATION_FINAL_SHA=<nuevo>` (documentado; `c7d5797`→`05c6567`→final lineal). Local: store-isolation con los 2 suites PASS (0 stores). El nuevo run remoto ejecuta y pasa los tests nuevos.
+**Fix (config-only, sin tocar código de producto):** se añadió a `identity-preflight.yml` un paso que ejecuta ambas suites y se extendió el guard de store-isolation para cubrirlas. Linaje lineal `c7d5797`→`05c6567`→**`INSTRUMENTATION_FINAL_SHA=66a4357`**.
+
+**CI remoto exact-tree GREEN sobre `66a4357` (attempt 1, sin flake):**
+
+| Workflow | Run ID | Conclusión |
+|---|---|---|
+| identity-preflight | 31975930149 | success |
+| security | (run para 66a4357) | success |
+
+Steps ejecutados y **success** en identity-preflight (verificado vía API a nivel de step):
+- **«Transporte de eventos + instrumentación de lectores (01A/01B)»** → success (corre `test:event-transport` + `test:reader-instrumentation`).
+- «La suite no escribe stores reales» → success (ahora cubre `test:event-transport test:reader-instrumentation`).
+- «Typecheck sin regresiones» → success · «Build de producción» → success.
+
+Cobertura confirmada por el run remoto: eventId estable, occurredAt estable, retry mismo evento, cola offline, elapsedMs incremental, sesión por apertura, sin x-user-id, payload bounded. **No es un GREEN que saltó los tests nuevos.**
+
+**Immersive non-regression (FASE 5):** `useBackboneReadingSession` lo usan Texto/PDF/Álbum **e Inmersivo**; su API pública (`sessionId/emitEvent/markActivity/endSession`) no cambió. El run remoto pasó `typecheck:baseline` (contrato de tipos consistente para los 4 consumidores, VisorInmersivo incluido) y `build` (VisorInmersivo bundlea). Ningún test importa el hook directamente (no hay suite dedicada); la lógica compartida (elapsed/sesión/transporte) está cubierta por `readerEventCore`. No se añadió test nuevo (sin cobertura ausente real ni cambio semántico).
+
+**Seguridad (FASE 6):** security workflow = success → `NEW_FINDINGS=0`; hallazgos baseline heredados quedan separados; sin nueva excepción.
+
+**Disposición (FASE 7):**
+```
+INSTRUMENTATION_01A_REMOTE_CI_CONFIRMED=true
+INSTRUMENTATION_01B_REMOTE_CI_CONFIRMED=true
+REMOTE_CI_CONFIRMATION_PENDING=false
+INSTRUMENTATION_01AB_FINAL_READY=true
+```
+Esto significa **solo**: listo para iniciar `CHP-STATS-INGEST-01-PREP` offline. NO significa desplegado en producción. Esta finalización de doc es **docs-only** (mismo árbol de código/test/workflow que `66a4357`; `docs/**` no dispara identity-preflight → cobertura CI inalterada).
 
 ## STOP — ninguna disparada
 
