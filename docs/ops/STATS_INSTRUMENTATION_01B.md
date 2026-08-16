@@ -92,6 +92,12 @@ Para Texto/PDF/Álbum ya puede afirmarse: **eventId estable** (ULID en el hecho)
 
 Read-only al cierre: api_1/api_2 `0ff76b6` COMPAT/json, front `m1a-0ff76b6`, healthy, restarts=0. Implementación offline; sin tráfico M1.
 
+## Cierre de CI (CHP-STATS-INSTRUMENTATION-01AB-CI-CLOSE-01)
+
+**Hallazgo:** el CI de `05c6567` estaba GREEN (identity-preflight + security, attempt 1, exact-tree) pero **no ejecutaba** los tests nuevos (`test:event-transport`, `test:reader-instrumentation`) — no estaban cableados a ningún workflow (descuido de 01A/01B). typecheck:baseline y build sí compilaban el código, pero las aserciones de comportamiento (eventId/occurredAt estables, retry, offline, elapsedMs incremental, sesión por apertura, sin x-user-id, payload bounded) no corrían en CI.
+
+**Fix (config-only, sin tocar código de producto):** se añadió a `identity-preflight.yml` un paso que ejecuta ambas suites y se extendió el guard de store-isolation para cubrirlas (`verify-test-store-isolation.mjs … test:event-transport test:reader-instrumentation`). El SHA final avanza de `05c6567` a `INSTRUMENTATION_FINAL_SHA=<nuevo>` (documentado; `c7d5797`→`05c6567`→final lineal). Local: store-isolation con los 2 suites PASS (0 stores). El nuevo run remoto ejecuta y pasa los tests nuevos.
+
 ## STOP — ninguna disparada
 
 eventId/occurredAt nunca se regeneran en retry; sin pérdida en fallo de red; sin x-user-id; sin cambio de conducta de lectores; tests solo con storage/fetch mock; sin duplicado canónico nuevo; M1 intacto.
