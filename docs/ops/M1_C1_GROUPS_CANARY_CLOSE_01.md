@@ -71,6 +71,15 @@ Clasificación acumulada api_2: `group_domain_reads` canonical=28 / compat_legac
 
 La sesión de las 18:20–18:21Z es un viaje de usuario real completo (401 → login → 200s → uso de contenido con TTS a las 18:21:44Z en api_1).
 
+Claves explícitas del gate (distinción requests/reads, contrato congelado):
+
+```
+NATURAL_GROUP_REQUESTS=8
+AUTHENTICATED_SUCCESSFUL_GROUP_REQUESTS=3
+POST_START_OFFICIAL_SQLITE_READ_DELTA=5
+TRAFFIC_GATE=GREEN_PER_FROZEN_REQUEST_CONTRACT
+```
+
 ## 7. Invariantes de membresía (FASE 6)
 
 - `identity.db` (lectura `mode=ro`): memberships=227, users=247, groups=4, institutions=4.
