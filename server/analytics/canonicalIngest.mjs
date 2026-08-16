@@ -123,6 +123,9 @@ export function factFingerprint(fact) {
         content_id: fact.content_id ?? null,
         session_id: fact.session_id,
         client_ts: fact.client_ts,
+        // contexto institucional verificado forma parte del hecho persistido:
+        institution_id: fact.institution_id ?? null,
+        group_id: fact.group_id ?? null,
         payload: fact.payload_json ?? (fact.payload ? JSON.stringify(fact.payload) : null),
     };
     return JSON.stringify(canon);
@@ -193,14 +196,18 @@ export function normalizeForIngest(raw, verifiedContext, receivedAt) {
     if (raw.provenance != null && String(raw.provenance) !== String(provenance)) {
         return reject(INGEST_ERROR.INVALID_PROVENANCE);
     }
-    // tenant: sólo desde el contexto verificado; el crudo no puede autoafirmarlo.
-    // Ausencia de tenant es válida (hecho personal legítimo). No se fabrica.
-    const rawTenant = raw.institutionId ?? raw.groupId ?? raw.tenant;
-    if (rawTenant != null && verifiedContext.tenant == null) {
-        return reject(INGEST_ERROR.TENANT_MISMATCH); // cliente afirma tenant no verificado
+    // Contexto institucional: AUTORIDAD = verifiedContext (server-resuelto).
+    // El crudo NO puede autoafirmar tenant. Ausencia en el contexto ⇒ hecho
+    // personal legítimo (institution_id/group_id = NULL). No se fabrica contexto.
+    const verInstitution = verifiedContext.institutionId ?? null;
+    const verGroup = verifiedContext.groupId ?? null;
+    const rawInstitution = raw.institutionId ?? raw.organizationId ?? (raw.tenant && raw.tenant.institutionId) ?? null;
+    const rawGroup = raw.groupId ?? (raw.tenant && raw.tenant.groupId) ?? null;
+    // Cliente afirma institución/grupo no verificado o distinto → rechazo.
+    if (rawInstitution != null && String(rawInstitution) !== String(verInstitution ?? '')) {
+        return reject(INGEST_ERROR.TENANT_MISMATCH);
     }
-    if (rawTenant != null && verifiedContext.tenant != null
-        && String(rawTenant) !== String(verifiedContext.tenant.institutionId ?? verifiedContext.tenant)) {
+    if (rawGroup != null && String(rawGroup) !== String(verGroup ?? '')) {
         return reject(INGEST_ERROR.TENANT_MISMATCH);
     }
     // payload
@@ -238,10 +245,13 @@ export function normalizeForIngest(raw, verifiedContext, receivedAt) {
         client_ts: occurredAt,
         elapsed_ms: Number.isFinite(raw.elapsedMs) ? Math.max(0, Math.round(raw.elapsedMs)) : null,
         progress_fraction: Number.isFinite(raw.progressFraction) ? raw.progressFraction : null,
+        // Contexto institucional VERIFICADO (server). NULL = hecho personal.
+        // Persistible tras la migración aditiva (institution_id/group_id).
+        institution_id: verInstitution,
+        group_id: verGroup,
         payload,
-        // metadata de contexto (no se persiste como columna hoy — ver doc):
+        // metadata server-owned (server_ts lo pone la capa de persistencia):
         _provenance: provenance,
-        _tenant: verifiedContext.tenant ?? null,
         _receivedAt: receivedAt,
     };
     return { ok: true, fact };

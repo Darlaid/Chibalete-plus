@@ -115,14 +115,15 @@ T('10. tenant autoafirmado sin contexto verificado → TENANT_MISMATCH (403)', (
     const r = normalizeForIngest(rawEvt({ institutionId: 'Colegio-X' }), ctx(), 1_700_000_100_000);
     assert.strictEqual(r.error, INGEST_ERROR.TENANT_MISMATCH);
 });
-T('10b. tenant crudo != verificado → TENANT_MISMATCH', () => {
-    const r = normalizeForIngest(rawEvt({ institutionId: 'A' }), ctx({ tenant: { institutionId: 'B' } }), 1_700_000_100_000);
+T('10b. institución cruda != verificada → TENANT_MISMATCH', () => {
+    const r = normalizeForIngest(rawEvt({ institutionId: 'A' }), ctx({ institutionId: 'B' }), 1_700_000_100_000);
     assert.strictEqual(r.error, INGEST_ERROR.TENANT_MISMATCH);
 });
-T('10c. hecho personal sin tenant → OK (no se fabrica, no se bloquea)', () => {
-    const n = normalizeForIngest(rawEvt(), ctx({ tenant: undefined }), 1_700_000_100_000);
+T('10c. hecho personal sin tenant → OK (institution_id/group_id NULL)', () => {
+    const n = normalizeForIngest(rawEvt(), ctx({ institutionId: undefined }), 1_700_000_100_000);
     assert.ok(n.ok);
-    assert.strictEqual(n.fact._tenant, null);
+    assert.strictEqual(n.fact.institution_id, null);
+    assert.strictEqual(n.fact.group_id, null);
 });
 
 // 11. invalid eventType rejected

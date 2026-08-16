@@ -46,7 +46,7 @@
     "test:session-browser": "node server/__test__/sessionBrowserCookieOnly.test.mjs",
     "test:event-transport": "node utils/__tests__/eventTransport.test.mjs",
     "test:reader-instrumentation": "node utils/__tests__/readerEventCore.test.mjs",
-    "test:canonical-ingest": "node server/analytics/__test__/canonicalIngest.test.mjs"
+    "test:canonical-ingest": "node server/analytics/__test__/canonicalIngest.test.mjs && node server/analytics/__test__/eventsTenantMigration.test.mjs && node server/analytics/__test__/ingestTenantContext.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
