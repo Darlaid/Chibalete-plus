@@ -46,7 +46,9 @@ Reglas: **hecho personal legítimo** → `institution_id=NULL`, `group_id=NULL`;
 
 ## 10. CI
 
-Los tests nuevos se ejecutan vía el script `test:canonical-ingest` (expandido a las 3 suites), **ya cableado** al workflow `identity-preflight` (paso «Ingestión canónica de eventos (01-PREP)») y cubierto por el guard de store-isolation — sin cambiar el workflow. Evidencia remota exact-tree: ver §CI-evidence tras el push.
+Los tests nuevos se ejecutan vía el script `test:canonical-ingest` (expandido a las 3 suites: canonicalIngest + eventsTenantMigration + ingestTenantContext), **ya cableado** al workflow `identity-preflight` (paso «Ingestión canónica de eventos (01-PREP)») y cubierto por el guard de store-isolation — sin cambiar el workflow.
+
+**CI remoto exact-tree GREEN sobre `1e9ff5b` (attempt 1, sin flake):** identity-preflight (run `31979603669`) + security = **success**. Verificado a nivel de STEP: step 12 «Ingestión canónica de eventos (01-PREP)» = success (corre las 47 pruebas de ingest, incl. migración e integración tenant), step 18 store-isolation = success, typecheck + build = success. security = success → `NEW_FINDINGS=0`.
 
 ## 11. Handoff de activación
 
