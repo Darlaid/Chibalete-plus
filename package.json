@@ -45,7 +45,8 @@
     "test:legacy-perf": "node scripts/perf/request-index.test.mjs && node scripts/perf/target-guard.test.mjs && node scripts/perf/productionCanaryCorpus.test.mjs && node scripts/perf/productionCanaryRuntimeBinding.test.mjs && node server/__test__/metricsRequestContext.test.js && node server/__test__/metricsContextRatchet.test.js && node server/__test__/metricsEquivalenceHarness.test.js",
     "test:session-browser": "node server/__test__/sessionBrowserCookieOnly.test.mjs",
     "test:event-transport": "node utils/__tests__/eventTransport.test.mjs",
-    "test:reader-instrumentation": "node utils/__tests__/readerEventCore.test.mjs"
+    "test:reader-instrumentation": "node utils/__tests__/readerEventCore.test.mjs",
+    "test:canonical-ingest": "node server/analytics/__test__/canonicalIngest.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",

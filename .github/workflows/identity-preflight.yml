@@ -114,6 +114,13 @@ jobs:
       - name: Transporte de eventos + instrumentación de lectores (01A/01B)
         run: npm run test:event-transport && npm run test:reader-instrumentation
 
+      # CHP-STATS-INGEST-01-PREP — ingestión canónica endurecida (append-only,
+      # idempotente por eventId con detección de conflicto, actor server-
+      # autoritativo, sin tenant autoafirmado, PII/derived-state rechazados).
+      # Integración con events.db en tmp (EVENTS_SQLITE_PATH); sin store real.
+      - name: Ingestión canónica de eventos (01-PREP)
+        run: npm run test:canonical-ingest
+
       # CHP-AI-RUNTIME-MODEL-COMPAT-01A — el runtime no puede volver a apuntar a
       # un modelo retirado. Sin red: los proveedores se inyectan con dobles.
       - name: Compatibilidad de modelos de IA (Gemini textual + breaker)
@@ -135,7 +142,7 @@ jobs:
         run: node server/__test__/realStoreGuard.test.js
 
       - name: La suite no escribe stores reales
-        run: node scripts/verify-test-store-isolation.mjs test:identity test:memberships test:event-transport test:reader-instrumentation
+        run: node scripts/verify-test-store-isolation.mjs test:identity test:memberships test:event-transport test:reader-instrumentation test:canonical-ingest
 
       - name: Typecheck sin regresiones (ops/ excluido por tsconfig)
         run: npm run typecheck:baseline
