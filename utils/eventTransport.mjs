@@ -240,15 +240,25 @@ export function createEventTransport(opts = {}) {
      * @returns {Promise<{sent:number, outcome:string, status?:number|null}>}
      */
     async function flush(o = {}) {
-        const { scope, useBeacon = false } = o;
+        const { scope, useBeacon = false, maxBatch = null } = o;
         const all = loadQueue();
-        const selected = scope != null ? all.filter(e => e._scope === scope) : all;
-        const rest     = scope != null ? all.filter(e => e._scope !== scope) : [];
+        let selected = scope != null ? all.filter(e => e._scope === scope) : all.slice();
+        const rest   = scope != null ? all.filter(e => e._scope !== scope) : [];
+        // Cap de lote: el endpoint procesa ≤50/request. Al drenar una cola
+        // offline grande enviamos por tandas (el resto queda en cola y drena en
+        // flushes sucesivos) — evita que un 2xx parcial borre eventos no
+        // ingeridos (silent-loss). maxBatch=null ⇒ enviar todo (comportamiento
+        // base 01A).
+        let deferred = [];
+        if (maxBatch != null && selected.length > maxBatch) {
+            deferred = selected.slice(maxBatch);
+            selected = selected.slice(0, maxBatch);
+        }
         if (selected.length === 0) return { sent: 0, outcome: 'empty' };
 
         // Persist-before-send con attempts++ (durabilidad si la pestaña muere mid-send).
         const attempted = selected.map(e => ({ ...e, attempts: (e.attempts || 0) + 1 }));
-        saveQueue([...rest, ...attempted]);
+        saveQueue([...rest, ...deferred, ...attempted]);
 
         const wire = attempted.map(toWire);
         const body = JSON.stringify({ events: wire });

@@ -36,24 +36,14 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { ulid } from '../utils/clientUlid';
+// CHP-STATS-INSTRUMENTATION-01B: transporte durable compartido (01A) +
+// elapsed incremental. Reemplaza el fetch fail-silent y el elapsedMs acumulado.
+import { createEventTransport } from '../utils/eventTransport.mjs';
+import { createElapsedTracker, buildReaderEvent } from '../utils/readerEventCore.mjs';
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 
 type ReaderMode = 'pdf' | 'text' | 'immersive' | 'album' | 'a11y' | 'lu';
-
-interface BackboneEvent {
-    eventId: string;
-    schemaVersion: 1;
-    event: string;
-    mode: ReaderMode;
-    userId: string;
-    contentId: string | null;
-    sessionId: string;
-    clientTs: number;
-    elapsedMs?: number;
-    progressFraction?: number;
-    payload?: Record<string, unknown>;
-}
 
 export interface UseBackboneReadingSessionConfig {
     /**
@@ -108,9 +98,13 @@ export interface UseBackboneReadingSessionApi {
 // ── Constantes ───────────────────────────────────────────────────────────────
 
 const ENDPOINT          = '/api/v1/events';
-const BUFFER_MAX        = 10;
 const FLUSH_INTERVAL_MS = 5_000;
 const ACTION_NAME_RX    = /^[a-z][a-z0-9_]*$/;
+// Cola durable compartida por los lectores backbone (Texto/PDF/Álbum/Inmersivo).
+// El server deduplica por eventId (UNIQUE), así que compartir la clave entre
+// instancias/pestañas es seguro. Cap de lote = 50 (el endpoint procesa ≤50).
+const QUEUE_STORAGE_KEY = 'chp_reader_event_queue';
+const FLUSH_MAX_BATCH   = 50;
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -147,38 +141,37 @@ export function useBackboneReadingSession(
     const sessionEndedRef      = useRef<boolean>(false);
 
     const lastActivityTsRef    = useRef<number>(Date.now());
-    const bufferRef            = useRef<BackboneEvent[]>([]);
+    // Checkpoint incremental de tiempo (01B): elapsedMs = delta desde el último
+    // evento con tiempo, NO acumulado desde el inicio. Se reinicia por apertura.
+    const elapsedTrackerRef    = useRef(createElapsedTracker(Date.now()));
+
+    // ── Transporte durable compartido (01B, sobre 01A) ───────────────────────
+    // Reemplaza el fetch fail-silent: cola persistente en localStorage, retry
+    // seguro (mismo eventId/occurredAt), clasificación 5xx/429/network vs 4xx,
+    // cero silent drop. Cookie-only (sin x-user-id): la identidad la resuelve la
+    // sesión. Ahora SÍ se puede usar sendBeacon en cierre (la cookie viaja sola).
+    const transportRef = useRef<ReturnType<typeof createEventTransport> | null>(null);
+    if (transportRef.current === null && typeof window !== 'undefined') {
+        transportRef.current = createEventTransport({
+            endpoint: ENDPOINT,
+            storageKey: QUEUE_STORAGE_KEY,
+            generateId: ulid,
+            sendBeacon: (url: string, body: string): boolean => {
+                if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return false;
+                try { return navigator.sendBeacon(url, new Blob([body], { type: 'application/json' })); }
+                catch { return false; }
+            },
+        });
+    }
 
     // ── flush ────────────────────────────────────────────────────────────────
-    // NOTA: sendBeacon eliminado intencionalmente. /api/v1/events exige header
-    // x-user-id y sendBeacon NO permite headers personalizados, causando 401
-    // sostenidos en cada session_end / visibilitychange. fetch + keepalive es el
-    // único path válido, soportado en todos los UAs modernos (hasta 64KB en
-    // beforeunload). Trade-off: en Safari iOS background el keepalive puede no
-    // completar; mitigado por heartbeats cada 15s que cubren analíticamente la
-    // pérdida del session_end final. El parámetro `_useBeacon` queda como dead
-    // arg para minimizar diff en los call sites.
-    const flush = useCallback((_useBeacon: boolean): void => {
-        const buf = bufferRef.current;
-        if (buf.length === 0) return;
-        const uid = userIdRef.current;
-        if (!uid || uid === 'guest') {
-            buf.length = 0; // sin user válido → descartar (el endpoint v1 lo rechazaría)
-            return;
-        }
-        const batch = buf.splice(0);
-        const body  = JSON.stringify({ events: batch });
-
-        try {
-            fetch(ENDPOINT, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body,
-                keepalive: true,
-            }).catch(() => { /* fail silencioso */ });
-        } catch {
-            // Nunca propagar errores de telemetría.
-        }
+    // Delega en el transporte durable. `useBeacon` en cierre de pestaña usa
+    // sendBeacon (habilitado por cookie-only). Fire-and-forget: nunca propaga.
+    const flush = useCallback((useBeacon: boolean): void => {
+        const tr = transportRef.current;
+        if (!tr) return;
+        try { void tr.flush({ useBeacon, maxBatch: FLUSH_MAX_BATCH }); }
+        catch { /* la telemetría nunca rompe el render */ }
     }, []);
 
     const flushRef = useRef(flush);
@@ -212,34 +205,38 @@ export function useBackboneReadingSession(
     };
 
     // ── Enqueue interno ──────────────────────────────────────────────────────
+    // Recibe la `action` SIN prefijo (p.ej. 'progress', 'session_start'); el
+    // core la prefija a `${mode}.${action}`. Construye el evento con identidad
+    // estable (eventId ULID + occurredAt en el hecho) y lo persiste en el
+    // transporte durable. NO envía en cada enqueue: el flush periódico + los de
+    // cierre agrupan por lote (durable + batched).
     const enqueue = useCallback((
-        fullEventName: string,
+        action: string,
         opts: {
             elapsedMs?: number;
             progressFraction?: number;
             payload?: Record<string, unknown>;
         } = {},
     ): void => {
+        const tr = transportRef.current;
+        if (!tr) return;
         const uid = userIdRef.current;
         if (!uid || uid === 'guest') return;
         if (!sessionIdRef.current) return;
 
-        const evt: BackboneEvent = {
-            eventId:       ulid(),
-            schemaVersion: 1,
-            event:         fullEventName,
-            mode:          modeRef.current,
-            userId:        uid,
-            contentId:     contentIdRef.current ?? null,
-            sessionId:     sessionIdRef.current,
-            clientTs:      Date.now(),
-        };
-        if (opts.elapsedMs !== undefined)        evt.elapsedMs        = opts.elapsedMs;
-        if (opts.progressFraction !== undefined) evt.progressFraction = opts.progressFraction;
-        if (opts.payload && Object.keys(opts.payload).length > 0) evt.payload = opts.payload;
-
-        bufferRef.current.push(evt);
-        if (bufferRef.current.length >= BUFFER_MAX) flushRef.current(false);
+        const evt = buildReaderEvent({
+            eventId:              ulid(),
+            now:                  Date.now(),
+            mode:                 modeRef.current,
+            action,
+            userId:               uid,
+            contentId:            contentIdRef.current ?? null,
+            interactionSessionId: sessionIdRef.current,
+            elapsedMs:            opts.elapsedMs,
+            progressFraction:     opts.progressFraction,
+            payload:              opts.payload,
+        });
+        if (evt) tr.enqueue(evt);
     }, []);
 
     const enqueueRef = useRef(enqueue);
@@ -252,10 +249,8 @@ export function useBackboneReadingSession(
     ): void => {
         if (!sessionStartedRef.current || sessionEndedRef.current) return;
         if (typeof action !== 'string' || !ACTION_NAME_RX.test(action)) return;
-        const fullName = `${modeRef.current}.${action}`;
-        const elapsed  = Date.now() - sessionStartTsRef.current;
-        enqueueRef.current(fullName, {
-            elapsedMs:        elapsed,
+        enqueueRef.current(action, {
+            elapsedMs:        elapsedTrackerRef.current.delta(Date.now()),
             progressFraction: computeFraction(opts.progressFraction),
             payload:          opts.payload,
         });
@@ -270,9 +265,8 @@ export function useBackboneReadingSession(
     const endSession = useCallback((): void => {
         if (!sessionStartedRef.current || sessionEndedRef.current) return;
         sessionEndedRef.current = true;
-        const elapsed = Date.now() - sessionStartTsRef.current;
-        enqueueRef.current(`${modeRef.current}.session_end`, {
-            elapsedMs:        elapsed,
+        enqueueRef.current('session_end', {
+            elapsedMs:        elapsedTrackerRef.current.delta(Date.now()),
             progressFraction: computeFraction(),
             payload:          computeInitialPayload(),
         });
@@ -288,29 +282,32 @@ export function useBackboneReadingSession(
     useEffect(() => {
         if (!enabled || !userId || userId === 'guest' || !contentId) return;
 
-        // Inicialización limpia.
+        // Inicialización limpia. Nueva interactionSessionId por APERTURA.
+        const startTs = Date.now();
         sessionIdRef.current      = ulid();
-        sessionStartTsRef.current = Date.now();
+        sessionStartTsRef.current = startTs;
         sessionStartedRef.current = false;
         sessionEndedRef.current   = false;
-        bufferRef.current         = [];
-        lastActivityTsRef.current = Date.now();
+        elapsedTrackerRef.current.reset(startTs); // checkpoint incremental desde la apertura
+        lastActivityTsRef.current = startTs;
 
         // session_start (después de marcar started=true para que enqueue acepte).
         sessionStartedRef.current = true;
-        enqueueRef.current(`${mode}.session_start`, {
+        enqueueRef.current('session_start', {
             elapsedMs:        0,
             progressFraction: computeFraction(),
             payload:          computeInitialPayload(),
         });
 
+        // Drenar la cola durable de sesiones previas al abrir el lector.
+        flushRef.current(false);
+
         return () => {
             // Cleanup: emit session_end de la sesión que termina.
             if (sessionStartedRef.current && !sessionEndedRef.current) {
                 sessionEndedRef.current = true;
-                const elapsed = Date.now() - sessionStartTsRef.current;
-                enqueueRef.current(`${mode}.session_end`, {
-                    elapsedMs:        elapsed,
+                enqueueRef.current('session_end', {
+                    elapsedMs:        elapsedTrackerRef.current.delta(Date.now()),
                     progressFraction: computeFraction(),
                     payload:          computeInitialPayload(),
                 });
@@ -326,20 +323,24 @@ export function useBackboneReadingSession(
             if (!sessionStartedRef.current || sessionEndedRef.current) return;
             if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
             if (Date.now() - lastActivityTsRef.current > activityWindowMs) return;
-            const elapsed = Date.now() - sessionStartTsRef.current;
-            enqueueRef.current(`${modeRef.current}.session_heartbeat`, {
-                elapsedMs:        elapsed,
+            enqueueRef.current('session_heartbeat', {
+                elapsedMs:        elapsedTrackerRef.current.delta(Date.now()),
                 progressFraction: computeFraction(),
             });
         }, heartbeatMs);
         return () => window.clearInterval(id);
     }, [heartbeatMs, activityWindowMs]);
 
-    // ── Effect: flush periódico ──────────────────────────────────────────────
+    // ── Effect: flush periódico + retry al recuperar red ─────────────────────
     useEffect(() => {
         if (typeof window === 'undefined') return;
         const id = window.setInterval(() => flushRef.current(false), FLUSH_INTERVAL_MS);
-        return () => window.clearInterval(id);
+        const onOnline = () => flushRef.current(false);
+        window.addEventListener('online', onOnline);
+        return () => {
+            window.clearInterval(id);
+            window.removeEventListener('online', onOnline);
+        };
     }, []);
 
     // ── Effect: actividad pasiva ─────────────────────────────────────────────

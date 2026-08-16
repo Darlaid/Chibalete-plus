@@ -245,6 +245,21 @@ await AT('14. cero silent drop', async () => {
     assert.ok(tel.some(t => t.kind === TELEMETRY.OVERFLOW), 'overflow: telemetría');
 });
 
+// Extra: maxBatch envía por tandas sin perder el resto
+await AT('maxBatch: drena en tandas sin silent-loss', async () => {
+    const fetchImpl = mockFetch([okResp, okResp]);
+    const tr = createEventTransport({ storage: memStorage(), fetchImpl });
+    for (let i = 0; i < 5; i++) tr.emit(baseEvt('b' + i));
+    assert.strictEqual(tr.queueSize(), 5);
+    const r1 = await tr.flush({ maxBatch: 2 });
+    assert.strictEqual(r1.sent, 2, 'envía 2');
+    assert.strictEqual(tr.queueSize(), 3, 'quedan 3');
+    await tr.flush({ maxBatch: 2 });
+    assert.strictEqual(tr.queueSize(), 1, 'quedan 1');
+    // el primer body sólo llevó 2 eventos
+    assert.strictEqual(JSON.parse(fetchImpl.calls[0].body).events.length, 2);
+});
+
 // Extra: classifyResponse unit
 T('classifyResponse mapea correctamente', () => {
     assert.strictEqual(classifyResponse({ ok: true, status: 200 }), 'success');
