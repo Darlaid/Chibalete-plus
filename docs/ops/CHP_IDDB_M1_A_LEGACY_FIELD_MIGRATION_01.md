@@ -76,3 +76,19 @@ Solo este documento. Ningún cambio en VPS, backend, APK, lu_config ni dispositi
 ## K. Próximo paso
 
 **Continuar ESTA unidad** cuando el operador complete las instalaciones de §A (la unidad se re-verifica con el analizador y actualiza el censo a MIGRATED-09). Cuando todos los accesibles estén migrados → `GREEN-FIELD-MIGRATION` → **`CHP-IDDB-M1-A-DRAIN-REDO-WEEKDAY-TRAFFIC-02`** (≥48h hábiles POST-migración, metodología y analizador ya validados). ENFORCE sigue no autorizado.
+
+---
+
+## Anexo — Pasada de corroboración (2026-08-18 16:05–16:20Z, unidad CLOSURE Fase 1)
+
+El operador declaró ejecutadas las instalaciones de campo. Verificación de señal productiva:
+
+- Producción healthy (`8ed4e5e`, restarts 0/0), 0 legacy nuevo, 0×401 anómalos, 0×5xx.
+- Tráfico `ChibaleteLU/0.9.0` desde la declaración: 3 requests (2 assignment + 1 analytics, todas 2xx) desde `190.27.x.x` — **consistentes con el dispositivo QA ya migrado** (misma fuente, sin login).
+- **Logins 0.9.0 del día: exactamente 1 (el del QA, 14:05Z).** Un dispositivo de campo recién instalado produce necesariamente `POST /api/auth/login` con el UA nuevo desde su propia IP (la versión vieja no tenía cookie que heredar). Vigía adicional de 9 min: **0 logins de campo**.
+
+**Veredicto de la pasada: la declaración NO queda corroborada aún por la señal productiva → el veredicto de la unidad permanece `YELLOW-OPERATOR-STEP`** (regla: nunca asumir GREEN). Intervención humana concreta pendiente, afinada:
+
+> En cada dispositivo de campo ya instalado: **abrir la app Chibalete LU con red y hacer login una vez** (credencial tecleada por el usuario). Eso emite el login + assignment con `ChibaleteLU/0.9.0` que corroboran la migración, y desde ese momento arranca la ventana del drain-02.
+
+Nota de secuencia: aun con corroboración inmediata, `DRAIN-REDO-WEEKDAY-TRAFFIC-02` exige **≥48 horas hábiles POSTERIORES a la migración** — el cierre de M1-A no puede completarse el mismo día de la migración por construcción (cierre más temprano realista: ~20–21/Ago con cobertura escolar).
