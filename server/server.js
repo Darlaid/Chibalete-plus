@@ -20,6 +20,7 @@ import {
     SESSION_COOKIE, DEFAULT_TTL_SEC,
 } from './lib/sessionAuth.js';
 import { cleanupExpiredSessions } from './db/sessionStore.js';
+import { createEventsWriteAuth } from './lib/eventsWriteAuth.js';
 import {
     authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
     authSessionSubjectMismatch, authSessionRevoked,
@@ -2460,6 +2461,18 @@ const sessionAuth = createSessionAuth({
 sessionAuth.attachMetrics({
     legacy: authSessionLegacyXUserId,
     mismatch: authSessionSubjectMismatch,
+});
+
+// CHP-M1A-EVENTS-COOKIE-AUTH-GAP-01 — escrituras de eventos SOLO con sesión
+// firmada cuando la sesión está habilitada: el header x-user-id autoafirmado
+// no es autoridad de atribución en events.db aunque compat lo acepte en otras
+// rutas (sin esto, cookie-only recibía 401 y un header falsificado escribía
+// eventos a nombre de otro usuario incluso bajo enforce). En 'off' el guard
+// es un next() puro y el contrato legacy de cada handler queda intacto.
+const requireEventsWriteAuth = createEventsWriteAuth({
+    sessionEnabled: () => sessionIssuanceEnabled(),
+    authenticate: (req) => sessionAuth.authenticate(req),
+    onFailure: (reason) => { try { authSessionFailure.labels(reason).inc(); } catch { /* noop */ } },
 });
 
 // CHP-IDDB-M1-A — identidad autenticada de un handler. Prioridad: sesión firmada
@@ -7497,7 +7510,7 @@ const checkMissingTTS = async () => {
 // Accepts a JSON array of ReadingEvent objects from the frontend.
 // Requires x-user-id header — events with a mismatching userId are discarded.
 // Rate-limited by the global /api/ limiter. Capped at 50k events rolling.
-app.post('/api/analytics/events', async (req, res) => {
+app.post('/api/analytics/events', requireEventsWriteAuth, async (req, res) => {
     try {
         const events = req.body;
         if (!Array.isArray(events) || events.length === 0) {
@@ -9113,7 +9126,7 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
 // Formato por línea: { event, ts, serverTs, userId, sessionId, contentId, ...campos }
 // Append-only — nunca lee, nunca modifica. Analizable offline con analyze_rhythm.js.
 // ---------------------------------------------------------------------------
-app.post('/api/playback-events', (req, res) => {
+app.post('/api/playback-events', requireEventsWriteAuth, (req, res) => {
     try {
         const userId = reqUserId(req);
         if (!userId) return res.status(401).end();
@@ -9160,7 +9173,7 @@ app.post('/api/playback-events', (req, res) => {
 // Recibe eventos de playback y los escribe al log del servidor.
 // Fire-and-forget desde el cliente — nunca bloquea el flujo de audio.
 // Requiere x-user-id para correlación — rechaza sin él (evita spam anónimo).
-app.post('/api/events', (req, res) => {
+app.post('/api/events', requireEventsWriteAuth, (req, res) => {
     try {
         const userId = reqUserId(req);
         if (!userId) return res.status(400).end();
@@ -9196,7 +9209,7 @@ app.post('/api/events', (req, res) => {
 // dedupa por event_id UNIQUE en SQLite (atomic INSERT OR IGNORE), responde
 // contadores. Nunca rompe el batch entero por un evento malformed.
 // ---------------------------------------------------------------------------
-app.post('/api/v1/events', (req, res) => {
+app.post('/api/v1/events', requireEventsWriteAuth, (req, res) => {
     try {
         const headerUserId = reqUserId(req);
         if (!headerUserId) {
