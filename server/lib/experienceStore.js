@@ -24,12 +24,31 @@ export function emptyMookStore() {
 
 export function normalizeMookStore(raw) {
     const d = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const versions = (Array.isArray(d.versions) ? d.versions : []).map(v => {
+        // V4 REALIGN: compat trivial con el shape pre-módulos (version.nodes
+        // plano) — datos solo de dev, se envuelven en un módulo único al leer.
+        if (!Array.isArray(v.modules) && Array.isArray(v.nodes)) {
+            const { nodes, ...rest } = v;
+            return { ...rest, modules: [{ id: 'm1', title: 'Ruta', nodes }] };
+        }
+        return v;
+    });
     return {
         experiences: Array.isArray(d.experiences) ? d.experiences : [],
-        versions: Array.isArray(d.versions) ? d.versions : [],
+        versions,
         runs: Array.isArray(d.runs) ? d.runs : [],
         evidence: Array.isArray(d.evidence) ? d.evidence : [],
     };
+}
+
+/** Secuencia global ordenada de nodos de una versión (módulos en orden). */
+export function versionNodes(version) {
+    return (version.modules ?? []).flatMap(m => m.nodes);
+}
+
+/** Módulo al que pertenece un nodo (contexto para UI/telemetría). */
+export function moduleOfNode(version, nodeId) {
+    return (version.modules ?? []).find(m => m.nodes.some(n => n.id === nodeId)) ?? null;
 }
 
 const nowIso = () => new Date().toISOString();
@@ -84,39 +103,59 @@ function validateNode(node, i, bookExists) {
     return out;
 }
 
-export function createDraftVersion(doc, experienceId, { objectives = [], nodes = [] }, bookExists) {
+/**
+ * Valida y congela la estructura de módulos (V4). Acepta `modules[]` o, por
+ * compat trivial, `nodes[]` planos (se envuelven en un módulo único).
+ */
+function buildModules({ modules, nodes }, bookExists) {
+    let mods = modules;
+    if (!Array.isArray(mods) || mods.length === 0) {
+        if (!Array.isArray(nodes) || nodes.length === 0) throw err('INVALID_NODES', 'la versión exige módulos con nodos');
+        mods = [{ id: 'm1', title: 'Ruta', nodes }];
+    }
+    const nodeIds = new Set();
+    const modIds = new Set();
+    let globalIdx = 0;
+    return mods.map((m, mi) => {
+        if (!m || !m.title || !String(m.title).trim()) throw err('INVALID_MODULE', `módulo ${mi}: title requerido`);
+        if (!Array.isArray(m.nodes) || m.nodes.length === 0) throw err('INVALID_MODULE', `módulo ${mi}: exige nodos`);
+        const id = m.id || `m${mi + 1}`;
+        if (modIds.has(id)) throw err('INVALID_MODULE', `módulo ${mi}: id duplicado ${id}`);
+        modIds.add(id);
+        return {
+            id,
+            title: String(m.title).trim(),
+            ...(m.description ? { description: String(m.description) } : {}),
+            nodes: m.nodes.map((n) => {
+                const v = validateNode(n, globalIdx++, bookExists);
+                if (nodeIds.has(v.id)) throw err('INVALID_NODE', `nodo ${v.id}: id duplicado global`);
+                nodeIds.add(v.id);
+                return v;
+            }),
+        };
+    });
+}
+
+export function createDraftVersion(doc, experienceId, { objectives = [], nodes, modules }, bookExists) {
     const exp = doc.experiences.find(e => e.id === experienceId);
     if (!exp) throw err('EXPERIENCE_NOT_FOUND', `experience no existe: ${experienceId}`);
-    if (!Array.isArray(nodes) || nodes.length === 0) throw err('INVALID_NODES', 'la versión exige nodos');
-    const ids = new Set();
-    const frozenNodes = nodes.map((n, i) => {
-        const v = validateNode(n, i, bookExists);
-        if (ids.has(v.id)) throw err('INVALID_NODE', `nodo ${i}: id duplicado ${v.id}`);
-        ids.add(v.id);
-        return v;
-    });
+    const frozenModules = buildModules({ modules, nodes }, bookExists);
     const maxV = Math.max(0, ...doc.versions.filter(v => v.experienceId === experienceId).map(v => v.version));
     const version = {
         id: rid('expv'), experienceId, version: maxV + 1, status: 'draft',
-        objectives: objectives.map(String), nodes: frozenNodes, createdAt: nowIso(),
+        objectives: objectives.map(String), modules: frozenModules, createdAt: nowIso(),
     };
     doc.versions.push(version);
     return version;
 }
 
-export function updateDraftVersion(doc, versionId, { objectives, nodes }, bookExists) {
+export function updateDraftVersion(doc, versionId, { objectives, nodes, modules }, bookExists) {
     const v = doc.versions.find(x => x.id === versionId);
     if (!v) throw err('VERSION_NOT_FOUND', `versión no existe: ${versionId}`);
     if (v.status !== 'draft') throw err('VERSION_IMMUTABLE', 'una versión publicada es INMUTABLE (crea una versión nueva)');
     if (objectives !== undefined) v.objectives = objectives.map(String);
-    if (nodes !== undefined) {
-        const ids = new Set();
-        v.nodes = nodes.map((n, i) => {
-            const out = validateNode(n, i, bookExists);
-            if (ids.has(out.id)) throw err('INVALID_NODE', `nodo ${i}: id duplicado`);
-            ids.add(out.id);
-            return out;
-        });
+    if (nodes !== undefined || modules !== undefined) {
+        v.modules = buildModules({ modules, nodes }, bookExists);
     }
     return v;
 }
@@ -127,7 +166,7 @@ export function publishVersion(doc, versionId) {
     if (v.status !== 'draft') throw err('VERSION_IMMUTABLE', 'solo un draft puede publicarse');
     v.status = 'published';
     v.publishedAt = nowIso();
-    Object.freeze(v.nodes.map(n => Object.freeze(n)));
+    v.modules.forEach(m => { Object.freeze(m.nodes.map(n => Object.freeze(n))); Object.freeze(m); });
     const exp = doc.experiences.find(e => e.id === v.experienceId);
     exp.currentVersionId = v.id;
     exp.status = 'published';
@@ -159,15 +198,28 @@ function versionOfRun(doc, run) {
 
 export function runProgress(doc, run) {
     const v = versionOfRun(doc, run);
-    const required = v.nodes.filter(n => n.required);
+    const required = versionNodes(v).filter(n => n.required);
     const done = required.filter(n => run.nodeStates[n.id]?.status === 'completed');
     return { completedRequired: done.length, totalRequired: required.length, completed: done.length === required.length };
 }
 
+/** Estado DERIVADO de un módulo (V4) — jamás persistido. */
+export function moduleState(module, run) {
+    const req = module.nodes.filter(n => n.required);
+    const anyDone = module.nodes.some(n => run.nodeStates[n.id]?.status === 'completed');
+    const allReqDone = req.length > 0
+        ? req.every(n => run.nodeStates[n.id]?.status === 'completed')
+        : anyDone;
+    if (allReqDone && anyDone) return 'COMPLETED';
+    if (anyDone) return 'IN_PROGRESS';
+    return 'NOT_STARTED';
+}
+
 function nodeAvailable(v, run, nodeId) {
-    const idx = v.nodes.findIndex(n => n.id === nodeId);
+    const flat = versionNodes(v);
+    const idx = flat.findIndex(n => n.id === nodeId);
     if (idx === -1) return false;
-    return v.nodes.slice(0, idx).every(n => !n.required || run.nodeStates[n.id]?.status === 'completed');
+    return flat.slice(0, idx).every(n => !n.required || run.nodeStates[n.id]?.status === 'completed');
 }
 
 /**
@@ -180,7 +232,7 @@ export function completeNode(doc, runId, nodeId, { leoInterchanges } = {}) {
     if (!run) throw err('RUN_NOT_FOUND', `run no existe: ${runId}`);
     if (run.status === 'completed') return { run, progress: runProgress(doc, run) };
     const v = versionOfRun(doc, run);
-    const node = v.nodes.find(n => n.id === nodeId);
+    const node = versionNodes(v).find(n => n.id === nodeId);
     if (!node) throw err('NODE_NOT_FOUND', `nodo no existe en la versión: ${nodeId}`);
     if (!nodeAvailable(v, run, nodeId)) throw err('NODE_LOCKED', 'nodo bloqueado: completa los requeridos anteriores');
     if (['ACTIVITY', 'PRODUCTION'].includes(node.type)) {
@@ -211,7 +263,7 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
     if (!run) throw err('RUN_NOT_FOUND', `run no existe: ${runId}`);
     if (run.userId !== userId) throw err('NOT_RUN_OWNER', 'la evidencia solo puede enviarla el dueño del run');
     const v = versionOfRun(doc, run);
-    const node = v.nodes.find(n => n.id === nodeId);
+    const node = versionNodes(v).find(n => n.id === nodeId);
     if (!node) throw err('NODE_NOT_FOUND', `nodo no existe: ${nodeId}`);
     if (!['ACTIVITY', 'PRODUCTION'].includes(node.type)) throw err('NODE_NO_EVIDENCE', `${node.type} no recibe envíos`);
     if (!nodeAvailable(v, run, nodeId)) throw err('NODE_LOCKED', 'nodo bloqueado');
@@ -271,7 +323,13 @@ export function listPublished(doc) {
         .filter(e => e.status === 'published' && e.currentVersionId)
         .map(e => {
             const v = doc.versions.find(x => x.id === e.currentVersionId);
-            return { id: e.id, slug: e.slug, title: e.title, description: e.description, version: v?.version ?? null, nodeCount: v?.nodes.length ?? 0 };
+            return {
+                id: e.id, slug: e.slug, title: e.title, description: e.description,
+                version: v?.version ?? null,
+                nodeCount: v ? versionNodes(v).length : 0,
+                moduleCount: v?.modules?.length ?? 0,
+                moduleTitles: (v?.modules ?? []).map(m => m.title),
+            };
         });
 }
 
@@ -280,7 +338,7 @@ export function computeRouteView(doc, run, contentList) {
     const byId = new Map((contentList || []).map(c => [c.id, c]));
     const progress = runProgress(doc, run);
     let currentAssigned = false;
-    const nodes = v.nodes.map(n => {
+    const projectNode = (n) => {
         const st = run.nodeStates[n.id];
         const available = nodeAvailable(v, run, n.id);
         let state = 'locked';
@@ -296,9 +354,19 @@ export function computeRouteView(doc, run, contentList) {
                 : null,
             evidenceIds: st?.evidenceIds ?? [],
         };
-    });
+    };
+    // V4: la ruta se agrupa por módulos con estado DERIVADO; se conserva la
+    // lista plana como conveniencia (misma secuencia global).
+    const modules = v.modules.map(m => ({
+        id: m.id,
+        title: m.title,
+        ...(m.description ? { description: m.description } : {}),
+        state: moduleState(m, run),
+        nodes: m.nodes.map(projectNode),
+    }));
+    const nodes = modules.flatMap(m => m.nodes);
     return {
         runId: run.id, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId,
-        status: run.status, progress, nodes,
+        status: run.status, progress, modules, nodes,
     };
 }

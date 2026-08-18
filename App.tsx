@@ -344,6 +344,9 @@ const AppContent: React.FC = () => {
                 <Route path="/experiencias" element={
                     <ProtectedRoute access={getRouteAccess('/experiencias')}><Layout><Experiencias /></Layout></ProtectedRoute>
                 } />
+                <Route path="/experiencias/:experienceId" element={
+                    <ProtectedRoute access={getRouteAccess('/experiencias/:experienceId')}><Layout><Experiencias /></Layout></ProtectedRoute>
+                } />
                 <Route path="/biblioteca" element={
                     <ProtectedRoute access={getRouteAccess('/biblioteca')}><Layout><Biblioteca /></Layout></ProtectedRoute>
                 } />

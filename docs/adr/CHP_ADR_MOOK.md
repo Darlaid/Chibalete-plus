@@ -131,3 +131,21 @@ A: run fija `experienceVersionId` ✓ · B: nueva publicación = versión nueva;
 ## 15. Qué NO es esta decisión
 
 No implementa runtime, no crea tablas productivas, no migra, no toca auth/entitlements/Biblioteca productiva, no crea pipeline de analytics/LMS/workflow-engine/motor de grafos/rúbricas/CMS/microservicio, no abstrae casos hipotéticos.
+
+---
+
+## 16. V4 REALIGN (2026-08-18 — CHP-MOOK-V4-REALIGN-01, vinculante por CHP-ROADMAP-2026-04)
+
+Decisiones de este ADR **superseded** por producto V4 (el resto del ADR permanece vigente):
+
+| Decisión anterior | Estado | Decisión V4 |
+|---|---|---|
+| §Piloto: "Me desconecto, luego existo" como contenido del primer MOOK | **SUPERSEDED** | El piloto queda SOLO como fixture/seed de dev y suite de tests. El runtime es genérico sobre `ExperienceVersion` (demostrado con segunda fixture sintética); el contenido del primer MOOK real se decidirá en `CHP-MOOK-PILOT-01`. |
+| §3: nodos como lista plana en la versión | **SUPERSEDED** | `ExperienceVersion.modules[] → nodes[]` (módulos EMBEBIDOS con id/title/description?; sin tabla Module). La secuencia global = módulos en orden; la versión sigue inmutable al publicar; compat trivial: shape plano se envuelve en un módulo único al leer. Estado de módulo **DERIVADO** (COMPLETED/IN_PROGRESS/NOT_STARTED), jamás persistido. |
+| §12 UX: entrada propia "Experiencias" | **SUPERSEDED** | La entrada de producto es **Biblioteca → pestaña Experiencias** (sin nueva isla en el nav principal). Se conserva la ruta técnica `/experiencias/:experienceId` para landing/runtime; `/experiencias` queda como listado técnico + cola de revisión. |
+| (nuevo) Autoría | **DECIDIDO V4** | **MOOK Studio vive dentro de `Subir`** (Gestor de Contenido) — sin CMS MOOK independiente. Flujo: crear Experiencia → info → objetivos → módulos → nodos → seleccionar contenido canónico → configurar → ordenar → preview → DRAFT → publicar. Las rutas/dominio actuales (create/draft/update/publish con admin canónico) son el backend que `CHP-MOOK-STUDIO-01` consume — prohibido backend paralelo. El selector de contenido muestra standalone y no-standalone; "Crear contenido" reutiliza `Subir` (sin uploader en Studio). |
+| (nuevo) Contenido no autónomo | **DECIDIDO V4** | Campo **`standalone: boolean`** en el contenido canónico (ausente ⇒ `true`, cero migración; no existía propiedad equivalente — `hiddenContentIds` es ocultamiento por colegio y `tipo` decide visor). `standalone:false` = pieza destinada a Experiencias que NO se descubre como obra independiente en Biblioteca (catálogo y vista editorial la ocultan) pero sigue siendo contenido canónico, referenciable por nodos, con su publication state y su entitlement intactos. La opción en `Subir` ("Contenido para una Experiencia") se implementa en STUDIO-01. |
+| §9 telemetría | **EXTENDIDO** | `moduleId` OPCIONAL añadido a `node_started/node_completed/evidence_submitted` (mejora reconstrucción por módulo; compatible — payloads sin moduleId siguen validando). Sin eventos `module_*`. |
+| (nuevo) Colisión `/admin/experiencias` | **DECIDIDO V4** | La superficie legacy de bundles se renombra visualmente a **"Paquetes (legacy)"** (ruta técnica intacta, sin migración ni borrado de datos; deprecación futura exigiría unidad explícita con evidencia de consumidores). |
+
+Tres superficies de producto congeladas: **Runtime** (participante) · **Studio dentro de Subir** (autoría) · **Review/Mediación**. Las cierra visualmente `CHP-MOOK-PRODUCT-UX-01`; después `CHP-MOOK-RUNTIME-01`, `CHP-MOOK-STUDIO-01`, `CHP-MOOK-REVIEW-01`, `CHP-MOOK-PILOT-01`.

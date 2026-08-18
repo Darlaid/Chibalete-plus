@@ -152,9 +152,13 @@ export function updateCollection(doc, colId, patch) {
  */
 export function computeEditorialView(doc, contentList, { includeUnpublished = false } = {}) {
     const byId = new Map((contentList || []).map(c => [c.id, c]));
+    // V4 (CHP-MOOK-V4-REALIGN-01): `standalone === false` marca contenido
+    // canónico destinado a Experiencias que NO se descubre como obra
+    // independiente en Biblioteca (ausente ⇒ true; dimensión separada de
+    // publication_state y de entitlement — el access engine no cambia).
     const visibleBook = (bookId) => {
         const book = byId.get(bookId);
-        return book && book.status === 'disponible' ? book : null;
+        return book && book.status === 'disponible' && book.standalone !== false ? book : null;
     };
     const projectRef = (r) => {
         const book = visibleBook(r.bookId);

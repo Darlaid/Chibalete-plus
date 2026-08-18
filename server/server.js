@@ -1603,18 +1603,25 @@ function countLeoInterchangesFor(run, node) {
     } catch { return 0; }
 }
 
+function mookModuleIdOf(doc, run, nodeId) {
+    try {
+        const v = doc.versions.find(x => x.id === run.experienceVersionId);
+        return v ? (experienceStore.moduleOfNode(v, nodeId)?.id ?? undefined) : undefined;
+    } catch { return undefined; }
+}
+
 function emitCurrentNodeStarted(doc, run) {
     try {
         const view = experienceStore.computeRouteView(doc, run, []);
         const current = view.nodes.find(n => n.state === 'current');
         if (current) {
-            void emitNodeStarted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId: current.id, nodeType: current.type }, log);
+            void emitNodeStarted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId: current.id, nodeType: current.type, moduleId: mookModuleIdOf(doc, run, current.id) }, log);
         }
     } catch { /* telemetría jamás rompe el flujo */ }
 }
 
-function emitCompletionEvents(run, nodeId, nodeType, progress) {
-    void emitNodeCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId, nodeType }, log);
+function emitCompletionEvents(run, nodeId, nodeType, progress, moduleId) {
+    void emitNodeCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId, nodeType, moduleId }, log);
     if (progress.completed) {
         void emitExperienceCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, requiredNodes: progress.totalRequired }, log);
     }
@@ -1713,7 +1720,7 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth,
             if (!run) { const e = new Error('run no existe'); e.code = 'RUN_NOT_FOUND'; throw e; }
             if (run.userId !== req.user.id) { const e = new Error('no es tu run'); e.code = 'NOT_RUN_OWNER'; throw e; }
             const v = doc.versions.find(x => x.id === run.experienceVersionId);
-            const node = v.nodes.find(n => n.id === req.params.nodeId);
+            const node = experienceStore.versionNodes(v).find(n => n.id === req.params.nodeId);
             let leoInterchanges;
             if (node?.type === 'LEO') {
                 leoInterchanges = countLeoInterchangesFor(run, node);
@@ -1722,8 +1729,9 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth,
             out = experienceStore.completeNode(doc, run.id, req.params.nodeId, { leoInterchanges });
             out.nodeType = node?.type;
         });
-        emitCompletionEvents(out.run, req.params.nodeId, out.nodeType, out.progress);
-        emitCurrentNodeStarted(readMook(), out.run);
+        const docPost = readMook();
+        emitCompletionEvents(out.run, req.params.nodeId, out.nodeType, out.progress, mookModuleIdOf(docPost, out.run, req.params.nodeId));
+        emitCurrentNodeStarted(docPost, out.run);
         res.json({ progress: out.progress, status: out.run.status });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
@@ -1737,9 +1745,11 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth,
                 userId: req.user.id, payload: req.body ?? {},
             });
         });
-        void emitEvidenceSubmitted({ userId: req.user.id, experienceId: out.evidence.experienceId, experienceVersionId: out.evidence.experienceVersionId, runId: out.run.id, nodeId: out.evidence.nodeId, nodeType: out.evidence.nodeType, evidenceId: out.evidence.id, requiresReview: out.evidence.requiresReview }, log);
-        emitCompletionEvents(out.run, out.evidence.nodeId, out.evidence.nodeType, out.progress);
-        emitCurrentNodeStarted(readMook(), out.run);
+        const docPost = readMook();
+        const modId = mookModuleIdOf(docPost, out.run, out.evidence.nodeId);
+        void emitEvidenceSubmitted({ userId: req.user.id, experienceId: out.evidence.experienceId, experienceVersionId: out.evidence.experienceVersionId, runId: out.run.id, nodeId: out.evidence.nodeId, nodeType: out.evidence.nodeType, moduleId: modId, evidenceId: out.evidence.id, requiresReview: out.evidence.requiresReview }, log);
+        emitCompletionEvents(out.run, out.evidence.nodeId, out.evidence.nodeType, out.progress, modId);
+        emitCurrentNodeStarted(docPost, out.run);
         res.status(201).json({ evidenceId: out.evidence.id, review: out.evidence.review, progress: out.progress, status: out.run.status });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
@@ -1760,10 +1770,12 @@ app.get('/api/experiences/review/queue', requireUserAuth, (req, res) => {
             .map(e => {
                 const exp = doc.experiences.find(x => x.id === e.experienceId);
                 const v = doc.versions.find(x => x.id === e.experienceVersionId);
-                const node = v?.nodes.find(n => n.id === e.nodeId);
+                const node = v ? experienceStore.versionNodes(v).find(n => n.id === e.nodeId) : null;
+                const module_ = v ? experienceStore.moduleOfNode(v, e.nodeId) : null;
                 return {
                     id: e.id, submittedAt: e.submittedAt, userId: e.userId,
                     experience: exp?.title, version: v?.version,
+                    moduleTitle: module_?.title ?? null,
                     nodeTitle: node?.title, consigna: node?.config?.consigna,
                     criterioRevision: node?.config?.criterioRevision,
                     objectives: v?.objectives ?? [],

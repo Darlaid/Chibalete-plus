@@ -27,6 +27,7 @@ export const PILOT_DEFINITION = {
         'Tomar una posición argumentada sobre la propia relación con la hiperconexión',
         'Apoyarse en las tres tensiones del libro: existencia vs. aparición, multitud vs. elección, ruido vs. atención',
     ],
+    // V4: los nodos se agrupan en módulos (ver moduleFor más abajo).
     nodes: [
         { id: 'n1-leer', type: 'READING', title: 'Leer: existencia vs. aparición', resourceRef: PILOT_BOOK, config: { fragmento: 'Introducción + primera tensión' } },
         {
@@ -74,8 +75,13 @@ export function seedPilot(doc, contentList, { bookIdOverride } = {}) {
         return { doc, created: false, reason: `libro canónico ausente: ${bookId}` };
     }
     const nodes = PILOT_DEFINITION.nodes.map(n => (n.resourceRef ? { ...n, resourceRef: bookId } : n));
+    // V4: agrupación en módulos (estructura embebida en la versión).
+    const modules = [
+        { id: 'm1-leer-conversar', title: 'Leer y conversar', nodes: nodes.slice(0, 2) },
+        { id: 'm2-pensar-producir', title: 'Pensar y producir', nodes: nodes.slice(2) },
+    ];
     const exp = createExperience(doc, { slug: PILOT_DEFINITION.slug, title: PILOT_DEFINITION.title, description: PILOT_DEFINITION.description });
-    const v1 = createDraftVersion(doc, exp.id, { objectives: PILOT_DEFINITION.objectives, nodes }, bookExists);
+    const v1 = createDraftVersion(doc, exp.id, { objectives: PILOT_DEFINITION.objectives, modules }, bookExists);
     publishVersion(doc, v1.id);
     return { doc, created: true, experienceId: exp.id, versionId: v1.id, bookId };
 }

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { useOffline } from '../context/OfflineContext';
@@ -70,6 +71,14 @@ const Biblioteca: React.FC = () => {
         }
     }, [activeTab, user, editorial]);
 
+    // CHP-MOOK-V4 — Biblioteca es la entrada de producto a Experiencias
+    const [experiencias, setExperiencias] = useState<any[] | null>(null);
+    useEffect(() => {
+        if (activeTab === 'experiencias' && user && experiencias === null) {
+            dataService.getExperiences().then(setExperiencias);
+        }
+    }, [activeTab, user, experiencias]);
+
     useEffect(() => {
         if (user && accessReady) {
             // Parallel loading for optimization
@@ -125,10 +134,50 @@ const Biblioteca: React.FC = () => {
 
         // 1. FILTERING (Optimization: Filter early)
         const filterHidden = (list: Content[]) => {
-            if (!schoolConfig.hiddenContentIds.length) return list;
             const hiddenSet = new Set(schoolConfig.hiddenContentIds);
-            return list.filter(c => c && c.id && !hiddenSet.has(c.id));
+            // V4: standalone === false = contenido destinado a Experiencias; no se
+            // descubre como obra independiente en Biblioteca (ausente ⇒ visible).
+            return list.filter(c => c && c.id && !hiddenSet.has(c.id) && (c as any).standalone !== false);
         };
+
+        // CHP-MOOK-V4 — pestaña Experiencias: descubrimiento y entrada al runtime.
+        if (activeTab === 'experiencias') {
+            if (!experiencias) return <AccessLoadingSkeleton />;
+            if (experiencias.length === 0) {
+                return (
+                    <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+                        <Filter size={48} className="mb-4 opacity-20" />
+                        <p>Pronto habrá Experiencias disponibles.</p>
+                    </div>
+                );
+            }
+            const [destacada, ...otras] = experiencias;
+            return (
+                <div className="animate-in fade-in duration-500 mt-8 space-y-8">
+                    <Link to={`/experiencias/${destacada.id}`} className="block rounded-3xl bg-gradient-to-br from-indigo-600 to-purple-700 text-white p-8 shadow-xl hover:shadow-2xl transition-shadow">
+                        <span className="text-xs uppercase tracking-widest text-indigo-200">Experiencia destacada</span>
+                        <h3 className="text-3xl font-bold mt-2">{destacada.title}</h3>
+                        <p className="text-indigo-100 mt-2 max-w-2xl">{destacada.description}</p>
+                        <div className="mt-3 text-sm text-indigo-200">{destacada.moduleCount} módulos · {destacada.nodeCount} pasos</div>
+                        <span className="inline-block mt-5 bg-white text-indigo-700 px-5 py-3 rounded-xl font-bold">Iniciar ruta →</span>
+                    </Link>
+                    {otras.length > 0 && (
+                        <div>
+                            <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200 mb-4">Otras Experiencias</h3>
+                            <div className="grid gap-4 md:grid-cols-2">
+                                {otras.map(e => (
+                                    <Link key={e.id} to={`/experiencias/${e.id}`} className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5 hover:shadow-md transition-shadow">
+                                        <h4 className="font-bold text-gray-800 dark:text-gray-100">{e.title}</h4>
+                                        <p className="text-sm text-gray-500 mt-1">{e.description}</p>
+                                        <span className="inline-block mt-2 text-sm font-bold text-indigo-600">Iniciar ruta →</span>
+                                    </Link>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
 
         // CHP-LIB-01 — capa EDITORIAL: dos niveles máximo (colección → libro).
         if (activeTab === 'editorial') {
@@ -388,8 +437,9 @@ const Biblioteca: React.FC = () => {
 
             <div className="flex space-x-3 overflow-x-auto pb-4 scrollbar-hide">
                 <TabButton tab="biblioteca" label="Libros" />
+                <TabButton tab="experiencias" label="Experiencias" highlight={true} />
                 <TabButton tab="editorial" label="Selección Chibalete" />
-                <TabButton tab="album" label="Libros Álbum" highlight={true} />
+                <TabButton tab="album" label="Libros Álbum" />
                 <TabButton tab="lectura" label="Continuar Leyendo" />
                 <TabButton tab="descargados" label="Disponibles Offline" />
                 <TabButton tab="recomendados" label="Para Ti" />

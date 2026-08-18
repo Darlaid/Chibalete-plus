@@ -116,7 +116,6 @@ const Navbar: React.FC = () => {
         { to: '/',         icon: <Home size={22} strokeWidth={2} />,         label: 'Inicio' },
         { to: '/aula-viva', icon: <GraduationCap size={22} strokeWidth={2} />, label: aulaLabel },
         { to: '/biblioteca', icon: <Library size={22} strokeWidth={2} />,     label: 'Biblioteca' },
-        { to: '/experiencias', icon: <Sparkles size={22} strokeWidth={2} />,  label: 'Experiencias' },
         { to: '/multimedia', icon: <PlayCircle size={22} strokeWidth={2} />,  label: 'Multimedia' },
         { to: '/trivia',     icon: <Gamepad2 size={22} strokeWidth={2} />,    label: 'Trívia' },
         { to: '/tienda',     icon: <ShoppingBag size={22} strokeWidth={2} />, label: 'Tienda' },
@@ -140,7 +139,7 @@ const Navbar: React.FC = () => {
             { to: '/admin/productos',    icon: <Package size={20} />,   label: 'Productos' },
             { to: '/admin/recompensas',  icon: <Gift size={20} />,      label: 'Recompensas' },
             { to: '/admin/usuarios',     icon: <Users size={20} />,     label: 'Usuarios' },
-            { to: '/admin/experiencias', icon: <Sparkles size={20} />,  label: 'Experiencias' },
+            { to: '/admin/experiencias', icon: <Sparkles size={20} />,  label: 'Paquetes (legacy)' },
         ] : []),
     ];
 
@@ -176,7 +175,7 @@ const Navbar: React.FC = () => {
             { to: '/admin/usuarios',     icon: <Users size={28} />,     label: 'Usuarios' },
             { to: '/admin/productos',    icon: <Package size={28} />,   label: 'Productos' },
             { to: '/admin/recompensas',  icon: <Gift size={28} />,      label: 'Recompensas' },
-            { to: '/admin/experiencias', icon: <Sparkles size={28} />,  label: 'Experiencias' },
+            { to: '/admin/experiencias', icon: <Sparkles size={28} />,  label: 'Paquetes (legacy)' },
         ] : []),
     ];
 

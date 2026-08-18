@@ -128,7 +128,12 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
   {
     path: '/experiencias',
     access: 'authenticated',
-    description: 'Experiencias — rutas pedagógicas (CHP-MOOK-01, piloto)',
+    description: 'Experiencias — listado técnico + cola de revisión (V4: la entrada de producto es Biblioteca → Experiencias)',
+  },
+  {
+    path: '/experiencias/:experienceId',
+    access: 'authenticated',
+    description: 'Landing/runtime de una Experiencia (CHP-MOOK-V4)',
   },
   {
     path: '/multimedia',

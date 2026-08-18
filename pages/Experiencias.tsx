@@ -7,10 +7,16 @@
  * existentes navegando al contenido canónico — MOOK jamás concede acceso.
  */
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, ClipboardCheck } from 'lucide-react';
+
+const MODULE_STATE_LABEL: Record<string, { text: string; cls: string }> = {
+    COMPLETED: { text: 'Completado', cls: 'bg-emerald-100 text-emerald-700' },
+    IN_PROGRESS: { text: 'En curso', cls: 'bg-indigo-100 text-indigo-700' },
+    NOT_STARTED: { text: 'Por iniciar', cls: 'bg-gray-100 text-gray-600' },
+};
 
 const NODE_ICON: Record<string, React.ReactNode> = {
     READING: <BookOpen size={18} />, VIDEO: <BookOpen size={18} />, AUDIO: <BookOpen size={18} />,
@@ -120,6 +126,7 @@ const NodeCard: React.FC<{ node: any; route: any; refresh: () => void }> = ({ no
 
 const Experiencias: React.FC = () => {
     const { user } = useAuth();
+    const { experienceId } = useParams<{ experienceId?: string }>();
     const [list, setList] = useState<any[]>([]);
     const [route, setRoute] = useState<any | null>(null);
     const [tab, setTab] = useState<'rutas' | 'revision'>('rutas');
@@ -129,6 +136,10 @@ const Experiencias: React.FC = () => {
     const isReviewer = (user?.roles ?? []).some((r: string) => ['administrador', 'mediador', 'profesor', 'teacher', 'librarian', 'coordinator'].includes(r));
 
     useEffect(() => { if (user) dataService.getExperiences().then(setList); }, [user]);
+    // V4: entrada desde Biblioteca vía /experiencias/:experienceId → abrir directo.
+    useEffect(() => {
+        if (user && experienceId) dataService.startExperienceRun(experienceId).then(setRoute);
+    }, [user, experienceId]);
     useEffect(() => { if (user && tab === 'revision' && isReviewer) dataService.getExperienceReviewQueue().then(setQueue); }, [user, tab]);
 
     const open = async (id: string) => setRoute(await dataService.startExperienceRun(id));
@@ -156,7 +167,7 @@ const Experiencias: React.FC = () => {
                     {queue.length === 0 && <p className="text-gray-500">No hay producciones pendientes de revisión.</p>}
                     {queue.map(q => (
                         <div key={q.id} className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5">
-                            <div className="text-sm text-gray-500 mb-1">{q.experience} · v{q.version} · {q.nodeTitle}</div>
+                            <div className="text-sm text-gray-500 mb-1">{q.experience} · v{q.version}{q.moduleTitle ? ` · ${q.moduleTitle}` : ''} · {q.nodeTitle}</div>
                             <div className="text-sm mb-2"><b>Consigna:</b> {q.consigna}</div>
                             <div className="text-sm mb-2"><b>Criterio:</b> {q.criterioRevision}</div>
                             <blockquote className="border-l-4 border-indigo-300 pl-3 my-3 text-sm whitespace-pre-wrap">{q.text}</blockquote>
@@ -171,7 +182,7 @@ const Experiencias: React.FC = () => {
                 </div>
             ) : route ? (
                 <div>
-                    <button onClick={() => setRoute(null)} className="text-sm text-indigo-600 mb-4 hover:underline">← Todas las Experiencias</button>
+                    <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</Link>
                     <div className="mb-6">
                         <div className="flex items-center justify-between">
                             <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">Tu ruta</h2>
@@ -182,8 +193,19 @@ const Experiencias: React.FC = () => {
                         </div>
                         {route.status === 'completed' && <p className="mt-3 text-emerald-600 font-bold">🎉 Experiencia completada.</p>}
                     </div>
-                    <div className="space-y-4">
-                        {route.nodes.map((n: any) => <NodeCard key={n.id} node={n} route={route} refresh={refresh} />)}
+                    {/* V4: la ruta se presenta por MÓDULOS con estado derivado */}
+                    <div className="space-y-8">
+                        {(route.modules ?? [{ id: 'm1', title: 'Ruta', state: 'IN_PROGRESS', nodes: route.nodes }]).map((m: any) => (
+                            <div key={m.id}>
+                                <div className="flex items-center gap-3 mb-3">
+                                    <h3 className="text-lg font-bold text-gray-800 dark:text-gray-100">{m.title}</h3>
+                                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${MODULE_STATE_LABEL[m.state]?.cls ?? ''}`}>{MODULE_STATE_LABEL[m.state]?.text ?? m.state}</span>
+                                </div>
+                                <div className="space-y-4">
+                                    {m.nodes.map((n: any) => <NodeCard key={n.id} node={n} route={route} refresh={refresh} />)}
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 </div>
             ) : (

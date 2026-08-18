@@ -125,9 +125,9 @@ const SCHEMAS = {
     // EXPERIENCE / MOOK (6) — CHP-ADR-MOOK §9. Payloads mínimos, sin PII ni
     // texto libre (la producción vive en ExperienceEvidence, no en telemetría).
     experience_started:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1) }).strip(),
-    node_started:               z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20) }).strip(),
-    node_completed:             z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20) }).strip(),
-    evidence_submitted:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), evidenceId: z.string().min(1), requiresReview: z.boolean() }).strip(),
+    node_started:               z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), moduleId: z.string().min(1).optional() }).strip(),
+    node_completed:             z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), moduleId: z.string().min(1).optional() }).strip(),
+    evidence_submitted:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), moduleId: z.string().min(1).optional(), evidenceId: z.string().min(1), requiresReview: z.boolean() }).strip(),
     evidence_reviewed:          z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), evidenceId: z.string().min(1), decision: z.enum(['aprobado', 'con_comentarios']) }).strip(),
     experience_completed:       z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), requiredNodes: z.number().int().nonnegative() }).strip(),
 
