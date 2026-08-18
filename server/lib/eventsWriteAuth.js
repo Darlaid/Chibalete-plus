@@ -45,3 +45,47 @@ export function createEventsWriteAuth({ sessionEnabled, authenticate, onFailure 
         return next();
     };
 }
+
+/**
+ * CHP-M1A-LU-ANALYTICS-401-LOOP-MITIGATION-01 — MITIGACIÓN TEMPORAL.
+ *
+ * SOLO para POST /api/analytics/events, delante de requireEventsWriteAuth.
+ * La app Android legacy (Chibalete LU, sin CookieJar) postea analytics con
+ * x-user-id sin cookie; el 401 del guard estricto dispara en el cliente un
+ * logout destructivo (purga sesión + libro offline + progreso local) y, como
+ * su cola de analytics persiste tras logout, un loop de re-login cada ~30s.
+ *
+ * Contrato: en modo compat, un request header-only (x-user-id presente, SIN
+ * cookie de sesión) recibe 202 accept-and-drop — NO se escribe nada, NO se
+ * atribuye identidad, NO se llama al handler. Cualquier otro caso pasa al
+ * guard estricto intacto: off → legacy byte-idéntico; enforce → 401 estricto;
+ * cookie presente (válida, expirada o mismatch) → authenticate decide;
+ * sin auth alguna → 401 del guard (navegador pre-login, sin cliente destructivo).
+ *
+ * TEMPORAL: se retira cuando LU migre a sesión por cookie
+ * (CHP-IDDB-M1-A-ANDROID-SESSION-MIGRATION-01). No es un legacy-allow:
+ * jamás produce escritura ni identidad.
+ */
+export function createLegacyAnalyticsDropGuard({ sessionMode, hasSessionCookie, onDrop = () => {} }) {
+    if (typeof sessionMode !== 'function' || typeof hasSessionCookie !== 'function') {
+        throw new Error('createLegacyAnalyticsDropGuard: sessionMode y hasSessionCookie son obligatorios');
+    }
+    return function legacyAnalyticsAcceptAndDrop(req, res, next) {
+        try {
+            if (sessionMode() !== 'compat') return next();
+            const headerUserId = req.headers?.['x-user-id'];
+            if (!headerUserId) return next();
+            if (hasSessionCookie(req)) return next();
+        } catch {
+            // Ante cualquier duda, el guard estricto decide (fail-closed aguas abajo).
+            return next();
+        }
+        try { onDrop(); } catch { /* noop */ }
+        return res.status(202).json({
+            ok: true,
+            accepted: false,
+            dropped: true,
+            reason: 'legacy_android_analytics_requires_session',
+        });
+    };
+}

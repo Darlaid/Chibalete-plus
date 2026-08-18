@@ -17,10 +17,10 @@ import { createAdminAuth } from './lib/adminAuth.js';
 import {
     createSessionAuth, sessionAuthMode, sessionIssuanceEnabled, sessionCookieOptions,
     csrfCheck, allowedOriginsFromEnv, bumpCredentialVersion, credentialVersionOf,
-    SESSION_COOKIE, DEFAULT_TTL_SEC,
+    SESSION_COOKIE, DEFAULT_TTL_SEC, parseCookies,
 } from './lib/sessionAuth.js';
 import { cleanupExpiredSessions } from './db/sessionStore.js';
-import { createEventsWriteAuth } from './lib/eventsWriteAuth.js';
+import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
 import {
     authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
     authSessionSubjectMismatch, authSessionRevoked,
@@ -2473,6 +2473,19 @@ const requireEventsWriteAuth = createEventsWriteAuth({
     sessionEnabled: () => sessionIssuanceEnabled(),
     authenticate: (req) => sessionAuth.authenticate(req),
     onFailure: (reason) => { try { authSessionFailure.labels(reason).inc(); } catch { /* noop */ } },
+});
+
+// CHP-M1A-LU-ANALYTICS-401-LOOP-MITIGATION-01 — TEMPORAL, solo /api/analytics/events:
+// en compat, header-only (app Android LU sin CookieJar) recibe 202 accept-and-drop
+// en vez del 401 que dispara en el cliente un logout destructivo en loop (~30s).
+// Nunca escribe, nunca atribuye identidad; se retira con la migración de LU a cookie.
+const legacyAnalyticsAcceptAndDrop = createLegacyAnalyticsDropGuard({
+    sessionMode: () => sessionAuthMode(),
+    hasSessionCookie: (req) => !!parseCookies(req.headers?.cookie)[SESSION_COOKIE],
+    onDrop: () => {
+        try { authSessionFailure.labels('legacy_analytics_accept_drop').inc(); } catch { /* noop */ }
+        try { log('[EVENTS] analytics header-only accept-and-drop (LU legacy, compat)', 'WARN'); } catch { /* noop */ }
+    },
 });
 
 // CHP-IDDB-M1-A — identidad autenticada de un handler. Prioridad: sesión firmada
@@ -7510,7 +7523,7 @@ const checkMissingTTS = async () => {
 // Accepts a JSON array of ReadingEvent objects from the frontend.
 // Requires x-user-id header — events with a mismatching userId are discarded.
 // Rate-limited by the global /api/ limiter. Capped at 50k events rolling.
-app.post('/api/analytics/events', requireEventsWriteAuth, async (req, res) => {
+app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWriteAuth, async (req, res) => {
     try {
         const events = req.body;
         if (!Array.isArray(events) || events.length === 0) {
