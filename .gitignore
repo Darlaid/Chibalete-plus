@@ -206,6 +206,11 @@ server/.deploy-info
 *.candidate.db-shm
 IDENTITY-IMPORT-MANIFEST-*.json
 
+# CHP-MOOK-01 — seed del piloto de Experiencias. El script SÍ se versiona;
+# data/mook_db.json sigue la regla general de data/ (dev-local, no versionado).
+!/scripts/mook/
+!/scripts/mook/**
+
 # CHP-LIB-01 — migración editorial de Biblioteca (referencias, jamás copias).
 # El script SÍ se versiona; data/library_db.json sigue la regla general de
 # data/ (dev-local, no versionado).

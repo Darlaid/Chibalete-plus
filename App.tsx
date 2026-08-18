@@ -64,6 +64,7 @@ function getRouteAccess(path: string): RouteAccess {
 
 // Lazy loading for heavy or role-specific components
 const Biblioteca = React.lazy(() => import('./pages/Biblioteca'));
+const Experiencias = React.lazy(() => import('./pages/Experiencias'));
 const Multimedia = React.lazy(() => import('./pages/Multimedia'));
 const Busqueda = React.lazy(() => import('./pages/Busqueda'));
 const Perfil = React.lazy(() => import('./pages/Perfil'));
@@ -339,6 +340,9 @@ const AppContent: React.FC = () => {
                 {/* Protected Routes — todos los accesos pasan por getRouteAccess() → routePermissions.ts */}
                 <Route path="/" element={
                     <ProtectedRoute access={getRouteAccess('/')}><Layout><Home /></Layout></ProtectedRoute>
+                } />
+                <Route path="/experiencias" element={
+                    <ProtectedRoute access={getRouteAccess('/experiencias')}><Layout><Experiencias /></Layout></ProtectedRoute>
                 } />
                 <Route path="/biblioteca" element={
                     <ProtectedRoute access={getRouteAccess('/biblioteca')}><Layout><Biblioteca /></Layout></ProtectedRoute>

@@ -116,6 +116,7 @@ const Navbar: React.FC = () => {
         { to: '/',         icon: <Home size={22} strokeWidth={2} />,         label: 'Inicio' },
         { to: '/aula-viva', icon: <GraduationCap size={22} strokeWidth={2} />, label: aulaLabel },
         { to: '/biblioteca', icon: <Library size={22} strokeWidth={2} />,     label: 'Biblioteca' },
+        { to: '/experiencias', icon: <Sparkles size={22} strokeWidth={2} />,  label: 'Experiencias' },
         { to: '/multimedia', icon: <PlayCircle size={22} strokeWidth={2} />,  label: 'Multimedia' },
         { to: '/trivia',     icon: <Gamepad2 size={22} strokeWidth={2} />,    label: 'Trívia' },
         { to: '/tienda',     icon: <ShoppingBag size={22} strokeWidth={2} />, label: 'Tienda' },

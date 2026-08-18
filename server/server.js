@@ -22,6 +22,11 @@ import {
 import { cleanupExpiredSessions } from './db/sessionStore.js';
 import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
 import * as libraryStore from './lib/libraryStore.js';
+import * as experienceStore from './lib/experienceStore.js';
+import {
+    emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
+    emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
+} from './experienceBackboneEmitter.mjs';
 import {
     authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
     authSessionSubjectMismatch, authSessionRevoked,
@@ -644,7 +649,8 @@ const SCHOOLS_DB = process.env.SCHOOLS_DB || path.join(DATA_DIR, 'schools_db.jso
 const ACCESS_DB = process.env.ACCESS_DB || path.join(DATA_DIR, 'access_db.json'); // FASE E6: Motor de Accesos por Scopes
 const LEO_MEMORY_DB = path.join(DATA_DIR, 'leo_memory_db.json'); // LEO SESSION PERSISTENCE
 const BUNDLES_DB = path.join(DATA_DIR, 'bundles_db.json');
-const LIBRARY_DB = path.join(DATA_DIR, 'library_db.json');       // CHP-LIB-01: referencias/colecciones de Biblioteca (punteros, jamás copias)       // Fase 7: Bundles comerciales
+const LIBRARY_DB = path.join(DATA_DIR, 'library_db.json');       // CHP-LIB-01: referencias/colecciones de Biblioteca (punteros, jamás copias)
+const MOOK_DB = path.join(DATA_DIR, 'mook_db.json');             // CHP-MOOK-01: Experiencias (referencias a contenido canónico, jamás copias)       // Fase 7: Bundles comerciales
 const SUBMISSIONS_DB = path.join(DATA_DIR, 'submissions_db.json'); // Exportación académica
 const ANALYTICS_DB = path.join(DATA_DIR, 'analytics_db.json');    // Reading event analytics
 const PLAYBACK_EVENTS_LOG = path.join(DATA_DIR, 'playback_events.log'); // Ritmo narrativo — append-only JSONL
@@ -1560,6 +1566,231 @@ app.delete('/api/library/editorial/references/:id', requireAdminAccess, async (r
     res.json({ ok: true });
 });
 // --- END CHP-LIB-01 --------------------------------------------------------
+
+// --- CHP-MOOK-01: EXPERIENCIAS (vertical slice del piloto) -----------------
+// Contrato: docs/adr/CHP_ADR_MOOK.md + docs/product/CHP_MOOK_PILOT_DESIGN_00.md.
+// - Actor SIEMPRE derivado de la sesión/request canónica (req.user), jamás
+//   del body/query. Sin headers legacy nuevos, sin ACL nueva.
+// - MOOK no concede acceso: abrir recursos pasa por el preflight existente.
+// - Telemetría por el backbone canónico (emitter flag-gated, mode=experience).
+// - Sin superficies INSTITUTIONAL (M1-B); cola de revisión = rol mediador/
+//   administrador existente, scoping institucional documentado como frontera.
+
+async function mutateMook(fn) {
+    return withFileLock(MOOK_DB, () => {
+        _jsonCache.delete(MOOK_DB);
+        const doc = experienceStore.normalizeMookStore(readJSON(MOOK_DB));
+        const result = fn(doc);
+        if (!result || !result.conflict) writeJSON(MOOK_DB, doc);
+        return result;
+    }, 'mookLock');
+}
+
+const readMook = () => experienceStore.normalizeMookStore(readJSON(MOOK_DB));
+
+// Conteo SERVER-SIDE de intercambios Leo para completitud del nodo LEO:
+// interacciones del usuario sobre el contentId del nodo desde el inicio del run.
+function countLeoInterchangesFor(run, node) {
+    try {
+        const list = readJSON(LEO_INTERACTIONS_DB);
+        const since = Date.parse(run.startedAt) || 0;
+        const contentId = node.resourceRef ?? node.config?.contentId ?? null;
+        return (Array.isArray(list) ? list : []).filter(it =>
+            it.userId === run.userId &&
+            (contentId == null || it.contentId === contentId) &&
+            Number(it.timestamp) >= since
+        ).length;
+    } catch { return 0; }
+}
+
+function emitCurrentNodeStarted(doc, run) {
+    try {
+        const view = experienceStore.computeRouteView(doc, run, []);
+        const current = view.nodes.find(n => n.state === 'current');
+        if (current) {
+            void emitNodeStarted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId: current.id, nodeType: current.type }, log);
+        }
+    } catch { /* telemetría jamás rompe el flujo */ }
+}
+
+function emitCompletionEvents(run, nodeId, nodeType, progress) {
+    void emitNodeCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId, nodeType }, log);
+    if (progress.completed) {
+        void emitExperienceCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, requiredNodes: progress.totalRequired }, log);
+    }
+}
+
+// Resumen de evidencias del PROPIO run (el dueño ve estado/decisión/feedback).
+function myEvidenceSummary(doc, run) {
+    return doc.evidence
+        .filter(e => e.runId === run.id)
+        .map(e => ({ id: e.id, nodeId: e.nodeId, nodeType: e.nodeType, requiresReview: e.requiresReview, submittedAt: e.submittedAt, review: e.review }));
+}
+
+const mookErrStatus = (e) => (
+    ['EXPERIENCE_NOT_FOUND', 'VERSION_NOT_FOUND', 'RUN_NOT_FOUND', 'NODE_NOT_FOUND', 'EVIDENCE_NOT_FOUND', 'RESOURCE_NOT_FOUND', 'NOT_PUBLISHED'].includes(e.code) ? 404
+    : ['NOT_RUN_OWNER'].includes(e.code) ? 403
+    : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION'].includes(e.code) ? 409
+    : e.code ? 400 : 500
+);
+
+// ── Editorial/admin (mecanismo administrativo canónico) ─────────────────────
+app.post('/api/experiences', requireAdminAccess, async (req, res) => {
+    try {
+        let created;
+        await mutateMook((doc) => { created = experienceStore.createExperience(doc, req.body ?? {}); });
+        log(`[MOOK] experience created: ${created.id} (${created.slug})`);
+        res.status(201).json(created);
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/:id/versions', requireAdminAccess, async (req, res) => {
+    try {
+        const contentList = readJSON(DB_FILE);
+        let v;
+        await mutateMook((doc) => {
+            v = experienceStore.createDraftVersion(doc, req.params.id, req.body ?? {}, (id) => contentList.some(c => c.id === id));
+        });
+        log(`[MOOK] draft v${v.version} created for ${req.params.id}`);
+        res.status(201).json(v);
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.put('/api/experiences/versions/:vid', requireAdminAccess, async (req, res) => {
+    try {
+        const contentList = readJSON(DB_FILE);
+        let v;
+        await mutateMook((doc) => {
+            v = experienceStore.updateDraftVersion(doc, req.params.vid, req.body ?? {}, (id) => contentList.some(c => c.id === id));
+        });
+        res.json(v);
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/versions/:vid/publish', requireAdminAccess, async (req, res) => {
+    try {
+        let v;
+        await mutateMook((doc) => { v = experienceStore.publishVersion(doc, req.params.vid); });
+        log(`[MOOK] published ${v.experienceId} v${v.version}`);
+        res.json(v);
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+// ── Usuario (actor = sesión canónica; sin identidades del cliente) ──────────
+app.get('/api/experiences', requireUserAuth, (req, res) => {
+    try { res.json(experienceStore.listPublished(readMook())); }
+    catch (e) { res.status(500).json({ error: 'No se pudieron listar las Experiencias' }); }
+});
+
+app.post('/api/experiences/:id/run', requireUserAuth, async (req, res) => {
+    try {
+        const contentList = readJSON(DB_FILE);
+        let out;
+        await mutateMook((doc) => { out = experienceStore.startRun(doc, { userId: req.user.id, experienceId: req.params.id }); });
+        const doc = readMook();
+        if (out.created) {
+            void emitExperienceStarted({ userId: req.user.id, experienceId: out.run.experienceId, experienceVersionId: out.run.experienceVersionId, runId: out.run.id }, log);
+            emitCurrentNodeStarted(doc, out.run);
+        }
+        res.status(out.created ? 201 : 200).json({ ...experienceStore.computeRouteView(doc, out.run, contentList), evidence: myEvidenceSummary(doc, out.run) });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.get('/api/experiences/:id/route', requireUserAuth, (req, res) => {
+    try {
+        const doc = readMook();
+        const run = doc.runs.find(r => r.userId === req.user.id && r.experienceId === req.params.id && r.status !== 'abandoned');
+        if (!run) return res.status(404).json({ error: 'Sin run activo — inicia la Experiencia' });
+        res.json({ ...experienceStore.computeRouteView(doc, run, readJSON(DB_FILE)), evidence: myEvidenceSummary(doc, run) });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth, async (req, res) => {
+    try {
+        let out;
+        await mutateMook((doc) => {
+            const run = doc.runs.find(r => r.id === req.params.runId);
+            if (!run) { const e = new Error('run no existe'); e.code = 'RUN_NOT_FOUND'; throw e; }
+            if (run.userId !== req.user.id) { const e = new Error('no es tu run'); e.code = 'NOT_RUN_OWNER'; throw e; }
+            const v = doc.versions.find(x => x.id === run.experienceVersionId);
+            const node = v.nodes.find(n => n.id === req.params.nodeId);
+            let leoInterchanges;
+            if (node?.type === 'LEO') {
+                leoInterchanges = countLeoInterchangesFor(run, node);
+                experienceStore.attachLeoEvidenceRefs(doc, run.id, node.id, []); // los ids de leo_evidence se referencian, no se copian
+            }
+            out = experienceStore.completeNode(doc, run.id, req.params.nodeId, { leoInterchanges });
+            out.nodeType = node?.type;
+        });
+        emitCompletionEvents(out.run, req.params.nodeId, out.nodeType, out.progress);
+        emitCurrentNodeStarted(readMook(), out.run);
+        res.json({ progress: out.progress, status: out.run.status });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth, async (req, res) => {
+    try {
+        let out;
+        await mutateMook((doc) => {
+            out = experienceStore.submitEvidence(doc, {
+                runId: req.params.runId, nodeId: req.params.nodeId,
+                userId: req.user.id, payload: req.body ?? {},
+            });
+        });
+        void emitEvidenceSubmitted({ userId: req.user.id, experienceId: out.evidence.experienceId, experienceVersionId: out.evidence.experienceVersionId, runId: out.run.id, nodeId: out.evidence.nodeId, nodeType: out.evidence.nodeType, evidenceId: out.evidence.id, requiresReview: out.evidence.requiresReview }, log);
+        emitCompletionEvents(out.run, out.evidence.nodeId, out.evidence.nodeType, out.progress);
+        emitCurrentNodeStarted(readMook(), out.run);
+        res.status(201).json({ evidenceId: out.evidence.id, review: out.evidence.review, progress: out.progress, status: out.run.status });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+// ── Revisión humana (rol mediador/administrador existente; scoping
+//    institucional de la cola = frontera M1-B, documentada) ─────────────────
+function isReviewer(user) {
+    const roles = user?.roles || [];
+    return roles.includes('administrador') || isMediatorRole(user);
+}
+
+app.get('/api/experiences/review/queue', requireUserAuth, (req, res) => {
+    try {
+        if (!isReviewer(req.user)) return res.status(403).json({ error: 'Solo mediadores/administradores' });
+        const doc = readMook();
+        const queue = doc.evidence
+            .filter(e => e.requiresReview && e.review.status === 'SUBMITTED')
+            .map(e => {
+                const exp = doc.experiences.find(x => x.id === e.experienceId);
+                const v = doc.versions.find(x => x.id === e.experienceVersionId);
+                const node = v?.nodes.find(n => n.id === e.nodeId);
+                return {
+                    id: e.id, submittedAt: e.submittedAt, userId: e.userId,
+                    experience: exp?.title, version: v?.version,
+                    nodeTitle: node?.title, consigna: node?.config?.consigna,
+                    criterioRevision: node?.config?.criterioRevision,
+                    objectives: v?.objectives ?? [],
+                    text: e.payload?.text,
+                };
+            });
+        res.json(queue);
+    } catch (e) { res.status(500).json({ error: 'No se pudo leer la cola de revisión' }); }
+});
+
+app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res) => {
+    try {
+        if (!isReviewer(req.user)) return res.status(403).json({ error: 'Solo mediadores/administradores' });
+        let ev;
+        await mutateMook((doc) => {
+            ev = experienceStore.reviewEvidence(doc, req.params.evidenceId, {
+                reviewerId: req.user.id,
+                decision: req.body?.decision,
+                feedback: req.body?.feedback,
+            });
+        });
+        void emitEvidenceReviewed({ userId: ev.userId, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, evidenceId: ev.id, decision: ev.review.decision }, log);
+        log(`[MOOK] evidence reviewed: ${ev.id} -> ${ev.review.decision}`);
+        res.json({ id: ev.id, review: ev.review });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+// --- END CHP-MOOK-01 -------------------------------------------------------
 
 // --- CONTENT ROUTES ---
 app.get('/api/content', (req, res) => {

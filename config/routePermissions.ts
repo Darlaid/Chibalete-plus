@@ -126,6 +126,11 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     description: 'Catálogo de libros accesibles para el usuario',
   },
   {
+    path: '/experiencias',
+    access: 'authenticated',
+    description: 'Experiencias — rutas pedagógicas (CHP-MOOK-01, piloto)',
+  },
+  {
     path: '/multimedia',
     access: 'authenticated',
     description: 'Contenido multimedia (audio, video)',

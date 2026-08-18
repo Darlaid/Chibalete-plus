@@ -122,6 +122,15 @@ const SCHEMAS = {
     leo_evidence_recorded:      z.object({ userId: z.string().min(1), kind: z.string().max(40), sourceEvent: z.string().max(60).optional(), pedagogicalObjective: z.string().max(40).optional() }).strip(),
     leo_recommendation_generated: z.object({ userId: z.string().min(1), recommendationId: z.string().min(1), kind: z.string().max(40) }).strip(),
 
+    // EXPERIENCE / MOOK (6) — CHP-ADR-MOOK §9. Payloads mínimos, sin PII ni
+    // texto libre (la producción vive en ExperienceEvidence, no en telemetría).
+    experience_started:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1) }).strip(),
+    node_started:               z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20) }).strip(),
+    node_completed:             z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20) }).strip(),
+    evidence_submitted:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), evidenceId: z.string().min(1), requiresReview: z.boolean() }).strip(),
+    evidence_reviewed:          z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), evidenceId: z.string().min(1), decision: z.enum(['aprobado', 'con_comentarios']) }).strip(),
+    experience_completed:       z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), requiredNodes: z.number().int().nonnegative() }).strip(),
+
     // SYSTEM (6)
     deploy_started:             z.object({ release: z.string().max(60).optional(), commit: z.string().max(40).optional() }).strip(),
     deploy_completed:           z.object({ release: z.string().max(60).optional(), durationMs: z.number().int().nonnegative().optional() }).strip(),
@@ -172,6 +181,9 @@ const CATEGORY = {
     leo_interaction_started:'leo', leo_interaction_completed:'leo',
     leo_memory_updated:'leo', leo_profile_updated:'leo',
     leo_evidence_recorded:'leo', leo_recommendation_generated:'leo',
+    // experience (MOOK)
+    experience_started:'experience', node_started:'experience', node_completed:'experience',
+    evidence_submitted:'experience', evidence_reviewed:'experience', experience_completed:'experience',
     // system
     deploy_started:'system', deploy_completed:'system', migration_applied:'system',
     archive_started:'system', archive_completed:'system', shadow_divergence_detected:'system',
@@ -190,6 +202,7 @@ const CATEGORY_DEFAULTS = {
     aula_viva:     { pedagogical_weight: 2, materialization_hint: 'snapshot_group', privacy_level: 'institutional', retention_class: 'warm_1y' },
     institutional: { pedagogical_weight: 1, materialization_hint: 'snapshot_school',privacy_level: 'institutional', retention_class: 'warm_1y' },
     leo:           { pedagogical_weight: 3, materialization_hint: 'snapshot_user',  privacy_level: 'sensitive',     retention_class: 'warm_1y' },
+    experience:    { pedagogical_weight: 3, materialization_hint: 'snapshot_user',  privacy_level: 'pedagogical',   retention_class: 'warm_1y' },
     system:        { pedagogical_weight: 0, materialization_hint: 'log_only',       privacy_level: 'public',        retention_class: 'hot_90d' },
 };
 const META_OVERRIDE = {
@@ -203,6 +216,10 @@ const META_OVERRIDE = {
     teacher_created_intervention:{ pedagogical_weight: 3, retention_class: 'cold_archive' },
     leo_evidence_recorded:       { pedagogical_weight: 3, retention_class: 'cold_archive' },
     leo_recommendation_generated:{ pedagogical_weight: 3, retention_class: 'warm_1y' },
+    node_started:                { pedagogical_weight: 2 },
+    evidence_submitted:          { retention_class: 'cold_archive' },
+    evidence_reviewed:           { retention_class: 'cold_archive' },
+    experience_completed:        { retention_class: 'cold_archive' },
 };
 
 const REGISTRY = Object.freeze(
@@ -220,7 +237,7 @@ const REGISTRY = Object.freeze(
 export const EVENT_NAMES      = Object.freeze(Object.keys(REGISTRY));
 export const EVENT_CATEGORIES = Object.freeze([
     'reading','session','immersive','audio','accessibility','pdf','guided','album',
-    'aula_viva','institutional','leo','system',
+    'aula_viva','institutional','leo','experience','system',
 ]);
 export const REGISTRY_VERSION = 2;   // bump al cambiar shapes
 

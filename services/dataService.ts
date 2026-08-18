@@ -4861,6 +4861,60 @@ class DataService {
         }
     }
 
+    // --- CHP-MOOK-01: EXPERIENCIAS (actor = sesión; MOOK no concede acceso) ---
+    async getExperiences(): Promise<any[]> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences`, { credentials: 'include' });
+            return res.ok ? res.json() : [];
+        } catch { return []; }
+    }
+
+    async startExperienceRun(experienceId: string): Promise<any | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/${encodeURIComponent(experienceId)}/run`, {
+                method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            });
+            return res.ok ? res.json() : null;
+        } catch { return null; }
+    }
+
+    async completeExperienceNode(runId: string, nodeId: string): Promise<{ ok: boolean; error?: string }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/complete`, {
+                method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}',
+            });
+            const body = await res.json().catch(() => ({}));
+            return res.ok ? { ok: true } : { ok: false, error: body.error };
+        } catch { return { ok: false, error: 'Sin conexión' }; }
+    }
+
+    async submitExperienceEvidence(runId: string, nodeId: string, payload: { answers?: string[]; text?: string }): Promise<{ ok: boolean; error?: string }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/evidence`, {
+                method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+            });
+            const body = await res.json().catch(() => ({}));
+            return res.ok ? { ok: true } : { ok: false, error: body.error };
+        } catch { return { ok: false, error: 'Sin conexión' }; }
+    }
+
+    async getExperienceReviewQueue(): Promise<any[]> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/review/queue`, { credentials: 'include' });
+            return res.ok ? res.json() : [];
+        } catch { return []; }
+    }
+
+    async reviewExperienceEvidence(evidenceId: string, decision: 'aprobado' | 'con_comentarios', feedback: string): Promise<boolean> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/review/${encodeURIComponent(evidenceId)}`, {
+                method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ decision, feedback }),
+            });
+            return res.ok;
+        } catch { return false; }
+    }
+
     // --- SECTIONS & FILTERING ---
     async getSections(): Promise<Section[]> {
         try {
