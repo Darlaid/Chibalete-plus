@@ -57,12 +57,16 @@ const err = (code, msg) => { const e = new Error(msg); e.code = code; return e; 
 
 // ── Experiencia y versiones ─────────────────────────────────────────────────
 
-export function createExperience(doc, { slug, title, description = '' }) {
+export function createExperience(doc, { slug, title, description = '', imageUrl, durationLabel, audience }) {
     if (!slug || !/^[a-z0-9-]+$/.test(slug)) throw err('INVALID_SLUG', 'slug inválido (kebab-case)');
     if (!title || !String(title).trim()) throw err('INVALID_TITLE', 'title requerido');
     if (doc.experiences.some(e => e.slug === slug)) throw err('DUPLICATE_SLUG', `slug ya existe: ${slug}`);
     const exp = {
         id: rid('exp'), slug, title: String(title).trim(), description: String(description),
+        // V4 RUNTIME-01 — únicos campos añadidos, declarados por el UX freeze:
+        ...(imageUrl ? { imageUrl: String(imageUrl) } : {}),
+        ...(durationLabel ? { durationLabel: String(durationLabel) } : {}),
+        ...(audience ? { audience: String(audience) } : {}),
         status: 'draft', currentVersionId: null, createdAt: nowIso(), updatedAt: nowIso(),
     };
     doc.experiences.push(exp);
@@ -325,12 +329,52 @@ export function listPublished(doc) {
             const v = doc.versions.find(x => x.id === e.currentVersionId);
             return {
                 id: e.id, slug: e.slug, title: e.title, description: e.description,
+                imageUrl: e.imageUrl ?? null,
+                durationLabel: e.durationLabel ?? null,
+                audience: e.audience ?? null,
                 version: v?.version ?? null,
                 nodeCount: v ? versionNodes(v).length : 0,
                 moduleCount: v?.modules?.length ?? 0,
                 moduleTitles: (v?.modules ?? []).map(m => m.title),
+                nodeTypes: v ? [...new Set(versionNodes(v).map(n => n.type))] : [],
+                hasProduction: v ? versionNodes(v).some(n => n.type === 'PRODUCTION') : false,
             };
         });
+}
+
+/** Resumen del run del usuario para descubrimiento/landing (derivado, sin persistir nada). */
+function myRunSummary(doc, userId, experienceId) {
+    const run = doc.runs.find(r => r.userId === userId && r.experienceId === experienceId && r.status !== 'abandoned');
+    if (!run) return null;
+    const v = doc.versions.find(x => x.id === run.experienceVersionId);
+    return {
+        runId: run.id,
+        status: run.status,
+        progress: runProgress(doc, run),
+        moduleStates: (v?.modules ?? []).map(m => ({ id: m.id, title: m.title, state: moduleState(m, run) })),
+    };
+}
+
+/** Listado publicado + `myRun` del usuario (declarado por CHP-MOOK-PRODUCT-UX-01). */
+export function listPublishedFor(doc, userId) {
+    return listPublished(doc).map(e => ({ ...e, myRun: myRunSummary(doc, userId, e.id) }));
+}
+
+/** Detalle para la landing: comprender ANTES de iniciar (no crea run). */
+export function experienceDetail(doc, experienceId, userId) {
+    const e = doc.experiences.find(x => x.id === experienceId && x.status === 'published' && x.currentVersionId);
+    if (!e) throw err('NOT_PUBLISHED', 'la Experiencia no está publicada');
+    const v = doc.versions.find(x => x.id === e.currentVersionId);
+    return {
+        id: e.id, slug: e.slug, title: e.title, description: e.description,
+        imageUrl: e.imageUrl ?? null, durationLabel: e.durationLabel ?? null, audience: e.audience ?? null,
+        version: v.version,
+        objectives: v.objectives,
+        modules: v.modules.map(m => ({ id: m.id, title: m.title, nodeCount: m.nodes.length, nodeTypes: [...new Set(m.nodes.map(n => n.type))] })),
+        nodeTypes: [...new Set(versionNodes(v).map(n => n.type))],
+        hasProduction: versionNodes(v).some(n => n.type === 'PRODUCTION'),
+        myRun: myRunSummary(doc, userId, e.id),
+    };
 }
 
 export function computeRouteView(doc, run, contentList) {

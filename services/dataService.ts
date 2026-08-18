@@ -4869,6 +4869,13 @@ class DataService {
         } catch { return []; }
     }
 
+    async getExperienceDetail(experienceId: string): Promise<any | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/${encodeURIComponent(experienceId)}`, { credentials: 'include' });
+            return res.ok ? res.json() : null;
+        } catch { return null; }
+    }
+
     async startExperienceRun(experienceId: string): Promise<any | null> {
         try {
             const res = await fetch(`${this.apiUrl}/experiences/${encodeURIComponent(experienceId)}/run`, {

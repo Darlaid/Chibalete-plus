@@ -1685,8 +1685,14 @@ app.post('/api/experiences/versions/:vid/publish', requireAdminAccess, async (re
 
 // ── Usuario (actor = sesión canónica; sin identidades del cliente) ──────────
 app.get('/api/experiences', requireUserAuth, (req, res) => {
-    try { res.json(experienceStore.listPublished(readMook())); }
+    try { res.json(experienceStore.listPublishedFor(readMook(), req.user.id)); }
     catch (e) { res.status(500).json({ error: 'No se pudieron listar las Experiencias' }); }
+});
+
+// Landing (comprender ANTES de iniciar) — NO crea run.
+app.get('/api/experiences/:id', requireUserAuth, (req, res) => {
+    try { res.json(experienceStore.experienceDetail(readMook(), req.params.id, req.user.id)); }
+    catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
 app.post('/api/experiences/:id/run', requireUserAuth, async (req, res) => {

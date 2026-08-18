@@ -151,15 +151,39 @@ const Biblioteca: React.FC = () => {
                     </div>
                 );
             }
-            const [destacada, ...otras] = experiencias;
+            // V4: destacada = la que tiene run activo; si no, la primera publicada.
+            const ordered = [...experiencias].sort((a, b) => ((b.myRun?.status === 'active' ? 1 : 0) - (a.myRun?.status === 'active' ? 1 : 0)));
+            const [destacada, ...otras] = ordered;
+            const moduleStateUI: Record<string, string> = { COMPLETED: 'Completado', IN_PROGRESS: 'En curso', NOT_STARTED: 'Por iniciar' };
+            const prog = destacada.myRun?.progress;
             return (
                 <div className="animate-in fade-in duration-500 mt-8 space-y-8">
-                    <Link to={`/experiencias/${destacada.id}`} className="block rounded-3xl bg-gradient-to-br from-indigo-600 to-purple-700 text-white p-8 shadow-xl hover:shadow-2xl transition-shadow">
-                        <span className="text-xs uppercase tracking-widest text-indigo-200">Experiencia destacada</span>
-                        <h3 className="text-3xl font-bold mt-2">{destacada.title}</h3>
-                        <p className="text-indigo-100 mt-2 max-w-2xl">{destacada.description}</p>
-                        <div className="mt-3 text-sm text-indigo-200">{destacada.moduleCount} módulos · {destacada.nodeCount} pasos</div>
-                        <span className="inline-block mt-5 bg-white text-indigo-700 px-5 py-3 rounded-xl font-bold">Iniciar ruta →</span>
+                    <Link to={`/experiencias/${destacada.id}`} className="block rounded-3xl overflow-hidden bg-gradient-to-br from-indigo-600 to-purple-700 text-white shadow-xl hover:shadow-2xl transition-shadow">
+                        {destacada.imageUrl && <img src={destacada.imageUrl} alt="" className="w-full h-44 object-cover opacity-80" />}
+                        <div className="p-8">
+                            <span className="text-xs uppercase tracking-widest text-indigo-200">Experiencia destacada</span>
+                            <h3 className="text-3xl font-bold mt-2">{destacada.title}</h3>
+                            <p className="text-indigo-100 mt-2 max-w-2xl">{destacada.description}</p>
+                            <div className="mt-3 text-sm text-indigo-200">
+                                {destacada.durationLabel ? `${destacada.durationLabel} · ` : ''}{destacada.moduleCount} módulos · {destacada.nodeCount} pasos
+                            </div>
+                            {prog && (
+                                <div className="mt-4 max-w-md" role="progressbar" aria-valuenow={prog.completedRequired} aria-valuemin={0} aria-valuemax={prog.totalRequired} aria-label={`Progreso: ${prog.completedRequired} de ${prog.totalRequired}`}>
+                                    <div className="h-2 bg-white/25 rounded-full"><div className="h-2 bg-white rounded-full" style={{ width: `${(prog.completedRequired / Math.max(1, prog.totalRequired)) * 100}%` }} /></div>
+                                    <span className="text-xs text-indigo-100">{prog.completedRequired}/{prog.totalRequired} completados</span>
+                                </div>
+                            )}
+                            {destacada.myRun?.moduleStates && (
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                    {destacada.myRun.moduleStates.map((m: any) => (
+                                        <span key={m.id} className="text-xs bg-white/15 px-3 py-1 rounded-full">{m.title} — {moduleStateUI[m.state] ?? m.state}</span>
+                                    ))}
+                                </div>
+                            )}
+                            <span className="inline-block mt-5 bg-white text-indigo-700 px-5 py-3 rounded-xl font-bold">
+                                {destacada.myRun?.status === 'active' ? 'Continuar ruta →' : destacada.myRun?.status === 'completed' ? 'Ver recorrido →' : 'Iniciar ruta →'}
+                            </span>
+                        </div>
                     </Link>
                     {otras.length > 0 && (
                         <div>
@@ -169,7 +193,7 @@ const Biblioteca: React.FC = () => {
                                     <Link key={e.id} to={`/experiencias/${e.id}`} className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5 hover:shadow-md transition-shadow">
                                         <h4 className="font-bold text-gray-800 dark:text-gray-100">{e.title}</h4>
                                         <p className="text-sm text-gray-500 mt-1">{e.description}</p>
-                                        <span className="inline-block mt-2 text-sm font-bold text-indigo-600">Iniciar ruta →</span>
+                                        <span className="inline-block mt-2 text-sm font-bold text-indigo-600">{e.myRun?.status === 'active' ? 'Continuar ruta →' : 'Iniciar ruta →'}</span>
                                     </Link>
                                 ))}
                             </div>

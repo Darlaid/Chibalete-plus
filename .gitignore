@@ -206,6 +206,10 @@ server/.deploy-info
 *.candidate.db-shm
 IDENTITY-IMPORT-MANIFEST-*.json
 
+# Padrón canónico: JAMÁS versionar (en prod contiene PII; en dev es fixture local).
+/data-critical/usuarios_colegios_oro.json
+/data-critical/usuarios_colegios_oro.json.bak*
+
 # CHP-MOOK-01 — seed del piloto de Experiencias. El script SÍ se versiona;
 # data/mook_db.json sigue la regla general de data/ (dev-local, no versionado).
 !/scripts/mook/

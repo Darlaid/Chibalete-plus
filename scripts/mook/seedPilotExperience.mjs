@@ -23,6 +23,9 @@ export const PILOT_DEFINITION = {
     slug: PILOT_SLUG,
     title: 'Me desconecto, luego existo',
     description: 'Ruta pedagógica: toma una posición argumentada sobre tu relación con la hiperconexión, con Descartes, Kierkegaard y Simone Weil como compañía.',
+    imageUrl: '/uploads/content-1765751139919/la_metamorfosis_esp-cover.jpg',
+    durationLabel: '2–3 sesiones de ~25 min',
+    audience: 'Secundaria (12–16)',
     objectives: [
         'Tomar una posición argumentada sobre la propia relación con la hiperconexión',
         'Apoyarse en las tres tensiones del libro: existencia vs. aparición, multitud vs. elección, ruido vs. atención',
@@ -80,7 +83,10 @@ export function seedPilot(doc, contentList, { bookIdOverride } = {}) {
         { id: 'm1-leer-conversar', title: 'Leer y conversar', nodes: nodes.slice(0, 2) },
         { id: 'm2-pensar-producir', title: 'Pensar y producir', nodes: nodes.slice(2) },
     ];
-    const exp = createExperience(doc, { slug: PILOT_DEFINITION.slug, title: PILOT_DEFINITION.title, description: PILOT_DEFINITION.description });
+    const exp = createExperience(doc, {
+        slug: PILOT_DEFINITION.slug, title: PILOT_DEFINITION.title, description: PILOT_DEFINITION.description,
+        imageUrl: PILOT_DEFINITION.imageUrl, durationLabel: PILOT_DEFINITION.durationLabel, audience: PILOT_DEFINITION.audience,
+    });
     const v1 = createDraftVersion(doc, exp.id, { objectives: PILOT_DEFINITION.objectives, modules }, bookExists);
     publishVersion(doc, v1.id);
     return { doc, created: true, experienceId: exp.id, versionId: v1.id, bookId };
