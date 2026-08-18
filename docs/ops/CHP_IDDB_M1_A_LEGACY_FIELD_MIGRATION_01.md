@@ -92,3 +92,13 @@ El operador declaró ejecutadas las instalaciones de campo. Verificación de se�
 > En cada dispositivo de campo ya instalado: **abrir la app Chibalete LU con red y hacer login una vez** (credencial tecleada por el usuario). Eso emite el login + assignment con `ChibaleteLU/0.9.0` que corroboran la migración, y desde ese momento arranca la ventana del drain-02.
 
 Nota de secuencia: aun con corroboración inmediata, `DRAIN-REDO-WEEKDAY-TRAFFIC-02` exige **≥48 horas hábiles POSTERIORES a la migración** — el cierre de M1-A no puede completarse el mismo día de la migración por construcción (cierre más temprano realista: ~20–21/Ago con cobertura escolar).
+
+### Segunda pasada de corroboración (2026-08-18 16:38–16:45Z)
+
+Tras una segunda declaración del operador («los dispositivos fueron abiertos con red y los usuarios hicieron login»), la señal productiva sigue sin corroborarla:
+
+- Apareció actividad 0.9.0 nueva a las 16:36Z (logout 200 → login 200 → assignment/analytics/sync 200) — **pero el padrón la atribuye a `user-1774…1303`, la cuenta del propio dispositivo QA** (único `lastLoginAt` de hoy ≥13:00Z en las 647 cuentas). Los eventos de analytics del día también son todos de esa cuenta.
+- **Cero logins de cuentas de campo**: ni `user-1781…1961` (prioridad 1) ni la cohorte escolar registran login hoy.
+- Sin regresiones: todo 2xx, 0×401 anómalos, 0×5xx, producción healthy.
+
+**Veredicto: sigue `YELLOW-OPERATOR-STEP`.** La activación observada corresponde al dispositivo ya migrado en QA, no a la tanda de campo. Lo que la evidencia necesita ver: **logins de las CUENTAS de campo** (cada usuario de campo entra con SU credencial en SU dispositivo). Si las instalaciones se hicieron sobre otros equipos pero los usuarios aún no han abierto la app o no han hecho login, esa apertura+login es la intervención pendiente; si por el contrario la activación se probó sobre el mismo dispositivo/cuenta de QA, la migración de campo real sigue sin ejecutarse.
