@@ -206,6 +206,12 @@ server/.deploy-info
 *.candidate.db-shm
 IDENTITY-IMPORT-MANIFEST-*.json
 
+# CHP-LIB-01 — migración editorial de Biblioteca (referencias, jamás copias).
+# El script SÍ se versiona; data/library_db.json sigue la regla general de
+# data/ (dev-local, no versionado).
+!/scripts/library/
+!/scripts/library/**
+
 # CHP-STATS-LEGACY-PERF-01A — harness de auditoría del coste legacy. Los
 # scripts SÍ se versionan; sus salidas y fixtures generadas, NO.
 !/scripts/perf/

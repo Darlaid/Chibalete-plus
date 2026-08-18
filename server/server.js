@@ -21,6 +21,7 @@ import {
 } from './lib/sessionAuth.js';
 import { cleanupExpiredSessions } from './db/sessionStore.js';
 import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
+import * as libraryStore from './lib/libraryStore.js';
 import {
     authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
     authSessionSubjectMismatch, authSessionRevoked,
@@ -642,7 +643,8 @@ const SCHOOL_CONFIGS_DB = path.join(DATA_DIR, 'school_configs.json');
 const SCHOOLS_DB = process.env.SCHOOLS_DB || path.join(DATA_DIR, 'schools_db.json');
 const ACCESS_DB = process.env.ACCESS_DB || path.join(DATA_DIR, 'access_db.json'); // FASE E6: Motor de Accesos por Scopes
 const LEO_MEMORY_DB = path.join(DATA_DIR, 'leo_memory_db.json'); // LEO SESSION PERSISTENCE
-const BUNDLES_DB = path.join(DATA_DIR, 'bundles_db.json');       // Fase 7: Bundles comerciales
+const BUNDLES_DB = path.join(DATA_DIR, 'bundles_db.json');
+const LIBRARY_DB = path.join(DATA_DIR, 'library_db.json');       // CHP-LIB-01: referencias/colecciones de Biblioteca (punteros, jamás copias)       // Fase 7: Bundles comerciales
 const SUBMISSIONS_DB = path.join(DATA_DIR, 'submissions_db.json'); // Exportación académica
 const ANALYTICS_DB = path.join(DATA_DIR, 'analytics_db.json');    // Reading event analytics
 const PLAYBACK_EVENTS_LOG = path.join(DATA_DIR, 'playback_events.log'); // Ritmo narrativo — append-only JSONL
@@ -1465,6 +1467,99 @@ app.delete('/api/bundles/:id', requireAuth, async (req, res) => {
     log(`[BUNDLE] Deleted: ${id}`);
     res.json({ ok: true });
 });
+
+// --- CHP-LIB-01: BIBLIOTECA (capa EDITORIAL) -------------------------------
+// Contrato: docs/adr/CHP_ADR_BIBLIOTECA.md. Biblioteca = referencia +
+// organización + contexto; NUNCA autorización (el preflight
+// /api/content/:id/access sigue siendo la única autoridad de acceso) y NUNCA
+// copia de Book (library_db solo guarda punteros bookId al catálogo canónico).
+// Escrituras INSTITUTIONAL/PERSONAL: IMPLEMENTATION-BLOCKED hasta M1-A
+// enforce + M1-B (no existen rutas — no abrir con workarounds).
+
+async function mutateLibrary(fn) {
+    return withFileLock(LIBRARY_DB, () => {
+        _jsonCache.delete(LIBRARY_DB);
+        const doc = libraryStore.normalizeLibrary(readJSON(LIBRARY_DB));
+        const result = fn(doc);
+        if (!result || !result.conflict) writeJSON(LIBRARY_DB, doc);
+        return result;
+    }, 'libraryLock');
+}
+
+// Lectura pública de la capa editorial (misma política que GET /api/content:
+// metadata de catálogo; abrir contenido sigue gateado por el preflight).
+app.get('/api/library/editorial', (req, res) => {
+    try {
+        const doc = libraryStore.normalizeLibrary(readJSON(LIBRARY_DB));
+        res.json(libraryStore.computeEditorialView(doc, readJSON(DB_FILE)));
+    } catch (e) {
+        log(`[LIBRARY] editorial view error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'No se pudo leer la biblioteca' });
+    }
+});
+
+// Administración editorial — mecanismo administrativo canónico existente.
+app.post('/api/library/editorial/collections', requireAdminAccess, async (req, res) => {
+    try {
+        let created;
+        await mutateLibrary((doc) => { created = libraryStore.addCollection(doc, { layer: 'EDITORIAL', name: req.body?.name, description: req.body?.description }); });
+        log(`[LIBRARY] collection created: ${created.id}`);
+        res.status(201).json(created);
+    } catch (e) {
+        res.status(e.code === 'INVALID_NAME' ? 400 : 500).json({ error: e.message });
+    }
+});
+
+app.put('/api/library/editorial/collections/:id', requireAdminAccess, async (req, res) => {
+    let updated;
+    await mutateLibrary((doc) => {
+        updated = libraryStore.updateCollection(doc, req.params.id, req.body ?? {});
+        if (!updated) return { conflict: 'not_found' };
+    });
+    if (!updated) return res.status(404).json({ error: 'Colección no encontrada' });
+    log(`[LIBRARY] collection updated: ${updated.id}`);
+    res.json(updated);
+});
+
+app.post('/api/library/editorial/references', requireAdminAccess, async (req, res) => {
+    try {
+        const contentList = readJSON(DB_FILE);
+        let out;
+        await mutateLibrary((doc) => {
+            out = libraryStore.addReference(
+                doc,
+                { bookId: req.body?.bookId, layer: 'EDITORIAL', collectionId: req.body?.collectionId ?? null, position: req.body?.position },
+                (id) => contentList.some(c => c.id === id)
+            );
+        });
+        log(`[LIBRARY] reference ${out.created ? 'created' : 'idempotent'}: ${out.reference.id} -> ${out.reference.bookId}`);
+        res.status(out.created ? 201 : 200).json(out);
+    } catch (e) {
+        const status = e.code === 'BOOK_NOT_FOUND' || e.code === 'COLLECTION_NOT_FOUND' ? 404
+            : e.code === 'INVALID_BOOK_ID' || e.code === 'INVALID_LAYER' ? 400 : 500;
+        res.status(status).json({ error: e.message });
+    }
+});
+
+app.put('/api/library/editorial/references/:id', requireAdminAccess, async (req, res) => {
+    let ref;
+    await mutateLibrary((doc) => {
+        ref = libraryStore.reorderReference(doc, req.params.id, req.body?.position);
+        if (!ref) return { conflict: 'not_found' };
+    });
+    if (!ref) return res.status(404).json({ error: 'Referencia no encontrada' });
+    res.json(ref);
+});
+
+app.delete('/api/library/editorial/references/:id', requireAdminAccess, async (req, res) => {
+    const conflict = await mutateLibrary((doc) => {
+        if (!libraryStore.removeReference(doc, req.params.id)) return { conflict: 'not_found' };
+    });
+    if (conflict) return res.status(404).json({ error: 'Referencia no encontrada' });
+    log(`[LIBRARY] reference removed: ${req.params.id}`);
+    res.json({ ok: true });
+});
+// --- END CHP-LIB-01 --------------------------------------------------------
 
 // --- CONTENT ROUTES ---
 app.get('/api/content', (req, res) => {

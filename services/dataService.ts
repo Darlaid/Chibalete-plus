@@ -4849,6 +4849,18 @@ class DataService {
         );
     }
 
+    // --- CHP-LIB-01: BIBLIOTECA EDITORIAL (solo lectura; abrir contenido
+    // sigue gateado por el preflight /api/content/:id/access) ---
+    async getEditorialLibrary(): Promise<{ layer: string; collections: any[]; unassigned: any[] }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/library/editorial`, { credentials: 'include' });
+            return res.ok ? res.json() : { layer: 'EDITORIAL', collections: [], unassigned: [] };
+        } catch (e) {
+            console.error('Error fetching editorial library:', e);
+            return { layer: 'EDITORIAL', collections: [], unassigned: [] };
+        }
+    }
+
     // --- SECTIONS & FILTERING ---
     async getSections(): Promise<Section[]> {
         try {

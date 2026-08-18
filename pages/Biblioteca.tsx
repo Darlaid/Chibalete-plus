@@ -5,7 +5,29 @@ import { useOffline } from '../context/OfflineContext';
 import ContentCard from '../components/ContentCard';
 import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, CommunityPost } from '../types';
-import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter } from 'lucide-react';
+import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter, Lock } from 'lucide-react';
+import { useAccessCheck } from '../hooks/useAccessCheck';
+
+// CHP-LIB-01 — card de la capa Editorial. El candado refleja el resultado del
+// preflight canónico /api/content/:id/access (Biblioteca no decide acceso);
+// abrir sigue pasando por la autorización existente del visor.
+const EditorialBookCard: React.FC<{ book: Content; userId?: string }> = ({ book, userId }) => {
+    const access = useAccessCheck(book.id, userId);
+    return (
+        <div className="relative">
+            <ContentCard content={book} />
+            {access.status === 'denied' && (
+                <div
+                    className="absolute top-2 right-2 bg-gray-900/75 text-white rounded-full p-2 shadow-md"
+                    title="Sin acceso — pídelo a tu mediador"
+                    aria-label="Sin acceso — pídelo a tu mediador"
+                >
+                    <Lock size={14} />
+                </div>
+            )}
+        </div>
+    );
+};
 
 // Skeleton para grid de contenido mientras carga el estado de acceso
 const AccessLoadingSkeleton: React.FC = () => (
@@ -39,6 +61,14 @@ const Biblioteca: React.FC = () => {
     // --- SECTIONS & FILTERING STATE ---
     const [sections, setSections] = useState<any[]>([]);
     const [schoolConfig, setSchoolConfig] = useState<{ hiddenContentIds: string[] }>({ hiddenContentIds: [] });
+
+    // CHP-LIB-01 — capa Editorial (carga perezosa al activar la pestaña)
+    const [editorial, setEditorial] = useState<{ collections: any[]; unassigned: any[] } | null>(null);
+    useEffect(() => {
+        if (activeTab === 'editorial' && user && editorial === null) {
+            dataService.getEditorialLibrary().then(v => setEditorial({ collections: v.collections ?? [], unassigned: v.unassigned ?? [] }));
+        }
+    }, [activeTab, user, editorial]);
 
     useEffect(() => {
         if (user && accessReady) {
@@ -99,6 +129,50 @@ const Biblioteca: React.FC = () => {
             const hiddenSet = new Set(schoolConfig.hiddenContentIds);
             return list.filter(c => c && c.id && !hiddenSet.has(c.id));
         };
+
+        // CHP-LIB-01 — capa EDITORIAL: dos niveles máximo (colección → libro).
+        if (activeTab === 'editorial') {
+            if (!editorial) return <AccessLoadingSkeleton />;
+            const hiddenSet = new Set(schoolConfig.hiddenContentIds);
+            const visibleRefs = (refs: any[]) => refs.filter(r => r?.book && !hiddenSet.has(r.bookId));
+            const cols = editorial.collections
+                .map(c => ({ ...c, references: visibleRefs(c.references) }))
+                .filter(c => c.references.length > 0);
+            const unassigned = visibleRefs(editorial.unassigned);
+            if (cols.length === 0 && unassigned.length === 0) {
+                return (
+                    <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+                        <Filter size={48} className="mb-4 opacity-20" />
+                        <p>La selección editorial estará disponible pronto.</p>
+                    </div>
+                );
+            }
+            return (
+                <div className="animate-in fade-in duration-500 space-y-12 mt-8">
+                    {cols.map(col => (
+                        <div key={col.id}>
+                            <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200">{col.name}</h3>
+                            {col.description && <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">{col.description}</p>}
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6 mt-4">
+                                {col.references.map((r: any) => (
+                                    <EditorialBookCard key={r.id} book={r.book} userId={user?.id} />
+                                ))}
+                            </div>
+                        </div>
+                    ))}
+                    {unassigned.length > 0 && (
+                        <div>
+                            <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200 mb-4">Más de la selección</h3>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+                                {unassigned.map((r: any) => (
+                                    <EditorialBookCard key={r.id} book={r.book} userId={user?.id} />
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
 
         if (activeTab === 'comunidad') {
             // ... (Existing Community Render - omit for brevity if unchanged, but need to include it or keep logic)
@@ -314,6 +388,7 @@ const Biblioteca: React.FC = () => {
 
             <div className="flex space-x-3 overflow-x-auto pb-4 scrollbar-hide">
                 <TabButton tab="biblioteca" label="Libros" />
+                <TabButton tab="editorial" label="Selección Chibalete" />
                 <TabButton tab="album" label="Libros Álbum" highlight={true} />
                 <TabButton tab="lectura" label="Continuar Leyendo" />
                 <TabButton tab="descargados" label="Disponibles Offline" />
