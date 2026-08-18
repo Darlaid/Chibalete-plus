@@ -95,6 +95,14 @@ recibirá `req.auth` ya canónico.
 Cableado CI: ambos tests nuevos añadidos a `test:identity` (que ya ejecuta el workflow
 identity-preflight) — trampa conocida de tests-no-cableados evitada.
 
+**CI remoto del commit `77c0f3b`: identity-preflight SUCCESS con verificación a nivel de
+step** (el log del job muestra `eventsWriteAuth.test.mjs OK — 9 escenarios`,
+`eventsRoutesSessionGuard.test.mjs OK — 4 rutas` y sesión 42/42, con la suite de
+integración POSIX corriendo en Linux). trivy/osv/gitleaks-head/evidence/image-integrity
+SUCCESS. Los 2 rojos (`gitleaks-history`, `trivy-image`) son los heredados
+baseline-equivalentes documentados del gate M1 — idénticos en el commit docs-only
+`0a25407` sobre la misma base (verificado en la misma corrida).
+
 Matriz de casos del encargo: A (cookie válida sin header → acepta) ✓, B (header sin
 cookie → rechaza) ✓, C (cookie A + header B → 401 subject_mismatch, resuelto por
 authenticate) ✓, D (sin auth → 401) ✓, E (escritura usa userId canónico: `req.auth`
