@@ -149,3 +149,112 @@ Decisiones de este ADR **superseded** por producto V4 (el resto del ADR permanec
 | (nuevo) Colisión `/admin/experiencias` | **DECIDIDO V4** | La superficie legacy de bundles se renombra visualmente a **"Paquetes (legacy)"** (ruta técnica intacta, sin migración ni borrado de datos; deprecación futura exigiría unidad explícita con evidencia de consumidores). |
 
 Tres superficies de producto congeladas: **Runtime** (participante) · **Studio dentro de Subir** (autoría) · **Review/Mediación**. Las cierra visualmente `CHP-MOOK-PRODUCT-UX-01`; después `CHP-MOOK-RUNTIME-01`, `CHP-MOOK-STUDIO-01`, `CHP-MOOK-REVIEW-01`, `CHP-MOOK-PILOT-01`.
+
+---
+
+## 17. CLOSURE (2026-08-19 — CHP-MOOK-CONTRACT-00-CLOSURE, vinculante)
+
+Cierre contractual auditado contra el código real de la rama (`16232a3`) y producción `679b036`. Este ADR es la **única fuente contractual**; `CHP_MOOK_PILOT_DESIGN_00` (fixture dev), `CHP_MOOK_PRODUCT_UX_01` (UX freeze) y los docs de unidad (`CHP_MOOK_01/V4_REALIGN/RUNTIME_01`) son subordinados y no lo contradicen (lo superseded está en §16). En interfaz el nombre es **Experiencias**; `MOOK`/`Experience` son vocabulario interno.
+
+### 17.1 Estado real (auditado contra código)
+
+| Elemento | Realidad | Clasificación |
+|---|---|---|
+| Dominio `server/lib/experienceStore.js` (4 entidades §3, módulos embebidos §16, publish congela, run fija versión, evidencia con review embebido) | implementado + 31 tests `test:mook` en CI | **PRESERVAR** |
+| Rutas `/api/experiences*` (autoría/publicación `requireAdminAccess`; runtime `requireUserAuth` con actor solo-sesión; review guard mediador/admin; completitud LEO contada server-side) | implementado | **PRESERVAR** |
+| Runtime participante (Biblioteca→pestaña Experiencias, landing sin crear run, NodeShell, reanudación, cierre) validado visualmente incl. mobile | implementado | **PRESERVAR** |
+| Registry canónico +6 eventos `experience` + emisor `experienceBackboneEmitter` (flag `EXPERIENCE_EVENTS_BACKBONE_ENABLED` OFF = dormant) | implementado, sin activar | **PRESERVAR** (activación = unidad de release) |
+| Campos `Experience.imageUrl/durationLabel/audience` + `myRun{status,progress}` + `experienceDetail` | implementado (únicos backend nuevos autorizados por UX-01) | **PRESERVAR** |
+| Formulario actual de creación (superficie legacy de bundles) | existe como página admin | **ADAPTAR** → pestaña **Información general** del Studio (UX-01 §C4), mismo backend admin |
+| Selector de contenidos actual | existe en la superficie legacy | **ADAPTAR** → **bandeja de recursos** del Studio (selector canónico, standalone-aware) |
+| Bundles Fase 7 / página `/admin/experiencias` ("Paquetes (legacy)") | sin datos productivos, ruta intacta | **DEPRECAR** (eventual; exige unidad explícita con evidencia de consumidores; sin fecha) |
+| Studio dentro de Subir | — | **NO EXISTE** → `CHP-MOOK-STUDIO-01` (handoff C1–C13 confirmado suficiente) |
+| Review en Aula Viva ("Producciones"; hoy cola técnica en `/experiencias`) | — | **NO EXISTE** → `CHP-MOOK-REVIEW-01` |
+| Asignación dirigida por grupo/audiencia | — | **NO EXISTE** → gate M1-B + modelo groups (MVP: inscripción abierta a autenticados, ver 17.2) |
+| Estado `ARCHIVED` en runtime | — | **NO EXISTE** → se materializa en STUDIO-01 (contractual desde ya, 17.3) |
+
+### 17.2 Alcance MVP (congelado) y no objetivos
+
+Un docente/participante puede: **(1)** descubrir una experiencia publicada (Biblioteca→Experiencias) ✅ · **(2)** inscribirse iniciándola (el run ES la inscripción; asignación dirigida = gate) ✅ · **(3)** recorrer módulos en secuencia ✅ · **(4)** reanudar ✅ · **(5)** conversar con Leo ✅ · **(6)** realizar una actividad ✅ · **(7)** entregar una producción ✅ · **(8)** recibir revisión humana ✅ · **(9)** terminar por regla transparente (todos los requeridos; progreso = requeridos/requeridos) ✅.
+
+**Fuera del MVP (congelado):** motor adaptativo · LMS genérico · SCORM/LTI · certificados · pagos · marketplace · colaboración en tiempo real · gamificación · rankings · cursos de idiomas · branching complejo · **MOOK offline en LU** (LU sigue limitado al libro asignado) · nueva plataforma de analytics. Sin calificación numérica, sin ranking, sin diagnóstico ni adaptación algorítmica opaca.
+
+### 17.3 Lifecycle contractual (congelado)
+
+Estados de versión: `DRAFT → IN_REVIEW → APPROVED → PUBLISHED → ARCHIVED`.
+
+| Transición | Quién | Validaciones / efecto |
+|---|---|---|
+| DRAFT → IN_REVIEW | autor | ≥1 módulo, ≥1 nodo requerido, `resourceRef` resolubles, alternativa accesible declarada por nodo (17.5) |
+| IN_REVIEW → DRAFT (rechazo) | revisor pedagógico/editorial o accesibilidad | vuelve con observaciones; nada se borra |
+| IN_REVIEW → APPROVED | revisor(es) | checklist pedagógica + accesibilidad |
+| APPROVED → PUBLISHED | administrador autorizado | congela `objectives+modules+nodes` byte a byte (código: `VERSION_IMMUTABLE`) |
+| PUBLISHED → (edición) | autor | **jamás muta la publicada**: crea `version+1` en DRAFT (§4) |
+| PUBLISHED → ARCHIVED | administrador | no descubrible ni iniciable; **runs activos terminan su recorrido** (pin §4); sin borrado |
+
+**Colapso MVP explícito (no contradice código):** hoy autor = aprobador = administrador (admin-secret), por lo que el código implementa el camino colapsado `draft → published` permitido cuando autor y aprobador coinciden. `IN_REVIEW`/`APPROVED` se materializan cuando autor ≠ aprobador (STUDIO-01+). **Rollback:** republicar la versión anterior como `version+1` copiada (§4) y/o apagar el flag del emisor; los runs en curso quedan intactos por el pin. Una versión publicada **nunca cambia silenciosamente**.
+
+### 17.4 Roles y permisos (matriz mínima — cero roles globales nuevos)
+
+| Capacidad | Autor | Rev. pedagógico/editorial | Rev. accesibilidad | Facilitador | Participante | Admin |
+|---|---|---|---|---|---|---|
+| Crear/editar DRAFT | ✅ | — | — | — | — | ✅ |
+| Enviar a revisión / aprobar | ✅ enviar | ✅ aprobar/rechazar | ✅ aprobar/rechazar | — | — | ✅ |
+| Publicar / archivar | — | — | — | — | — | ✅ |
+| Iniciar run / completar nodos / enviar evidencia | — | — | — | — | ✅ | ✅ (pruebas) |
+| Revisar producciones (cola) | — | — | — | ✅ | — | ✅ |
+
+Mapeo a lo existente: autor y ambos revisores = equipo editorial vía canal admin canónico (MVP; **mediador-autor sería decisión nueva**, resuelta como scope sobre la experiencia, no rol global); facilitador = **mediador** canónico de los grupos del participante; participante = usuario autenticado por sesión. Aislamiento institucional de la cola = gate M1-B (§10).
+
+### 17.5 Contrato de nodos — cierre (complementa §5)
+
+Por tipo: **alternativa accesible** y **datos que NO se conservan** (lo demás en §5):
+
+| Tipo | Alternativa accesible | NO conservar |
+|---|---|---|
+| READING | modos de lectura existentes de los visores (Guiado/TTS/OpenDyslexic/alto contraste) | nada adicional a la marca de completitud |
+| VIDEO/AUDIO | `config.transcripcionRef?`/texto alternativo (contractual, opcional en MVP; obligatorio para publicar el piloto) | telemetría fina de reproducción |
+| LEO | la conversación ya es texto; navegable por teclado | **transcripciones completas en events.db**; razonamientos del modelo |
+| ACTIVITY | text_short accesible por teclado; estados siempre con texto | borradores no enviados |
+| PRODUCTION | ídem | versiones intermedias no enviadas |
+
+Estados de UI siempre con texto (no solo color, UX-01). **`Leer → Conversar → Producir` es una plantilla de autoría del Studio, NO un séptimo tipo de nodo ni otro runtime.**
+
+### 17.6 Leo — cierre (complementa §7)
+
+**Propósito/rol:** mediador de conversación del nodo; jamás evaluador final, terapeuta ni docente autónomo. **Fuentes:** solo el contexto del nodo (título/objetivo de la experiencia + semilla + `contentId`, vía `leoContextBuilder`). **Pregunta inicial:** la `semilla` del nodo. **Límites:** conoce solo su nodo. **Prohibido:** calificar, diagnosticar, aconsejar clínicamente, pedir datos personales, guardar razonamiento interno. **Criterio de cierre transparente:** `≥ minIntercambios`, visible para el participante (ya se muestra en el NodeShell). **Evidencia mínima:** referencias a `leo_evidence` clasificada + conteo server-side. **Aviso de IA:** el nodo LEO debe mostrar un aviso visible de que se conversa con una IA — **pendiente en UI, requisito de PILOT-01**. **Escalamiento humano:** toda PRODUCTION pasa por mediador; el participante puede solicitar mediación humana por los canales de su grupo.
+
+### 17.7 Integraciones e invariantes (congelados)
+
+Referencias a Biblioteca **solo por contentId canónico** · acceso/licencias se verifican fuera del recurso (preflight `/api/content/:id/access`, §11) · progreso de lectura único (§8) · identidad y membership del sistema canónico (sesión; actor jamás del cliente) · eventos **solo** al registry + `/api/v1/events` — **ningún nuevo events.db** ni pipeline paralelo (§9) · revisión humana explícita (§10) · accesibilidad desde el modelo (17.5) · datos personales minimizados (payloads con ids, sin PII, sin transcripciones).
+
+**Gates documentados (no se resuelven aquí):** anti-spoofing duro = **M1-A enforce** (bloqueado en field migration) · scoping institucional review = **M1-B** · producción audio/archivo = decisión almacenamiento/moderación UGC · insights = cadena STATS · asignación dirigida = M1-B + groups.
+
+### 17.8 Piloto contractual (decidido en este cierre)
+
+**Primer piloto = inducción docente, 3 módulos** (audiencia: mediadores/docentes; sustituye al "por decidir" de §16 — la fixture "Me desconecto, luego existo" permanece como seed/tests de dev):
+
+1. **Bienvenida y fundamentos** — READING + VIDEO/AUDIO + ACTIVITY.
+2. **Competencias, trayectorias y mediación con Leo** — READING + LEO + ACTIVITY.
+3. **Seguimiento, evidencia y responsabilidad institucional** — READING o VIDEO + PRODUCTION (revisión humana).
+
+Cada módulo combina lectura, medio audiovisual, conversación, actividad o producción; los contenidos completos se redactan en `CHP-MOOK-PILOT-01`, no aquí. Los recursos del piloto se crean como contenido canónico (marcados no-standalone si no son obra independiente).
+
+### 17.9 Migración compatible (aditiva; cero big-bang, cero datos productivos en esta unidad)
+
+| Elemento actual | Destino Experiencias | Tratamiento | Riesgo | Gate |
+|---|---|---|---|---|
+| Formulario de creación legacy | Información general (Studio, tab C4) | evolución sobre el mismo backend admin | bajo | STUDIO-01 |
+| Selector de contenidos legacy | Bandeja de recursos (Studio) | evolución; selector canónico standalone-aware | bajo | STUDIO-01 |
+| Bundles Fase 7 "Paquetes (legacy)" | sin destino MOOK (colecciones Biblioteca los absorben) | conservar intactos; deprecación futura con unidad explícita | bajo (sin datos prod) | evidencia de consumidores |
+| URL `/admin/experiencias` | permanece (renombrada visualmente) | sin cambio de URL | nulo | — |
+| Cola técnica en `/experiencias` | Aula Viva → pestaña Producciones | la cola migra; la ruta técnica se retira después | bajo | REVIEW-01 (+M1-B scoping) |
+| Contenido canónico | referenciado por nodos (`standalone` ausente⇒true) | aditivo, cero migración | nulo | — |
+
+### 17.10 Criterios de aceptación (gate GREEN de este cierre)
+
+✅ no contradice código ni datos (auditado contra `16232a3`; el colapso MVP del lifecycle está declarado) · ✅ preserva funcionalidad útil (nada implementado se descarta; legacy se adapta o convive) · ✅ cero duplicación de Biblioteca/progreso/telemetría · ✅ MVP y no-objetivos definidos · ✅ lifecycle y permisos inequívocos · ✅ versión publicada inmutable (garantizado en código) · ✅ 6 nodos con contrato mínimo + accesibilidad + retención · ✅ Leo con límites, aviso de IA y revisión humana · ✅ migración aditiva · ✅ el siguiente slice no exige rediseñar el contrato.
+
+### 17.11 Siguiente unidad
+
+El candidato `CHP-MOOK-01A-MINIMUM-VERSIONED-MODEL` está **ya satisfecho por el código existente** (store versionado + runs con pin + evidencia + 31 tests). El siguiente paso real bajo orden explícita es **`CHP-MOOK-STUDIO-01`** (secuencia congelada STUDIO→REVIEW→PILOT), que consume este contrato sin cambios.
