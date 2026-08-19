@@ -13,11 +13,11 @@ import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, ClipboardCheck, Clock, Users } from 'lucide-react';
 
-const NODE_ICON: Record<string, React.ReactNode> = {
+export const NODE_ICON: Record<string, React.ReactNode> = {
     READING: <BookOpen size={16} />, VIDEO: <BookOpen size={16} />, AUDIO: <BookOpen size={16} />,
     LEO: <MessageCircle size={16} />, ACTIVITY: <ListChecks size={16} />, PRODUCTION: <PenLine size={16} />,
 };
-const NODE_TYPE_LABEL: Record<string, string> = {
+export const NODE_TYPE_LABEL: Record<string, string> = {
     READING: 'Lectura', VIDEO: 'Video', AUDIO: 'Audio', LEO: 'Conversación con Leo', ACTIVITY: 'Actividad', PRODUCTION: 'Producción',
 };
 export const MODULE_STATE_LABEL: Record<string, { text: string; cls: string }> = {
@@ -29,7 +29,7 @@ export const MODULE_STATE_LABEL: Record<string, { text: string; cls: string }> =
 const wordCount = (t: string) => t.trim().split(/\s+/).filter(Boolean).length;
 
 /** Barra de progreso accesible de la Experiencia. */
-const ProgressBar: React.FC<{ done: number; total: number }> = ({ done, total }) => (
+export const ProgressBar: React.FC<{ done: number; total: number }> = ({ done, total }) => (
     <div role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={total} aria-label={`Progreso: ${done} de ${total} pasos completados`}>
         <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full">
             <div className="h-2 bg-indigo-600 rounded-full transition-all" style={{ width: `${(done / Math.max(1, total)) * 100}%` }} />
@@ -37,8 +37,12 @@ const ProgressBar: React.FC<{ done: number; total: number }> = ({ done, total })
     </div>
 );
 
-/** NodeShell — nodo actual/expandido: contexto, instrucción, contenido, acción. */
-const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void }> = ({ node, moduleTitle, experienceTitle, route, refresh }) => {
+/**
+ * NodeShell — nodo actual/expandido: contexto, instrucción, contenido, acción.
+ * `preview` (STUDIO-01, C11): mismo renderer sin efectos — completar/enviar
+ * NO llaman a la API (cero runs, cero evidencia, cero eventos).
+ */
+export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false }) => {
     const [answers, setAnswers] = useState<string[]>([]);
     const [text, setText] = useState('');
     const [msg, setMsg] = useState<string | null>(null);
@@ -46,12 +50,14 @@ const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: str
     const myEvidence = (route.evidence || []).filter((e: any) => e.nodeId === node.id);
 
     const complete = async () => {
+        if (preview) { setMsg('Vista previa — nada de lo que hagas aquí se guarda.'); return; }
         setBusy(true); setMsg(null);
         const r = await dataService.completeExperienceNode(route.runId, node.id);
         if (!r.ok) setMsg(r.error ?? 'No se pudo completar');
         setBusy(false); refresh();
     };
     const send = async (payload: { answers?: string[]; text?: string }) => {
+        if (preview) { setMsg('Vista previa — nada de lo que hagas aquí se guarda.'); return; }
         setBusy(true); setMsg(null);
         const r = await dataService.submitExperienceEvidence(route.runId, node.id, payload);
         if (!r.ok) setMsg(r.error ?? 'No se pudo enviar');
@@ -81,7 +87,14 @@ const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: str
             )}
 
             {node.type === 'LEO' && (
-                <p className="text-sm text-gray-600 dark:text-gray-300 my-2 italic">“{node.config?.semilla}” — conversa con Leo dentro de la lectura (mínimo {node.config?.minIntercambios} intercambios).</p>
+                <>
+                    <p className="text-sm text-gray-600 dark:text-gray-300 my-2 italic">“{node.config?.semilla}” — conversa con Leo dentro de la lectura (mínimo {node.config?.minIntercambios} intercambios).</p>
+                    {/* Aviso de IA — ADR §17.6: visible y comprensible en el nodo LEO. */}
+                    <p className="text-xs text-gray-500 dark:text-gray-400 my-2 rounded-lg bg-gray-50 dark:bg-gray-900 p-2 flex items-start gap-1">
+                        <MessageCircle size={12} className="mt-0.5 shrink-0" aria-hidden />
+                        <span>Leo es un asistente de inteligencia artificial: conversarás con una IA que acompaña tu lectura, no con una persona. Leo no califica ni evalúa; las producciones las revisa siempre tu mediador humano.</span>
+                    </p>
+                </>
             )}
 
             {(node.type === 'READING' || node.type === 'VIDEO' || node.type === 'AUDIO' || node.type === 'LEO') && (
@@ -134,7 +147,7 @@ const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: str
 };
 
 /** Fila compacta de nodo (no actual). */
-const NodeRow: React.FC<{ node: any }> = ({ node }) => (
+export const NodeRow: React.FC<{ node: any }> = ({ node }) => (
     <div className={`flex items-center gap-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3 ${node.state === 'locked' ? 'opacity-55' : ''}`}>
         {node.state === 'completed' ? <CheckCircle2 size={18} className="text-emerald-600" aria-hidden /> : node.state === 'locked' ? <Lock size={16} className="text-gray-400" aria-hidden /> : <Circle size={16} className="text-gray-400" aria-hidden />}
         <span className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">{NODE_ICON[node.type]} {node.title}</span>

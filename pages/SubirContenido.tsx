@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { analizarIlustracionAlbum, sugerirEtiquetasThema } from '../services/geminiService';
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import ExperienceStudio from '../components/studio/ExperienceStudio';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -362,7 +363,11 @@ const SubirContenido: React.FC = () => {
     const navigate = useNavigate();
     const { user } = useAuth();
     // Mode: "new" = Creating a new parent + materials. "existing" = Adding materials to existing parent. "manage" = Managing existing content.
-    const [uploadMode, setUploadMode] = useState<'new' | 'existing' | 'manage'>('new');
+    // "experiencia" (CHP-MOOK-STUDIO-01) = Studio de Experiencias (cuarta acción de primer nivel, UX C1).
+    const [uploadMode, setUploadMode] = useState<'new' | 'existing' | 'manage' | 'experiencia'>('new');
+    // El Studio se mantiene montado (oculto) tras abrirse por primera vez para
+    // que el borrador en edición sobreviva al salto «Crear contenido» (UX C8).
+    const [studioOpened, setStudioOpened] = useState(false);
     const [existingParents, setExistingParents] = useState<Content[]>([]);
     const [availableSections, setAvailableSections] = useState<Section[]>([]); // Sections List
 
@@ -400,7 +405,8 @@ const SubirContenido: React.FC = () => {
             ilustracionesFiles: [],
             sectionIds: content.sectionIds || [],
             resourceURL: (content.tipo === 'video' && content.url_recurso) ? content.url_recurso : '',
-            etiquetasString: content.etiquetas ? content.etiquetas.join(', ') : ''
+            etiquetasString: content.etiquetas ? content.etiquetas.join(', ') : '',
+            paraExperiencia: content.standalone === false,
         });
 
         // Clear any validation errors from a previous editing session.
@@ -469,7 +475,10 @@ const SubirContenido: React.FC = () => {
                 alert("Contenido eliminado correctamente.");
             } catch (error) {
                 console.error("Error al eliminar:", error);
-                alert("Hubo un error al eliminar el contenido.");
+                // C13: el 409 de referencia viva trae el mensaje y dónde se usa.
+                alert(error instanceof Error && error.message && !error.message.startsWith('Failed')
+                    ? error.message
+                    : "Hubo un error al eliminar el contenido.");
             }
         }
     };
@@ -489,6 +498,9 @@ const SubirContenido: React.FC = () => {
         sectionIds: [] as string[],
         resourceURL: '', // New: URL for video/external content
         etiquetasString: '', // New UI state for tags
+        // CHP-MOOK-STUDIO-01 (UX C9): true ⇒ la pieza se guarda con standalone:false
+        // (no se descubre como obra independiente en Biblioteca).
+        paraExperiencia: false,
     });
 
     // Album Editor State
@@ -1018,6 +1030,9 @@ const SubirContenido: React.FC = () => {
                     etiquetas: mainContent.etiquetasString ? mainContent.etiquetasString.split(',').map(s => s.trim()) : (existingContent?.etiquetas || ['Nuevo', mainContent.tipo]),
                     isCollection: mainContent.isCollection,
                     sectionIds: mainContent.sectionIds, // Included in payload
+                    // CHP-MOOK-STUDIO-01 (C9): ausente/true = obra independiente;
+                    // false = pieza para Experiencias (Biblioteca no la descubre).
+                    standalone: !mainContent.paraExperiencia,
 
                     // Files: Use new URL if uploaded, else keep existing (from spread), else string fallback
                     portada_url: coverUrl || existingContent?.portada_url || '',
@@ -1306,6 +1321,14 @@ const SubirContenido: React.FC = () => {
                             <div className="flex items-center mb-2"><Trash className="mr-2 text-red-500" /> <span className="font-bold">Gestionar Biblioteca</span></div>
                             <p className="text-sm text-gray-500">Eliminar libros o contenidos obsoletos.</p>
                         </button>
+                        <button
+                            type="button"
+                            onClick={() => { setUploadMode('experiencia'); setStudioOpened(true); }}
+                            className={`flex-1 p-4 rounded-lg border-2 text-left transition-all ${uploadMode === 'experiencia' ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
+                        >
+                            <div className="flex items-center mb-2"><Sparkles className="mr-2 text-purple-500" /> <span className="font-bold">Crear / editar Experiencia</span></div>
+                            <p className="text-sm text-gray-500">Studio de Experiencias: rutas de lectura, conversación y producción.</p>
+                        </button>
                     </div>
                 </div>
 
@@ -1332,7 +1355,10 @@ const SubirContenido: React.FC = () => {
                                         {existingParents.map(content => (
                                             <tr key={content.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                                                 <td className="p-3 text-gray-500" title={content.tipo}>{getIcon(content.tipo)}</td>
-                                                <td className="p-3 font-medium text-gray-900 dark:text-gray-100">{content.titulo}</td>
+                                                <td className="p-3 font-medium text-gray-900 dark:text-gray-100">
+                                                    {content.titulo}
+                                                    {content.standalone === false && <span className="ml-2 text-[10px] font-bold bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full align-middle">Para Experiencias</span>}
+                                                </td>
                                                 <td className="p-3 text-gray-500">{content.autor}</td>
                                                 <td className="p-3">
                                                     <div className="flex flex-col gap-1">
@@ -1410,9 +1436,21 @@ const SubirContenido: React.FC = () => {
                                 </div>
                             </div>
                             {mainContent.tipo !== 'memoria_club' && (
-                                <div className="flex items-center">
-                                    <input type="checkbox" id="isCollection" checked={mainContent.isCollection} onChange={handleIsCollectionChange} className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500" />
-                                    <label htmlFor="isCollection" className="ml-2 text-sm text-gray-700 dark:text-gray-300">¿Es una colección? (Ej. Serie de videos)</label>
+                                <div>
+                                    <div className="flex items-center">
+                                        <input type="checkbox" id="isCollection" checked={mainContent.isCollection} onChange={handleIsCollectionChange} className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500" />
+                                        <label htmlFor="isCollection" className="ml-2 text-sm text-gray-700 dark:text-gray-300">¿Es una colección? (Ej. Serie de videos)</label>
+                                    </div>
+                                    <div className="flex items-center mt-2">
+                                        <input type="checkbox" id="paraExperiencia" checked={mainContent.paraExperiencia}
+                                            onChange={e => setMainContent(prev => ({ ...prev, paraExperiencia: e.target.checked }))}
+                                            aria-describedby="paraExperiencia-help"
+                                            className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500" />
+                                        <label htmlFor="paraExperiencia" className="ml-2 text-sm text-gray-700 dark:text-gray-300">Contenido para una Experiencia</label>
+                                    </div>
+                                    <p id="paraExperiencia-help" className="text-xs text-gray-500 mt-1 ml-7">
+                                        Esta pieza puede utilizarse dentro de una Experiencia y no se mostrará normalmente como contenido independiente en Biblioteca.
+                                    </p>
                                 </div>
                             )}
                         </div>
@@ -2829,7 +2867,7 @@ const SubirContenido: React.FC = () => {
 
                 {/* 4. Materiales del Ecosistema (Hijos) */}
                 {
-                    mainContent.tipo !== 'memoria_club' && (
+                    mainContent.tipo !== 'memoria_club' && uploadMode !== 'experiencia' && (
                         <div className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-xl border border-dashed border-gray-300 dark:border-gray-700">
                             <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200 flex items-center">
@@ -2949,6 +2987,7 @@ const SubirContenido: React.FC = () => {
                     )
                 }
 
+                {uploadMode !== 'experiencia' && (
                 <div className="pt-4">
                     {/* Inline error — shown instead of alert() so the form stays accessible for retry */}
                     {uploadError && (
@@ -3003,8 +3042,19 @@ const SubirContenido: React.FC = () => {
                         {isUploading ? 'Subiendo archivos al servidor...' : (mainContent.tipo === 'memoria_club' ? 'Publicar Memoria en Comunidad' : (uploadMode === 'new' ? 'Publicar Ecosistema Completo' : 'Añadir Materiales al Ecosistema'))}
                     </button>
                 </div>
+                )}
 
             </form>
+
+            {/* CHP-MOOK-STUDIO-01 — Studio de Experiencias (fuera del <form> de
+                contenido para que Enter en sus campos no dispare el submit del
+                ecosistema; permanece montado tras abrirse para conservar el
+                borrador durante el salto a «Crear contenido», UX C8). */}
+            {studioOpened && (
+                <div className={uploadMode === 'experiencia' ? 'mt-8' : 'hidden'}>
+                    <ExperienceStudio onCreateContent={() => setUploadMode('new')} />
+                </div>
+            )}
 
             {/* SECTION CREATION MODAL */}
             {isSectionModalOpen && (

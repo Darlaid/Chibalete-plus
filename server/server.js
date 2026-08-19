@@ -1637,7 +1637,7 @@ function myEvidenceSummary(doc, run) {
 const mookErrStatus = (e) => (
     ['EXPERIENCE_NOT_FOUND', 'VERSION_NOT_FOUND', 'RUN_NOT_FOUND', 'NODE_NOT_FOUND', 'EVIDENCE_NOT_FOUND', 'RESOURCE_NOT_FOUND', 'NOT_PUBLISHED'].includes(e.code) ? 404
     : ['NOT_RUN_OWNER'].includes(e.code) ? 403
-    : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION'].includes(e.code) ? 409
+    : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION', 'EXPERIENCE_ARCHIVED', 'ALREADY_ARCHIVED'].includes(e.code) ? 409
     : e.code ? 400 : 500
 );
 
@@ -1680,6 +1680,46 @@ app.post('/api/experiences/versions/:vid/publish', requireAdminAccess, async (re
         await mutateMook((doc) => { v = experienceStore.publishVersion(doc, req.params.vid); });
         log(`[MOOK] published ${v.experienceId} v${v.version}`);
         res.json(v);
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+// ── STUDIO-01: lecturas de autoría — sesión + rol administrador EXPLÍCITO
+//    (mismo patrón que la cola de revisión: los borradores no son visibles
+//    para cualquier sesión autenticada). Registradas ANTES de /:id para que
+//    'admin' no se capture como experienceId. ────────────────────────────────
+function isAdminSession(user) {
+    const roles = user?.roles || [];
+    return roles.includes('administrador');
+}
+
+app.get('/api/experiences/admin/list', requireUserAuth, (req, res) => {
+    try {
+        if (!isAdminSession(req.user)) return res.status(403).json({ error: 'Solo administradores' });
+        res.json(experienceStore.adminListExperiences(readMook()));
+    } catch (e) { res.status(500).json({ error: 'No se pudo listar la autoría' }); }
+});
+
+app.get('/api/experiences/admin/:id', requireUserAuth, (req, res) => {
+    try {
+        if (!isAdminSession(req.user)) return res.status(403).json({ error: 'Solo administradores' });
+        res.json(experienceStore.adminExperienceDetail(readMook(), req.params.id));
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.put('/api/experiences/:id', requireAdminAccess, async (req, res) => {
+    try {
+        let exp;
+        await mutateMook((doc) => { exp = experienceStore.updateExperience(doc, req.params.id, req.body ?? {}); });
+        res.json(exp);
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/:id/archive', requireAdminAccess, async (req, res) => {
+    try {
+        let exp;
+        await mutateMook((doc) => { exp = experienceStore.archiveExperience(doc, req.params.id); });
+        log(`[MOOK] experience archived: ${exp.id}`);
+        res.json(exp);
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
@@ -2098,6 +2138,26 @@ app.delete('/api/content/:id', async (req, res) => {
             log(`Content not found in DB: ${id}`, 'WARN');
             return res.status(404).json({ error: 'Content not found' });
         }
+
+        // CHP-MOOK-STUDIO-01 (UX C13): contenido referenciado por una versión
+        // PUBLICADA de una Experiencia no se elimina — la referencia canónica
+        // quedaría rota para participantes en curso (incluidas archivadas,
+        // cuyos runs activos aún terminan su recorrido).
+        try {
+            const mook = readMook();
+            const usedBy = [];
+            for (const v of mook.versions) {
+                if (v.status !== 'published') continue;
+                const expOwner = mook.experiences.find(e => e.id === v.experienceId);
+                for (const n of experienceStore.versionNodes(v)) {
+                    if (n.resourceRef === id) usedBy.push({ experience: expOwner?.title ?? v.experienceId, version: v.version, node: n.title });
+                }
+            }
+            if (usedBy.length > 0) {
+                log(`[DELETE_BLOCKED] contentId=${id} usado por ${usedBy.length} nodo(s) de Experiencia publicada`, 'WARN');
+                return res.status(409).json({ error: 'Este contenido está siendo utilizado en una Experiencia publicada.', usedBy });
+            }
+        } catch { /* si el store MOOK no es legible, el borrado sigue su camino histórico */ }
 
         const item = contentList[itemIndex];
 

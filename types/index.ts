@@ -421,6 +421,9 @@ export interface Content {
   // Hierarchy Fields
   parentId?: string; // ID of the parent content (e.g., the Book ID for a Guide)
   isCollection?: boolean; // If true, this content is a container (e.g., "Video Series")
+  // V4 (CHP-MOOK): false = pieza destinada a Experiencias, no se descubre como
+  // obra independiente en Biblioteca. Ausente ⇒ true (cero migración).
+  standalone?: boolean;
 
   // New: Sections
   sectionIds?: string[];

@@ -801,7 +801,13 @@ class DataService {
         });
 
         if (!response.ok) {
-            throw new Error('Failed to delete content');
+            // CHP-MOOK-STUDIO-01 (C13): el 409 de referencia viva trae la lista
+            // de dónde se usa — se propaga para que la UI la muestre.
+            const body = await response.json().catch(() => null);
+            const usedBy = Array.isArray(body?.usedBy)
+                ? ` Se usa en: ${body.usedBy.map((u: any) => `«${u.experience}» (v${u.version} · ${u.node})`).join(', ')}.`
+                : '';
+            throw new Error((body?.error ?? 'Failed to delete content') + usedBy);
         }
 
         // Update local state
@@ -4903,6 +4909,51 @@ class DataService {
             const body = await res.json().catch(() => ({}));
             return res.ok ? { ok: true } : { ok: false, error: body.error };
         } catch { return { ok: false, error: 'Sin conexión' }; }
+    }
+
+    // --- CHP-MOOK-STUDIO-01: autoría (sesión admin; el backend valida rol) ---
+    private async studioFetch(path: string, init?: RequestInit): Promise<{ ok: boolean; data?: any; error?: string }> {
+        try {
+            const res = await fetch(`${this.apiUrl}${path}`, {
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                ...init,
+            });
+            const body = await res.json().catch(() => null);
+            return res.ok ? { ok: true, data: body } : { ok: false, error: body?.error ?? `Error ${res.status}`, data: body };
+        } catch { return { ok: false, error: 'Sin conexión con el servidor' }; }
+    }
+
+    async getStudioExperiences() {
+        return this.studioFetch('/experiences/admin/list');
+    }
+
+    async getStudioExperienceDetail(experienceId: string) {
+        return this.studioFetch(`/experiences/admin/${encodeURIComponent(experienceId)}`);
+    }
+
+    async createStudioExperience(payload: { slug: string; title: string; description?: string; imageUrl?: string; durationLabel?: string; audience?: string }) {
+        return this.studioFetch('/experiences', { method: 'POST', body: JSON.stringify(payload) });
+    }
+
+    async updateStudioExperience(experienceId: string, payload: { title?: string; description?: string; imageUrl?: string | null; durationLabel?: string | null; audience?: string | null }) {
+        return this.studioFetch(`/experiences/${encodeURIComponent(experienceId)}`, { method: 'PUT', body: JSON.stringify(payload) });
+    }
+
+    async createStudioDraftVersion(experienceId: string, payload: { objectives?: string[]; modules: any[] }) {
+        return this.studioFetch(`/experiences/${encodeURIComponent(experienceId)}/versions`, { method: 'POST', body: JSON.stringify(payload) });
+    }
+
+    async updateStudioDraftVersion(versionId: string, payload: { objectives?: string[]; modules?: any[] }) {
+        return this.studioFetch(`/experiences/versions/${encodeURIComponent(versionId)}`, { method: 'PUT', body: JSON.stringify(payload) });
+    }
+
+    async publishStudioVersion(versionId: string) {
+        return this.studioFetch(`/experiences/versions/${encodeURIComponent(versionId)}/publish`, { method: 'POST', body: '{}' });
+    }
+
+    async archiveStudioExperience(experienceId: string) {
+        return this.studioFetch(`/experiences/${encodeURIComponent(experienceId)}/archive`, { method: 'POST', body: '{}' });
     }
 
     async getExperienceReviewQueue(): Promise<any[]> {

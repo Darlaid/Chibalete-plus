@@ -73,6 +73,48 @@ export function createExperience(doc, { slug, title, description = '', imageUrl,
     return exp;
 }
 
+/**
+ * STUDIO-01 — Información general de la Experiencia (entidad, no versión).
+ * El invariante de inmutabilidad del ADR aplica a objectives+modules de la
+ * versión publicada; los metadatos descriptivos de la Experiencia se editan
+ * aquí. Una archivada no se edita.
+ */
+export function updateExperience(doc, experienceId, { title, description, imageUrl, durationLabel, audience } = {}) {
+    const exp = doc.experiences.find(e => e.id === experienceId);
+    if (!exp) throw err('EXPERIENCE_NOT_FOUND', `experience no existe: ${experienceId}`);
+    if (exp.status === 'archived') throw err('EXPERIENCE_ARCHIVED', 'una Experiencia archivada no se edita');
+    if (title !== undefined) {
+        if (!String(title).trim()) throw err('INVALID_TITLE', 'title requerido');
+        exp.title = String(title).trim();
+    }
+    if (description !== undefined) exp.description = String(description);
+    const opt = { imageUrl, durationLabel, audience };
+    for (const k of Object.keys(opt)) {
+        if (opt[k] === undefined) continue;
+        if (opt[k] === null || String(opt[k]).trim() === '') delete exp[k];
+        else exp[k] = String(opt[k]);
+    }
+    exp.updatedAt = nowIso();
+    return exp;
+}
+
+/**
+ * STUDIO-01 — Archivo NO destructivo (contrato §17.3): la Experiencia deja de
+ * descubrirse e iniciarse (startRun exige status published), pero versiones,
+ * runs, progreso y evidencia quedan INTACTOS y los runs activos pueden
+ * terminar su recorrido (completeNode/submitEvidence no dependen del status
+ * de la Experiencia). Sin unarchive en el MVP.
+ */
+export function archiveExperience(doc, experienceId) {
+    const exp = doc.experiences.find(e => e.id === experienceId);
+    if (!exp) throw err('EXPERIENCE_NOT_FOUND', `experience no existe: ${experienceId}`);
+    if (exp.status === 'archived') throw err('ALREADY_ARCHIVED', 'ya está archivada');
+    exp.status = 'archived';
+    exp.archivedAt = nowIso();
+    exp.updatedAt = nowIso();
+    return exp;
+}
+
 function validateNode(node, i, bookExists) {
     if (!node || !NODE_TYPES.includes(node.type)) throw err('INVALID_NODE_TYPE', `nodo ${i}: type inválido`);
     if (!node.title || !String(node.title).trim()) throw err('INVALID_NODE', `nodo ${i}: title requerido`);
@@ -143,6 +185,7 @@ function buildModules({ modules, nodes }, bookExists) {
 export function createDraftVersion(doc, experienceId, { objectives = [], nodes, modules }, bookExists) {
     const exp = doc.experiences.find(e => e.id === experienceId);
     if (!exp) throw err('EXPERIENCE_NOT_FOUND', `experience no existe: ${experienceId}`);
+    if (exp.status === 'archived') throw err('EXPERIENCE_ARCHIVED', 'una Experiencia archivada no recibe versiones nuevas');
     const frozenModules = buildModules({ modules, nodes }, bookExists);
     const maxV = Math.max(0, ...doc.versions.filter(v => v.experienceId === experienceId).map(v => v.version));
     const version = {
@@ -168,6 +211,8 @@ export function publishVersion(doc, versionId) {
     const v = doc.versions.find(x => x.id === versionId);
     if (!v) throw err('VERSION_NOT_FOUND', `versión no existe: ${versionId}`);
     if (v.status !== 'draft') throw err('VERSION_IMMUTABLE', 'solo un draft puede publicarse');
+    const owner = doc.experiences.find(e => e.id === v.experienceId);
+    if (owner?.status === 'archived') throw err('EXPERIENCE_ARCHIVED', 'una Experiencia archivada no publica versiones');
     v.status = 'published';
     v.publishedAt = nowIso();
     v.modules.forEach(m => { Object.freeze(m.nodes.map(n => Object.freeze(n))); Object.freeze(m); });
@@ -374,6 +419,51 @@ export function experienceDetail(doc, experienceId, userId) {
         nodeTypes: [...new Set(versionNodes(v).map(n => n.type))],
         hasProduction: versionNodes(v).some(n => n.type === 'PRODUCTION'),
         myRun: myRunSummary(doc, userId, e.id),
+    };
+}
+
+/**
+ * STUDIO-01 — Listado de autoría (todas las Experiencias, con estado y
+ * resumen de versiones). Solo proyección; no muta nada.
+ */
+export function adminListExperiences(doc) {
+    return doc.experiences.map(e => {
+        const versions = doc.versions
+            .filter(v => v.experienceId === e.id)
+            .sort((a, b) => a.version - b.version);
+        const lastDraft = [...versions].reverse().find(v => v.status === 'draft') ?? null;
+        const published = [...versions].reverse().find(v => v.status === 'published') ?? null;
+        return {
+            id: e.id, slug: e.slug, title: e.title, description: e.description,
+            status: e.status,
+            imageUrl: e.imageUrl ?? null, durationLabel: e.durationLabel ?? null, audience: e.audience ?? null,
+            latestVersion: versions.at(-1)?.version ?? 0,
+            publishedVersion: published?.version ?? null,
+            draftVersionId: lastDraft?.id ?? null,
+            draftVersion: lastDraft?.version ?? null,
+            updatedAt: e.updatedAt,
+        };
+    });
+}
+
+/** STUDIO-01 — Detalle de autoría: Experiencia + versiones completas (modules). */
+export function adminExperienceDetail(doc, experienceId) {
+    const e = doc.experiences.find(x => x.id === experienceId);
+    if (!e) throw err('EXPERIENCE_NOT_FOUND', `experience no existe: ${experienceId}`);
+    const versions = doc.versions
+        .filter(v => v.experienceId === experienceId)
+        .sort((a, b) => a.version - b.version)
+        .map(v => ({
+            id: v.id, version: v.version, status: v.status,
+            objectives: v.objectives, modules: v.modules,
+            publishedAt: v.publishedAt ?? null, createdAt: v.createdAt,
+        }));
+    return {
+        id: e.id, slug: e.slug, title: e.title, description: e.description,
+        status: e.status,
+        imageUrl: e.imageUrl ?? null, durationLabel: e.durationLabel ?? null, audience: e.audience ?? null,
+        currentVersionId: e.currentVersionId, updatedAt: e.updatedAt,
+        versions,
     };
 }
 
