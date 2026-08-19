@@ -86,6 +86,14 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </div>
             )}
 
+            {(node.type === 'VIDEO' || node.type === 'AUDIO') && node.config?.transcripcion && (
+                // ADR §17.4: la alternativa textual del medio debe ser accesible desde el nodo.
+                <details className="my-2 rounded-xl bg-gray-50 dark:bg-gray-900 p-3">
+                    <summary className="text-sm font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer">Ver transcripción (alternativa textual)</summary>
+                    <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 whitespace-pre-line">{node.config.transcripcion}</p>
+                </details>
+            )}
+
             {node.type === 'LEO' && (
                 <>
                     <p className="text-sm text-gray-600 dark:text-gray-300 my-2 italic">“{node.config?.semilla}” — conversa con Leo dentro de la lectura (mínimo {node.config?.minIntercambios} intercambios).</p>
