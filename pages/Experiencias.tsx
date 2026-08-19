@@ -11,7 +11,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
-import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, ClipboardCheck, Clock, Users } from 'lucide-react';
+import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users } from 'lucide-react';
 
 export const NODE_ICON: Record<string, React.ReactNode> = {
     READING: <BookOpen size={16} />, VIDEO: <BookOpen size={16} />, AUDIO: <BookOpen size={16} />,
@@ -135,14 +135,99 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
             {myEvidence.map((e: any) => (
                 <div key={e.id} className="mt-3 text-sm rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
                     {e.requiresReview
-                        ? (e.review.status === 'REVIEWED'
-                            ? <span>Revisada — <b>{e.review.decision === 'aprobado' ? 'Aprobada' : 'Con comentarios'}</b>{e.review.feedback ? <>: <span className="italic">“{e.review.feedback}”</span></> : null}</span>
-                            : <span className="text-amber-700">Enviado — pendiente de revisión.</span>)
+                        ? <ProductionStatus e={e} compact />
                         : <span className="text-emerald-700">Respuestas enviadas.</span>}
                 </div>
             ))}
             {msg && <p className="mt-2 text-sm text-red-600" role="alert">{msg}</p>}
         </div>
+    );
+};
+
+/**
+ * REVIEW-01 — estado de la producción del PROPIO participante (D4): texto del
+ * estado, retroalimentación de mediación, historial de versiones y reenvío
+ * cuando el mediador solicitó ajustes. La entrega anterior nunca se pierde.
+ */
+export const PRODUCTION_STATE_LABEL: Record<string, string> = {
+    SUBMITTED: 'Enviado — pendiente de revisión.',
+    REVISION_REQUESTED: 'Tu mediador te pidió ajustes — puedes reenviar tu producción.',
+    RESUBMITTED: 'Reenviada — pendiente de revisión.',
+    REVIEWED: 'Revisada',
+};
+
+const ProductionStatus: React.FC<{ e: any; compact?: boolean }> = ({ e, compact }) => {
+    const status = e.status ?? e.review?.status;
+    const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleDateString() : '');
+    return (
+        <div className="text-sm space-y-1">
+            {status === 'REVIEWED'
+                ? <span>Revisada el {fmt(e.review?.reviewedAt)} — <b>{e.review?.decision === 'aprobado' ? 'Aprobada' : 'Con comentarios'}</b>{e.review?.feedback ? <>: <span className="italic">“{e.review.feedback}”</span></> : null}</span>
+                : <span className={status === 'REVISION_REQUESTED' ? 'text-orange-700 font-medium' : 'text-amber-700'}>{PRODUCTION_STATE_LABEL[status] ?? status}</span>}
+            {!compact && (e.comments ?? []).length > 0 && (
+                <ul className="pl-3 border-l-2 border-gray-200 dark:border-gray-700 space-y-1">
+                    {e.comments.map((c: any, i: number) => (
+                        <li key={i} className="text-xs text-gray-600 dark:text-gray-300 italic">“{c.comment}” <span className="not-italic text-gray-400">· mediación, {fmt(c.at)}</span></li>
+                    ))}
+                </ul>
+            )}
+            {!compact && (e.versions ?? []).length > 1 && (
+                <p className="text-xs text-gray-400">Historial: {e.versions.map((v: any, i: number) => `versión ${i + 1} (${fmt(v.submittedAt)})`).join(' · ')} — todas se conservan.</p>
+            )}
+        </div>
+    );
+};
+
+/** Panel «Tu producción» bajo la ruta: estado + reenvío tras ajustes (D4). */
+const MyProductionPanel: React.FC<{ route: any; refresh: () => void }> = ({ route, refresh }) => {
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
+    const productions = (route.evidence || []).filter((e: any) => e.requiresReview);
+    if (productions.length === 0) return null;
+
+    const resubmit = async (e: any) => {
+        if (busy) return;
+        setBusy(true); setMsg(null);
+        const r = await dataService.resubmitProduction(e.id, text);
+        setBusy(false);
+        if (!r.ok) { setMsg(r.error ?? 'No se pudo reenviar'); return; }
+        setText('');
+        refresh();
+    };
+
+    return (
+        <section aria-label="Tu producción" className="mt-8 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5">
+            <h3 className="font-bold text-gray-800 dark:text-gray-100 mb-3">Tu producción</h3>
+            {productions.map((e: any) => {
+                const node = (route.nodes || []).find((n: any) => n.id === e.nodeId);
+                const min = node?.config?.minPalabras ?? 150;
+                const max = node?.config?.maxPalabras ?? 300;
+                return (
+                    <div key={e.id} className="space-y-3">
+                        <ProductionStatus e={e} />
+                        {e.canResubmit && (
+                            <div className="space-y-2">
+                                <label htmlFor={`resubmit-${e.id}`} className="block text-sm font-medium text-gray-700 dark:text-gray-200">Nueva versión (la anterior se conserva en el historial)</label>
+                                <textarea id={`resubmit-${e.id}`} value={text} onChange={ev => setText(ev.target.value)} rows={8}
+                                    placeholder={e.currentText ? 'Puedes partir de tu versión anterior copiándola aquí…' : 'Escribe tu nueva versión…'}
+                                    aria-describedby={msg ? `resubmit-err-${e.id}` : undefined}
+                                    className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
+                                <div className="flex items-center justify-between">
+                                    <span className={`text-xs ${wordCount(text) >= min && wordCount(text) <= max ? 'text-emerald-600 font-bold' : 'text-gray-400'}`}>
+                                        {wordCount(text)} palabras ({min}–{max})
+                                    </span>
+                                    <button type="button" onClick={() => resubmit(e)} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">
+                                        {busy ? 'Enviando…' : 'Reenviar producción'}
+                                    </button>
+                                </div>
+                                {msg && <p id={`resubmit-err-${e.id}`} className="text-sm text-red-600" role="alert">{msg}</p>}
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+        </section>
     );
 };
 
@@ -163,13 +248,11 @@ const Experiencias: React.FC = () => {
     const [list, setList] = useState<any[]>([]);
     const [detail, setDetail] = useState<any | null>(null);
     const [route, setRoute] = useState<any | null>(null);
-    const [tab, setTab] = useState<'rutas' | 'revision'>('rutas');
-    const [queue, setQueue] = useState<any[]>([]);
-    const [feedback, setFeedback] = useState<Record<string, string>>({});
     const [showRouteAfterClose, setShowRouteAfterClose] = useState(false);
     const currentRef = useRef<HTMLDivElement | null>(null);
 
-    const isReviewer = (user?.roles ?? []).some((r: string) => ['administrador', 'mediador', 'profesor', 'teacher', 'librarian', 'coordinator'].includes(r));
+    // REVIEW-01: la pestaña técnica de revisión se retiró de esta página (D1);
+    // la revisión vive en Aula Viva → Producciones con autorización backend.
 
     useEffect(() => { if (user) dataService.getExperiences().then(setList); }, [user]);
     // Landing: comprender antes de iniciar. NO crea run; si ya hay run activo, entra directo a la ruta (reanudación B7).
@@ -183,14 +266,9 @@ const Experiencias: React.FC = () => {
         });
     }, [user, experienceId]);
     useEffect(() => { currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [route?.progress?.completedRequired]);
-    useEffect(() => { if (user && tab === 'revision' && isReviewer) dataService.getExperienceReviewQueue().then(setQueue); }, [user, tab]);
 
     const start = async () => { if (detail) setRoute(await dataService.startExperienceRun(detail.id)); };
     const refresh = async () => { if (route) setRoute(await dataService.startExperienceRun(route.experienceId)); };
-    const review = async (evidenceId: string, decision: 'aprobado' | 'con_comentarios') => {
-        await dataService.reviewExperienceEvidence(evidenceId, decision, feedback[evidenceId] ?? '');
-        setQueue(await dataService.getExperienceReviewQueue());
-    };
 
     // ── Cierre (Q) ──
     const renderCierre = () => {
@@ -204,11 +282,15 @@ const Experiencias: React.FC = () => {
                     ))}
                 </ul>
                 {production && (
-                    <p className="mt-4 text-emerald-50">
-                        Tu producción: {production.review.status === 'REVIEWED'
-                            ? <>Revisada — <b>{production.review.decision === 'aprobado' ? 'Aprobada' : 'Con comentarios'}</b>{production.review.feedback ? <>: <span className="italic">“{production.review.feedback}”</span></> : null}</>
-                            : 'Pendiente de revisión por tu mediador.'}
-                    </p>
+                    <div className="mt-4 text-emerald-50">
+                        Tu producción: {production.status === 'REVIEWED'
+                            ? <>Revisada — <b>{production.review?.decision === 'aprobado' ? 'Aprobada' : 'Con comentarios'}</b>{production.review?.feedback ? <>: <span className="italic">“{production.review.feedback}”</span></> : null}</>
+                            : production.status === 'REVISION_REQUESTED'
+                                ? 'Tu mediador te pidió ajustes — reenvíala desde «Revisar recorrido».'
+                                : production.status === 'RESUBMITTED'
+                                    ? 'Reenviada — pendiente de revisión.'
+                                    : 'Pendiente de revisión por tu mediador.'}
+                    </div>
                 )}
                 <div className="flex flex-wrap gap-3 mt-6">
                     <Link to="/biblioteca" className="bg-white text-emerald-700 px-5 py-3 rounded-xl font-bold">Volver a Biblioteca</Link>
@@ -250,6 +332,7 @@ const Experiencias: React.FC = () => {
                             </section>
                         ))}
                     </div>
+                    <MyProductionPanel route={route} refresh={refresh} />
                 </>
             )}
         </div>
@@ -304,33 +387,8 @@ const Experiencias: React.FC = () => {
                 </>
             )}
 
-            {isReviewer && !experienceId && (
-                <div className="flex gap-3 mb-6">
-                    <button onClick={() => setTab('rutas')} className={`px-5 py-2 rounded-full text-sm font-medium ${tab === 'rutas' ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700'}`}>Rutas</button>
-                    <button onClick={() => setTab('revision')} className={`px-5 py-2 rounded-full text-sm font-medium inline-flex items-center gap-1 ${tab === 'revision' ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700'}`}><ClipboardCheck size={16} /> Revisión</button>
-                </div>
-            )}
-
-            {tab === 'revision' && isReviewer && !experienceId ? (
-                <div className="space-y-6">
-                    {queue.length === 0 && <p className="text-gray-500">No hay producciones pendientes de revisión. Las nuevas aparecerán aquí.</p>}
-                    {queue.map(q => (
-                        <div key={q.id} className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5">
-                            <div className="text-sm text-gray-500 mb-1">{q.experience} · v{q.version}{q.moduleTitle ? ` · ${q.moduleTitle}` : ''} · {q.nodeTitle}</div>
-                            <div className="text-sm mb-2"><b>Consigna:</b> {q.consigna}</div>
-                            <div className="text-sm mb-2"><b>Criterio:</b> {q.criterioRevision}</div>
-                            <blockquote className="border-l-4 border-indigo-300 pl-3 my-3 text-sm whitespace-pre-wrap">{q.text}</blockquote>
-                            <label htmlFor={`fb-${q.id}`} className="sr-only">Feedback para el estudiante</label>
-                            <textarea id={`fb-${q.id}`} value={feedback[q.id] ?? ''} onChange={e => setFeedback(f => ({ ...f, [q.id]: e.target.value }))}
-                                rows={2} placeholder="Feedback para el estudiante…" className="w-full p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm mb-2" />
-                            <div className="flex gap-3">
-                                <button onClick={() => review(q.id, 'aprobado')} className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold">Aprobar</button>
-                                <button onClick={() => review(q.id, 'con_comentarios')} className="px-4 py-2 rounded-xl bg-amber-500 text-white text-sm font-bold">Con comentarios</button>
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            ) : route ? renderRoute()
+            {/* REVIEW-01: la revisión vive en Aula Viva → Producciones. */}
+            {route ? renderRoute()
                 : experienceId && detail ? renderLanding()
                 : experienceId ? <p className="text-gray-500 mt-8">Cargando…</p>
                 : (

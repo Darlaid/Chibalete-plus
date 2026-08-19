@@ -4,7 +4,7 @@ import { dataService } from '../services/dataService';
 import { isMediator, isAdmin as checkIsAdmin } from '../utils/permissions';
 import { analizarProgresoPedagogico } from '../services/geminiService';
 import type { Group, User, PedagogicalStats, Assignment, Content, AssignmentSubmission, Bundle, StudentLearningSignals, StudentRecommendationBundle, LeoTeacherAdvisorSummary } from '../types';
-import { Users, BookOpen, BrainCircuit, Clock, ChevronRight, BarChart2, Zap, Repeat, Timer, TrendingUp, ClipboardList, Plus, Calendar, Trash, FileText, X, Video, Image, Eye, EyeOff, Send, PenTool, MessageCircle, CheckCircle, Package, Sparkles, Download, Loader2, ExternalLink, BookMarked } from 'lucide-react';
+import { Users, BookOpen, BrainCircuit, Clock, ChevronRight, BarChart2, Zap, Repeat, Timer, TrendingUp, ClipboardList, Plus, Calendar, Trash, FileText, X, Video, Image, Eye, EyeOff, Send, PenTool, MessageCircle, CheckCircle, Package, Sparkles, Download, Loader2, ExternalLink, BookMarked, PenLine } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 // Import extracted components
@@ -14,6 +14,7 @@ import { DistributionChart } from '../components/aula-viva/DistributionChart';
 import { TrendChart } from '../components/aula-viva/TrendChart';
 import { StudentRow } from '../components/aula-viva/StudentRow';
 import { GroupDiagnosisPanel } from '../components/aula-viva/GroupDiagnosisPanel';
+import { ProduccionesTab } from '../components/review/ProduccionesTab';
 import type { GroupDiagnosis } from '../utils/groupDiagnosis';
 import { StudentStatusPanel } from '../components/aula-viva/StudentStatusPanel';
 import type { StudentStatus } from '../utils/studentStatus';
@@ -175,7 +176,7 @@ const AulaViva: React.FC = () => {
     const [studentStats, setStudentStats] = useState<PedagogicalStats | undefined>(undefined);
     const [aiReport, setAiReport] = useState<string>('');
     const [loadingReport, setLoadingReport] = useState(false);
-    const [activeTab, setActiveTab] = useState<'analytics' | 'tasks'>('analytics');
+    const [activeTab, setActiveTab] = useState<'analytics' | 'tasks' | 'producciones'>('analytics');
 
     // --- Task Mgmt ---
     const [groupAssignments, setGroupAssignments] = useState<Assignment[]>([]);
@@ -1515,7 +1516,16 @@ const AulaViva: React.FC = () => {
                 >
                     <ClipboardList size={18} className="mr-2" /> Gestión de Tareas
                 </button>
+                {/* CHP-MOOK-REVIEW-01 — Producciones de Experiencias (UX D1). */}
+                <button
+                    onClick={() => setActiveTab('producciones')}
+                    className={`px-4 py-2 font-bold border-b-2 transition-colors flex items-center ${activeTab === 'producciones' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                >
+                    <PenLine size={18} className="mr-2" /> Producciones
+                </button>
             </div>
+
+            {activeTab === 'producciones' && <ProduccionesTab />}
 
             {activeTab === 'tasks' && (
                 <div className="animate-in fade-in">

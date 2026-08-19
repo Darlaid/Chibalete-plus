@@ -329,14 +329,21 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
             throw err('PRODUCTION_LENGTH', `la producción exige ${node.config.minPalabras}–${node.config.maxPalabras} palabras (lleva ${words})`);
         }
     }
+    const at = nowIso();
     const ev = {
         id: rid('evid'), runId, userId,
         experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, nodeId,
         nodeType: node.type, type: 'text',
         payload: node.type === 'ACTIVITY' ? { answers: payload.answers.map(String) } : { text: String(payload.text) },
         requiresReview: node.type === 'PRODUCTION',
-        submittedAt: nowIso(),
+        submittedAt: at,
         review: { status: 'SUBMITTED' },
+        // REVIEW-01 — historial APPEND-ONLY: la entrega original nunca se
+        // sobrescribe; los reenvíos y acciones de revisión se agregan.
+        ...(node.type === 'PRODUCTION' ? {
+            versions: [{ text: String(payload.text), submittedAt: at }],
+            history: [{ type: 'submitted', at }],
+        } : {}),
     };
     doc.evidence.push(ev);
     run.nodeStates[nodeId] = { status: 'completed', completedAt: nowIso(), evidenceIds: [...(run.nodeStates[nodeId]?.evidenceIds ?? []), ev.id] };
@@ -354,15 +361,178 @@ export function attachLeoEvidenceRefs(doc, runId, nodeId, leoEvidenceIds) {
     return st;
 }
 
-export function reviewEvidence(doc, evidenceId, { reviewerId, decision, feedback = '' }) {
+// ── REVIEW-01 — ciclo de revisión humana de producciones ────────────────────
+// Estados: SUBMITTED → (REVISION_REQUESTED → RESUBMITTED)* → REVIEWED.
+// REVIEWED = «revisión humana realizada», jamás una evaluación del aprendizaje.
+// Sin calificaciones, scores ni ranking. Historial y versiones APPEND-ONLY.
+
+export const REVIEW_STATES = Object.freeze(['SUBMITTED', 'REVISION_REQUESTED', 'RESUBMITTED', 'REVIEWED']);
+
+/** Compat: evidencia previa a REVIEW-01 sin versions/history — se derivan sin mutar el sentido. */
+function ensureReviewShape(ev) {
+    if (!Array.isArray(ev.versions)) ev.versions = [{ text: ev.payload?.text ?? '', submittedAt: ev.submittedAt }];
+    if (!Array.isArray(ev.history)) ev.history = [{ type: 'submitted', at: ev.submittedAt }];
+    return ev;
+}
+
+function findReviewable(doc, evidenceId) {
     const ev = doc.evidence.find(e => e.id === evidenceId);
     if (!ev) throw err('EVIDENCE_NOT_FOUND', `evidencia no existe: ${evidenceId}`);
     if (!ev.requiresReview) throw err('NOT_REVIEWABLE', 'esta evidencia no requiere revisión');
+    return ensureReviewShape(ev);
+}
+
+/** Comentario de retroalimentación SIN cambiar el estado (mediación en curso). */
+export function addReviewFeedback(doc, evidenceId, { reviewerId, comment }) {
+    const ev = findReviewable(doc, evidenceId);
+    if (!reviewerId) throw err('INVALID_ACTOR', 'reviewerId (derivado de sesión) requerido');
+    if (!comment || !String(comment).trim()) throw err('COMMENT_REQUIRED', 'la retroalimentación exige comentario');
+    if (ev.review.status === 'REVIEWED') throw err('ALREADY_REVIEWED', 'ya revisada — la conversación de revisión está cerrada');
+    ev.history.push({ type: 'feedback', reviewerId, comment: String(comment).trim(), at: nowIso() });
+    return ev;
+}
+
+/** Solicitar ajustes: SUBMITTED|RESUBMITTED → REVISION_REQUESTED. Comentario OBLIGATORIO. */
+export function requestChanges(doc, evidenceId, { reviewerId, comment }) {
+    const ev = findReviewable(doc, evidenceId);
+    if (!reviewerId) throw err('INVALID_ACTOR', 'reviewerId (derivado de sesión) requerido');
+    if (!comment || !String(comment).trim()) throw err('COMMENT_REQUIRED', 'solicitar ajustes exige explicar qué ajustar');
+    if (ev.review.status === 'REVIEWED') throw err('ALREADY_REVIEWED', 'ya revisada');
+    if (!['SUBMITTED', 'RESUBMITTED'].includes(ev.review.status)) {
+        throw err('INVALID_TRANSITION', `no se pueden solicitar ajustes desde ${ev.review.status}`);
+    }
+    ev.review = { ...ev.review, status: 'REVISION_REQUESTED' };
+    ev.history.push({ type: 'revision_requested', reviewerId, comment: String(comment).trim(), at: nowIso() });
+    return ev;
+}
+
+/**
+ * Reenvío del participante tras ajustes solicitados. SOLO el dueño; la entrega
+ * anterior se CONSERVA (versions append-only); el payload pasa a ser la vigente.
+ */
+export function resubmitEvidence(doc, evidenceId, { userId, text }) {
+    const ev = findReviewable(doc, evidenceId);
+    if (!userId) throw err('INVALID_ACTOR', 'userId (derivado de sesión) requerido');
+    if (ev.userId !== userId) throw err('NOT_EVIDENCE_OWNER', 'solo el dueño puede reenviar su producción');
+    if (ev.review.status !== 'REVISION_REQUESTED') {
+        throw err('INVALID_TRANSITION', `solo se reenvía cuando hay ajustes solicitados (estado: ${ev.review.status})`);
+    }
+    const run = doc.runs.find(r => r.id === ev.runId);
+    const v = run && doc.versions.find(x => x.id === run.experienceVersionId);
+    const node = v && versionNodes(v).find(n => n.id === ev.nodeId);
+    const words = countWords(text);
+    const min = node?.config?.minPalabras ?? 1;
+    const max = node?.config?.maxPalabras ?? Number.MAX_SAFE_INTEGER;
+    if (words < min || words > max) {
+        throw err('PRODUCTION_LENGTH', `la producción exige ${min}–${max} palabras (lleva ${words})`);
+    }
+    const at = nowIso();
+    ev.versions.push({ text: String(text), submittedAt: at });
+    ev.payload = { text: String(text) };
+    ev.review = { ...ev.review, status: 'RESUBMITTED' };
+    ev.history.push({ type: 'resubmitted', at });
+    return ev;
+}
+
+export function reviewEvidence(doc, evidenceId, { reviewerId, decision, feedback = '' }) {
+    const ev = findReviewable(doc, evidenceId);
     if (ev.review.status === 'REVIEWED') throw err('ALREADY_REVIEWED', 'ya revisada');
     if (!['aprobado', 'con_comentarios'].includes(decision)) throw err('INVALID_DECISION', 'decision inválida');
     if (!reviewerId) throw err('INVALID_ACTOR', 'reviewerId (derivado de sesión) requerido');
-    ev.review = { status: 'REVIEWED', reviewerId, decision, feedback: String(feedback), reviewedAt: nowIso() };
+    // REVIEW-01: cierre válido desde cualquier estado no terminal (incluye
+    // REVISION_REQUESTED sin reenvío — el mediador puede cerrar la conversación).
+    const at = nowIso();
+    ev.review = { status: 'REVIEWED', reviewerId, decision, feedback: String(feedback), reviewedAt: at };
+    ev.history.push({ type: 'reviewed', reviewerId, decision, ...(String(feedback).trim() ? { comment: String(feedback).trim() } : {}), at });
     return ev;
+}
+
+/**
+ * Vista del participante sobre SU evidencia (sin reviewerId — mínimo necesario):
+ * estado con texto, retroalimentación, historial de versiones y cierre.
+ */
+export function participantEvidenceView(ev) {
+    ensureReviewShape(ev);
+    return {
+        id: ev.id, nodeId: ev.nodeId, nodeType: ev.nodeType,
+        requiresReview: ev.requiresReview,
+        submittedAt: ev.submittedAt,
+        status: ev.requiresReview ? ev.review.status : null,
+        review: ev.review.status === 'REVIEWED'
+            ? { status: 'REVIEWED', decision: ev.review.decision, feedback: ev.review.feedback, reviewedAt: ev.review.reviewedAt }
+            : { status: ev.review.status },
+        canResubmit: ev.requiresReview && ev.review.status === 'REVISION_REQUESTED',
+        versions: ev.requiresReview ? ev.versions.map(x => ({ submittedAt: x.submittedAt })) : undefined,
+        currentText: ev.requiresReview ? ev.payload?.text : undefined,
+        comments: ev.requiresReview
+            ? ev.history.filter(h => ['feedback', 'revision_requested', 'reviewed'].includes(h.type) && h.comment)
+                .map(h => ({ type: h.type, comment: h.comment, at: h.at }))
+            : undefined,
+    };
+}
+
+/**
+ * Bandeja de revisión (REVIEW-01): TODAS las producciones con estado, para el
+ * revisor AUTORIZADO. `resolveName` proyecta la identificación mínima permitida
+ * del participante (nombre, jamás credenciales/correo); el scoping institucional
+ * fino sigue gateado por M1-B (la autorización la impone la ruta, no esta vista).
+ */
+export function reviewListView(doc, resolveName = () => null) {
+    return doc.evidence
+        .filter(e => e.requiresReview)
+        .map(e => {
+            ensureReviewShape(e);
+            const exp = doc.experiences.find(x => x.id === e.experienceId);
+            const v = doc.versions.find(x => x.id === e.experienceVersionId);
+            const node = v ? versionNodes(v).find(n => n.id === e.nodeId) : null;
+            const module_ = v ? moduleOfNode(v, e.nodeId) : null;
+            const last = e.history[e.history.length - 1];
+            return {
+                id: e.id, status: e.review.status,
+                submittedAt: e.submittedAt, lastActivityAt: last?.at ?? e.submittedAt,
+                participantName: resolveName(e.userId),
+                experienceId: e.experienceId, experience: exp?.title, version: v?.version,
+                moduleTitle: module_?.title ?? null, nodeTitle: node?.title,
+                versionsCount: e.versions.length,
+            };
+        })
+        .sort((a, b) => (a.status === 'REVIEWED') - (b.status === 'REVIEWED') || String(a.submittedAt).localeCompare(String(b.submittedAt)));
+}
+
+/** Detalle completo para revisar (D3): contexto + entrega + historial. */
+export function reviewDetailView(doc, evidenceId, resolveName = () => null) {
+    const ev = findReviewable(doc, evidenceId);
+    const exp = doc.experiences.find(x => x.id === ev.experienceId);
+    const v = doc.versions.find(x => x.id === ev.experienceVersionId);
+    const node = v ? versionNodes(v).find(n => n.id === ev.nodeId) : null;
+    const module_ = v ? moduleOfNode(v, ev.nodeId) : null;
+    const run = doc.runs.find(r => r.id === ev.runId);
+    // Respuestas de actividad del MISMO run como contexto de mediación (D3).
+    const activityContext = doc.evidence
+        .filter(x => x.runId === ev.runId && x.nodeType === 'ACTIVITY')
+        .map(x => {
+            const actNode = v ? versionNodes(v).find(n => n.id === x.nodeId) : null;
+            return {
+                nodeTitle: actNode?.title,
+                preguntas: (actNode?.config?.preguntas ?? []).map(p => p.texto),
+                answers: x.payload?.answers ?? [],
+            };
+        });
+    return {
+        id: ev.id, status: ev.review.status,
+        participantName: resolveName(ev.userId),
+        experience: exp?.title, version: v?.version,
+        objectives: v?.objectives ?? [],
+        moduleTitle: module_?.title ?? null, nodeTitle: node?.title,
+        consigna: node?.config?.consigna, criterioRevision: node?.config?.criterioRevision,
+        minPalabras: node?.config?.minPalabras, maxPalabras: node?.config?.maxPalabras,
+        submittedAt: ev.submittedAt,
+        versions: ev.versions.map(x => ({ text: x.text, submittedAt: x.submittedAt })),
+        history: ev.history.map(h => ({ type: h.type, ...(h.comment ? { comment: h.comment } : {}), ...(h.decision ? { decision: h.decision } : {}), at: h.at })),
+        review: ev.review,
+        runStatus: run?.status ?? null,
+        activityContext,
+    };
 }
 
 // ── Vistas (proyección; jamás copia metadata canónica a disco) ──────────────

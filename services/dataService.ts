@@ -4956,11 +4956,46 @@ class DataService {
         return this.studioFetch(`/experiences/${encodeURIComponent(experienceId)}/archive`, { method: 'POST', body: '{}' });
     }
 
-    async getExperienceReviewQueue(): Promise<any[]> {
+    // --- CHP-MOOK-REVIEW-01: revisión humana de producciones ---
+    // La bandeja DISTINGUE fallo de vacío (jamás mostrar 0 si la consulta falló)
+    // y el gate fail-closed de mediadores (M1-B) llega como código estructurado.
+    async getReviewProductions(): Promise<{ ok: boolean; items?: any[]; error?: string; code?: string }> {
         try {
             const res = await fetch(`${this.apiUrl}/experiences/review/queue`, { credentials: 'include' });
-            return res.ok ? res.json() : [];
-        } catch { return []; }
+            const body = await res.json().catch(() => null);
+            return res.ok ? { ok: true, items: body ?? [] } : { ok: false, error: body?.error, code: body?.code };
+        } catch { return { ok: false, error: 'Sin conexión con el servidor' }; }
+    }
+
+    async getReviewProductionDetail(evidenceId: string): Promise<{ ok: boolean; data?: any; error?: string }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/experiences/review/${encodeURIComponent(evidenceId)}/detail`, { credentials: 'include' });
+            const body = await res.json().catch(() => null);
+            return res.ok ? { ok: true, data: body } : { ok: false, error: body?.error };
+        } catch { return { ok: false, error: 'Sin conexión con el servidor' }; }
+    }
+
+    private async reviewPost(path: string, payload: object): Promise<{ ok: boolean; error?: string }> {
+        try {
+            const res = await fetch(`${this.apiUrl}${path}`, {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+            });
+            const body = await res.json().catch(() => null);
+            return res.ok ? { ok: true } : { ok: false, error: body?.error ?? `Error ${res.status}` };
+        } catch { return { ok: false, error: 'Sin conexión con el servidor' }; }
+    }
+
+    async sendReviewFeedback(evidenceId: string, comment: string) {
+        return this.reviewPost(`/experiences/review/${encodeURIComponent(evidenceId)}/feedback`, { comment });
+    }
+
+    async requestProductionChanges(evidenceId: string, comment: string) {
+        return this.reviewPost(`/experiences/review/${encodeURIComponent(evidenceId)}/request-changes`, { comment });
+    }
+
+    async resubmitProduction(evidenceId: string, text: string) {
+        return this.reviewPost(`/experiences/evidence/${encodeURIComponent(evidenceId)}/resubmit`, { text });
     }
 
     async reviewExperienceEvidence(evidenceId: string, decision: 'aprobado' | 'con_comentarios', feedback: string): Promise<boolean> {

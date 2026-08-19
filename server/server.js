@@ -1627,17 +1627,18 @@ function emitCompletionEvents(run, nodeId, nodeType, progress, moduleId) {
     }
 }
 
-// Resumen de evidencias del PROPIO run (el dueño ve estado/decisión/feedback).
+// Resumen de evidencias del PROPIO run (el dueño ve estado/retroalimentación/
+// historial de SUS entregas — REVIEW-01: proyección sin reviewerId).
 function myEvidenceSummary(doc, run) {
     return doc.evidence
         .filter(e => e.runId === run.id)
-        .map(e => ({ id: e.id, nodeId: e.nodeId, nodeType: e.nodeType, requiresReview: e.requiresReview, submittedAt: e.submittedAt, review: e.review }));
+        .map(e => experienceStore.participantEvidenceView(e));
 }
 
 const mookErrStatus = (e) => (
     ['EXPERIENCE_NOT_FOUND', 'VERSION_NOT_FOUND', 'RUN_NOT_FOUND', 'NODE_NOT_FOUND', 'EVIDENCE_NOT_FOUND', 'RESOURCE_NOT_FOUND', 'NOT_PUBLISHED'].includes(e.code) ? 404
-    : ['NOT_RUN_OWNER'].includes(e.code) ? 403
-    : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION', 'EXPERIENCE_ARCHIVED', 'ALREADY_ARCHIVED'].includes(e.code) ? 409
+    : ['NOT_RUN_OWNER', 'NOT_EVIDENCE_OWNER'].includes(e.code) ? 403
+    : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION', 'EXPERIENCE_ARCHIVED', 'ALREADY_ARCHIVED', 'INVALID_TRANSITION'].includes(e.code) ? 409
     : e.code ? 400 : 500
 );
 
@@ -1800,41 +1801,75 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth,
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
-// ── Revisión humana (rol mediador/administrador existente; scoping
-//    institucional de la cola = frontera M1-B, documentada) ─────────────────
-function isReviewer(user) {
-    const roles = user?.roles || [];
-    return roles.includes('administrador') || isMediatorRole(user);
+// ── Revisión humana (REVIEW-01) ─────────────────────────────────────────────
+// REGLA DE SEGURIDAD (M1-B pendiente): el sistema aún NO puede demostrar el
+// scope institucional de un mediador, así que el acceso de mediador queda
+// FAIL-CLOSED (403 explícito, sin cola global, sin fallback inventado). Solo
+// el rol administrador — el único cuyo alcance reconoce el contrato actual —
+// opera la revisión. La activación de mediadores llega con M1-B.
+function requireReviewAccess(req, res) {
+    const roles = req.user?.roles || [];
+    if (roles.includes('administrador')) return true;
+    if (isMediatorRole(req.user)) {
+        res.status(403).json({
+            error: 'La revisión para mediadores se habilita cuando el sistema pueda garantizar el alcance institucional de tu cola.',
+            code: 'MEDIATOR_SCOPE_GATED',
+        });
+        return false;
+    }
+    res.status(403).json({ error: 'No autorizado para revisar producciones', code: 'REVIEW_FORBIDDEN' });
+    return false;
+}
+
+// Identificación MÍNIMA permitida del participante: nombre del padrón canónico
+// (sin correo, sin credenciales, sin colegio). Server-side, jamás del cliente.
+function resolveParticipantName(userId) {
+    try {
+        const u = readJSON(USERS_DB).find(x => x.id === userId);
+        return u?.nombre_completo ?? u?.nombre ?? null;
+    } catch { return null; }
 }
 
 app.get('/api/experiences/review/queue', requireUserAuth, (req, res) => {
     try {
-        if (!isReviewer(req.user)) return res.status(403).json({ error: 'Solo mediadores/administradores' });
-        const doc = readMook();
-        const queue = doc.evidence
-            .filter(e => e.requiresReview && e.review.status === 'SUBMITTED')
-            .map(e => {
-                const exp = doc.experiences.find(x => x.id === e.experienceId);
-                const v = doc.versions.find(x => x.id === e.experienceVersionId);
-                const node = v ? experienceStore.versionNodes(v).find(n => n.id === e.nodeId) : null;
-                const module_ = v ? experienceStore.moduleOfNode(v, e.nodeId) : null;
-                return {
-                    id: e.id, submittedAt: e.submittedAt, userId: e.userId,
-                    experience: exp?.title, version: v?.version,
-                    moduleTitle: module_?.title ?? null,
-                    nodeTitle: node?.title, consigna: node?.config?.consigna,
-                    criterioRevision: node?.config?.criterioRevision,
-                    objectives: v?.objectives ?? [],
-                    text: e.payload?.text,
-                };
-            });
-        res.json(queue);
+        if (!requireReviewAccess(req, res)) return;
+        res.json(experienceStore.reviewListView(readMook(), resolveParticipantName));
     } catch (e) { res.status(500).json({ error: 'No se pudo leer la cola de revisión' }); }
+});
+
+app.get('/api/experiences/review/:evidenceId/detail', requireUserAuth, (req, res) => {
+    try {
+        if (!requireReviewAccess(req, res)) return;
+        res.json(experienceStore.reviewDetailView(readMook(), req.params.evidenceId, resolveParticipantName));
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/review/:evidenceId/feedback', requireUserAuth, async (req, res) => {
+    try {
+        if (!requireReviewAccess(req, res)) return;
+        let ev;
+        await mutateMook((doc) => {
+            ev = experienceStore.addReviewFeedback(doc, req.params.evidenceId, { reviewerId: req.user.id, comment: req.body?.comment });
+        });
+        res.json({ id: ev.id, status: ev.review.status, historyCount: ev.history.length });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+app.post('/api/experiences/review/:evidenceId/request-changes', requireUserAuth, async (req, res) => {
+    try {
+        if (!requireReviewAccess(req, res)) return;
+        let ev;
+        await mutateMook((doc) => {
+            ev = experienceStore.requestChanges(doc, req.params.evidenceId, { reviewerId: req.user.id, comment: req.body?.comment });
+        });
+        log(`[MOOK] changes requested on ${ev.id}`);
+        res.json({ id: ev.id, status: ev.review.status, historyCount: ev.history.length });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
 app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res) => {
     try {
-        if (!isReviewer(req.user)) return res.status(403).json({ error: 'Solo mediadores/administradores' });
+        if (!requireReviewAccess(req, res)) return;
         let ev;
         await mutateMook((doc) => {
             ev = experienceStore.reviewEvidence(doc, req.params.evidenceId, {
@@ -1846,6 +1881,22 @@ app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res
         void emitEvidenceReviewed({ userId: ev.userId, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, evidenceId: ev.id, decision: ev.review.decision }, log);
         log(`[MOOK] evidence reviewed: ${ev.id} -> ${ev.review.decision}`);
         res.json({ id: ev.id, review: ev.review });
+    } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+// Reenvío del participante tras ajustes solicitados — dueño derivado de sesión;
+// la entrega anterior se conserva (append-only). Emite el tipo EXISTENTE
+// evidence_submitted (flag dormant intacto; payload solo ids, sin contenido).
+app.post('/api/experiences/evidence/:evidenceId/resubmit', requireUserAuth, async (req, res) => {
+    try {
+        let ev;
+        await mutateMook((doc) => {
+            ev = experienceStore.resubmitEvidence(doc, req.params.evidenceId, { userId: req.user.id, text: req.body?.text });
+        });
+        const docPost = readMook();
+        const run = docPost.runs.find(r => r.id === ev.runId);
+        void emitEvidenceSubmitted({ userId: req.user.id, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, runId: ev.runId, nodeId: ev.nodeId, nodeType: ev.nodeType, moduleId: run ? mookModuleIdOf(docPost, run, ev.nodeId) : undefined, evidenceId: ev.id, requiresReview: ev.requiresReview }, log);
+        res.json({ id: ev.id, status: ev.review.status, versionsCount: ev.versions.length });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 // --- END CHP-MOOK-01 -------------------------------------------------------
