@@ -102,3 +102,94 @@ Tras una segunda declaración del operador («los dispositivos fueron abiertos c
 - Sin regresiones: todo 2xx, 0×401 anómalos, 0×5xx, producción healthy.
 
 **Veredicto: sigue `YELLOW-OPERATOR-STEP`.** La activación observada corresponde al dispositivo ya migrado en QA, no a la tanda de campo. Lo que la evidencia necesita ver: **logins de las CUENTAS de campo** (cada usuario de campo entra con SU credencial en SU dispositivo). Si las instalaciones se hicieron sobre otros equipos pero los usuarios aún no han abierto la app o no han hecho login, esa apertura+login es la intervención pendiente; si por el contrario la activación se probó sobre el mismo dispositivo/cuenta de QA, la migración de campo real sigue sin ejecutarse.
+
+---
+
+## Anexo — Tercera pasada de corroboración (2026-08-19 13:33–13:40Z, `CLOSURE`)
+
+Pasada read-only con ~21 h de ventana nueva (incluye la tarde escolar del 18/Ago y la mañana del 19/Ago). **Cero cambios productivos.**
+
+### Roster de campo — ahora derivado, no declarado
+
+Las pasadas anteriores usaban el censo aproximado («cohorte escolar ≥3»). Esta pasada lo **derivó de la fuente**: cuentas que alguna vez emitieron analytics `source=lu_android` (133 eventos históricos). Resultado: **exactamente 5 cuentas LU**, consistente con el censo de `ANDROID-COOKIE-SESSION-AUDIT-01`. El prefijo `user-1779493121246-*` tiene **180 cuentas en el padrón**, pero sólo **3** de ellas han usado LU jamás — el resto es padrón escolar sin cliente Android, y **no** forma parte del roster de migración.
+
+| # | Cuenta (truncada) | Rol en el censo | Último evento LU | `lastLoginAt` | Estado |
+|---|---|---|---|---|---|
+| 1 | `user-1774…1303` | dispositivo QA | 2026-08-18 16:02Z | 2026-08-19 13:33Z | **MIGRATED-09 — EXCLUIDA como evidencia de campo** |
+| 2 | `user-1781…1961` | PRIORIDAD-1 (lector del incidente ENFORCE) | 2026-06-12 | 2026-08-18 01:18Z | **PENDING-FIELD** |
+| 3 | `user-1779…-171` | cohorte escolar | 2026-07-02 | 2026-06-20 | **PENDING-FIELD** |
+| 4 | `user-1779…-142` | cohorte escolar | 2026-06-20 | 2026-06-29 | **PENDING-FIELD** |
+| 5 | `user-1779…-091` | cohorte escolar | 2026-06-19 | 2026-06-24 | **PENDING-FIELD** |
+
+Fuera de tabla: el ping legacy del **14/Ago 23h** sigue **UNKNOWN** (no asociable a una cuenta sin perseguir PII; decisión mantenida).
+
+### Esperado vs. observado
+
+| Señal que exige el gate | Observado en la ventana |
+|---|---|
+| Login `ChibaleteLU/0.9.0` de cada cuenta de campo | **0** |
+| Petición autenticada posterior de esa sesión | **0** (n/a sin login) |
+| Tráfico `ChibaleteLU/0.9.0` de cualquier origen | **0** en 18/Ago 17:07Z → 19/Ago 13:33Z |
+| Tráfico legacy `okhttp/*` en endpoints LU | **0** (tampoco hay regresión ni actividad legacy) |
+
+Analizador congelado (`docs/ops/tools/lu_segment_analyzer.py`) sobre el edge log:
+
+- Ventana `2026-08-18T16:00Z → 2026-08-19T13:33Z` (418 líneas): `SEGMENT-09` = 11 requests, **todas concentradas en el bloque 18/Ago 16h** (login 1, assignment 6, analytics 2, progress-sync 1, auth-otros 1 — todas 2xx), UA único `ChibaleteLU/0.9.0 Android/35` = el dispositivo QA.
+- Ventana `2026-08-18T17:07Z → 2026-08-19T13:33Z` (405 líneas): **`SEGMENT-09` = 0 y `LEGACY-LU` = 0**. Ningún cliente LU, de ninguna versión, tocó producción en ~20,5 h.
+
+### Exclusiones aplicadas
+
+- **Cuenta/dispositivo QA (`user-1774…1303`)**: excluida por regla. Su `lastLoginAt` de hoy (13:33:19Z) se atribuyó por UA del edge a **`Mozilla/5.0 (Windows NT 10.0…)` — un navegador de escritorio**, no la app: es tráfico web del operador, no señal de campo ni de LU.
+- Los 3 logins `SEGMENT-NON-LU` de la ventana son de navegador (web app), fuera del roster LU.
+- `SEGMENT-UNKNOWN` = 25 (scanners: `wp-admin` probe, Palo Alto, UA vacío) con **0 requests en endpoints LU** → no contamina, no se reclasifica.
+- Sin logins sintéticos, sin smokes técnicos, sin tráfico fabricado: esta unidad no generó ni una petición autenticada.
+
+### 401 / 5xx / comportamiento destructivo
+
+`SEGMENT-09`: **0×401, 0×403, 0×5xx** (el único 401 histórico sigue siendo el ping pre-login del QA del 18/Ago). Sin loop 401, sin `x-user-id` requerido, sin señal destructiva. Los 401/403 de `SEGMENT-NON-LU` (8+2 / 6) son tráfico web ordinario, ajeno a LU.
+
+### Salud productiva — con drift explicado
+
+| Chequeo | 18/Ago (cierre anterior) | 19/Ago 13:33Z | Lectura |
+|---|---|---|---|
+| Imagen API | `chibalete/api:8ed4e5e` | **`chibalete/api:679b036`** | **drift explicado**: es el deploy `GREEN-LIB-01-PROD` (Biblioteca editorial) del 18/Ago ~19:30Z. Verificado que **`8ed4e5e` es ancestro de `679b036`** → la mitigación 202-drop viaja en la imagen productiva |
+| Frontend | — | `chibalete/front:lib01-679b036` (healthy) | mismo deploy |
+| Modos | COMPAT/COMPAT | **COMPAT/COMPAT** | sin cambio; ENFORCE sigue desactivado |
+| Restarts | 0/0 | **0/0** (edge y front también 0) | estable |
+| Health | 200 | **200** | estable |
+| APK publicado | sha `a9250330…`, 2.010.794 B | **idéntico** (`a925033054a4846a`, 2.010.794 B, mtime 18/Ago 14:19) | intacto, no reemplazado |
+
+No se emite `STOP-DRIFT`: el cambio de imagen está documentado, es posterior y ajeno a M1-A, preserva la mitigación y no altera modos de sesión. **Efecto colateral a registrar**: el recreate reseteó los contadores in-process del 202-drop → el drain-02 arranca con baseline nuevo.
+
+### Veredicto de la pasada
+
+**`YELLOW-OPERATOR-STEP`** (tercera vez). La brecha ya no es ambigua: en ~21 h **ningún cliente LU de ninguna versión** tocó producción, y **ninguna de las 4 cuentas de campo ha iniciado sesión desde antes de la publicación del canary** (la más reciente, la de prioridad 1, data del 18/Ago 01:18Z — su sesión legacy previa al incidente).
+
+`fieldMigrationCompletedAt` = **no aplica** (sin corroboración, no hay hora que registrar). El sistema **no** es elegible aún para el preflight de `DRAIN-02`.
+
+Nota metodológica: la vigilancia de 15 min prevista para «después de que el operador confirme» no se activó en esta pasada — no hubo declaración nueva del operador, y la ventana observada (21 h) supera con creces cualquier vigía corta.
+
+### Pendiente humano — lista compacta
+
+| Instalación esperada | Estado | Señal faltante |
+|---|---|---|
+| Dispositivo de `user-1781…1961` (prioridad 1) | PENDING-FIELD | login `ChibaleteLU/0.9.0` + assignment desde su equipo |
+| Dispositivo de `user-1779…-171` | PENDING-FIELD | login `ChibaleteLU/0.9.0` + assignment desde su equipo |
+| Dispositivo de `user-1779…-142` | PENDING-FIELD | login `ChibaleteLU/0.9.0` + assignment desde su equipo |
+| Dispositivo de `user-1779…-091` | PENDING-FIELD | login `ChibaleteLU/0.9.0` + assignment desde su equipo |
+| Dispositivo desconocido del 14/Ago 23h | UNKNOWN | no perseguible sin PII; el drain-02 lo medirá por agregado |
+
+Instrucción al operador, por dispositivo (sin capturas, sin credenciales compartidas):
+
+1. Confirmar que el equipo tiene Chibalete LU **0.9.0** instalada desde `https://chibaleteplus.chibaleteeditores.com/uploads/chibalete-lu-0.9.0.apk` (actualización en sitio, **jamás desinstalar**).
+2. Conectar el dispositivo a internet.
+3. Abrir la aplicación.
+4. Iniciar sesión normalmente si la app lo pide (la credencial la teclea el usuario).
+5. Abrir el libro asignado y esperar a que cargue.
+6. Informar la hora aproximada de la acción.
+
+Si un equipo ya conserva sesión válida y no pide login, **no** forzar logout: basta con abrir la app y el libro con red — el `GET /api/offline/assignment` con UA `ChibaleteLU/0.9.0` es señal equivalente admitida por este gate (el propio canario se corroboró así tras la reinstalación).
+
+### Próximo paso
+
+Repetir esta unidad cuando haya declaración nueva del operador. Con `GREEN-FIELD-MIGRATION` → `CHP-IDDB-M1-A-DRAIN-02-PREFLIGHT-AND-T0` (≥48 h hábiles POSTERIORES a la migración). Dado que hoy es miércoles 19/Ago y aún no hay T0, el cierre realista de M1-A se desplaza a **~21–24/Ago**. ENFORCE sigue sin autorizar.
