@@ -213,6 +213,16 @@ export function publishVersion(doc, versionId) {
     if (v.status !== 'draft') throw err('VERSION_IMMUTABLE', 'solo un draft puede publicarse');
     const owner = doc.experiences.find(e => e.id === v.experienceId);
     if (owner?.status === 'archived') throw err('EXPERIENCE_ARCHIVED', 'una Experiencia archivada no publica versiones');
+    // Gate técnico (ADR §18): publicar exige transcripción textual en todo nodo
+    // VIDEO/AUDIO. El borrador puede guardarse incompleto; la calidad de la
+    // transcripción sigue siendo una responsabilidad editorial humana.
+    for (const m of v.modules) {
+        for (const n of m.nodes) {
+            if (['VIDEO', 'AUDIO'].includes(n.type) && !String(n.config?.transcripcion ?? '').trim()) {
+                throw err('TRANSCRIPTION_REQUIRED', `módulo «${m.title}» (${m.id}) · nodo «${n.title}» (${n.id}): ${n.type} exige transcripción para publicar`);
+            }
+        }
+    }
     v.status = 'published';
     v.publishedAt = nowIso();
     v.modules.forEach(m => { Object.freeze(m.nodes.map(n => Object.freeze(n))); Object.freeze(m); });

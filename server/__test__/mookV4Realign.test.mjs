@@ -27,7 +27,7 @@ const SYNTH = {
     modules: [
         {
             id: 'mA', title: 'Mirar', nodes: [
-                { id: 's1', type: 'VIDEO', title: 'Ver el clip', resourceRef: 'content-clip-y' },
+                { id: 's1', type: 'VIDEO', title: 'Ver el clip', resourceRef: 'content-clip-y', config: { transcripcion: 'alternativa textual sintética del clip' } },
                 { id: 's2', type: 'ACTIVITY', title: 'Una pregunta', config: { instruccion: 'di algo', preguntas: [{ texto: 'q1' }] } },
             ],
         },

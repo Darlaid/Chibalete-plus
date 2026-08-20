@@ -699,7 +699,10 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
 
             {/* ── C4 Información ── */}
             {tab === 'info' && (
-                <div className="space-y-4 max-w-2xl">
+                <div className="space-y-4 max-w-2xl" aria-describedby="st-info-scope-note">
+                    <p id="st-info-scope-note" role="note" className="text-xs text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/40 border border-amber-200 dark:border-amber-700 rounded-lg p-3">
+                        Los cambios de esta sección se aplican inmediatamente a la experiencia, incluida la versión publicada. La ruta, los módulos y los nodos sí pertenecen al borrador de versión.
+                    </p>
                     <div>
                         <label htmlFor="st-title" className="block text-sm font-medium text-gray-700 dark:text-gray-200">Título *</label>
                         <input id="st-title" value={info.title} onChange={e => { setInfo(s => ({ ...s, title: e.target.value })); markDirty(); }}

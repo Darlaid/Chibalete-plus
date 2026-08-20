@@ -258,3 +258,34 @@ Cada módulo combina lectura, medio audiovisual, conversación, actividad o prod
 ### 17.11 Siguiente unidad
 
 El candidato `CHP-MOOK-01A-MINIMUM-VERSIONED-MODEL` está **ya satisfecho por el código existente** (store versionado + runs con pin + evidencia + 31 tests). El siguiente paso real bajo orden explícita es **`CHP-MOOK-STUDIO-01`** (secuencia congelada STUDIO→REVIEW→PILOT), que consume este contrato sin cambios.
+
+## 18. MVP SCOPE FREEZE (2026-08-19 — CHP-MOOK-MVP-SCOPE-FREEZE-01, vinculante)
+
+Congelación del alcance real del MVP, fundamentada en la evidencia empírica de los prototipos A (inducción docente: 3 módulos, 10 nodos, producción revisable — `CHP_MOOK_PROTOTYPE_02`) y B (club de lectura breve: 1 módulo, 3 nodos, sin producción — `CHP_MOOK_PROTOTYPE_03`), ambos GREEN sobre el mismo modelo sin condiciones especiales.
+
+### 18.1 Alcance congelado (contrato MVP)
+
+1. Una Experiencia puede tener **uno o varios módulos**.
+2. Una versión puede usar **cualquier subconjunto** de los seis tipos de nodo (`READING/VIDEO/AUDIO/LEO/ACTIVITY/PRODUCTION`).
+3. **`Leer → Conversar → Producir` es plantilla de autoría, no validación**: el Studio la sugiere, el dominio no la exige (demostrado: B publica y completa con READING+LEO+ACTIVITY opcional).
+4. **PRODUCTION y la revisión humana son opcionales**: existen solo cuando el diseño pedagógico requiere una entrega. Una experiencia sin PRODUCTION se completa con sus nodos requeridos y no genera entradas en Producciones.
+5. **Las versiones publicadas y los runs permanecen inmutables y pineados** (verificado byte a byte en ambos prototipos).
+6. **Los recursos se referencian por `contentId`** del catálogo canónico; jamás se copian ni conceden acceso.
+7. **Preview no persiste**: cero runs, cero evidencia, cero eventos (verificado por hash de store y auditoría de red).
+8. **No existen calificaciones, diagnóstico, rankings ni comparación entre participantes** en ninguna superficie MOOK.
+
+### 18.2 F1 decidido — Información general NO versionada en el MVP
+
+`title/description/imageUrl/durationLabel/audience` son **metadata global de `Experience`**: editable de inmediato, no versionada, visible al instante también sobre la versión publicada. Es la decisión de STUDIO-01 ahora elevada a contrato MVP. Mitigación de interfaz (implementada en esta unidad): la pestaña Información del Studio muestra un aviso persistente y accesible (`role="note"`, ligado por `aria-describedby`, visible antes de editar) que lo declara. Evolución futura registrada (NO deuda MVP): **`VERSIONED-EXPERIENCE-METADATA`**.
+
+### 18.3 M4 decidido — Actividades con registro técnico, sin circuito de revisión
+
+Comportamiento congelado tal como está en código: una ACTIVITY respondida persiste su envío como `ExperienceEvidence` con `requiresReview:false` (registro técnico del recorrido); **no aparece en Producciones ni crea circuito de revisión**; una actividad `required:false` puede omitirse y el run completa igual. **No existe reflexión efímera en el MVP** (si se respondió, quedó en el recorrido). Mitigación de interfaz (implementada): junto al envío de ACTIVITY el runtime muestra un texto accesible que lo declara al participante.
+
+### 18.4 Transcripción — gate técnico de publicación
+
+`publishVersion` **rechaza** toda versión que contenga un nodo `VIDEO` o `AUDIO` sin `config.transcripcion` no vacía: error estructurado HTTP 400 con código estable **`TRANSCRIPTION_REQUIRED`** que identifica módulo y nodo. El **borrador sí puede guardarse incompleto** (la validación de guardado no cambia). La calidad lingüística y la correspondencia audio↔transcripción siguen siendo responsabilidad editorial humana, no del código. READING/LEO/ACTIVITY/PRODUCTION no se ven afectados.
+
+### 18.5 Fuera del MVP (explícito)
+
+Versionado de Información general (`VERSIONED-EXPERIENCE-METADATA`) · reflexión efímera · F2 sugerencia de título al cambiar recurso · F3 guardado sticky · F4/M3 pulido móvil · M2 drafts estructuralmente incompletos · nuevos tipos de nodo · cambios de telemetría. Todo permanece como backlog documentado en `CHP_MOOK_PROTOTYPE_02/03`.

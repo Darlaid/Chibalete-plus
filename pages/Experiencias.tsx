@@ -120,7 +120,8 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                                 rows={2} className="w-full mt-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
                         </div>
                     ))}
-                    <button onClick={() => send({ answers })} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Enviar respuestas</button>
+                    <p id={`act-${node.id}-note`} role="note" className="text-xs text-gray-500 dark:text-gray-400">Si respondes, tu reflexión se guardará como parte de tu recorrido. No se enviará a revisión.</p>
+                    <button onClick={() => send({ answers })} disabled={busy} aria-describedby={`act-${node.id}-note`} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Enviar respuestas</button>
                 </div>
             )}
 
