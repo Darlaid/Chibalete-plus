@@ -1,12 +1,10 @@
 # CHP-MOOK-ESTAS-AQUI-04C — PRODUCTION CODE DEPLOY
 
-**Veredicto:** 🟡 **`YELLOW-AUTHENTICATED-SMOKE-PENDING`**
+**Veredicto:** 🟢 **`GREEN-MOOK-CODE-PRODUCTION`**
 **Rama:** `chp/mook-contract-00` · **SHA desplegado:** `ffc90a1`
 **Fecha:** 2026-08-25 · **Operador:** Nicolás Jiménez
 
-> **El código MOOK está en producción y sano.** Todas las verificaciones server-side pasaron.
-> Queda pendiente **una sola cosa**: el smoke de UI con una sesión de navegador legítima, que
-> requiere credenciales que esta unidad tiene **prohibido crear**. Ver §N.
+> **El código MOOK está en producción, sano y verificado por humano.** Smoke autenticado **5/5 PASS**.
 >
 > **Alcance de la autorización ejecutada:** solo código. **No se cargó ningún recurso, no se creó
 > ninguna experiencia, `mook_db.json` sigue sin existir, no se creó ninguna cuenta y no se publicó
@@ -22,12 +20,12 @@
 | B · Construcción sin activación | 🟢 ambas imágenes, exit 0, smoke aislado GREEN |
 | C · Rolling de API (1 → 2) | 🟢 ambas en `ffc90a1`, healthy, 0 restarts |
 | D · Frontend | 🟢 `lib01-ffc90a1`, resuelve ambos upstreams |
-| E · Smoke productivo | 🟢 server-side · 🟡 **UI autenticada pendiente** |
-| F · Observación | 🟢 0 errores, **0 5xx en 20 min** |
+| E · Smoke productivo | 🟢 server-side **y UI autenticada 5/5 PASS** |
+| F · Observación | 🟢 0 errores, **0 5xx en 60 min** |
 | K · Ausencia de escrituras | 🟢 verificada punto por punto |
 
-**No se emite `GREEN-MOOK-CODE-PRODUCTION`** únicamente porque el smoke de UI autenticada de §E no
-pudo ejecutarse sin credenciales. Ninguna otra condición lo impide.
+**`GREEN-MOOK-CODE-PRODUCTION` emitido:** el operador completó el smoke de UI autenticada con
+**5/5 PASS** y el cierre técnico posterior verificó **9/9** comprobaciones read-only.
 
 **No se emitió** `STOP-PRODUCTION-DRIFT`, `STOP-BACKUP-GATE` ni `RED-DEPLOY-ROLLBACK`.
 
@@ -286,23 +284,68 @@ usuarios**.
 
 ---
 
+## N-BIS. SMOKE AUTENTICADO — ✅ 5/5 PASS · `YELLOW-AUTHENTICATED-SMOKE-PENDING` CERRADO
+
+**Nicolás Jiménez, sesión administradora legítima en producción.** No creó, guardó, publicó,
+archivó ni revisó ningún elemento.
+
+| # | Comprobación | Resultado |
+|---|---|---|
+| 1 | Biblioteca y visor | ✅ **PASS** |
+| 2 | Aula Viva | ✅ **PASS** |
+| 3 | Studio carga y muestra lista vacía | ✅ **PASS** |
+| 4 | Experiencias muestra lista vacía | ✅ **PASS** |
+| 5 | Producciones conserva su estado previo | ✅ **PASS** |
+
+### Evidencia visual aportada (descrita, **no copiada ni indexada en el repositorio**)
+
+- Chibalete+ **3.0.2** cargando en producción.
+- Biblioteca y catálogo visibles.
+- Ficha correcta de *Me desconecto, luego existo*.
+- URL canónica **`#/contenido/content-1774362922886`**.
+- **Portada correcta del libro.**
+- Visor textual cargando contenido.
+- Studio de Experiencias disponible para admin, con el mensaje **«Aún no hay Experiencias»**.
+- Pestaña Experiencias en estado vacío: **«Pronto habrá Experiencias disponibles»**.
+
+### 🟢 R-4 CERRADO
+
+La evidencia confirma en producción lo que 04B había deducido por hash:
+**`content-1774362922886` es la fuente correcta de la portada y el `parentId` del libro.**
+**`content-1765751139919` (La metamorfosis, de Kafka) NO debe usarse.** El riesgo R-4 queda
+resuelto antes de 04D.
+
+### Cierre técnico posterior — 9/9 read-only
+
+| # | Comprobación | Resultado |
+|---|---|---|
+| 1–3 | APIs y frontend healthy · edge intacto | ✅ los 4 `healthy`; edge `StartedAt` sigue en **2026-08-11T01:33:31Z** |
+| 2 | `RestartCount` | ✅ **0 / 0 / 0 / 0** |
+| 4 | Errores y 5xx durante la ventana del smoke (60 min) | ✅ **0 errores** en `api_1`, `api_2` y `front` · **0 5xx** |
+| 5 | `mook_db.json` | ✅ **sigue ausente** |
+| 6 | Studio y Experiencias | ✅ **`[]` 200** en ambas |
+| 7 | Recursos/experiencias MOOK creados | ✅ catálogo **67 entradas**, `mtime` de mayo · **0 ids MOOK** · **0 hijos** de `content-1774362922886` |
+| 8 | Eventos MOOK | ✅ **0** |
+| 9 | Mutaciones atribuibles al MOOK | ✅ uploads **64 / 5,1 GB** sin cambio · `groups_db.json` sin tocar · `SESSION_AUTH_MODE=compat` · bandera de eventos **OFF** |
+
+**Tráfico del smoke humano:** 119 × 304, 71 × 200, 5 × 403, 2 × 401. **Ningún 5xx.** Los 403
+corresponden a comprobaciones de permisos de ruta durante la navegación — comportamiento esperado.
+
+### Dos deltas observados, explicados y NO atribuibles al MOOK
+
+| Delta | Explicación |
+|---|---|
+| `events.db` **19 575 → 19 584** (+9) | **Telemetría ordinaria de lectura** generada por la apertura legítima del libro y del visor. **Cero de esos eventos es MOOK** (consulta explícita sobre los 6 tipos `experience_*`/`node_*`/`evidence_*` → 0). No se borró ningún evento ni progreso. |
+| Padrón `mtime` **2026-08-25 15:12 → 23:47** | El handler de login actualiza `lastLoginAt` del usuario que inicia sesión. Es consecuencia directa y esperada del propio smoke autenticado, **no una mutación de datos MOOK**. |
+
+---
+
 ## N. RIESGOS RESTANTES Y SOLICITUD PARA 04D
 
-### Lo único que falta para el GREEN pleno
+### Estado del gate de smoke
 
-`YELLOW-AUTHENTICATED-SMOKE-PENDING`. La Fase E pedía verificar con **una sesión legítima ya
-existente**: inicio de sesión, Biblioteca, lectores/visores, Aula Viva, **carga de la UI de Studio
-para admin**, Runtime/Experiencias sin experiencia publicada y estado previo de Producciones.
-
-**No dispongo de una sesión de navegador legítima, y crear credenciales está prohibido en esta
-unidad.** Verifiqué el equivalente server-side de cada control —incluidos los 403 de lector y
-mediador y el `200 []` de participante y admin— pero **no puedo afirmar que la UI carga**, y no lo
-afirmo.
-
-**Lo que se necesita del operador:** iniciar sesión con una cuenta propia y confirmar
-(a) Biblioteca y un visor abren, (b) Aula Viva carga, (c) la pestaña de Studio carga para admin,
-(d) Experiencias muestra la lista vacía, (e) Producciones conserva su estado. Con eso el veredicto
-pasa a **`GREEN-MOOK-CODE-PRODUCTION`**.
+✅ **Cerrado.** El operador confirmó 5/5 y el cierre técnico verificó 9/9. Veredicto elevado a
+**`GREEN-MOOK-CODE-PRODUCTION`**.
 
 ### Riesgos restantes
 
@@ -311,15 +354,17 @@ pasa a **`GREEN-MOOK-CODE-PRODUCTION`**.
 | **R-1** | `CVE-2026-45447` heredado en la imagen base | Aceptado como deuda **`CHP-SEC-IMAGE-CVE-01`**; re-verificado no alcanzable (Node con OpenSSL estático). **Cero hallazgos nuevos.** |
 | **R-2** | Ventana de observación con tráfico bajo | Vigilar en la próxima jornada de uso real |
 | **R-3** | `YELLOW-AUDIENCE-DECISION` (de 04B) | **Sigue abierto.** No afecta a 04C ni a 04D; bloquea 04F |
-| **R-4** | Portada de Kafka en la experiencia local | **Corregir antes de 04D** |
+| **R-4** | Portada y `parentId` del libro | ✅ **CERRADO** — confirmado en producción que la fuente correcta es `content-1774362922886` |
 
 ### Solicitud
 
 **No se ejecutó 04D.** No se cargaron activos, no se creó el MOOK, no se creó cuenta QA y no se
-publicó ninguna experiencia.
+publicó ninguna experiencia. **Producción no se modificó en esta unidad de cierre**: todas las
+comprobaciones posteriores fueron read-only.
 
-**Se solicita autorización explícita para `04D-CONTENT-LOAD-AND-DRAFT`**, preferentemente después
-del smoke autenticado y con la decisión sobre la portada (R-4) resuelta.
+**Se solicita autorización explícita para `04D-CONTENT-LOAD-AND-DRAFT`.** Con R-4 cerrado, el único
+bloqueador pendiente del tren es `YELLOW-AUDIENCE-DECISION`, que **no afecta a 04D** —la carga nace
+en DRAFT, no descubrible— pero **sigue bloqueando 04F**.
 
 ---
 
@@ -328,3 +373,4 @@ del smoke autenticado y con la decisión sobre la portada (R-4) resuelta.
 | Fecha | Operador | Acción |
 |---|---|---|
 | 2026-08-25 | Nicolás Jiménez | Deploy de código `ffc90a1` a producción: build desde `git archive` verificado por hash, smoke aislado, rolling API 1 → API 2, frontend, edge intacto. **Cero escrituras de datos; `mook_db.json` sigue ausente.** Veredicto `YELLOW-AUTHENTICATED-SMOKE-PENDING` a la espera del smoke de UI con sesión legítima. |
+| 2026-08-25 | Nicolás Jiménez | **Smoke autenticado 5/5 PASS** con sesión administradora legítima + cierre técnico **9/9** read-only. **R-4 cerrado**: la fuente correcta de portada y `parentId` es `content-1774362922886`. Veredicto elevado a 🟢 **`GREEN-MOOK-CODE-PRODUCTION`**. 04D no ejecutado. |
