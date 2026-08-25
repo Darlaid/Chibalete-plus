@@ -727,7 +727,28 @@ imágenes más el smoke aislado.
 > **No se declara «CI toda verde».** Se declara: el único job bloqueante que rompió el run está
 > **realmente corregido**, y los dos `continue-on-error` conservan **exactamente** el baseline.
 
-## R1.8 · Diff, rollback y confirmación
+## R1.8 · CI remota final — run #182
+
+| Run | SHA | Conclusión | Jobs |
+|---|---|---|---|
+| **#182** | `9e8fc75` | ✅ **success** | 5 bloqueantes en verde; 2 `continue-on-error` en su baseline |
+
+| Job | Resultado |
+|---|---|
+| `evidence-hardening` | ✅ **success** — corregido en esta unidad |
+| `gitleaks-head` | ✅ success |
+| `osv-scanner` | ✅ success |
+| `trivy` | ✅ success |
+| `image-integrity` | ✅ success |
+| `gitleaks-history` | ❌ failure — no bloqueante por diseño, **10 fingerprints, 0 nuevos** |
+| `trivy-image` | ❌ failure — no bloqueante por diseño, **5 filas CVE, 0 nuevas** |
+
+Equivalencia con el último run verde previo (#180) demostrada por comparación, no por declaración:
+**gitleaks 10 vs 10, nuevos = 0 · trivy 5 vs 5, nuevas = 0.**
+
+**Los 5 jobs bloqueantes están en verde y el run cierra en `success`.**
+
+## R1.9 · Diff, rollback y confirmación
 
 **Diff de R1:** un solo archivo — tres líneas reescritas más este anexo. **Cero cambios en código,
 dependencias, Dockerfiles, workflows o scripts.**
