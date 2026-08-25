@@ -140,6 +140,14 @@ function validateNode(node, i, bookExists) {
         if (!Array.isArray(out.config.preguntas) || out.config.preguntas.length === 0) {
             throw err('INVALID_NODE', `nodo ${i}: ACTIVITY exige config.preguntas`);
         }
+        // Bitácora privada (ESTAS-AQUI-01): SOLO el booleano `true` la activa;
+        // cualquier otro valor deja el campo AUSENTE, de modo que una ACTIVITY
+        // normal conserva exactamente la forma congelada de siempre.
+        if (out.config.privado === true) out.config.privado = true;
+        else delete out.config.privado;
+    } else {
+        // `privado` solo significa algo en ACTIVITY: no se arrastra a otros tipos.
+        delete out.config.privado;
     }
     if (out.type === 'PRODUCTION') {
         if (!out.config.consigna) throw err('INVALID_NODE', `nodo ${i}: PRODUCTION exige config.consigna`);
@@ -361,6 +369,36 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
     return { evidence: ev, run, progress };
 }
 
+// ── Bitácora privada (CHP-MOOK-ESTAS-AQUI-01) ───────────────────────────────
+// Una ACTIVITY con `config.privado:true` es una BITÁCORA PRIVADA: su texto se
+// proyecta ÚNICAMENTE al participante dueño. No hay bypass por rol — ni
+// administrador ni revisor la reciben por API. La privacidad es una garantía
+// de AUTORIZACIÓN Y PROYECCIÓN (no se promete cifrado en reposo).
+//
+// FAIL-CLOSED: si el nodo no se puede resolver en la versión fijada del run,
+// se trata como privado. Ante la duda NO se proyecta a terceros.
+
+/** ¿El nodo `nodeId` de esta versión es una bitácora privada? Fail-closed. */
+export function isPrivateActivityNode(version, nodeId) {
+    const node = version ? versionNodes(version).find(n => n.id === nodeId) : null;
+    if (!node) return true;
+    return node.type === 'ACTIVITY' && node.config?.privado === true;
+}
+
+/**
+ * Proyección de la evidencia PROPIA de un run para su dueño. Es la única vía
+ * por la que el texto de una bitácora privada sale del servidor: exige que
+ * `userId` (derivado de sesión, jamás del cliente) sea el dueño del run Y de
+ * cada evidencia. No abre acceso a otros runs ni a evidencias ajenas.
+ */
+export function myEvidenceView(doc, run, userId) {
+    if (!run || !userId || run.userId !== userId) return [];
+    const v = versionOfRun(doc, run);
+    return doc.evidence
+        .filter(e => e.runId === run.id && e.userId === userId)
+        .map(e => participantEvidenceView(e, { privado: isPrivateActivityNode(v, e.nodeId) }));
+}
+
 /** Referencia (jamás copia) evidencia Leo canónica desde el estado del nodo. */
 export function attachLeoEvidenceRefs(doc, runId, nodeId, leoEvidenceIds) {
     const run = doc.runs.find(r => r.id === runId);
@@ -460,12 +498,21 @@ export function reviewEvidence(doc, evidenceId, { reviewerId, decision, feedback
 /**
  * Vista del participante sobre SU evidencia (sin reviewerId — mínimo necesario):
  * estado con texto, retroalimentación, historial de versiones y cierre.
+ *
+ * `privado` (ESTAS-AQUI-01) lo resuelve el LLAMADOR contra la versión fijada
+ * del run — nunca el cliente. Solo entonces se devuelven las `answers`, para
+ * que el dueño pueda releer su bitácora. Una ACTIVITY no privada conserva
+ * exactamente la proyección anterior (sin `answers`).
  */
-export function participantEvidenceView(ev) {
+export function participantEvidenceView(ev, { privado = false } = {}) {
     ensureReviewShape(ev);
+    const esBitacoraPrivada = privado === true && !ev.requiresReview;
     return {
         id: ev.id, nodeId: ev.nodeId, nodeType: ev.nodeType,
         requiresReview: ev.requiresReview,
+        privado: esBitacoraPrivada,
+        // Relectura del dueño: copia, para que el llamador no pueda mutar el store.
+        answers: esBitacoraPrivada ? [...(ev.payload?.answers ?? [])] : undefined,
         submittedAt: ev.submittedAt,
         status: ev.requiresReview ? ev.review.status : null,
         review: ev.review.status === 'REVIEWED'
@@ -518,8 +565,13 @@ export function reviewDetailView(doc, evidenceId, resolveName = () => null) {
     const module_ = v ? moduleOfNode(v, ev.nodeId) : null;
     const run = doc.runs.find(r => r.id === ev.runId);
     // Respuestas de actividad del MISMO run como contexto de mediación (D3).
+    // ESTAS-AQUI-01: las BITÁCORAS PRIVADAS se omiten POR COMPLETO —
+    // ni pregunta, ni respuesta, ni título del nodo. El revisor no recibe
+    // indicio alguno de su contenido, y no existe bypass por rol.
+    // `isPrivateActivityNode` es fail-closed: si el nodo no resuelve, se omite.
     const activityContext = doc.evidence
         .filter(x => x.runId === ev.runId && x.nodeType === 'ACTIVITY')
+        .filter(x => !isPrivateActivityNode(v, x.nodeId))
         .map(x => {
             const actNode = v ? versionNodes(v).find(n => n.id === x.nodeId) : null;
             return {

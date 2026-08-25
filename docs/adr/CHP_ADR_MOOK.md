@@ -289,3 +289,61 @@ Comportamiento congelado tal como está en código: una ACTIVITY respondida pers
 ### 18.5 Fuera del MVP (explícito)
 
 Versionado de Información general (`VERSIONED-EXPERIENCE-METADATA`) · reflexión efímera · F2 sugerencia de título al cambiar recurso · F3 guardado sticky · F4/M3 pulido móvil · M2 drafts estructuralmente incompletos · nuevos tipos de nodo · cambios de telemetría. Todo permanece como backlog documentado en `CHP_MOOK_PROTOTYPE_02/03`.
+
+## 19. BITÁCORA PRIVADA (2026-08-24 — CHP-MOOK-ESTAS-AQUI-01, vinculante)
+
+Sección **aditiva**: no modifica §5, §17 ni §18. Cierra el `PRIVACY-BLOCKER` demostrado en
+`CHP_MOOK_ESTAS_AQUI_00_ASSET_CAPABILITY_PREFLIGHT`, donde se probó que `activityContext`
+proyectaba las respuestas ACTIVITY íntegras al revisor administrador.
+
+### 19.1 Definición
+
+Una **bitácora privada** es un nodo `ACTIVITY` con `config.privado: true`. Su texto se proyecta
+**únicamente al participante que lo escribió**. No es un tipo de nodo nuevo, ni un store nuevo,
+ni una entidad nueva: es una propiedad opcional de la configuración de ACTIVITY.
+
+**Privada significa:** el contenido no sale del servidor hacia nadie que no sea su autor.
+Administradores, revisores, mediadores y otros participantes **no lo reciben por API**, y **no
+existe bypass por rol**. Es una garantía de **autorización y proyección**, no de criptografía:
+**no se promete cifrado en reposo** (el texto vive en el store JSON como el resto de la evidencia).
+
+### 19.2 Reglas congeladas
+
+1. **`config.privado` ausente o `false` ⇒ comportamiento actual EXACTO.** Solo el booleano `true`
+   activa; cualquier otro valor deja el campo ausente en la versión congelada. En nodos que no son
+   ACTIVITY el campo se descarta.
+2. **Se congela con la versión** (§4): una versión publicada no cambia su carácter privado.
+3. **La respuesta sigue siendo append-only** (§18.3): cada envío añade una evidencia; nada se
+   sobrescribe. Sirve para registros repetidos (p. ej. un reto de varios días).
+4. **El dueño puede releerla** — antes y después de completar el paso, desde el mismo run.
+5. **Sin edición, sin eliminación, sin compartir, sin grupo y sin galería** en el MVP.
+   La respuesta es **read-only** una vez guardada.
+6. **`reviewDetailView.activityContext` omite por completo** pregunta, respuesta y título de todo
+   nodo privado. Una `PRODUCTION` del mismo run **sigue siendo revisable con normalidad**.
+7. **FAIL-CLOSED:** si el nodo no se puede resolver en la versión fijada del run, se trata como
+   privado y no se proyecta a terceros.
+8. **Los eventos siguen llevando solo ids** (§9): jamás texto de la bitácora.
+
+### 19.3 Superficie
+
+| Superficie | Contrato |
+|---|---|
+| Studio (autoría) | Control accesible en ACTIVITY: «Bitácora privada — solo el participante podrá leer su respuesta», con nota descriptiva ligada por `aria-describedby`. Persiste con la versión y sigue editable en borradores futuros. |
+| Runtime (participante) | Antes de guardar: «Privada. Solo tú puedes leerla.», botón «Guardar para mí», «Nada se publicará automáticamente». Después: «Guardada para ti» + relectura del texto. **Sin controles de compartir** (no existen). |
+| Salida sin guardar | Confirmación accesible (`role="alertdialog"`): «Tu respuesta todavía no está guardada. ¿Quieres conservarla o salir sin guardar?» → «Conservar solo para mí» / «Salir sin guardar». |
+| Preview | Conserva los mensajes y **nunca persiste** (§18.1.7 intacto). |
+| Revisión | La bitácora no aparece en la cola ni en el detalle. |
+
+### 19.4 Evolución futura — `MOOK-JOURNAL-SHARING`
+
+Compartir una bitácora (elegir con quién, compartir con el grupo, proponer para una galería,
+y **retirar lo compartido**) queda **fuera del MVP** y **bloqueado** hasta contar con: scoping
+institucional (**M1-B**), consentimiento explícito del autor y retiro reversible con persistencia
+real. Las microcopias correspondientes quedan marcadas `FUTURE — MOOK-JOURNAL-SHARING` en el
+diseño editorial; **no se simulan controles sin backend**.
+
+### 19.5 Límite explícito del MVP
+
+Sin cifrado en reposo · sin edición ni borrado · sin compartir/galería · sin exportación ·
+sin bitácora privada en PRODUCTION (que es revisable por definición) · sin borradores no enviados
+(§17.5 se mantiene: lo no enviado no se conserva).

@@ -6,7 +6,7 @@
 
 ## Veredicto
 
-> ## 🟡 YELLOW-PRIVACY-CONTRACT-GAP
+> ## 🟡 YELLOW-PRIVACY-CONTRACT-GAP  ·  *(bloqueador CERRADO el 2026-08-24 — ver actualización abajo)*
 >
 > Los **49 activos están completos, íntegros y son cargables** (`GREEN` en el eje de activos:
 > 16/16 parejas exactas, 49/49 aceptados por el upload canónico real). La carga **se detiene**
@@ -19,6 +19,31 @@ catálogo local; lista de microcopias 38–59 no entregada).
 
 **No se rebajó ninguna promesa editorial para obtener GREEN.** Las promesas se contrastaron
 contra el código y las que no se sostienen se declaran brecha.
+
+---
+
+## ⚠️ ACTUALIZACIÓN — 2026-08-24 (CHP-MOOK-ESTAS-AQUI-01)
+
+Este preflight se emitió como `YELLOW-PRIVACY-CONTRACT-GAP`. Tres cosas cambiaron después:
+
+1. **Matriz ratificada.** La §D ya no es derivada: es la **estructura editorial canónica**
+   (siete movimientos, `A04` retirado sin renumerar, `pp. 133–152` como lectura adicional
+   opcional, `B06` acompañando `A08`–`A14`).
+2. **Decisión de alcance: PRIVACIDAD SOLAMENTE.** El `PRIVACY-BLOCKER` de §E quedó **cerrado**
+   por `CHP-MOOK-ESTAS-AQUI-01` (veredicto `GREEN-PRIVATE-JOURNAL`): `config.privado:true` en
+   ACTIVITY, filtrado fail-closed de `activityContext`, relectura exclusiva del dueño, y
+   append-only preservado. Contrato en **ADR §19**. **Las bitácoras `B00`–`B07` ya pueden
+   cargarse como ACTIVITY privadas.**
+3. **Compartir y galería → evolución futura.** Las capacidades 6–9 de §E.3 (compartir por
+   decisión separada, retirar lo compartido, compartir con grupo, proponer para galería) y las
+   microcopias correspondientes quedan marcadas **`FUTURE — MOOK-JOURNAL-SHARING`**, bloqueadas
+   hasta scoping institucional (M1-B), consentimiento explícito y retiro reversible. **No se
+   simulan controles sin backend.** La promesa de `T00` («algunas respuestas podrán compartirse»)
+   sigue pendiente de decisión editorial: ampliar alcance o reescribir el texto.
+
+**Lo que este preflight sigue reportando como abierto:** descarga de transcripciones, duración de
+audio por nodo, extractos derivados del libro (§C), y el `ASSET-GAP` del catálogo local. Las
+capacidades de edición/eliminación de bitácora **no** se habilitaron: contradicen ADR §17.5 y §18.3.
 
 ---
 
@@ -189,80 +214,76 @@ catálogo donde se monte y que su paginación cubre hasta la página 152.
 
 ---
 
-## D. Mapa de ensamblaje — matriz de siete movimientos
+## D. Mapa de ensamblaje — matriz RATIFICADA de siete movimientos
 
-> **⚠️ Estado de esta matriz: DERIVADA — requiere ratificación editorial.**
-> El documento de **estructura editorial** con la adscripción movimiento→pieza **no está en la
-> carpeta fuente** (contiene exactamente los 49 activos y nada más) ni venía en el encargo. La
-> matriz se reconstruyó desde: (1) el **único anclaje explícito entregado** — Movimiento 3 —,
-> (2) los títulos de las piezas, (3) el arco declarado en `T00`, y (4) el orden de las claves.
-> **Las columnas técnicas (tipo de nodo, configuración, terminación, privacidad) son
-> vinculantes**; la adscripción de cada pieza a su movimiento debe confirmarla el editor.
+> **✅ Estado de esta matriz: CANÓNICA (ratificada editorialmente el 2026-08-24).**
+> Sustituye a la matriz derivada de la primera emisión de este preflight. La adscripción
+> movimiento→pieza ya no es una reconstrucción: es la estructura editorial entregada y vinculante,
+> registrada también en `CHP_MOOK_ESTAS_AQUI_01_PRIVATE_JOURNAL_PRIMITIVE` §F.
 
 Reglas aplicadas: `Axx` → AUDIO · `Txx` → READING con recurso canónico original del MOOK ·
-capítulos/fragmentos → READING vinculado al libro · `Bxx` → **no asignado a ACTIVITY** (ver §E) ·
-A08–A14 expandidos como **siete piezas independientes** · preguntas y transiciones en **campos
-editables**, nunca hardcodeadas · toda la experiencia editable vía Studio, versiones y `contentId`.
+capítulos/fragmentos → READING vinculado al libro · `Bxx` → ACTIVITY **con `config.privado:true`**
+(bitácora privada; contrato en ADR §19) · A08–A14 expandidos como **siete piezas independientes** ·
+preguntas y transiciones en **campos editables**, nunca hardcodeadas · toda la experiencia editable
+vía Studio, versiones y `contentId`.
 
 | Mov. | Orden | Clave / recurso | Tipo nodo | Configuración | Terminación | Privacidad |
 |---|---:|---|---|---|---|---|
-| **0** | 1 | cap. **7–14** | READING | `resourceRef`=extracto derivado | marca explícita | pública |
-| | 2 | `A01` Son las once de la noche | AUDIO | `resourceRef` + `config.transcripcion`=A01 | marca explícita | pública |
-| | 3 | `T00` Carta de entrada | READING | `resourceRef`=texto canónico MOOK | marca explícita | pública |
-| | 4 | `B00` Bitácora de entrada | ⛔ **BLOQUEADO** | — | — | **privada — no soportada** |
-| **1** | 5 | cap. **15–33** | READING | extracto derivado | marca explícita | pública |
-| | 6 | `A02` Si no lo publicaste, ocurrió | AUDIO | + transcripción A02 | marca explícita | pública |
+| **0** | 1 | `A01` Son las once de la noche | AUDIO | `resourceRef` + `config.transcripcion`=A01 | marca explícita | pública |
+| | 2 | `T00` Carta de entrada | READING | texto canónico MOOK | marca explícita | pública |
+| | 3 | libro **pp. 7–14** | READING | extracto derivado | marca explícita | pública |
+| | 4 | `B00` Bitácora de entrada | ACTIVITY | `preguntas` + **`privado:true`** | responder y guardar | **privada** |
+| **1** | 5 | `A02` Si no lo publicaste, ocurrió | AUDIO | + transcripción A02 | marca explícita | pública |
+| | 6 | libro **pp. 15–33** | READING | extracto derivado | marca explícita | pública |
 | | 7 | `T01` La vida sin testigos | READING | texto canónico | marca explícita | pública |
-| | 8 | `B01` Algo importante que nunca publiqué | ⛔ **BLOQUEADO** | — | — | **privada — no soportada** |
-| **2** | 9 | cap. **35–40** y **41–47** | READING ×2 | extractos derivados | marca explícita | pública |
-| | 10 | `A03` Todos están hablando | AUDIO | + transcripción A03 | marca explícita | pública |
+| | 8 | `B01` Algo importante que nunca publiqué | ACTIVITY | **`privado:true`** | responder y guardar | **privada** |
+| **2** | 9 | `A03` Todos están hablando | AUDIO | + transcripción A03 | marca explícita | pública |
+| | 10 | libro **pp. 35–40** | READING | extracto derivado | marca explícita | pública |
 | | 11 | `T02` Quién eligió esta opinión | READING | texto canónico | marca explícita | pública |
 | | 12 | `T03` Cinco formas de repetir sin pensar | READING | texto canónico | marca explícita | pública |
-| | 13 | `B02` La opinión que repetí | ⛔ **BLOQUEADO** | — | — | **privada — no soportada** |
-| **3** | 14 | cap. **49–57** | READING | extracto derivado | marca explícita | pública |
-| | 15 | `A05` Noventa segundos | AUDIO | + transcripción A05 | marca explícita | pública |
-| | 16 | `T04` La pausa metódica | READING | texto canónico | marca explícita | pública |
-| | 17 | `B03` Antes de enviar | ⛔ **BLOQUEADO** | — | — | **privada + borrable — no soportada** |
-| **4** | 18 | cap. **59–67** | READING | extracto derivado | marca explícita | pública |
-| | 19 | `A06` Me estás escuchando *(ficción sonora, 4 voces)* | AUDIO | + transcripción A06 **con voces** | marca explícita | pública |
-| | 20 | `T05` El derecho a terminar una frase | READING | texto canónico | marca explícita | pública |
-| | 21 | `B04` Lo que escuché | ⛔ **BLOQUEADO** | — | — | **privada — no soportada** |
-| **5** | 22 | cap. **69–77** y **79–87** | READING ×2 | extractos derivados | marca explícita | pública |
-| | 23 | `A07.1` Si no posteo, desaparezco | AUDIO | + transcripción A07.1 | marca explícita | pública |
-| | 24 | `A07.2` Libertad no paga las cuentas | AUDIO | + transcripción A07.2 | marca explícita | pública |
-| | 25 | `A07.3` La elección de empezar a elegir | AUDIO | + transcripción A07.3 | marca explícita | pública |
-| | 26 | `T06` Elegir también es perder | READING | texto canónico | marca explícita | pública |
-| | 27 | `B05` La puerta que no quiero cerrar | ⛔ **BLOQUEADO** | — | — | **privada — no soportada** |
-| **6** | 28 | cap. **89–95** | READING | extracto derivado | marca explícita | pública |
-| | 29 | `T07` Antes del reto… pequeñas rebeldías | READING | texto canónico | marca explícita | pública |
-| | 30 | `A08` Día 1 — Una hora sin notificaciones | AUDIO `required:false` | + transcripción A08 | marca explícita | pública |
-| | 31 | `A09` Día 2 — Una sola pestaña | AUDIO `required:false` | + transcripción A09 | marca explícita | pública |
-| | 32 | `A10` Día 3 — Una fotografía que no vas a publicar | AUDIO `required:false` | + transcripción A10 | marca explícita | pública |
-| | 33 | `A11` Día 4 — Escuchar sin interrumpir | AUDIO `required:false` | + transcripción A11 | marca explícita | pública |
-| | 34 | `A12` Día 5 — Caminar sin audífonos | AUDIO `required:false` | + transcripción A12 | marca explícita | pública |
-| | 35 | `A13` Día 6 — No responder todavía | AUDIO `required:false` | + transcripción A13 | marca explícita | pública |
-| | 36 | `A14` Día 7 — Estar juntos sin pantallas | AUDIO `required:false` | + transcripción A14 | marca explícita | pública |
-| | 37 | `B06` Bitácora del reto — registro diario | ⛔ **BLOQUEADO** | — | — | **privada ×7 — no soportada** |
-| **Cierre** | 38 | cap. **113–121** | READING | extracto derivado | marca explícita | pública |
-| | 39 | `A15` Una ética de la presencia | AUDIO | + transcripción A15 | marca explícita | pública |
-| | 40 | `T08` Mi manera de estar | READING | texto canónico | marca explícita | pública |
-| | 41 | `B07` Bitácora de salida — Volver a estar | ⛔ **BLOQUEADO** | — | — | **privada + relectura de B00 — no soportada** |
-| | 42 | adicional **133–152** | READING `required:false` | extracto derivado | marca explícita | pública |
-| | 43 | Continuar en el libro completo | READING `required:false` | `resourceRef`=`content-1765751139919` | marca explícita | pública |
+| | 13 | libro **pp. 41–47** | READING | extracto derivado | marca explícita | pública |
+| | 14 | `B02` La opinión que repetí | ACTIVITY | **`privado:true`** | responder y guardar | **privada** |
+| **3** | 15 | libro **pp. 49–57** | READING | extracto derivado | marca explícita | pública |
+| | 16 | `A05` Noventa segundos | AUDIO | + transcripción A05 | marca explícita | pública |
+| | 17 | `T04` La pausa metódica | READING | texto canónico | marca explícita | pública |
+| | 18 | `B03` Antes de enviar | ACTIVITY | **`privado:true`** | responder y guardar | **privada** |
+| **4** | 19 | libro **pp. 59–67** | READING | extracto derivado | marca explícita | pública |
+| | 20 | libro **pp. 69–77** | READING | extracto derivado | marca explícita | pública |
+| | 21 | `A06` Me estás escuchando *(ficción sonora, 4 voces)* | AUDIO | + transcripción A06 **con voces** | marca explícita | pública |
+| | 22 | `T05` El derecho a terminar una frase | READING | texto canónico | marca explícita | pública |
+| | 23 | `B04` Lo que escuché | ACTIVITY | **`privado:true`** | responder y guardar | **privada** |
+| **5** | 24 | libro **pp. 79–87** | READING | extracto derivado | marca explícita | pública |
+| | 25 | `A07.1` Si no posteo, desaparezco | AUDIO | + transcripción A07.1 | marca explícita | pública |
+| | 26 | `A07.2` Libertad no paga las cuentas | AUDIO | + transcripción A07.2 | marca explícita | pública |
+| | 27 | `A07.3` La elección de empezar a elegir | AUDIO | + transcripción A07.3 | marca explícita | pública |
+| | 28 | `T06` Elegir también es perder | READING | texto canónico | marca explícita | pública |
+| | 29 | `B05` La puerta que no quiero cerrar | ACTIVITY | **`privado:true`** | responder y guardar | **privada** |
+| | 30 | libro **pp. 133–152** *(lectura adicional)* | READING `required:false` | extracto derivado | marca explícita | pública |
+| **6** | 31 | libro **pp. 89–95** | READING | extracto derivado | marca explícita | pública |
+| | 32 | `T07` Antes del reto… pequeñas rebeldías | READING | texto canónico | marca explícita | pública |
+| | 33 | `A08` Día 1 — Una hora sin notificaciones | AUDIO `required:false` | + transcripción A08 | marca explícita | pública |
+| | 34 | `A09` Día 2 — Una sola pestaña | AUDIO `required:false` | + transcripción A09 | marca explícita | pública |
+| | 35 | `A10` Día 3 — Una fotografía que no vas a publicar | AUDIO `required:false` | + transcripción A10 | marca explícita | pública |
+| | 36 | `A11` Día 4 — Escuchar sin interrumpir | AUDIO `required:false` | + transcripción A11 | marca explícita | pública |
+| | 37 | `A12` Día 5 — Caminar sin audífonos | AUDIO `required:false` | + transcripción A12 | marca explícita | pública |
+| | 38 | `A13` Día 6 — No responder todavía | AUDIO `required:false` | + transcripción A13 | marca explícita | pública |
+| | 39 | `A14` Día 7 — Estar juntos sin pantallas | AUDIO `required:false` | + transcripción A14 | marca explícita | pública |
+| | 40 | `B06` Bitácora del reto — registro diario | ACTIVITY | **`privado:true`**, repetible | cada guardado añade registro | **privada** |
+| | 41 | libro **pp. 113–121** | READING | extracto derivado | marca explícita | pública |
+| | 42 | `A15` Una ética de la presencia | AUDIO | + transcripción A15 | marca explícita | pública |
+| | 43 | `B07` Bitácora de salida — Volver a estar | ACTIVITY | **`privado:true`** | responder y guardar | **privada** |
+| | 44 | `T08` Mi manera de estar | READING | texto canónico | marca explícita | pública |
 
 **Cobertura:** los 49 activos quedan asignados — 16 AUDIO (A01–A15 incl. A07.1/.2/.3, **sin A04**),
-9 READING de textos `T`, 11 READING de extractos + 1 al libro completo, y 8 bitácoras `B`
-**bloqueadas**. La ausencia de A04 es intencional y no deja hueco en la secuencia.
+9 READING de textos `T`, 8 bitácoras `B` **como ACTIVITY privadas**, y 11 READING de extractos del
+libro. **`A04` está retirado y no se renumera nada**; su ausencia es intencional y no deja hueco.
 
-**Sobre «Movimiento 0–6 → siete módulos editables»:** el bloque de cierre (filas 38–43) constituye
-el séptimo módulo si el Movimiento 6 absorbe el reto. La matriz deja esa frontera marcada para
-ratificación. **Ambas formas son publicables**: ADR §18.1 congela que una Experiencia admite uno o
-varios módulos y **cualquier subconjunto** de los seis tipos de nodo.
+**`B06` en el Movimiento 6** acompaña las siete prácticas `A08`–`A14` como bitácora **repetible**:
+un solo nodo que acepta los siete registros append-only, sin sobrescritura, sin rachas y sin exigir
+completar las siete (verificado en §F de este preflight y en el test 6 de ESTAS-AQUI-01).
 
 **Nada de esto exige componente, ruta ni modelo especial para «¿Estás aquí?».** Son nodos
 genéricos sobre `ExperienceVersion`, exactamente como los prototipos A y B.
-
----
 
 ## E. Auditoría de privacidad — `PRIVACY-BLOCKER`
 

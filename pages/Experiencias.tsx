@@ -7,8 +7,8 @@
  * acceso. La pestaña Revisión permanece aquí de forma técnica hasta que
  * REVIEW-01 la reubique en Aula Viva.
  */
-import React, { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users } from 'lucide-react';
@@ -38,16 +38,50 @@ export const ProgressBar: React.FC<{ done: number; total: number }> = ({ done, t
 );
 
 /**
+ * ESTAS-AQUI-01 — bitácora privada YA GUARDADA, releíble solo por su autor.
+ * El texto llega en `e.answers`, que el backend proyecta ÚNICAMENTE al dueño
+ * del run. Sin acciones de compartir: no existen en este MVP.
+ */
+export const PrivateJournalEntry: React.FC<{ e: any; node: any }> = ({ e, node }) => {
+    const preguntas = (node?.config?.preguntas ?? []).map((p: any) => p?.texto);
+    return (
+        <div className="space-y-2">
+            <p className="text-emerald-700 font-medium">Guardada para ti.</p>
+            <p className="inline-flex items-center gap-1 text-xs font-bold text-gray-600 dark:text-gray-300">
+                <Lock size={12} aria-hidden /> Privada. Solo tú puedes leerla.
+            </p>
+            <details className="rounded-lg bg-white dark:bg-gray-800 p-2">
+                <summary className="text-sm font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer">Leer lo que escribí</summary>
+                <dl className="mt-2 space-y-2">
+                    {(e.answers ?? []).map((a: string, i: number) => (
+                        <div key={i}>
+                            {preguntas[i] && <dt className="text-xs text-gray-500 dark:text-gray-400">{preguntas[i]}</dt>}
+                            <dd className="text-sm text-gray-700 dark:text-gray-200 whitespace-pre-line">{a}</dd>
+                        </div>
+                    ))}
+                </dl>
+            </details>
+        </div>
+    );
+};
+
+/**
  * NodeShell — nodo actual/expandido: contexto, instrucción, contenido, acción.
  * `preview` (STUDIO-01, C11): mismo renderer sin efectos — completar/enviar
  * NO llaman a la API (cero runs, cero evidencia, cero eventos).
  */
-export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false }) => {
+export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean; onUnsaved?: (h: { save: () => Promise<void> } | null) => void }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false, onUnsaved }) => {
     const [answers, setAnswers] = useState<string[]>([]);
     const [text, setText] = useState('');
     const [msg, setMsg] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const myEvidence = (route.evidence || []).filter((e: any) => e.nodeId === node.id);
+
+    // ESTAS-AQUI-01 — bitácora privada: el backend es la autoridad
+    // (`config.privado` viaja en la versión congelada); aquí solo se ajusta el
+    // lenguaje y se protege el texto sin guardar, que no se recupera.
+    const privado = node.type === 'ACTIVITY' && node.config?.privado === true;
+    const sinGuardar = privado && answers.some((a) => (a ?? '').trim().length > 0);
 
     const complete = async () => {
         if (preview) { setMsg('Vista previa — nada de lo que hagas aquí se guarda.'); return; }
@@ -61,8 +95,30 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
         setBusy(true); setMsg(null);
         const r = await dataService.submitExperienceEvidence(route.runId, node.id, payload);
         if (!r.ok) setMsg(r.error ?? 'No se pudo enviar');
+        else if (privado) setAnswers([]); // guardada: el borrador local deja de estar «sin guardar»
         setBusy(false); refresh();
     };
+
+    // Guardado de la bitácora accesible desde el aviso de salida, sin recrear
+    // la función en cada render (evita re-suscribir al padre en bucle).
+    const answersRef = useRef(answers);
+    answersRef.current = answers;
+    const saveRef = useRef(async () => { await send({ answers: answersRef.current }); });
+    saveRef.current = async () => { await send({ answers: answersRef.current }); };
+
+    useEffect(() => {
+        if (!onUnsaved || preview) return;
+        onUnsaved(sinGuardar ? { save: () => saveRef.current() } : null);
+        return () => onUnsaved(null);
+    }, [sinGuardar, onUnsaved, preview]);
+
+    // Cierre de pestaña o recarga con texto privado sin guardar.
+    useEffect(() => {
+        if (!sinGuardar || preview) return;
+        const h = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+        window.addEventListener('beforeunload', h);
+        return () => window.removeEventListener('beforeunload', h);
+    }, [sinGuardar, preview]);
 
     return (
         <div className="rounded-2xl border-2 border-indigo-300 dark:border-indigo-700 bg-white dark:bg-gray-800 p-5 shadow-md">
@@ -111,6 +167,12 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </button>
             )}
 
+            {node.type === 'ACTIVITY' && privado && (
+                <p className="mt-2 inline-flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-900 px-2 py-1 text-xs font-bold text-gray-700 dark:text-gray-200">
+                    <Lock size={12} aria-hidden /> Privada. Solo tú puedes leerla.
+                </p>
+            )}
+
             {node.type === 'ACTIVITY' && (
                 <div className="space-y-3 mt-2">
                     {(node.config?.preguntas ?? []).map((p: any, i: number) => (
@@ -120,8 +182,14 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                                 rows={2} className="w-full mt-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
                         </div>
                     ))}
-                    <p id={`act-${node.id}-note`} role="note" className="text-xs text-gray-500 dark:text-gray-400">Si respondes, tu reflexión se guardará como parte de tu recorrido. No se enviará a revisión.</p>
-                    <button onClick={() => send({ answers })} disabled={busy} aria-describedby={`act-${node.id}-note`} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Enviar respuestas</button>
+                    <p id={`act-${node.id}-note`} role="note" className="text-xs text-gray-500 dark:text-gray-400">
+                        {privado
+                            ? 'Nada se publicará automáticamente. En esta versión la respuesta no se puede editar, eliminar ni compartir.'
+                            : 'Si respondes, tu reflexión se guardará como parte de tu recorrido. No se enviará a revisión.'}
+                    </p>
+                    <button onClick={() => send({ answers })} disabled={busy} aria-describedby={`act-${node.id}-note`} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">
+                        {privado ? 'Guardar para mí' : 'Enviar respuestas'}
+                    </button>
                 </div>
             )}
 
@@ -145,7 +213,9 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 <div key={e.id} className="mt-3 text-sm rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
                     {e.requiresReview
                         ? <ProductionStatus e={e} compact />
-                        : <span className="text-emerald-700">Respuestas enviadas.</span>}
+                        : e.privado
+                            ? <PrivateJournalEntry e={e} node={node} />
+                            : <span className="text-emerald-700">Respuestas enviadas.</span>}
                 </div>
             ))}
             {msg && <p className="mt-2 text-sm text-red-600" role="alert">{msg}</p>}
@@ -240,16 +310,30 @@ const MyProductionPanel: React.FC<{ route: any; refresh: () => void }> = ({ rout
     );
 };
 
-/** Fila compacta de nodo (no actual). */
-export const NodeRow: React.FC<{ node: any }> = ({ node }) => (
-    <div className={`flex items-center gap-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3 ${node.state === 'locked' ? 'opacity-55' : ''}`}>
-        {node.state === 'completed' ? <CheckCircle2 size={18} className="text-emerald-600" aria-hidden /> : node.state === 'locked' ? <Lock size={16} className="text-gray-400" aria-hidden /> : <Circle size={16} className="text-gray-400" aria-hidden />}
-        <span className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">{NODE_ICON[node.type]} {node.title}</span>
-        <span className="ml-auto text-xs text-gray-500">
-            {node.state === 'completed' ? 'Completado' : node.state === 'locked' ? 'Bloqueado' : node.required ? 'Pendiente' : 'Opcional'}
-        </span>
-    </div>
-);
+/**
+ * Fila compacta de nodo (no actual). Si el nodo es una BITÁCORA PRIVADA ya
+ * guardada, el dueño puede releerla aquí: la relectura debe seguir disponible
+ * después de completar el paso, no solo mientras es el nodo actual.
+ */
+export const NodeRow: React.FC<{ node: any; route?: any }> = ({ node, route }) => {
+    const bitacoras = (route?.evidence ?? []).filter((e: any) => e.nodeId === node.id && e.privado);
+    return (
+        <div className={`rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3 ${node.state === 'locked' ? 'opacity-55' : ''}`}>
+            <div className="flex items-center gap-3">
+                {node.state === 'completed' ? <CheckCircle2 size={18} className="text-emerald-600" aria-hidden /> : node.state === 'locked' ? <Lock size={16} className="text-gray-400" aria-hidden /> : <Circle size={16} className="text-gray-400" aria-hidden />}
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">{NODE_ICON[node.type]} {node.title}</span>
+                <span className="ml-auto text-xs text-gray-500">
+                    {node.state === 'completed' ? 'Completado' : node.state === 'locked' ? 'Bloqueado' : node.required ? 'Pendiente' : 'Opcional'}
+                </span>
+            </div>
+            {bitacoras.map((e: any) => (
+                <div key={e.id} className="mt-2 text-sm rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
+                    <PrivateJournalEntry e={e} node={node} />
+                </div>
+            ))}
+        </div>
+    );
+};
 
 const Experiencias: React.FC = () => {
     const { user } = useAuth();
@@ -259,6 +343,12 @@ const Experiencias: React.FC = () => {
     const [route, setRoute] = useState<any | null>(null);
     const [showRouteAfterClose, setShowRouteAfterClose] = useState(false);
     const currentRef = useRef<HTMLDivElement | null>(null);
+    const navigate = useNavigate();
+    // ESTAS-AQUI-01: bitácora privada con texto sin guardar. El texto no se
+    // recupera si se pierde, así que salir de la ruta pide confirmación.
+    const [unsaved, setUnsaved] = useState<{ save: () => Promise<void> } | null>(null);
+    const [askExit, setAskExit] = useState(false);
+    const onUnsaved = useCallback((h: { save: () => Promise<void> } | null) => setUnsaved(h), []);
 
     // REVIEW-01: la pestaña técnica de revisión se retiró de esta página (D1);
     // la revisión vive en Aula Viva → Producciones con autorización backend.
@@ -315,7 +405,27 @@ const Experiencias: React.FC = () => {
     // ── Ruta (G/B3) ──
     const renderRoute = () => (
         <div>
-            <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</Link>
+            {unsaved
+                ? <button type="button" onClick={() => setAskExit(true)} className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</button>
+                : <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</Link>}
+
+            {askExit && (
+                <div role="alertdialog" aria-modal="true" aria-labelledby="salir-sin-guardar-titulo"
+                    className="mb-4 rounded-2xl border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 p-4">
+                    <p id="salir-sin-guardar-titulo" className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                        Tu respuesta todavía no está guardada. ¿Quieres conservarla o salir sin guardar?
+                    </p>
+                    <div className="flex flex-wrap gap-2 mt-3">
+                        <button type="button" autoFocus
+                            onClick={async () => { await unsaved?.save(); setAskExit(false); }}
+                            className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold">Conservar solo para mí</button>
+                        <button type="button"
+                            onClick={() => { setAskExit(false); setUnsaved(null); navigate('/biblioteca'); }}
+                            className="px-4 py-2 rounded-xl border border-amber-400 text-amber-900 dark:text-amber-200 text-sm font-bold">Salir sin guardar</button>
+                    </div>
+                </div>
+            )}
+
             {route.status === 'completed' && renderCierre()}
             {(route.status !== 'completed' || showRouteAfterClose) && (
                 <>
@@ -335,8 +445,8 @@ const Experiencias: React.FC = () => {
                                 </div>
                                 <div className="space-y-3">
                                     {m.nodes.map((n: any) => n.state === 'current'
-                                        ? <div key={n.id} ref={currentRef}><NodeShell node={n} moduleTitle={m.title} experienceTitle={detail?.title ?? 'Experiencia'} route={route} refresh={refresh} /></div>
-                                        : <NodeRow key={n.id} node={n} />)}
+                                        ? <div key={n.id} ref={currentRef}><NodeShell node={n} moduleTitle={m.title} experienceTitle={detail?.title ?? 'Experiencia'} route={route} refresh={refresh} onUnsaved={onUnsaved} /></div>
+                                        : <NodeRow key={n.id} node={n} route={route} />)}
                                 </div>
                             </section>
                         ))}

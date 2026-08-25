@@ -282,6 +282,23 @@ const NodeEditor: React.FC<{
                                 className="text-sm font-bold text-indigo-600 hover:underline">+ Añadir pregunta</button>
                         </div>
                     </fieldset>
+                    {/* ESTAS-AQUI-01 — bitácora privada: la respuesta solo la lee su autor. */}
+                    <div className="rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
+                        <label htmlFor={`${errKey}-privado`} className="flex items-start gap-2 cursor-pointer">
+                            <input id={`${errKey}-privado`} type="checkbox" checked={node.config.privado === true}
+                                aria-describedby={`${errKey}-privado-note`}
+                                onChange={e => setCfg({ privado: e.target.checked })}
+                                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600" />
+                            <span className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                                Bitácora privada — solo el participante podrá leer su respuesta
+                            </span>
+                        </label>
+                        <p id={`${errKey}-privado-note`} className="text-xs text-gray-500 dark:text-gray-400 mt-1 pl-6">
+                            Ni tú, ni el equipo revisor, ni los mediadores verán el texto: no aparecerá en Producciones
+                            ni como contexto de revisión. En esta versión la respuesta no se puede editar, eliminar ni
+                            compartir.
+                        </p>
+                    </div>
                 </>
             )}
 

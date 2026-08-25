@@ -1629,10 +1629,11 @@ function emitCompletionEvents(run, nodeId, nodeType, progress, moduleId) {
 
 // Resumen de evidencias del PROPIO run (el dueño ve estado/retroalimentación/
 // historial de SUS entregas — REVIEW-01: proyección sin reviewerId).
-function myEvidenceSummary(doc, run) {
-    return doc.evidence
-        .filter(e => e.runId === run.id)
-        .map(e => experienceStore.participantEvidenceView(e));
+// La proyección de la evidencia propia vive en el store (única sede de la
+// regla de privacidad): exige dueño de sesión y resuelve la bitácora privada
+// contra la versión FIJADA del run. Nunca proyecta evidencia ajena.
+function myEvidenceSummary(doc, run, userId) {
+    return experienceStore.myEvidenceView(doc, run, userId);
 }
 
 const mookErrStatus = (e) => (
@@ -1746,7 +1747,7 @@ app.post('/api/experiences/:id/run', requireUserAuth, async (req, res) => {
             void emitExperienceStarted({ userId: req.user.id, experienceId: out.run.experienceId, experienceVersionId: out.run.experienceVersionId, runId: out.run.id }, log);
             emitCurrentNodeStarted(doc, out.run);
         }
-        res.status(out.created ? 201 : 200).json({ ...experienceStore.computeRouteView(doc, out.run, contentList), evidence: myEvidenceSummary(doc, out.run) });
+        res.status(out.created ? 201 : 200).json({ ...experienceStore.computeRouteView(doc, out.run, contentList), evidence: myEvidenceSummary(doc, out.run, req.user.id) });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
@@ -1755,7 +1756,7 @@ app.get('/api/experiences/:id/route', requireUserAuth, (req, res) => {
         const doc = readMook();
         const run = doc.runs.find(r => r.userId === req.user.id && r.experienceId === req.params.id && r.status !== 'abandoned');
         if (!run) return res.status(404).json({ error: 'Sin run activo — inicia la Experiencia' });
-        res.json({ ...experienceStore.computeRouteView(doc, run, readJSON(DB_FILE)), evidence: myEvidenceSummary(doc, run) });
+        res.json({ ...experienceStore.computeRouteView(doc, run, readJSON(DB_FILE)), evidence: myEvidenceSummary(doc, run, req.user.id) });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
