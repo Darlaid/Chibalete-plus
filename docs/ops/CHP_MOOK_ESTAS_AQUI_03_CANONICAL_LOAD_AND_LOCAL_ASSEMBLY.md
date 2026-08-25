@@ -6,7 +6,7 @@ cero importadores permanentes. **Cero producción. Sin deploy.**
 
 ## A. Veredicto
 
-> ## 🟡 YELLOW-BOOK-SOURCE-UNAVAILABLE
+> ## 🟡 YELLOW-BOOK-SOURCE-UNAVAILABLE  ·  *(CERRADO el 2026-08-25 — ver ANEXO DE CIERRE 03B al final)*
 >
 > Todo lo que **no** depende del libro está hecho, cargado por rutas canónicas, ensamblado,
 > publicado en local y demostrado end-to-end: **32 recursos canónicos**, **46 nodos**, **7
@@ -459,3 +459,376 @@ No se escribió JSON a mano.
 4. Resolver `YELLOW-EDITORIAL-AMBIGUITY` (§G.3): ampliar alcance o corregir las dos frases.
 5. Verificación humana: escucha de los 16 MP3 contra su transcripción.
 6. Publicar la versión completa **en local** y repetir el E2E.
+
+---
+
+# ANEXO DE CIERRE — CHP-MOOK-ESTAS-AQUI-03B
+
+**Fecha:** 2026-08-25 · **Baseline:** `5beee8d` · Unidad de contenido y autoría, **sin código nuevo**.
+
+## A. Veredicto: 🟢 `GREEN-BOOK-EXCERPTS-V2-LOCAL`
+
+**El `YELLOW-BOOK-SOURCE-UNAVAILABLE` de la unidad 03 queda CERRADO.** Con el nuevo archivo
+maestro se crearon el padre canónico local y los **diez extractos**, se insertaron en sus
+posiciones, se corrigieron las dos promesas editoriales incompatibles y se demostró la versión
+completa end-to-end en local.
+
+> El YELLOW histórico **se conserva** en el cuerpo de este documento como registro de por qué la
+> unidad 03 no pudo cerrarlo (producción devolvía 401). Este anexo documenta su cierre.
+
+**No aplican:** `YELLOW-BOOK-SOURCE-INVALID` (fuente íntegra) · `YELLOW-EXCERPT-BOUNDARY` (los diez
+límites son inequívocos: cada capítulo tiene su encabezado en línea propia) · `YELLOW-EDITORIAL-COPY`
+(una sola interpretación posible en ambas correcciones) · `YELLOW-PARENT-CONTRACT` (`parentId`
+resoluble) · `YELLOW-RUNTIME-CONTRACT-GAP` (cero cambios de React, backend, store o contrato) ·
+`RED-PRIVACY` · `RED-REGRESSION`.
+
+Pendiente separado, **no bloqueante**: **`YELLOW-HUMAN-AUDIO-QA`** (§K.2).
+
+**Desviación declarada:** la versión completa es **v3**, no v2. Publiqué v2 antes de comprobar que
+la corrección de `B00` llegara al participante; como una versión publicada es inmutable por
+contrato, la corrección se completó en **v3** en lugar de mutar v2. Detalle y justificación en §D.2.
+
+## B. Baseline e inmutabilidad de v1
+
+| Verificación | Resultado |
+|---|---|
+| Rama / HEAD | `chp/mook-contract-00`, `5beee8d`, **ahead=0 behind=0** ✅ |
+| Árbol | limpio salvo la carpeta editorial untracked ✅ |
+| Suites baseline | GREEN ✅ |
+| **v1 `expv-1787621835613-1g389f`** | **46 nodos, `published`** — sin tocar ✅ |
+| **Run v1 `run-1787622134590-0kygq6`** | pineado a v1, `completed`, **14 evidencias** — sin tocar ✅ |
+| v1 revertida / archivada / editada / borrada | **NO** ✅ |
+| 32 recursos previos | intactos; sus `contentId` no cambiaron ✅ |
+
+La inmutabilidad se comprobó **después** de crear v2 y v3: v1 conserva sus 46 nodos, su estado y
+las 14 evidencias de su run.
+
+## C. Fuente completa
+
+`Me desconecto, luego existo.txt` — **`SOURCE-ONLY`**: no es asset faltante ni drift del manifest
+49/49 (la carpeta pasa de 49 a 50 archivos; los 49 activos editoriales siguen verificados).
+
+| Campo | Valor |
+|---|---|
+| **SHA-256** | `6a9734e4193056358bef8324b63162885c8385af1fec37b3ba374083535c5ce7` |
+| Bytes | 148 647 |
+| Codificación | **UTF-8 sin BOM** |
+| Saltos de línea | **CRLF** (491) · 0 LF sueltos |
+| Palabras | 24 272 · 145 713 caracteres · 492 líneas |
+
+**Divisiones internas detectadas** (encabezado en línea propia, sin ambigüedad): Prólogo ·
+*Aparecer o estar: el nuevo cogito* · *La multitud y la angustia* · *Mil pestañas abiertas* ·
+*El silencio cartesiano* · *Simone Weil: atención como justicia* · *Presencias ausentes* ·
+*Elegir un yo: Kierkegaard en la era del FOMO* · *Prácticas de atención* · *Me desconecto, luego
+existo (otra vez)* · Epílogo · Glosario · *Diálogos imposibles*.
+
+**Artefactos mecánicos de extracción: cero** — 0 números de página sueltos, 0 guiones de corte,
+0 encabezados/pies repetidos, 0 espacios múltiples, 0 caracteres de control. Los 4 separadores
+`* * *` son cortes editoriales legítimos y se conservan.
+
+**El TXT no conserva cortes de página**, así que las páginas impresas son **exclusivamente
+metadata del operador**; no se infirió ningún corte. El archivo **no se modificó, no se convirtió,
+no se versionó** y **no se consultó producción**.
+
+## D. Correcciones editoriales B00 / B03
+
+Ambas promesas eran **inequívocas** (una sola ocurrencia). Cada reemplazo se validó revirtiéndolo
+en memoria y comparándolo con el original: el resto del texto quedó byte a byte idéntico.
+
+| Archivo | SHA-256 antes | SHA-256 después | Bytes | BOM | CRLF |
+|---|---|---|---|---|---|
+| `B00. Bitácora de entrada…` | `015593776c79…` | `054ad2acd9fa…` | 718 → 772 | no → no | 12 → 12 |
+| `B03. Bitácora — Antes de enviar` | `0edce3e4bd6d…` | `6cee299fe3d9…` | 624 → 646 | no → no | 14 → 14 |
+
+- **B00:** «Nadie más podrá verla a menos que tú decidas compartirla» → **«Tu respuesta será
+  privada. Solo tú podrás leerla dentro de este recorrido. Nada se publicará automáticamente»**.
+- **B03:** «Al final puedes copiarlo, guardarlo o borrarlo.» → **«Puedes copiar este borrador o
+  conservarlo aquí para volver después.»**
+
+Verificado: las palabras `compartir` y `borrar` **ya no aparecen** en sus archivos. Sin backups
+dentro de la carpeta (copias en el scratchpad de sesión) y **fuera de Git**.
+
+### D.2 Por qué la versión completa es v3
+
+La corrección de `B00` vive en una **línea de directiva de autoría** («Al guardar la bitácora,
+mostrar: «…»»), que el criterio establecido en la unidad 03 **excluye** de los campos visibles.
+Al regenerar `B00` desde el TXT corregido, el nodo quedó **idéntico a v1**: la corrección no
+llegaba al participante y §H («B00 muestra exclusivamente la promesa privada corregida») no se
+cumplía.
+
+Lo detecté **después** de publicar v2. Como una versión publicada es inmutable por contrato
+(y respetarlo es justamente lo que esta unidad debe demostrar), **no mutéla v2**: creé **v3**,
+idéntica a v2 salvo que `B00` incorpora a su instrucción el **payload citado** de la directiva.
+
+- **v2 `expv-1787627232665-q0shao`** — 56 nodos, publicada; `B03` corregida, `B00` sin la
+  microcopia visible. Sin runs. Queda como intermedia inmutable.
+- **v3 `expv-1787627328985-qgaiki`** — 56 nodos, publicada, **`currentVersionId`**. Difiere de v2
+  **solo en `n-b00`** (verificado por comparación nodo a nodo).
+
+## E. Padre canónico local
+
+| Campo | Valor |
+|---|---|
+| Título | `Me desconecto, luego existo` |
+| **contentId local** | `content-1787627190805-00` |
+| contentId **productivo conocido** | `content-1765751139919` (no reutilizado: el sistema no admite fijar ese id de forma natural en local) |
+| Tipo canónico | `libro` (ya existente; **sin enums nuevos**) |
+| `standalone` | `false` |
+| SHA-256 del TXT fuente | `6a9734e4193056…535c5ce7` |
+| Autoría / edición | tomadas del propio archivo (`Latitud Cero`); **nada inventado**, sin paginación fabricada |
+| Referenciado como paso del mook | **NO** — solo actúa como padre de los extractos |
+
+**→ No aplica `YELLOW-PARENT-CONTRACT`:** los diez extractos resuelven su `parentId` contra este
+registro, presente en el catálogo local.
+
+### G.1 Matriz final de v3 (56 nodos)
+
+| Módulo | # | Nodo | Tipo | Título | Privado |
+|---|---:|---|---|---|---|
+| `m0` | 1 | `n-a01` | AUDIO | A01. Son las once de la noche | — |
+| `m0` | 2 | `n-t00` | READING | Texto del mook · Carta de entrada | — |
+| `m0` | 3 | `n-libro-ex01` | READING | Libro · Prólogo. Me desconecto, luego existo | — |
+| `m0` | 4 | `n-b00` | ACTIVITY | Bitácora · B00 | **sí** |
+| `m0` | 5 | `n-trans-m0` | READING | Transición · M0 | — |
+| `m1` | 1 | `n-a02` | AUDIO | A02. Si no lo publicaste, ocurrió | — |
+| `m1` | 2 | `n-libro-ex02` | READING | Libro · Aparecer o estar: el nuevo cogito | — |
+| `m1` | 3 | `n-t01` | READING | Texto del mook · La vida sin testigos | — |
+| `m1` | 4 | `n-b01` | ACTIVITY | Bitácora · B01 | **sí** |
+| `m1` | 5 | `n-trans-m1` | READING | Transición · M1 | — |
+| `m2` | 1 | `n-a03` | AUDIO | A03. Todos están hablando | — |
+| `m2` | 2 | `n-libro-ex03` | READING | Libro · La multitud y la angustia | — |
+| `m2` | 3 | `n-t02` | READING | Texto del mook · Quién eligió esta opinión | — |
+| `m2` | 4 | `n-t03` | READING | Texto del mook · Cinco formas de repetir sin pensar | — |
+| `m2` | 5 | `n-libro-ex04` | READING | Libro · Mil pestañas abiertas: lo dividido no elige | — |
+| `m2` | 6 | `n-b02` | ACTIVITY | Bitácora · B02 | **sí** |
+| `m2` | 7 | `n-trans-m2` | READING | Transición · M2 | — |
+| `m3` | 1 | `n-libro-ex05` | READING | Libro · El silencio cartesiano: detenerse para empezar | — |
+| `m3` | 2 | `n-a05` | AUDIO | A05. Noventa segundos | — |
+| `m3` | 3 | `n-t04` | READING | Texto del mook · La pausa metódica | — |
+| `m3` | 4 | `n-b03` | ACTIVITY | Bitácora · B03 | **sí** |
+| `m3` | 5 | `n-trans-m3` | READING | Transición · M3 | — |
+| `m4` | 1 | `n-libro-ex06` | READING | Libro · Simone Weil: atención como justicia | — |
+| `m4` | 2 | `n-libro-ex07` | READING | Libro · Presencias ausentes: estar sin estar | — |
+| `m4` | 3 | `n-a06` | AUDIO | A06. Me estás escuchando | — |
+| `m4` | 4 | `n-t05` | READING | Texto del mook · El derecho a terminar una frase | — |
+| `m4` | 5 | `n-b04` | ACTIVITY | Bitácora · B04 | **sí** |
+| `m4` | 6 | `n-trans-m4` | READING | Transición · M4 | — |
+| `m5` | 1 | `n-libro-ex08` | READING | Libro · Elegir un yo: Kierkegaard en la era del FOMO | — |
+| `m5` | 2 | `n-a07-1` | AUDIO | A07.1. Si no posteo, desaparezco | — |
+| `m5` | 3 | `n-a07-2` | AUDIO | A07.2. Libertad no paga las cuentas | — |
+| `m5` | 4 | `n-a07-3` | AUDIO | A07.3. La elección de empezar a elegir | — |
+| `m5` | 5 | `n-t06` | READING | Texto del mook · Elegir también es perder | — |
+| `m5` | 6 | `n-b05` | ACTIVITY | Bitácora · B05 | **sí** |
+| `m5` | 7 | `n-trans-m5` | READING | Transición · M5 | — |
+| `m6` | 1 | `n-libro-ex09` | READING | Libro · Prácticas de atención: pequeñas rebeldías | — |
+| `m6` | 2 | `n-t07` | READING | Texto del mook · Antes del reto... pequeñas rebeldías | — |
+| `m6` | 3 | `n-trans-m6` | READING | Transición · M6 | — |
+| `m6` | 4 | `n-a08` | AUDIO | A08. Día 1 — Una hora sin notificaciones | — |
+| `m6` | 5 | `n-b06-dia-1` | ACTIVITY | Bitácora del reto · Día 1 | **sí** |
+| `m6` | 6 | `n-a09` | AUDIO | A09. Día 2 — Una sola pestaña | — |
+| `m6` | 7 | `n-b06-dia-2` | ACTIVITY | Bitácora del reto · Día 2 | **sí** |
+| `m6` | 8 | `n-a10` | AUDIO | A10. Día 3 — Una fotografía que no vas a publicar | — |
+| `m6` | 9 | `n-b06-dia-3` | ACTIVITY | Bitácora del reto · Día 3 | **sí** |
+| `m6` | 10 | `n-a11` | AUDIO | A11. Día 4 — Escuchar sin interrumpir | — |
+| `m6` | 11 | `n-b06-dia-4` | ACTIVITY | Bitácora del reto · Día 4 | **sí** |
+| `m6` | 12 | `n-a12` | AUDIO | A12. Día 5 — Caminar sin audífonos | — |
+| `m6` | 13 | `n-b06-dia-5` | ACTIVITY | Bitácora del reto · Día 5 | **sí** |
+| `m6` | 14 | `n-a13` | AUDIO | A13. Día 6 — No responder todavía | — |
+| `m6` | 15 | `n-b06-dia-6` | ACTIVITY | Bitácora del reto · Día 6 | **sí** |
+| `m6` | 16 | `n-a14` | AUDIO | A14. Día 7 — Estar juntos sin pantallas | — |
+| `m6` | 17 | `n-b06-dia-7` | ACTIVITY | Bitácora del reto · Día 7 | **sí** |
+| `m6` | 18 | `n-libro-ex10` | READING | Libro · Epílogo — Una ética de la presencia | — |
+| `m6` | 19 | `n-a15` | AUDIO | A15. Una ética de la presencia | — |
+| `m6` | 20 | `n-b07` | ACTIVITY | Bitácora · B07 | **sí** |
+| `m6` | 21 | `n-t08` | READING | Texto del mook · Mi manera de estar | — |
+
+## F. Manifest de extractos
+
+### F.2 Manifest de los diez extractos
+
+| # | Título | contentId | SHA-256 (12) | Palabras | Págs. | Encabezado de origen | Posición |
+|---:|---|---|---|---:|---|---|---|
+| 1 | Libro · Prólogo. Me desconecto, luego existo | `content-1787627190901-01` | `47e73ce82d0b` | 1387 | 7–14 | «Prólogo. Me desconecto, luego existo» | M0 · entre T00 y B00 |
+| 2 | Libro · Aparecer o estar: el nuevo cogito | `content-1787627190922-02` | `13ef9e9e5bd0` | 3634 | 15–33 | «Aparecer o estar: el nuevo cogito» | M1 · entre A02 y T01 |
+| 3 | Libro · La multitud y la angustia | `content-1787627190941-03` | `6c9fda952939` | 1137 | 35–40 | «La multitud y la angustia» | M2 · entre A03 y T02 |
+| 4 | Libro · Mil pestañas abiertas: lo dividido no elige | `content-1787627190958-04` | `87f9579ecc9b` | 1380 | 41–47 | «Mil pestañas abiertas: lo dividido no elige» | M2 · entre T03 y B02 |
+| 5 | Libro · El silencio cartesiano: detenerse para empezar | `content-1787627190975-05` | `fad2f33d8fb7` | 1685 | 49–57 | «El silencio cartesiano: detenerse para empezar» | M3 · antes de A05 |
+| 6 | Libro · Simone Weil: atención como justicia | `content-1787627190991-06` | `44618b03d1c4` | 1677 | 59–67 | «Simone Weil: atención como justicia» | M4 · antes de Presencias ausentes |
+| 7 | Libro · Presencias ausentes: estar sin estar | `content-1787627191006-07` | `a0cc5fa9c906` | 1515 | 69–77 | «Presencias ausentes: estar sin estar» | M4 · antes de A06 |
+| 8 | Libro · Elegir un yo: Kierkegaard en la era del FOMO | `content-1787627191021-08` | `36cc16ae3e38` | 1530 | 79–87 | «Elegir un yo: Kierkegaard en la era del FOMO» | M5 · antes de A07.1 |
+| 9 | Libro · Prácticas de atención: pequeñas rebeldías | `content-1787627191035-09` | `933b26a70b96` | 1146 | 89–95 | «Prácticas de atención: pequeñas rebeldías» | M6 · antes de T07 |
+| 10 | Libro · Epílogo — Una ética de la presencia | `content-1787627191051-10` | `c1b1b5295527` | 1539 | 113–121 | «Epílogo – Una ética de la presencia» | M6 · antes de A15 |
+
+Todos con `parentId` = `content-1787627190805-00` y `standalone:false`.
+
+#### Límites textuales (primeras y últimas 12 palabras)
+
+**1. Libro · Prólogo. Me desconecto, luego existo** · pp. 7–14 · 1387 palabras
+- inicio: «Prólogo. Me desconecto, luego existo Son las once de la noche y…»
+- final: «…un gesto mínimo, ese gesto puede ser el inicio de la libertad.»
+
+**2. Libro · Aparecer o estar: el nuevo cogito** · pp. 15–33 · 3634 palabras
+- inicio: «Aparecer o estar: el nuevo cogito Vivimos en un mundo donde aparecer…»
+- final: «…liberarnos de la ansiedad del aparecer y devolvernos la serenidad del estar.»
+
+**3. Libro · La multitud y la angustia** · pp. 35–40 · 1137 palabras
+- inicio: «La multitud y la angustia Imagina que abres tu celular y entras…»
+- final: «…topic, sino en atrevernos a decidir quiénes somos más allá de él.»
+
+**4. Libro · Mil pestañas abiertas: lo dividido no elige** · pp. 41–47 · 1380 palabras
+- inicio: «Mil pestañas abiertas: lo dividido no elige Abres el computador para hacer…»
+- final: «…¿cuántas pestañas abiertas puedo cerrar para empezar a estar de verdad aquí?»
+
+**5. Libro · El silencio cartesiano: detenerse para empezar** · pp. 49–57 · 1685 palabras
+- inicio: «El silencio cartesiano: detenerse para empezar Imagina que estás en medio de…»
+- final: «…silencio, aunque sea breve, podemos escuchar la voz más importante: la nuestra.»
+
+**6. Libro · Simone Weil: atención como justicia** · pp. 59–67 · 1677 palabras
+- inicio: «Simone Weil: atención como justicia Simone Weil escribió alguna vez que la…»
+- final: «…revolucionario. Y quizá, como ella decía, la forma más pura de generosidad.»
+
+**7. Libro · Presencias ausentes: estar sin estar** · pp. 69–77 · 1515 palabras
+- inicio: «Presencias ausentes: estar sin estar Estás sentado en una mesa con varios…»
+- final: «…un mundo de presencias ausentes, ese gesto es más necesario que nunca.»
+
+**8. Libro · Elegir un yo: Kierkegaard en la era del FOMO** · pp. 79–87 · 1530 palabras
+- inicio: «Elegir un yo: Kierkegaard en la era del FOMO Estás mirando tu…»
+- final: «…acto de elegir, aunque sintamos la angustia, empezamos a existir de verdad.»
+
+**9. Libro · Prácticas de atención: pequeñas rebeldías** · pp. 89–95 · 1146 palabras
+- inicio: «Prácticas de atención: pequeñas rebeldías Imagina que estás estudiando para un examen.…»
+- final: «…en un tiempo de dispersión masiva, ese gesto ya es una revolución.»
+
+**10. Libro · Epílogo — Una ética de la presencia** · pp. 113–121 · 1539 palabras
+- inicio: «Epílogo – Una ética de la presencia Hay una escena que podríamos…»
+- final: «…importa. Y entonces, quizá, puedas decirlo con convicción: me desconecto, luego existo.»
+
+## G. Estructura y conteos de v3
+
+| Elemento | Vinculante | Observado |
+|---|---:|---:|
+| AUDIO | 16 | **16** ✅ |
+| READING (9 T + 7 transiciones + 10 extractos) | 26 | **26** ✅ |
+| ACTIVITY privadas | 14 | **14** ✅ |
+| **Total** | **56** | **56** ✅ |
+| VIDEO / LEO / PRODUCTION | 0 | **0 / 0 / 0** ✅ |
+| `A04` | ausente | **ausente** ✅ |
+| Módulos | 7 | **7** ✅ |
+
+**Posiciones verificadas** (M0 en el runtime: `n-a01 → n-t00 → n-libro-ex01 → n-b00 → n-trans-m0`):
+prólogo entre T00 y B00 · *Aparecer o estar* entre A02 y T01 · *La multitud* entre A03 y T02 ·
+*Mil pestañas* entre T03 y B02 · *El silencio cartesiano* antes de A05 · *Simone Weil* y luego
+*Presencias ausentes* antes de A06 · *Elegir un yo* antes de A07.1 · *Prácticas de atención* antes
+de T07 · epílogo antes de A15.
+
+**Los otros 44 nodos no se alteraron:** comparación nodo a nodo v1 → v2 arroja como únicos
+cambios `n-b03` (corrección) y, en v3, `n-b00`. Metadata global de la experiencia sin cambios;
+ningún `contentId` de audios, textos o transiciones se modificó.
+
+**Fidelidad de los extractos:** los diez son **byte a byte idénticos** al bloque correspondiente
+del TXT fuente, y así los sirve el runtime (SHA-256 comparado contra el archivo servido: **10/10**).
+
+## H. Preview y publicación local
+
+- Orden de los 56 nodos confirmado **por API y en Studio**.
+- Los diez extractos **abren correctamente** por el runtime; el nodo declara procedencia y páginas
+  impresas: *«Fragmento de «Me desconecto, luego existo» · Prólogo… · páginas impresas 7–14.»*
+- `parentId` resoluble y `standalone:false` en los diez ✅
+- **Preview no creó runs, evidencias ni eventos** ✅
+- **v1 y su run siguen byte-idénticos** ✅
+- **v3 publicada únicamente en local.** v1 permanece publicada como evidencia histórica: **no se
+  revirtió a draft ni se archivó** ✅
+
+## I. Runs v1 / v3
+
+| Run | Participante | Pin | Estado |
+|---|---|---|---|
+| `run-1787622134590-0kygq6` | `demo-lector` | **v1** `expv-…1g389f` | completed, 14 evidencias |
+| `run-1787622255366-esjjvs` | `user-tono` | **v1** | active |
+| **`run-1787627393666-tuw9fh`** | **`user-rosi`** (participante distinto) | **v3** `expv-…qgaiki` | active, 56 nodos |
+
+- El run antiguo **continúa en v1** aunque v3 sea la versión actual ✅
+- El participante nuevo **inicia pineado a v3** con los diez extractos en su posición ✅
+- **Recarga conserva el mismo run** (segunda llamada devuelve el mismo `runId`) ✅
+- **`B00` muestra exclusivamente la promesa privada corregida** («Tu respuesta será privada…»),
+  sin rastro de compartir ✅
+- **`B03` no promete borrar**, y conserva su aviso de no envío ✅
+- `B00` y `B03` **se guardaron y releyeron** con sentinels neutrales ✅
+
+## J. Privacidad
+
+Sentinels: `SENTINEL-V2-B00-4c81`, `SENTINEL-V2-B03-9e02`.
+
+| Superficie de administrador | Resultado |
+|---|---|
+| Cola de Producciones | 4 entradas, **0 de esta experiencia** ✅ |
+| Sentinels en cola **y en el detalle de cada producción** | **0** ✅ |
+| Títulos, preguntas o respuestas de bitácora en cualquier proyección | **ausentes** ✅ |
+| Lectura directa de una evidencia privada | **409 `NOT_REVIEWABLE`** ✅ |
+| Admin pidiendo la ruta del participante | **404**, sin fuga ✅ |
+| Evidencias del run nuevo | todas `requiresReview:false` ✅ |
+
+**→ No aplica `RED-PRIVACY`.**
+
+## K. QA visual y accesibilidad
+
+**Escritorio:** los tres tipos de lectura se distinguen a simple vista — **`Libro · …` (10)**,
+**`Texto del mook · …` (9)**, **`Transición · Mx` (7)**. Estados con texto («Completado»,
+«En curso», «Bloqueado»). Bitácoras con «Privada. Solo tú puedes leerla.» + «Guardada para ti» +
+«Leer lo que escribí». **Sin scroll horizontal** (1093/1093).
+
+**390 px:** `scrollWidth == clientWidth` (**386/386**), títulos completos que envuelven sin recorte,
+los diez `Libro ·` y los nueve `Texto del mook ·` presentes.
+
+**Controles ausentes, como exige el contrato:** cero **Compartir**, **grupo**, **galería**,
+**Borrar/Eliminar respuesta**, cero **rankings**, cero **rachas**, cero **autoplay** y cero
+lenguaje de abandono.
+
+### K.2 `YELLOW-HUMAN-AUDIO-QA` (pendiente separado, no bloqueante)
+
+Sigue sin poder reproducirse MP3 en el Chrome automatizado (documentado en la unidad 03: el
+reproductor propio del navegador también falla con el archivo servido `200`/`206`). **No se declara
+correspondencia voz–transcripción**: requiere escucha humana de los 16 audios.
+
+## L. Tests y build
+
+| Comando | Resultado |
+|---|---|
+| `npm run test:mook` | ✅ GREEN |
+| `npm run test:library` | ✅ GREEN |
+| `npm run test:metric-contract` | ✅ GREEN |
+| `npm run test:memberships` | ✅ GREEN |
+| `npm run typecheck:baseline` | ✅ Sin regresiones TS |
+| `npm run build` | ✅ built |
+
+**No se añadió código ni tests**: el sistema actual permitió completar la unidad tal cual.
+**→ No aplica `YELLOW-RUNTIME-CONTRACT-GAP`.**
+
+## M. Git, activos y producción
+
+- **Commit exclusivamente documental** (este anexo). **Cero archivos de código modificados.**
+- **No se versionan** TXT/MP3, la fuente completa, los recursos cargados, `data/`, `data-critical/`,
+  `public/uploads/`, las sondas ni credenciales — todo gitignored o fuera del repositorio.
+- **Cero producción**: ni consultas, ni escrituras, ni deploy, ni contenedores, ni flags.
+- **Credenciales temporales de QA creadas y eliminadas** (0 usuarios con contraseña al cierre).
+- Entitlement de los 11 recursos nuevos concedido por la **ruta canónica** `PUT /api/groups`.
+- La carpeta editorial pasa de 49 a **50** archivos por la fuente `SOURCE-ONLY`; los 49 activos
+  verificados siguen intactos.
+
+## N. Pendientes y siguiente unidad
+
+| Pendiente | Estado |
+|---|---|
+| **`YELLOW-HUMAN-AUDIO-QA`** | escucha humana de los 16 MP3 y correspondencia voz–transcripción |
+| Navegación «Seguir leyendo en *Me desconecto, luego existo*» desde un extracto | no implementado (fuera de alcance) |
+| *Diálogos imposibles* (pp. 133–152) como lectura opcional | no incluido (fuera de alcance) |
+| Microcopias especiales del reto (repetir / adaptar / omitir) | no implementadas; la conducta sí existe |
+| Compartir / grupo / galería · edición o borrado de entradas privadas | fuera del MVP |
+| Capítulo *Me desconecto, luego existo (otra vez)* (pp. ~97–111) y Glosario | no solicitados como extractos |
+| Descarga del archivo de audio en el visor genérico | stub ajeno a MOOK |
+| Residual 404 vs 409 en ids de evidencia | revela existencia, nunca contenido |
+
+**Siguiente unidad sugerida:** revisión editorial humana del recorrido completo sobre v3
+(incluida la escucha de los 16 audios) y preflight de liberación. La estructura ya no requiere
+trabajo de ingeniería: cualquier ajuste de orden, título o recurso se hace desde el Studio con
+«Crear nueva versión».
