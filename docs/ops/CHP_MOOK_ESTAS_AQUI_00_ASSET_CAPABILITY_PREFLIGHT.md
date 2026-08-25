@@ -45,6 +45,26 @@ Este preflight se emitió como `YELLOW-PRIVACY-CONTRACT-GAP`. Tres cosas cambiar
 audio por nodo, extractos derivados del libro (§C), y el `ASSET-GAP` del catálogo local. Las
 capacidades de edición/eliminación de bitácora **no** se habilitaron: contradicen ADR §17.5 y §18.3.
 
+### Actualización 2026-08-24 (CHP-MOOK-ESTAS-AQUI-02)
+
+4. **Promesa editorial de `T00` corregida.** La frase «algunas respuestas podrán compartirse»
+   fue sustituida (localización inequívoca, una sola ocurrencia) por: «Todo lo que escribas en
+   las bitácoras será privado. Solo tú podrás leerlo dentro de este recorrido. Nada se publicará
+   automáticamente.» El texto editorial ya **no promete** una capacidad que el MVP no tiene.
+   **Hash de `T00` en el manifest de §B actualizado**: `344e09ce6124…` → **`71ce37b29d1a…`**
+   (2 951 → 3 016 bytes, UTF-8 sin BOM, CRLF y resto del texto intactos).
+5. **Duración de audio y descarga de transcripción: CERRADAS** por
+   `CHP_MOOK_ESTAS_AQUI_02_AUDIO_A11Y_COPY_CLOSURE` (`GREEN-AUDIO-A11Y-COPY`). La duración se lee
+   del elemento nativo en `loadedmetadata` (nunca persistida ni estimada) y se muestra como
+   «Este audio dura 1 min 22 s…»; la transcripción se descarga como `.txt` UTF-8 generado en el
+   cliente, con voces y saltos de línea intactos. Se añaden estados de reproducción por
+   `aria-live` sin autoplay ni reproducción encadenada.
+6. **Capacidades aún pendientes** (§G y §J de este preflight): extractos derivados del libro con
+   `parentId` + `standalone:false` · el `ASSET-GAP` del catálogo local (`content-1765751139919`)
+   · compartir / retirar / grupo / galería (`FUTURE — MOOK-JOURNAL-SHARING`) · edición y
+   eliminación de bitácoras (contradicen ADR §17.5 y §18.3) · el botón de descarga de
+   `VisorAudio`, que sigue siendo un stub ajeno a MOOK.
+
 ---
 
 ## A. Baseline verificado
@@ -110,7 +130,7 @@ archivos vacíos, sin archivos adicionales, sin claves no parseables.
 | `B05` | B05. Bitácora — La puerta que no quiero cerrar.txt | 455 | UTF-8 | 66 | 12 | 0 | `96d1fb412817` |
 | `B06` | B06. Bitácora del reto — Registro diario.txt | 472 | UTF-8 | 71 | 15 | 0 | `4b3d1d0775a5` |
 | `B07` | B07. Bitácora de salida — Volver a estar.txt | 643 | UTF-8 | 100 | 17 | 0 | `4d8efa2bac06` |
-| `T00` | T00. Carta de entrada.txt | 2951 | UTF-8 | 450 | 12 | 0 | `344e09ce6124` |
+| `T00` | T00. Carta de entrada.txt | 3016 | UTF-8 | 462 | 12 | 0 | `71ce37b29d1a` |
 | `T01` | T01. La vida sin testigos.txt | 1964 | UTF-8 | 298 | 9 | 0 | `280cb90ba494` |
 | `T02` | T02. Quién eligió esta opinión.txt | 2576 | UTF-8 | 389 | 14 | 0 | `f2a5ab6d8684` |
 | `T03` | T03. Cinco formas de repetir sin pensar.txt | 1086 | UTF-8 | 171 | 11 | 0 | `0ef0893ea791` |

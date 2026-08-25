@@ -65,5 +65,8 @@ test('runtime: el nodo VIDEO/AUDIO muestra la transcripción como alternativa te
     const src = readFileSync(path.join(ROOT, 'pages', 'Experiencias.tsx'), 'utf8');
     assert.match(src, /node\.type === 'VIDEO' \|\| node\.type === 'AUDIO'/);
     assert.match(src, /config\?\.transcripcion/);
-    assert.match(src, /Ver transcripción \(alternativa textual\)/);
+    // ESTAS-AQUI-02 renombra el control a «Ver transcripción» y añade la descarga real;
+    // la intención de §17.4 (alternativa textual accesible desde el nodo) se conserva.
+    assert.match(src, /Ver transcripción</);
+    assert.match(src, /Descargar transcripción/);
 });

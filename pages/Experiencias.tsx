@@ -11,7 +11,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
-import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users } from 'lucide-react';
+import { useAccessCheck } from '../hooks/useAccessCheck';
+import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, Download } from 'lucide-react';
 
 export const NODE_ICON: Record<string, React.ReactNode> = {
     READING: <BookOpen size={16} />, VIDEO: <BookOpen size={16} />, AUDIO: <BookOpen size={16} />,
@@ -36,6 +37,124 @@ export const ProgressBar: React.FC<{ done: number; total: number }> = ({ done, t
         </div>
     </div>
 );
+
+/**
+ * ESTAS-AQUI-02 — utilidades de audio y transcripción.
+ *
+ * La duración NO se persiste en ninguna parte (ni Experience, ni versión, ni
+ * nodo, ni catálogo): se lee del elemento nativo en `loadedmetadata`. Mientras
+ * no se conozca, se muestra un estado neutro — jamás una duración inventada.
+ */
+export const formatAudioDuration = (segundos: number | null | undefined): string | null => {
+    if (typeof segundos !== 'number' || !Number.isFinite(segundos) || segundos <= 0) return null;
+    const total = Math.round(segundos);
+    const min = Math.floor(total / 60);
+    const seg = total % 60;
+    if (min === 0) return `${seg} s`;
+    if (seg === 0) return `${min} min`;
+    return `${min} min ${seg} s`;
+};
+
+/** Nombre de archivo legible y seguro derivado del título del nodo. */
+export const transcriptFilename = (titulo: string): string => {
+    const base = String(titulo ?? '')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')   // sin diacríticos
+        .replace(/[^a-zA-Z0-9]+/g, '-')                     // sin separadores de ruta ni espacios
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80)
+        .toLowerCase();
+    return `${base || 'transcripcion'}.txt`;
+};
+
+/**
+ * Descarga la transcripción TAL CUAL (saltos de línea y marcas de voz
+ * incluidos) como .txt UTF-8 generado en el cliente: sin endpoint, sin copia
+ * en uploads y sin telemetría. El Object URL se libera tras usarlo.
+ */
+export const downloadTranscript = (texto: string, titulo: string): void => {
+    const blob = new Blob([texto], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = transcriptFilename(titulo);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    } finally {
+        URL.revokeObjectURL(url);
+    }
+};
+
+/**
+ * Reproductor del nodo AUDIO/VIDEO — renderer COMPARTIDO por Runtime y preview
+ * (ambos montan NodeShell). Controles nativos, cero autoplay, cero playlist:
+ * al terminar no se abre nada. La duración sale del elemento; los estados se
+ * anuncian por `aria-live` sin repetir ni confundir pausa con final.
+ *
+ * El acceso lo sigue gobernando el preflight canónico `/api/content/:id/access`:
+ * MOOK no concede acceso (ADR §11). Sin permiso no se monta el reproductor y el
+ * participante conserva la ruta canónica al visor.
+ */
+export const NodeMediaPlayer: React.FC<{ node: any; userId?: string }> = ({ node, userId }) => {
+    const [duracion, setDuracion] = useState<number | null>(null);
+    const [aviso, setAviso] = useState<string | null>(null);
+    const ref = useRef<HTMLAudioElement | null>(null);
+    const contentId = node.resource?.id;
+    const { status } = useAccessCheck(contentId, userId);
+    const src = dataService.getContenidoById(contentId)?.url_recurso;
+
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        const onMeta = () => setDuracion(el.duration);
+        // La pausa solo se anuncia si el participante YA empezó y NO terminó:
+        // así la carga inicial, la navegación y el final no dicen «pausa».
+        const onPause = () => {
+            if (el.ended || el.currentTime <= 0) return;
+            setAviso('Puedes continuar después. La pausa también forma parte del recorrido.');
+        };
+        const onPlay = () => setAviso(null);
+        const onEnded = () => setAviso('No hay reproducción automática. Tú decides cuándo abrir la siguiente pieza.');
+        el.addEventListener('loadedmetadata', onMeta);
+        el.addEventListener('pause', onPause);
+        el.addEventListener('play', onPlay);
+        el.addEventListener('ended', onEnded);
+        if (el.readyState >= 1) setDuracion(el.duration); // metadata ya disponible
+        return () => {
+            // Desmontaje: se retiran los listeners ANTES de que el navegador
+            // pause el elemento, para no anunciar una pausa fantasma.
+            el.removeEventListener('loadedmetadata', onMeta);
+            el.removeEventListener('pause', onPause);
+            el.removeEventListener('play', onPlay);
+            el.removeEventListener('ended', onEnded);
+        };
+    }, [src, status]);
+
+    if (!src || status !== 'allowed') return null;
+    const legible = formatAudioDuration(duracion);
+
+    return (
+        <div className="my-3 rounded-xl bg-gray-50 dark:bg-gray-900 p-3">
+            <audio
+                ref={ref}
+                src={src}
+                controls
+                preload="metadata"
+                className="w-full max-w-full"
+                aria-label={`Audio: ${node.title}`}
+            />
+            <p className="text-xs text-gray-600 dark:text-gray-300 mt-2">
+                {legible
+                    ? `Este audio dura ${legible}. Si puedes, escucha una sola pieza a la vez.`
+                    : 'Preparando la duración… Si puedes, escucha una sola pieza a la vez.'}
+            </p>
+            <p role="status" aria-live="polite" className="text-xs text-indigo-700 dark:text-indigo-300 mt-1 min-h-[1rem]">
+                {aviso}
+            </p>
+        </div>
+    );
+};
 
 /**
  * ESTAS-AQUI-01 — bitácora privada YA GUARDADA, releíble solo por su autor.
@@ -70,7 +189,7 @@ export const PrivateJournalEntry: React.FC<{ e: any; node: any }> = ({ e, node }
  * `preview` (STUDIO-01, C11): mismo renderer sin efectos — completar/enviar
  * NO llaman a la API (cero runs, cero evidencia, cero eventos).
  */
-export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean; onUnsaved?: (h: { save: () => Promise<void> } | null) => void }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false, onUnsaved }) => {
+export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean; onUnsaved?: (h: { save: () => Promise<void> } | null) => void; userId?: string }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false, onUnsaved, userId }) => {
     const [answers, setAnswers] = useState<string[]>([]);
     const [text, setText] = useState('');
     const [msg, setMsg] = useState<string | null>(null);
@@ -142,12 +261,27 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </div>
             )}
 
+            {(node.type === 'VIDEO' || node.type === 'AUDIO') && node.resource && (
+                <NodeMediaPlayer node={node} userId={userId} />
+            )}
+
             {(node.type === 'VIDEO' || node.type === 'AUDIO') && node.config?.transcripcion && (
                 // ADR §17.4: la alternativa textual del medio debe ser accesible desde el nodo.
-                <details className="my-2 rounded-xl bg-gray-50 dark:bg-gray-900 p-3">
-                    <summary className="text-sm font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer">Ver transcripción (alternativa textual)</summary>
-                    <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 whitespace-pre-line">{node.config.transcripcion}</p>
-                </details>
+                // La descarga vive FUERA del <details> para funcionar también con la
+                // transcripción contraída, y reutiliza exactamente `config.transcripcion`.
+                <div className="my-2 rounded-xl bg-gray-50 dark:bg-gray-900 p-3">
+                    <details>
+                        <summary className="text-sm font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer">Ver transcripción</summary>
+                        <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 whitespace-pre-line">{node.config.transcripcion}</p>
+                    </details>
+                    <button
+                        type="button"
+                        onClick={() => downloadTranscript(node.config.transcripcion, node.title)}
+                        className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-indigo-700 dark:text-indigo-300 hover:underline"
+                    >
+                        <Download size={14} aria-hidden /> Descargar transcripción
+                    </button>
+                </div>
             )}
 
             {node.type === 'LEO' && (
@@ -445,7 +579,7 @@ const Experiencias: React.FC = () => {
                                 </div>
                                 <div className="space-y-3">
                                     {m.nodes.map((n: any) => n.state === 'current'
-                                        ? <div key={n.id} ref={currentRef}><NodeShell node={n} moduleTitle={m.title} experienceTitle={detail?.title ?? 'Experiencia'} route={route} refresh={refresh} onUnsaved={onUnsaved} /></div>
+                                        ? <div key={n.id} ref={currentRef}><NodeShell node={n} moduleTitle={m.title} experienceTitle={detail?.title ?? 'Experiencia'} route={route} refresh={refresh} onUnsaved={onUnsaved} userId={user?.id} /></div>
                                         : <NodeRow key={n.id} node={n} route={route} />)}
                                 </div>
                             </section>

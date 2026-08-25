@@ -12,6 +12,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { dataService } from '../../services/dataService';
+import { useAuth } from '../../context/AuthContext';
 import {
     NodeShell, NodeRow, ProgressBar, NODE_ICON, NODE_TYPE_LABEL, MODULE_STATE_LABEL,
 } from '../../pages/Experiencias';
@@ -379,6 +380,9 @@ function buildPreviewRoute(modules: StudioModule[], catalogById: Map<string, Con
 
 // ── Studio ──────────────────────────────────────────────────────────────────
 export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ onCreateContent }) => {
+    // ESTAS-AQUI-02: la preview monta el MISMO NodeShell que el Runtime, así que
+    // necesita el actor de sesión para el preflight canónico de acceso al medio.
+    const { user } = useAuth();
     const [view, setView] = useState<'list' | 'editor'>('list');
     const [list, setList] = useState<any[]>([]);
     const [listState, setListState] = useState<'loading' | 'ready' | 'error' | 'forbidden'>('loading');
@@ -901,7 +905,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                                         </div>
                                         <div className="space-y-3">
                                             {m.nodes.map((n: any) => n.state === 'current'
-                                                ? <NodeShell key={n.id} node={n} moduleTitle={m.title} experienceTitle={info.title || 'Experiencia'} route={previewRoute} refresh={() => { }} preview />
+                                                ? <NodeShell key={n.id} node={n} moduleTitle={m.title} experienceTitle={info.title || 'Experiencia'} route={previewRoute} refresh={() => { }} preview userId={user?.id} />
                                                 : <NodeRow key={n.id} node={n} />)}
                                         </div>
                                     </section>
