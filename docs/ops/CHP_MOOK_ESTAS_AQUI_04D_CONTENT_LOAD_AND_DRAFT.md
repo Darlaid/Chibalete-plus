@@ -19,7 +19,7 @@
 | Fase | Resultado |
 |---|---|
 | A · Preflight y backup | 🟢 **completa** |
-| B · Autenticación de carga | 🟡 **BLOQUEADA** — requiere decisión del operador |
+| B · Autenticación de carga | 🟡 **BLOQUEADA** — opción A probada e insuficiente, ver Anexo R1 |
 | C–J | ⏸️ **no ejecutadas** |
 
 **No se emitió** `STOP-MANIFEST-DRIFT` (manifest idéntico), `STOP-CATALOG-CONFLICT` (0 conflictos),
@@ -220,3 +220,115 @@ pendiente.
 | Fecha | Operador | Acción |
 |---|---|---|
 | 2026-08-26 | Nicolás Jiménez | **Fase A de 04D completa**: salud productiva GREEN, manifest 50/50 con 7 hashes de control, clasificación 41 `CREATE-PROD` / 0 `CONFLICT` sin drift, libro padre y portada reverificados, backup canónico previo (`962e38a5`, `6611b4d2`, `719a80eb`; 226 → 230 snapshots). **Cero escrituras.** Detenida en Fase B por falta de vía de autenticación de escritura conforme a los límites → **`YELLOW-OPERATOR-LOGIN`**. |
+
+---
+
+# ANEXO R1 — INTENTO CON `admin-secret` (opción A autorizada)
+
+**Veredicto R1:** 🟡 **`YELLOW-OPERATOR-LOGIN` — se mantiene, con causa raíz distinta y ya probada.**
+**Cero escrituras.** Catálogo en 67, `mook_db.json` ausente, uploads en 64 dirs, 4 containers
+healthy con 0 restarts y 0 5xx.
+
+## R1.1 · Manejo del secreto — condiciones cumplidas
+
+Se construyó un orquestador **temporal, fuera del repo**, en el VPS. El secreto se leyó
+**exclusivamente desde `/var/www/chibalete/secrets/admin_secret`** con `fs.readFileSync` dentro del
+proceso, en ámbito local de función.
+
+| Condición | Cumplimiento |
+|---|---|
+| Solo desde fichero, solo en memoria | ✅ |
+| Nunca impreso, copiado, devuelto ni persistido | ✅ — en los diagnósticos solo se emitieron **longitud y hash truncado**, jamás el valor |
+| No como argumento, `$(cat …)`, variable de entorno, fichero temporal, log o stdout | ✅ |
+| No sale del VPS | ✅ |
+| Llamadas al endpoint local autorizado | ✅ `http://172.21.0.4:3000` (container `api_1`) |
+| Cabeceras redactadas en diagnósticos | ✅ helper `redactHeaders` → `x-admin-secret: <REDACTED>` |
+
+**El helper existente no era utilizable:** `scripts/validate-remote.mjs` toma el secreto de una
+**variable de entorno**, expresamente prohibido por las condiciones. No existe en el repositorio un
+helper que realice escrituras administrativas leyendo el secreto solo desde fichero.
+
+El orquestador se eliminó al terminar (`/root/chp-04d`). Ningún script llegó a contener el valor:
+lo leía en tiempo de ejecución.
+
+## R1.2 · Verificación de que el secreto es correcto
+
+Diagnóstico **sin exponer el valor**, comparando hashes:
+
+| Origen | Longitud | SHA-256 (prefijo) |
+|---|---|---|
+| Fichero en el host, normalizado | 64 | `16cda091b9957e3c` |
+| **Lector propio del servidor** (`readSecretFile` en el container) | 64 | **`16cda091b9957e3c`** |
+
+**Coinciden.** Metadatos correctos: 64 bytes, modo `0400`, `uid=0`, proceso servidor `uid=0`.
+`headerMatchesAdminSecret` probado en aislamiento dentro del container: **`true`** con el secreto
+correcto, **`false`** con valor erróneo y sin cabecera.
+
+## R1.3 · 🔴 EL HALLAZGO: el `admin-secret` NO autoriza la carga de contenido
+
+Probado con **cuerpos deliberadamente inválidos**, de modo que un `400` demuestra autenticación
+correcta y **nada puede crearse**:
+
+| Ruta | Guard | Resultado | Lectura |
+|---|---|---|---|
+| `POST /api/experiences` | `requireAdminAccess` | **400 `INVALID_SLUG`** | ✅ **autenticación aceptada** |
+| `POST /api/content` | `requireAdminRole` | **401 `Auth requerida`** | ❌ **rechazada** |
+| `POST /api/upload` | `requireAdminRole` | **401 `Auth requerida`** | ❌ **rechazada** |
+
+La causa está en el código, y es deliberada. `requireAdminAccess` ofrece la vía máquina:
+
+```js
+// Opción A: admin secret (scripts, PM2, server-to-server) — file-only
+if (await headerMatchesAdminSecret(req)) return next();
+```
+
+`requireAdminRole` —el guard de `app.use('/api/upload', …)` y `app.use('/api/content', …)`— **no
+tiene esa rama**: en `compat` exige sesión firmada y nada más.
+
+```js
+if (sessionIssuanceEnabled()) {
+    const d = await sessionAuth.authenticate(req);
+    if (!d.ok) return res.status(d.status).json({ error: 'Auth requerida' });
+```
+
+**Consecuencia:** la opción A autoriza únicamente la mitad de 04D —crear la Experience y la
+Version— pero **no permite cargar ninguno de los 41 recursos**, que es el requisito previo. Las
+Fases C y D son inejecutables por esta vía.
+
+> **Nota lateral verificada:** el `admin-secret` tampoco basta para los **GET** administrativos
+> (`/api/system/metrics`, `/api/admin/membership/validate` → 401). Los GET pasan por
+> `allowAuthenticatedGetOrReject`, más estricto en este build. No es un bloqueador de 04D, pero
+> conviene saberlo: **la verificación de estado no puede hacerse por esa vía**, sino leyendo los
+> stores o desde la sesión del operador.
+
+**No se emite `STOP-SECRET-HANDLING`**: el manejo del secreto cumplió todas las condiciones. El
+problema no es *cómo* usarlo, sino que **es insuficiente por diseño** para las rutas de carga.
+
+## R1.4 · Lo que se necesita ahora
+
+La carga de los 41 recursos exige una **sesión administrativa humana**. Caminos posibles, **todos
+requieren decisión del operador**:
+
+| Opción | Qué implica | Valoración |
+|---|---|---|
+| **B1 · El operador ejecuta la carga** | Se le entrega el orquestador y lo corre desde un contexto ya autenticado con su sesión | ✅ **Respeta todos los límites.** Es la vía natural |
+| **B2 · Carga manual por Studio** | 41 ficheros con metadata completa, a mano | ⚠️ Impracticable y propenso a error |
+| **B3 · Ampliar `requireAdminRole` para aceptar admin-secret** | Cambio de código en el guard de `upload`/`content` | ❌ **Fuera de alcance**: 04D prohíbe tocar código, y ampliaría la superficie de autenticación de dos rutas sensibles. Exigiría unidad propia con revisión de seguridad |
+
+**Recomendación:** **B1**. El resto de 04D ya está preparado y verificado: manifest, hashes,
+clasificación, libro padre, portada, estructura de 56 nodos y validaciones previas al POST.
+
+## R1.5 · Estado tras el anexo
+
+| Comprobación | Resultado |
+|---|---|
+| Escrituras realizadas | **0** |
+| `mook_db.json` | ✅ ausente |
+| Catálogo | ✅ **67 entradas** |
+| Uploads | ✅ **64 dirs** |
+| Containers | ✅ 4 healthy, **0 restarts** |
+| 5xx (10 min) | ✅ **0** |
+| Orquestador temporal | ✅ eliminado |
+| Publicación / cuenta QA / 04E / 04F | ✅ **no ejecutados** |
+
+**El checkpoint de reanudación sigue siendo el fin de Fase A**, intacto y válido.
