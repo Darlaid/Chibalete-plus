@@ -251,10 +251,36 @@ Se añade el job `backup-suite-sandboxed` a `.github/workflows/backup-capacity.y
   100 MB y su cleanup;
 - verifica al final (`if: always()`) que **no queda ningún sandbox** en `/tmp`.
 
-Validado antes de commitear en una imagen equivalente a la del runner
-(`ubuntu:24.04` con `restic` y `systemd`): **105/105 PASS, GREEN**.
+Validado primero en una imagen equivalente a la del runner (`ubuntu:24.04` con
+`restic` y `systemd`) y después **en CI de verdad** (`dc38f04`):
+
+```text
+entorno limpio
+sandbox: /tmp/chp-backup-tests.97fvk8st
+=== RESUMEN: 105/105 PASS ===
+SUITE_RESULT=GREEN
+disco usado por la suite: 50151233 B (47.8 MB de 100 MB)
+sandboxes restantes: 0
+```
 
 `test:content-rmw` **no** se mezcla aquí: es el gate siguiente.
+
+### CI estaba en rojo y no lo vi
+
+`backup-capacity` llevaba fallando desde `19deb19`, el commit que cerró la
+unidad anterior. Causa: el ratchet `PROTECTED_DATA_SCOPE_UNCHANGED` de
+`test_capacity.py` fija a mano el número de stores del scope protegido, y añadir
+`data/mook_db.json` lo subió de 25 a 26 sin actualizar el literal.
+
+Lo pasé por alto porque en aquella unidad ejecuté `test_suite.py` pero **no**
+`test_capacity.py`, y consulté el CI solo del commit de deploy, no del de
+backup. Corregido en `dc38f04`: se sube el contador **y** se añade
+`mook_db.json` a la lista de rutas que el guard exige cubrir — subir el número
+sin lo segundo dejaría el ratchet contando cajas vacías.
+
+Que el job nuevo ejecute la suite completa en CI cierra justamente ese hueco:
+a partir de ahora un cambio en `ops/backup/**` no puede quedarse rojo sin que se
+vea.
 
 ---
 
