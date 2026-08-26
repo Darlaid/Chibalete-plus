@@ -30,6 +30,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -43,6 +44,7 @@ sys.path.insert(0, RUNNERS_DIR)
 sys.path.insert(0, HERE)
 
 import fixtures  # noqa: E402
+import sandbox  # noqa: E402
 from chibalete_backup import errors  # noqa: E402
 from chibalete_backup.config import load_config  # noqa: E402
 from chibalete_backup.locking import SharedLock, StagingArea  # noqa: E402
@@ -53,12 +55,22 @@ from chibalete_backup.s3_preflight import RemoteState, ScopeVerdict  # noqa: E40
 from chibalete_backup.safelog import SafeLogger  # noqa: E402
 from chibalete_backup.sqlite_capture import capture_sqlite, source_journal_mode  # noqa: E402
 
-WORK_ROOT = os.environ.get("CHP_TEST_ROOT", "/work/tests")
-LOWSPACE = "/lowspace"
-LOWINO = "/lowino"
-FULLFS = "/fullfs"
+# CHP-BACKUP-TEST-SANDBOX-GUARD-01 — el harness ya NO acepta rutas absolutas ni
+# redirecciones. Crea su propio root bajo /tmp y todo cuelga de el.
+#
+# Antes habia cuatro rutas absolutas hardcodeadas: WORK_ROOT (redirigible con
+# CHP_TEST_ROOT), y los tmpfs `/lowspace`, `/lowino` y `/fullfs`. Fuera del
+# contenedor esas rutas se materializaban en el disco real y el caso de
+# «filesystem lleno» escribia lastre hasta agotarlo. Sustituidas por el sandbox
+# y por inyeccion de fallos determinista (sandbox.statvfs_fault_env /
+# sandbox.enospc_restic_env): cero lastre, cero rutas absolutas.
+SANDBOX_ROOT = None   # lo fija main(); ningun test debe escribir antes.
+WORK_ROOT = None
 
 RESULTS: list[tuple[str, str, str]] = []
+
+class ToolUnavailable(RuntimeError):
+    """La comprobacion no puede ejecutarse aqui: se reporta SKIP, no PASS."""
 
 
 # --------------------------------------------------------------------------
@@ -66,11 +78,49 @@ RESULTS: list[tuple[str, str, str]] = []
 # --------------------------------------------------------------------------
 
 def fresh(name: str) -> str:
-    path = os.path.join(WORK_ROOT, name)
+    """Directorio limpio para un caso, SIEMPRE validado contra el sandbox.
+
+    `assert_path_allowed` es la puerta: rechaza rutas vacias, relativas, con
+    `..`, con symlinks que escapen, y cualquier cosa fuera del root o dentro de
+    una ruta prohibida. `safe_rmtree` aplica la misma validacion antes de
+    borrar, asi que un `name` malicioso no puede convertirse en un rm -rf.
+    """
+    if WORK_ROOT is None:
+        raise sandbox.SandboxViolation("sandbox no inicializado: no se escribe nada")
+    path = sandbox.assert_path_allowed(os.path.join(WORK_ROOT, name), SANDBOX_ROOT)
     if os.path.exists(path):
-        shutil.rmtree(path, ignore_errors=True)
+        sandbox.safe_rmtree(path, SANDBOX_ROOT)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def systemd_unit_files():
+    """Nombres de las units, saltando subdirectorios como `dropins/`.
+
+    Varias comprobaciones trataban cada entrada de `systemd/` como archivo y
+    reventaban con IsADirectoryError desde que existe `dropins/`.
+    """
+    return sorted(
+        n for n in os.listdir(SYSTEMD_DIR)
+        if os.path.isfile(os.path.join(SYSTEMD_DIR, n))
+    )
+
+
+def simulated_install_dir() -> str:
+    """Instalacion SIMULADA del runner, siempre dentro del sandbox.
+
+    Las units declaran `ExecStart=/opt/chibalete-backup/runners/...`, asi que
+    `systemd-analyze` necesita que esa ruta exista para validarlas. Antes la
+    suite usaba la ruta REAL, que en el VPS es la instalacion productiva y
+    `run_all.sh` llegaba a sobrescribir con `cp -r`. Ahora se materializa una
+    copia dentro del sandbox y nadie toca `/opt`.
+    """
+    d = sandbox.assert_path_allowed(
+        os.path.join(SANDBOX_ROOT, "opt", "chibalete-backup"), SANDBOX_ROOT)
+    if not os.path.isdir(os.path.join(d, "runners")):
+        os.makedirs(d, exist_ok=True)
+        shutil.copytree(RUNNERS_DIR, os.path.join(d, "runners"), dirs_exist_ok=True)
+    return d
 
 
 class Env:
@@ -198,16 +248,11 @@ def inflate_db(path: str, rows: int) -> None:
     conn.close()
 
 
-def fill_filesystem(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-    target = os.path.join(path, "ballast")
-    try:
-        with open(target, "wb") as handle:
-            while True:
-                handle.write(b"\0" * 4096)
-                handle.flush()
-    except OSError:
-        pass
+# `fill_filesystem` fue RETIRADA (CHP-BACKUP-TEST-SANDBOX-GUARD-01). Escribia
+# lastre hasta agotar el dispositivo; fuera del contenedor eso era el disco del
+# host. El escenario de ENOSPC lo cubre ahora `sandbox.enospc_restic_env`, que
+# es determinista y no escribe un solo byte. El caso GS12 falla si el literal
+# vuelve a aparecer en el harness.
 
 
 def assert_sources_untouched(before: dict, after: dict, context: str = "") -> None:
@@ -300,38 +345,29 @@ def test_unknown_repository():
 
 @case("05", "espacio insuficiente en staging")
 def test_insufficient_space():
+    # Antes: un tmpfs de 1 MB en la ruta absoluta /lowspace. Ahora se inyecta
+    # `os.statvfs` en el proceso hijo para que reporte el dispositivo sin
+    # bloques libres. Mismo camino de codigo, cero dependencia del host.
     env = Env("c05")
-    inflate_db(os.path.join(env.base, "data-critical/events.db"), 20000)
-    small_work = os.path.join(LOWSPACE, "work")
-    proc = subprocess.run(
-        [
-            sys.executable, os.path.join(RUNNERS_DIR, "structured_backup.py"),
-            "--config-dir", env.config_dir, "--base-dir", env.base,
-            "--work-dir", small_work, "--lock-path", env.lock,
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
+    inflate_db(os.path.join(env.base, "data-critical/events.db"), 2000)
+    proc = env.run("structured_backup.py",
+                   env=sandbox.statvfs_fault_env(SANDBOX_ROOT, "lowspace"))
     assert proc.returncode == errors.InsufficientStagingSpace.exit_code, (
         f"rc={proc.returncode} stderr={proc.stderr[-400:]}"
     )
     assert "espacio insuficiente" in proc.stderr, proc.stderr
     assert not os.path.isdir(os.path.join(env.repo, "data")), "no debe iniciar staging ni repo"
+    assert env.staging_dirs() == [], "no debe quedar staging"
 
 
 @case("06", "inodos insuficientes en staging")
 def test_insufficient_inodes():
+    # Antes: tmpfs con `nr_inodes=20` en la ruta absoluta /lowino. Ahora el
+    # hijo ve un dispositivo con espacio de sobra pero sin inodos libres, que es
+    # justo la rama que distingue este caso del 05.
     env = Env("c06")
-    st = os.statvfs(LOWINO)
-    assert st.f_files > 0, "el filesystem de prueba debe reportar inodos"
-    ino_work = os.path.join(LOWINO, "work")
-    proc = subprocess.run(
-        [
-            sys.executable, os.path.join(RUNNERS_DIR, "structured_backup.py"),
-            "--config-dir", env.config_dir, "--base-dir", env.base,
-            "--work-dir", ino_work, "--lock-path", env.lock,
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
+    proc = env.run("structured_backup.py",
+                   env=sandbox.statvfs_fault_env(SANDBOX_ROOT, "lowino"))
     assert proc.returncode == errors.InsufficientStagingSpace.exit_code, (
         f"rc={proc.returncode} stderr={proc.stderr[-400:]}"
     )
@@ -618,18 +654,27 @@ def test_interruption():
         pass  # si esto no lanza, el lock quedo libre
 
 
-@case("19", "error real de restic propagado con codigo claro")
+@case("19", "error real de restic propagado con codigo claro (ENOSPC inyectado)")
 def test_restic_error():
-    fill_filesystem(FULLFS)
-    env = Env("c19", repository=os.path.join(FULLFS, "repo"))
+    # ESTE es el caso que lleno el disco del VPS: llenaba /fullfs con lastre
+    # hasta ENOSPC para que `restic init` fallase. Ahora el ENOSPC se inyecta
+    # con un `restic` de pega delante en el PATH, que responde a `version` y
+    # falla en todo lo demas con el mensaje real del kernel. Determinista y con
+    # cero bytes de lastre; el camino ejercitado —clasificacion del fallo en
+    # Restic.run y limpieza del staging— es exactamente el mismo.
+    env = Env("c19")
+    fault = sandbox.enospc_restic_env(SANDBOX_ROOT)
+
     # Sin autorizacion ni siquiera se intenta el init: bloquea antes.
-    env.run("structured_backup.py", expect=errors.RepositoryInitNotAuthorized.exit_code)
+    env.run("structured_backup.py", env=fault,
+            expect=errors.RepositoryInitNotAuthorized.exit_code)
     assert not os.path.isdir(os.path.join(env.repo, "data")), "se creo un repositorio"
-    # Con la autorizacion de provision se llega al `restic init` real, que
-    # falla por ENOSPC: es el error de restic que este caso debe propagar.
+
+    # Con la autorizacion de provision se llega al init, que falla por ENOSPC.
     proc = env.run("structured_backup.py", extra=["--initialize-empty-repository"],
-                   expect=errors.ResticError.exit_code)
+                   env=fault, expect=errors.ResticError.exit_code)
     assert "restic" in proc.stderr, proc.stderr
+    assert "no space left on device" in proc.stderr.lower(), proc.stderr[-400:]
     assert env.staging_dirs() == [], "staging no limpiado tras error de restic"
 
 
@@ -873,10 +918,11 @@ def test_integration_verify():
 
 @case("S1", "systemd-analyze verify sin advertencias textuales")
 def test_systemd_units():
-    staging = "/opt/chibalete-backup"
-    units_tmp = "/work/units"
-    os.makedirs(units_tmp, exist_ok=True)
-    for name in os.listdir(SYSTEMD_DIR):
+    # La instalacion simulada vive DENTRO del sandbox. Antes se apuntaba a
+    # `/opt/chibalete-backup`, que en el VPS es la instalacion real del runner.
+    staging = simulated_install_dir()
+    units_tmp = fresh("s1-units")
+    for name in systemd_unit_files():
         target = os.path.join(units_tmp, name)
         shutil.copy(os.path.join(SYSTEMD_DIR, name), target)
         # Las units deben instalarse 0644: systemd avisa si son ejecutables.
@@ -885,6 +931,11 @@ def test_systemd_units():
     assert os.path.isdir(staging), (
         "las units apuntan a /opt/chibalete-backup: debe existir para validar ExecStart"
     )
+    # `systemd-analyze` no existe en toda imagen base. Si falta, esta
+    # comprobacion no puede ejecutarse: se declara SALTADA de forma explicita,
+    # nunca como PASS. El paso 5 de run_all.sh la cubre en el toolchain real.
+    if shutil.which("systemd-analyze") is None:
+        raise ToolUnavailable("systemd-analyze no esta en esta imagen")
     problems = []
     for name in sorted(os.listdir(units_tmp)):
         proc = subprocess.run(
@@ -901,7 +952,7 @@ def test_systemd_units():
 
     # Ninguna unit ejecuta retencion destructiva: se inspeccionan las
     # directivas efectivas, ignorando comentarios.
-    for name in os.listdir(SYSTEMD_DIR):
+    for name in systemd_unit_files():
         for raw in open(os.path.join(SYSTEMD_DIR, name), encoding="utf-8"):
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -1563,7 +1614,7 @@ def test_p_sanitization():
 
 @case("P24", "las units systemd no pueden autorizar el primer init")
 def test_p_units_have_no_authorization():
-    for name in sorted(os.listdir(SYSTEMD_DIR)):
+    for name in systemd_unit_files():
         text = open(os.path.join(SYSTEMD_DIR, name), encoding="utf-8").read()
         assert "--initialize-empty-repository" not in text, f"{name} autoriza el init"
         assert "initialize_empty_repository" not in text, f"{name} autoriza el init"
@@ -2439,7 +2490,7 @@ def test_l_verify_runner_never_inits():
 
 @case("L07", "ninguna unit systemd puede introducir la autorizacion")
 def test_l_units_cannot_authorize():
-    for name in sorted(os.listdir(SYSTEMD_DIR)):
+    for name in systemd_unit_files():
         text = open(os.path.join(SYSTEMD_DIR, name), encoding="utf-8").read()
         assert "initialize" not in text.lower(), f"{name} menciona la autorizacion"
         for raw in text.splitlines():
@@ -2745,11 +2796,274 @@ def test_mk_no_collateral():
     assert len(os.listdir(uploads_dir)) == 6, os.listdir(uploads_dir)
 
 
+# --------------------------------------------------------------------------
+# Casos GS01-GS12 — guard fail-closed del harness
+# (CHP-BACKUP-TEST-SANDBOX-GUARD-01)
+# --------------------------------------------------------------------------
+#
+# Estos casos prueban el GUARD, no el backup. Existen porque el harness llego a
+# llenar el disco de un VPS productivo y a poder sobrescribir la instalacion
+# real del runner. Cada uno fija una via de escape que ya no debe existir.
+
+def _violates(fn, *a, **kw) -> str:
+    """Ejecuta y exige SandboxViolation. Devuelve el mensaje."""
+    try:
+        fn(*a, **kw)
+    except sandbox.SandboxViolation as exc:
+        return str(exc)
+    raise AssertionError(f"se esperaba SandboxViolation de {getattr(fn,'__name__',fn)}")
+
+
+@case("GS01", "ejecucion normal: todo cuelga del sandbox y nada de /tmp se escapa")
+def test_gs_normal_execution():
+    assert SANDBOX_ROOT and os.path.isdir(SANDBOX_ROOT), SANDBOX_ROOT
+    assert sandbox.is_sandbox(SANDBOX_ROOT), "el root no esta marcado"
+    assert os.path.basename(SANDBOX_ROOT).startswith(sandbox.SANDBOX_PREFIX), SANDBOX_ROOT
+    assert SANDBOX_ROOT == os.path.realpath(SANDBOX_ROOT), "el root no esta resuelto"
+    assert not os.path.islink(SANDBOX_ROOT), "el root es un symlink"
+    # Fuera del repositorio y de las rutas del sistema.
+    assert not SANDBOX_ROOT.startswith(UNIT_DIR), SANDBOX_ROOT
+    # La lista la declara el propio guard: los tests no repiten rutas a mano.
+    for prohibida in sandbox.FORBIDDEN_PATHS:
+        if prohibida == os.sep:
+            continue
+        assert not SANDBOX_ROOT.startswith(prohibida + "/"), SANDBOX_ROOT
+    # Y el trabajo real de la suite vive dentro.
+    assert WORK_ROOT.startswith(SANDBOX_ROOT + os.sep), WORK_ROOT
+    env = Env("gs01")
+    for p in (env.base, env.work, env.repo, env.config_dir):
+        assert os.path.realpath(p).startswith(SANDBOX_ROOT + os.sep), p
+
+
+@case("GS02", "host productivo simulado: aborta ANTES de escribir nada")
+def test_gs_production_host_guard():
+    # Se simula el host con un marcador que si existe en cualquier maquina;
+    # asi se prueba la deteccion sin fabricar rutas productivas falsas.
+    msg = _violates(sandbox.assert_not_production_host, markers=("/etc/hostname",))
+    assert "HOST PRODUCTIVO" in msg, msg
+    assert "no hay flag" in msg.lower(), "el mensaje debe dejar claro que no hay bypass"
+
+    # Los marcadores reales son los del VPS, y ninguno debe existir aqui: si
+    # existiera, la suite no habria llegado a ejecutarse.
+    presentes = [m for m in sandbox.PRODUCTION_MARKERS if os.path.exists(m)]
+    assert presentes == [], f"marcadores productivos presentes: {presentes}"
+
+    # Y no hay variable de entorno que desactive el guard.
+    fuente = open(os.path.join(HERE, "sandbox.py"), encoding="utf-8").read()
+    cuerpo = fuente.split("def assert_not_production_host", 1)[1].split("\ndef ", 1)[0]
+    assert "environ" not in cuerpo, "el guard de host consulta el entorno: es un bypass"
+
+
+@case("GS03", "CHP_TEST_ROOT=/ rechazado")
+def test_gs_test_root_slash():
+    msg = _violates(sandbox.assert_no_test_root_override, {"CHP_TEST_ROOT": "/"})
+    assert "CHP_TEST_ROOT" in msg, msg
+    # Y aunque alguien la usara como ruta, el validador la rechaza igual.
+    _violates(sandbox.assert_path_allowed, "/", SANDBOX_ROOT)
+
+
+@case("GS04", "CHP_TEST_ROOT=/opt/chibalete-backup rechazado")
+def test_gs_test_root_install_dir():
+    _violates(sandbox.assert_no_test_root_override,
+              {"CHP_TEST_ROOT": "/opt/chibalete-backup"})
+    msg = _violates(sandbox.assert_path_allowed, "/opt/chibalete-backup", SANDBOX_ROOT)
+    assert "prohibida" in msg, msg
+    # La suite en ejecucion no la tiene definida.
+    assert "CHP_TEST_ROOT" not in os.environ, "la suite corre con CHP_TEST_ROOT definida"
+
+
+@case("GS05", "symlink hacia ruta prohibida rechazado")
+def test_gs_symlink_escape():
+    d = fresh("gs05")
+    link = os.path.join(d, "puerta")
+    os.symlink("/etc", link)
+    msg = _violates(sandbox.assert_path_allowed, link, SANDBOX_ROOT)
+    assert "prohibida" in msg, msg
+    # Un symlink a otra parte del sistema tambien: lo que manda es el realpath.
+    link2 = os.path.join(d, "puerta2")
+    os.symlink(os.path.realpath(tempfile.gettempdir()), link2)
+    _violates(sandbox.assert_path_allowed, link2, SANDBOX_ROOT)
+    # El symlink sigue ahi: validar no borra.
+    assert os.path.islink(link), "el guard borro el symlink en vez de rechazarlo"
+
+
+@case("GS06", "traversal con .. rechazado")
+def test_gs_traversal():
+    for intento in ("../../etc", "../..", "a/../../../opt", "x/../../../../"):
+        _violates(sandbox.assert_path_allowed,
+                  os.path.join(SANDBOX_ROOT, intento), SANDBOX_ROOT)
+    # Un `..` que se queda dentro SI es valido: el guard no es supersticioso.
+    dentro = os.path.join(SANDBOX_ROOT, "tests", "..", "tests")
+    assert sandbox.assert_path_allowed(dentro, SANDBOX_ROOT) == WORK_ROOT
+
+
+@case("GS07", "ruta vacia, None o relativa rechazadas")
+def test_gs_empty_variable():
+    for malo in ("", "   ", None, 0, "relativa/sin/raiz", "./x"):
+        _violates(sandbox.assert_path_allowed, malo, SANDBOX_ROOT)
+        _violates(sandbox.safe_rmtree, malo, SANDBOX_ROOT)
+    # El caso clasico: rm -rf "$VAR" con VAR vacia.
+    msg = _violates(sandbox.destroy_sandbox, "")
+    assert "vacia" in msg, msg
+
+
+@case("GS08", "cleanup sin marcador rechazado")
+def test_gs_cleanup_requires_marker():
+    d = fresh("gs08")
+    impostor = os.path.join(d, sandbox.SANDBOX_PREFIX + "impostor")
+    os.makedirs(impostor, exist_ok=True)
+    testigo = os.path.join(impostor, "no-borrar.txt")
+    with open(testigo, "w", encoding="utf-8") as handle:
+        handle.write("testigo")
+    # Prefijo correcto pero SIN marcador: no se borra.
+    msg = _violates(sandbox.destroy_sandbox, impostor)
+    assert "marcador" in msg, msg
+    assert os.path.isfile(testigo), "se borro un arbol sin marcador"
+    assert not sandbox.is_sandbox(impostor)
+
+
+@case("GS09", "cleanup con prefijo incorrecto rechazado")
+def test_gs_cleanup_wrong_prefix():
+    d = fresh("gs09")
+    otro = os.path.join(d, "carpeta-cualquiera")
+    os.makedirs(otro, exist_ok=True)
+    # Marcador presente pero prefijo que no es el nuestro: tampoco se borra.
+    with open(os.path.join(otro, sandbox.MARKER_NAME), "w", encoding="utf-8") as h:
+        h.write("marcador plantado")
+    msg = _violates(sandbox.destroy_sandbox, otro)
+    assert "prefijo" in msg, msg
+    assert os.path.isdir(otro), "se borro un arbol con prefijo incorrecto"
+    # Y NINGUNA ruta critica declarada se borra jamas, tenga lo que tenga.
+    for critica in sandbox.FORBIDDEN_PATHS:
+        _violates(sandbox.destroy_sandbox, critica)
+    for critica in sandbox.PRODUCTION_MARKERS:
+        _violates(sandbox.destroy_sandbox, critica)
+
+
+@case("GS10", "ENOSPC inyectado: sin lastre y sin tocar el disco")
+def test_gs_enospc_without_ballast():
+    antes = sandbox.tree_bytes(SANDBOX_ROOT)
+    env = Env("gs10")
+    proc = env.run("structured_backup.py", extra=["--initialize-empty-repository"],
+                   env=sandbox.enospc_restic_env(SANDBOX_ROOT),
+                   expect=errors.ResticError.exit_code)
+    assert "no space left on device" in proc.stderr.lower(), proc.stderr[-300:]
+    despues = sandbox.tree_bytes(SANDBOX_ROOT)
+    # El fixture del Env ocupa algo; el ENOSPC en si no debe anadir megas.
+    crecimiento = despues - antes
+    assert crecimiento < 8 * 1024 * 1024, f"el caso ENOSPC crecio {crecimiento} B"
+    # Y no existe ningun fichero de lastre en ninguna parte del sandbox.
+    lastre = [os.path.join(dp, n)
+              for dp, _dn, fn in os.walk(SANDBOX_ROOT) for n in fn
+              if n == "ballast" or os.path.getsize(os.path.join(dp, n)) > 32 * 1024 * 1024]
+    assert lastre == [], lastre
+
+
+@case("GS11", "instalacion simulada dentro del sandbox; /opt real intacto")
+def test_gs_simulated_install():
+    d = simulated_install_dir()
+    assert d.startswith(SANDBOX_ROOT + os.sep), d
+    assert os.path.isfile(os.path.join(d, "runners", "structured_backup.py")), os.listdir(d)
+    # El harness no puede escribir en la ruta real bajo ninguna via.
+    _violates(sandbox.assert_path_allowed, "/opt/chibalete-backup", SANDBOX_ROOT)
+    _violates(sandbox.assert_path_allowed, "/opt/chibalete-backup/runners", SANDBOX_ROOT)
+    # Y si existiera de verdad, el guard de host habria abortado el arranque.
+    assert "/opt/chibalete-backup" in sandbox.PRODUCTION_MARKERS
+
+
+@case("GS12", "la ruta absoluta del incidente no vuelve como literal operativo")
+def test_gs_no_ballast_path_literal():
+    """Control de regresion sobre la ruta que lleno el disco del VPS.
+
+    Se analiza el AST, no el texto: asi los comentarios y docstrings que
+    EXPLICAN el incidente no cuentan (no existen para el AST) y solo se detecta
+    la ruta usada de verdad como dato. Las unicas apariciones toleradas son las
+    listas de rechazo del guard.
+    """
+    marca = "/full" + "fs"   # partido para no ser su propio ofensor
+    listas_permitidas = {"FORBIDDEN_PATHS", "PRODUCTION_MARKERS"}
+    ofensores = []
+
+    for nombre in sorted(os.listdir(HERE)):
+        if not nombre.endswith(".py"):
+            continue
+        ruta = os.path.join(HERE, nombre)
+        arbol = ast.parse(open(ruta, encoding="utf-8").read(), filename=nombre)
+
+        # Docstrings: se excluyen por estructura, no por heuristica de texto.
+        docstrings = set()
+        for nodo in ast.walk(arbol):
+            if isinstance(nodo, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                cuerpo = getattr(nodo, "body", [])
+                if (cuerpo and isinstance(cuerpo[0], ast.Expr)
+                        and isinstance(cuerpo[0].value, ast.Constant)
+                        and isinstance(cuerpo[0].value.value, str)):
+                    docstrings.add(id(cuerpo[0].value))
+
+        # Literales que son elementos de una lista de rechazo declarada.
+        permitidos = set()
+        for nodo in ast.walk(arbol):
+            if not isinstance(nodo, ast.Assign):
+                continue
+            objetivos = {t.id for t in nodo.targets if isinstance(t, ast.Name)}
+            if not (objetivos & listas_permitidas):
+                continue
+            for hijo in ast.walk(nodo.value):
+                if isinstance(hijo, ast.Constant) and isinstance(hijo.value, str):
+                    permitidos.add(id(hijo))
+
+        for nodo in ast.walk(arbol):
+            if not (isinstance(nodo, ast.Constant) and isinstance(nodo.value, str)):
+                continue
+            if marca not in nodo.value:
+                continue
+            if id(nodo) in docstrings or id(nodo) in permitidos:
+                continue
+            ofensores.append(f"{nombre}:{getattr(nodo, 'lineno', '?')}: {nodo.value[:60]!r}")
+
+    assert ofensores == [], (
+        "la ruta de lastre volvio como literal operativo:\n" + "\n".join(ofensores))
+
+    # Y en los .sh, fuera de comentarios.
+    for nombre in sorted(os.listdir(HERE)):
+        if not nombre.endswith(".sh"):
+            continue
+        for n, linea in enumerate(open(os.path.join(HERE, nombre), encoding="utf-8"), 1):
+            if marca in linea and not linea.strip().startswith("#"):
+                ofensores.append(f"{nombre}:{n}")
+    assert ofensores == [], "la ruta de lastre volvio a un script:\n" + "\n".join(ofensores)
+
+    # Tampoco vuelven las otras rutas absolutas del incidente ni el lastre.
+    # Las agujas se parten para que esta comprobacion no se detecte a si misma.
+    fuente = open(os.path.join(HERE, "test_suite.py"), encoding="utf-8").read()
+    assert ("def " + "fill_filesystem") not in fuente, "la funcion de lastre volvio al harness"
+    for var in ("LOWSPACE", "LOWINO", "FULLFS"):
+        assert (var + " =") not in fuente, f"volvio la constante {var}"
+
+
 def main() -> int:
+    global SANDBOX_ROOT, WORK_ROOT
+
+    # Guard fail-closed ANTES de escribir un solo byte: host productivo,
+    # CHP_TEST_ROOT y creacion del root son lo primero que ocurre. Si algo de
+    # esto falla, la suite no llega a tocar el filesystem.
+    try:
+        SANDBOX_ROOT = sandbox.create_sandbox()
+    except sandbox.SandboxViolation as exc:
+        print("SANDBOX GUARD: " + str(exc))
+        print("SUITE_RESULT=RED")
+        return 2
+
+    WORK_ROOT = sandbox.assert_path_allowed(
+        os.path.join(SANDBOX_ROOT, "tests"), SANDBOX_ROOT)
     os.makedirs(WORK_ROOT, exist_ok=True)
+    sandbox.install_fault_tools(SANDBOX_ROOT)
+    print(f"sandbox: {SANDBOX_ROOT}")
+
     tests = [obj for name, obj in sorted(globals().items()) if callable(obj) and hasattr(obj, "_case")]
     tests.sort(key=lambda fn: fn._case[0])
     failures = 0
+    skipped = 0
     for fn in tests:
         cid, title = fn._case
         started = time.time()
@@ -2758,13 +3072,42 @@ def main() -> int:
             elapsed = time.time() - started
             print(f"  PASS  [{cid}] {title}  ({elapsed:.1f}s)")
             RESULTS.append((cid, title, "PASS"))
+        except ToolUnavailable as exc:
+            skipped += 1
+            print(f"  SKIP  [{cid}] {title}  ({exc})")
+            RESULTS.append((cid, title, "SKIP"))
         except Exception as exc:  # noqa: BLE001 - reporte explicito
             failures += 1
             print(f"  FAIL  [{cid}] {title}")
             print(f"        {type(exc).__name__}: {exc}")
             RESULTS.append((cid, title, f"FAIL: {type(exc).__name__}"))
+    # Consumo real de disco, medido y acotado. Un harness de pruebas no tiene
+    # ninguna razon legitima para escribir cientos de megas: si se pasa del
+    # presupuesto, es un fallo mas, no una nota al pie.
+    usados = sandbox.tree_bytes(SANDBOX_ROOT)
+    dentro = usados <= sandbox.DISK_BUDGET_BYTES
+    if not dentro:
+        failures += 1
+        print(f"  FAIL  [DISK] consumo {usados} B supera el limite "
+              f"{sandbox.DISK_BUDGET_BYTES} B")
     print()
-    print(f"=== RESUMEN: {len(tests) - failures}/{len(tests)} PASS ===")
+    print(f"disco usado por la suite: {usados} B "
+          f"({usados / 1024 / 1024:.1f} MB de {sandbox.DISK_BUDGET_BYTES // 1024 // 1024} MB)")
+
+    # Cleanup validado: prefijo + marcador. Nunca una variable suelta.
+    try:
+        sandbox.destroy_sandbox(SANDBOX_ROOT)
+        residuo = os.path.exists(SANDBOX_ROOT)
+    except sandbox.SandboxViolation as exc:
+        failures += 1
+        residuo = True
+        print(f"  FAIL  [CLEANUP] {exc}")
+    if residuo:
+        print(f"  aviso: quedo residuo en {SANDBOX_ROOT}")
+
+    print(f"=== RESUMEN: {len(tests) - failures - skipped}/{len(tests)} PASS"
+          f"{f', {skipped} SKIP' if skipped else ''}"
+          f"{f', {failures} FAIL' if failures else ''} ===")
     print("SUITE_RESULT=" + ("GREEN" if failures == 0 else "RED"))
     return 1 if failures else 0
 

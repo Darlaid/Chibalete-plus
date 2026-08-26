@@ -38,3 +38,46 @@ jobs:
           PY
       - name: Suite de capacity (stdlib, sin red)
         run: python3 ops/backup/CHP-BACKUP-01B/tests/test_capacity.py
+
+  # CHP-BACKUP-TEST-SANDBOX-GUARD-01 — la suite funcional completa, ejecutada
+  # SIEMPRE dentro de un contenedor efimero.
+  #
+  # Por que en contenedor y no directamente en el runner: el contrato de
+  # configuracion del backup exige que backup.env y restic-password sean
+  # root:root 0400, asi que los fixtures tienen que hacer chown a root. Eso
+  # hace la suite inherentemente root-only. En vez de debilitar el contrato, se
+  # aisla: el contenedor es desechable, no tiene mounts productivos y muere con
+  # el job. El propio harness se niega a arrancar si detecta marcadores de
+  # Chibalete+, crea su sandbox bajo /tmp, acota el disco a 100 MB y limpia al
+  # terminar.
+  backup-suite-sandboxed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Toolchain (git para checkout, restic y systemd para la suite)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git restic python3 systemd ca-certificates
+      - uses: actions/checkout@v4
+      - name: Comprobar que el entorno NO parece produccion
+        run: |
+          for m in /var/www/chibalete /opt/chibalete-backup /etc/chibalete-backup \
+                   /opt/chibaleteplus /var/backups/chibalete-backup; do
+            if [ -e "$m" ]; then
+              echo "marcador productivo presente en CI: $m"; exit 1
+            fi
+          done
+          if [ -n "${CHP_TEST_ROOT+definida}" ]; then
+            echo "CHP_TEST_ROOT no debe existir en CI"; exit 1
+          fi
+          echo "entorno limpio"
+      - name: Suite funcional en sandbox (guard, disco acotado, cleanup propio)
+        run: python3 ops/backup/CHP-BACKUP-01B/tests/test_suite.py
+      - name: No debe quedar ningun sandbox tras la suite
+        if: always()
+        run: |
+          restos=$(ls -d /tmp/chp-backup-tests.* 2>/dev/null | wc -l)
+          echo "sandboxes restantes: $restos"
+          [ "$restos" -eq 0 ] || { ls -la /tmp; exit 1; }

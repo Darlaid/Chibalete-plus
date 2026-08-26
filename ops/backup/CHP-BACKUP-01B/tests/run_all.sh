@@ -6,7 +6,6 @@
 set -uo pipefail
 
 UNIT_DIR="${UNIT_DIR:-/repo/ops/backup/CHP-BACKUP-01B}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/chibalete-backup}"
 export PYTHONDONTWRITEBYTECODE=1
 
 FAILURES=0
@@ -14,7 +13,60 @@ step() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 pass() { printf '  PASS  %s\n' "$1"; }
 
+# --------------------------------------------------------------------------
+# GUARD FAIL-CLOSED (CHP-BACKUP-TEST-SANDBOX-GUARD-01)
+#
+# Va ANTES de cualquier escritura, mkdir o cp. El 2026-08-26 este script se
+# ejecuto sobre el VPS productivo: llenaba el disco raiz y su `cp -r` habria
+# sobrescrito la instalacion real del runner en /opt/chibalete-backup.
+#
+# No hay flag de bypass. Si el host tiene marcadores de Chibalete+, la unica
+# salida es ejecutar la suite en un contenedor desechable sin mounts.
+# --------------------------------------------------------------------------
+PRODUCTION_MARKERS="/var/www/chibalete /opt/chibalete-backup /etc/chibalete-backup /opt/chibaleteplus /var/backups/chibalete-backup"
+FOUND=""
+for marker in $PRODUCTION_MARKERS; do
+  [ -e "$marker" ] && FOUND="$FOUND $marker"
+done
+if [ -n "$FOUND" ]; then
+  printf '\n=== STOP — HOST PRODUCTIVO DETECTADO ===\n'
+  printf 'La suite de backup NUNCA se ejecuta directamente en un VPS productivo.\n'
+  printf 'Marcadores presentes:%s\n' "$FOUND"
+  printf 'Ejecutala en un contenedor desechable sin mounts productivos (ver README §2).\n'
+  printf 'No hay flag para saltarse esta comprobacion.\n'
+  printf 'SUITE_RESULT=RED\n'
+  exit 2
+fi
+
+if [ -n "${CHP_TEST_ROOT+definida}" ]; then
+  printf '\n=== STOP — CHP_TEST_ROOT definida ===\n'
+  printf 'Esa variable dejo de existir: redirigia el harness a rutas arbitrarias.\n'
+  printf 'SUITE_RESULT=RED\n'
+  exit 2
+fi
+
+# Sandbox propio: mktemp bajo /tmp, resuelto, con marcador, y limpiado solo si
+# ambos coinciden. Nunca /opt, nunca una variable suelta en el rm.
+SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/chp-backup-tests.XXXXXXXX")"
+SANDBOX_ROOT="$(realpath "$SANDBOX_ROOT")"
+case "$SANDBOX_ROOT" in
+  */chp-backup-tests.*) : ;;
+  *) printf 'STOP — prefijo de sandbox inesperado: %s\nSUITE_RESULT=RED\n' "$SANDBOX_ROOT"; exit 2 ;;
+esac
+touch "$SANDBOX_ROOT/.chp-backup-sandbox"
+INSTALL_DIR="$SANDBOX_ROOT/opt/chibalete-backup"
+
+cleanup_sandbox() {
+  # Doble llave antes de borrar: prefijo correcto Y marcador presente.
+  [ -n "${SANDBOX_ROOT:-}" ] || return 0
+  case "$SANDBOX_ROOT" in */chp-backup-tests.*) : ;; *) return 0 ;; esac
+  [ -f "$SANDBOX_ROOT/.chp-backup-sandbox" ] || return 0
+  rm -rf -- "$SANDBOX_ROOT"
+}
+trap cleanup_sandbox EXIT
+
 step "0. Entorno"
+printf '  sandbox: %s\n' "$SANDBOX_ROOT"
 printf '  restic:  %s\n' "$(restic version)"
 printf '  python:  %s\n' "$(python3 --version)"
 NON_LOOPBACK=0
@@ -30,8 +82,10 @@ else
 fi
 
 step "1. Preparacion del arbol de instalacion simulado"
-# Las units apuntan a /opt/chibalete-backup: se materializa en tmpfs para que
-# systemd-analyze pueda resolver ExecStart. El repositorio sigue read-only.
+# Las units apuntan a /opt/chibalete-backup, asi que systemd-analyze necesita
+# una ruta que exista para resolver ExecStart. Se materializa DENTRO del
+# sandbox: antes se copiaba sobre /opt/chibalete-backup, que en el VPS es la
+# instalacion productiva. El repositorio sigue read-only.
 mkdir -p "$INSTALL_DIR"
 cp -r "$UNIT_DIR/runners" "$INSTALL_DIR/"
 cp "$UNIT_DIR/README.md" "$INSTALL_DIR/" 2>/dev/null || true
@@ -83,9 +137,9 @@ done < <(find "$UNIT_DIR" -name '*.sh' -type f)
 [ "$SC_OK" = "1" ] && pass "shellcheck limpio"
 
 step "5. systemd-analyze verify (con inspeccion textual)"
-UNITS_TMP=/work/units-standalone
+UNITS_TMP="$SANDBOX_ROOT/units-standalone"
 mkdir -p "$UNITS_TMP"
-cp "$UNIT_DIR"/systemd/* "$UNITS_TMP/"
+find "$UNIT_DIR/systemd" -maxdepth 1 -type f -exec cp {} "$UNITS_TMP/" \;
 chmod 0644 "$UNITS_TMP"/*
 SD_OK=1
 for unit in "$UNITS_TMP"/*; do

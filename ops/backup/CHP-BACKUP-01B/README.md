@@ -47,6 +47,25 @@ Sin dependencias nuevas: solo la stdlib de Python 3.12. **No** usa el
 
 ## 2. Cómo validar (única forma soportada)
 
+> ### ⛔ La suite de backup nunca se ejecuta directamente en un VPS productivo.
+>
+> Ni `run_all.sh`, ni `test_suite.py`, ni «solo un caso». Siempre en un
+> contenedor desechable **sin mounts productivos**.
+>
+> Desde CHP-BACKUP-TEST-SANDBOX-GUARD-01 esto no depende de que alguien se
+> acuerde: el harness **se niega a arrancar** si detecta marcadores de
+> Chibalete+ en el host (`/var/www/chibalete`, `/opt/chibalete-backup`,
+> `/etc/chibalete-backup`, `/opt/chibaleteplus`,
+> `/var/backups/chibalete-backup`) y **no hay flag para saltárselo**.
+> `CHP_TEST_ROOT` dejó de existir: su sola presencia aborta la ejecución.
+>
+> El motivo es un incidente real (2026-08-26): ejecutada fuera del contenedor,
+> la suite escribió 48,4 GB de lastre en `/fullfs` y llenó el disco raíz del
+> VPS; los cuatro containers quedaron `unhealthy` y el backup programado falló.
+> Además `run_all.sh` copiaba los runners sobre `/opt/chibalete-backup`, que en
+> el VPS es la instalación real. Ver
+> `docs/ops/CHP_BACKUP_TEST_SANDBOX_GUARD_01.md`.
+
 Siempre dentro del toolchain Linux aprobado en CHP-BACKUP-01B-0, **offline** y
 con el repositorio montado en solo lectura:
 
@@ -69,9 +88,22 @@ docker run --rm \
   bash /repo/ops/backup/CHP-BACKUP-01B/tests/run_all.sh
 ```
 
-Los tmpfs auxiliares no son decorativos: `/lowspace` y `/fullfs` producen
-**ENOSPC real** y `/lowino` (`nr_inodes=20`) produce **agotamiento real de
-inodos**. Esos dos casos no se simulan con dobles.
+Desde CHP-BACKUP-TEST-SANDBOX-GUARD-01 **los tmpfs auxiliares
+`/lowspace`, `/lowino` y `/fullfs` ya no se usan ni hacen falta**: eran rutas
+absolutas y, fuera del contenedor, se materializaban en el disco real. Los tres
+escenarios se cubren ahora con **inyección de fallos determinista**, sin escribir
+un solo byte de lastre:
+
+| Escenario | Antes | Ahora |
+|---|---|---|
+| Espacio insuficiente | tmpfs `/lowspace` de 1 MB | `os.statvfs` parcheado en el proceso hijo |
+| Inodos agotados | tmpfs `/lowino` (`nr_inodes=20`) | ídem, con `f_favail` mínimo |
+| ENOSPC de restic | llenar `/fullfs` con lastre | `restic` de pega que falla con «no space left on device» |
+
+Los `--tmpfs` de la invocación pueden conservarse (no estorban), pero el
+harness ya no depende de ellos. Lo que sí crea siempre es su propio sandbox
+`/tmp/chp-backup-tests.<aleatorio>`, con marcador propio, presupuesto de disco
+de **100 MB** y limpieza validada por prefijo + marcador.
 
 Resultado esperado: `VALIDACION GLOBAL: GREEN` y `SUITE_RESULT=GREEN`.
 
