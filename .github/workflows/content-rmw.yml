@@ -37,6 +37,13 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      negative_control:
+        description: 'Control negativo: degrada server.js EN EL CHECKOUT DEL RUNNER (nunca en el repositorio) y deja que el gate falle. El run terminará en `failure` A PROPÓSITO.'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 # Mínimo imprescindible para el checkout. El job no recibe ningún secreto del
 # repositorio: no hay bloque `secrets`, `env` ni `with` que los referencie.
@@ -77,6 +84,41 @@ jobs:
             if [ -e "$d" ]; then echo "::error::$d existe en el clone"; exit 1; fi
           done
           echo "OK — sin stores reales"
+
+      # Control negativo — SOLO manual, jamás en push ni pull request.
+      #
+      # Un gate que nunca ha fallado no ha demostrado nada. Este paso retira UNA
+      # invalidación de caché del checkout EFÍMERO del runner —el repositorio no
+      # se toca— para que el gate reproduzca la pérdida de escrituras y el run
+      # termine en `failure`. Así se comprueba, cuando haga falta, que este
+      # workflow es capaz de ponerse rojo de verdad.
+      #
+      # Si el ancla desaparece, el paso falla en vez de degradarse en silencio:
+      # un control negativo vacuo sería peor que no tenerlo.
+      - name: Control negativo — retirar una invalidación de caché (solo runner)
+        if: github.event_name == 'workflow_dispatch' && inputs.negative_control == 'true'
+        run: |
+          set -euo pipefail
+          node --input-type=commonjs - <<'JS'
+          const fs = require('fs');
+          const p = 'server/server.js';
+          const src = fs.readFileSync(p, 'utf8');
+          const lines = src.split('\n');
+          // Ancla semántica (no un número de línea): el RMW de creación/edición.
+          const flujo = lines.findIndex(l => /const freshIdx = freshList\.findIndex\(c => c\.id === newContent\.id\);/.test(l));
+          if (flujo === -1) throw new Error('no se encuentra el flujo RMW de creación');
+          let i = -1;
+          for (let n = flujo; n >= 0 && n > flujo - 8; n--) {
+            if (/^\s*_jsonCache\.delete\(DB_FILE\);\s*$/.test(lines[n])) { i = n; break; }
+          }
+          if (i === -1) throw new Error('no se encuentra la invalidación que retirar');
+          lines.splice(i, 1);
+          fs.writeFileSync(p, lines.join('\n'));
+          const quedan = (lines.join('\n').match(/_jsonCache\.delete\(DB_FILE\)/g) || []).length;
+          console.log(`invalidación retirada (línea ${i + 1}); quedan ${quedan} de 6`);
+          if (quedan !== 5) throw new Error('el control negativo no dejó el árbol como se esperaba');
+          JS
+          echo "::warning::checkout degradado a propósito — se ESPERA que el gate falle"
 
       # Guard de integridad de la suite + suite multiproceso, en ese orden.
       # Sin `continue-on-error`, sin `|| true`: un solo registro perdido deja el
