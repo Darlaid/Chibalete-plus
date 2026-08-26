@@ -2285,6 +2285,7 @@ app.delete('/api/content/:id', async (req, res) => {
 
         // 7. Remove DB record — done last, after cleanup (atomic cross-container)
         await withFileLock(DB_FILE, () => {
+            _jsonCache.delete(DB_FILE);
             const freshList = readJSON(DB_FILE);
             const freshIdx = freshList.findIndex(c => c.id === id);
             if (freshIdx !== -1) freshList.splice(freshIdx, 1);
@@ -2749,6 +2750,7 @@ app.post('/api/content', async (req, res) => {
         // 2. Transaccionalidad / Rollback Crítico (atomic cross-container lock)
         try {
             await withFileLock(DB_FILE, () => {
+                _jsonCache.delete(DB_FILE);
                 const freshList = readJSON(DB_FILE);
                 const freshIdx = freshList.findIndex(c => c.id === newContent.id);
                 if (freshIdx >= 0) {
@@ -2803,6 +2805,7 @@ app.post('/api/content', async (req, res) => {
                 (async () => {
                     try {
                         await withFileLock(DB_FILE, () => {
+                            _jsonCache.delete(DB_FILE);
                             const currentList = readJSON(DB_FILE);
                             const idx = currentList.findIndex(c => c.id === newContent.id);
                             if (idx !== -1) {
@@ -6967,6 +6970,7 @@ app.post('/api/content/:id/retry', async (req, res) => {
 
         // Reset Status (atomic cross-container lock)
         await withFileLock(DB_FILE, () => {
+            _jsonCache.delete(DB_FILE);
             const freshList = readJSON(DB_FILE);
             const freshIdx = freshList.findIndex(c => c.id === id);
             if (freshIdx !== -1) {
@@ -6988,6 +6992,7 @@ app.post('/api/content/:id/retry', async (req, res) => {
             (async () => {
                 try {
                     await withFileLock(DB_FILE, () => {
+                        _jsonCache.delete(DB_FILE);
                         const currentList = readJSON(DB_FILE);
                         const idx = currentList.findIndex(c => c.id === id);
                         if (idx !== -1) {
@@ -7892,6 +7897,7 @@ const checkMissingTTS = async () => {
         const contentList = readJSON(DB_FILE);
         let itemsPending = 0;
         let dbModified = false;
+        const idsModificados = new Set();
 
         for (const content of contentList) {
             if (!content.texto_plano_url) continue;
@@ -7907,7 +7913,7 @@ const checkMissingTTS = async () => {
                      content.ttsStatus = 'error_proveedor';
                      content.processingStatus = { ...content.processingStatus, status: 'error_proveedor', error: 'Server Restarted - Job Interrupted' };
                 }
-                dbModified = true;
+                dbModified = true; idsModificados.add(content.id);
             }
 
             if (fs.existsSync(textFullPath)) {
@@ -7929,7 +7935,7 @@ const checkMissingTTS = async () => {
 
                     if (content.ttsStatus !== 'pendiente' && content.ttsStatus !== 'error_proveedor') {
                         content.ttsStatus = 'pendiente';
-                        dbModified = true;
+                        dbModified = true; idsModificados.add(content.id);
                     }
 
                     // W5: Catch false 'listo' — ttsStatus says ready but manifest is absent/empty.
@@ -7938,7 +7944,7 @@ const checkMissingTTS = async () => {
                     if (content.ttsStatus === 'listo') {
                         log(`[Startup Audit] ttsStatus='listo' but manifest missing/incomplete for ${content.id}. Resetting to pendiente.`, 'WARN');
                         content.ttsStatus = 'pendiente';
-                        dbModified = true;
+                        dbModified = true; idsModificados.add(content.id);
                     }
 
                     // No longer launching generateAudioForContent to avoid Thundering Herd APIs rate limits.
@@ -7949,8 +7955,24 @@ const checkMissingTTS = async () => {
         }
 
         if (dbModified) {
+            // CHP-CONTENT-STORE-RMW-01: contentList se leyó ANTES del lock y el
+            // escaneo de ficheros puede durar segundos. Reescribirla entera
+            // borraría cuanto la otra réplica haya creado entretanto, así que se
+            // relee dentro del lock y se aplican SOLO los campos que esta
+            // auditoría decidió cambiar, registro a registro.
             await withFileLock(DB_FILE, () => {
-                writeJSON(DB_FILE, contentList);
+                _jsonCache.delete(DB_FILE);
+                const freshList = readJSON(DB_FILE);
+                const auditados = new Map(contentList.map(c => [c.id, c]));
+                for (const id of idsModificados) {
+                    const idx = freshList.findIndex(c => c.id === id);
+                    const auditado = auditados.get(id);
+                    if (idx === -1 || !auditado) continue; // eliminado por otra réplica: no se resucita
+                    freshList[idx].status = auditado.status;
+                    freshList[idx].ttsStatus = auditado.ttsStatus;
+                    if (auditado.processingStatus !== undefined) freshList[idx].processingStatus = auditado.processingStatus;
+                }
+                writeJSON(DB_FILE, freshList);
             }, 'contentLock');
             log('[Startup Audit] DB updated with pending TTS states and restored reader availability.', 'INFO');
         }
