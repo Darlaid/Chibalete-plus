@@ -50,8 +50,11 @@ on:
 permissions:
   contents: read
 
+# El evento entra en la clave a propósito: un control negativo lanzado a mano
+# comparte `github.ref` con el push de esa misma rama y, sin esta separación,
+# cancelaba el run del push y dejaba el commit sin check reportado.
 concurrency:
-  group: content-rmw-${{ github.ref }}
+  group: content-rmw-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
