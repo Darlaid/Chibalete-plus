@@ -1762,13 +1762,17 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-@case("D01", "inventario: 4 SQLite + 20 JSON = 24 stores")
+@case("D01", "inventario: 4 SQLite + 21 JSON declarados; 24 stores respaldados")
 def test_d_inventario():
     from chibalete_backup import stores as S
     json_paths = [s.logical_path for s in S.JSON_STORES]
     sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
-    assert len(json_paths) == 20, f"se esperaban 20 JSON declarados, hay {len(json_paths)}"
-    assert len(set(json_paths)) == 20, "hay logical_path duplicados"
+    # 21 = los 20 historicos + data/mook_db.json
+    # (CHP-BACKUP-MOOK-STORE-COVERAGE-01). El manifiesto sigue trayendo 24
+    # stores porque mook_db.json es opcional y los fixtures no lo crean: se
+    # anota en `stores_absent`, no en `stores`.
+    assert len(json_paths) == 21, f"se esperaban 21 JSON declarados, hay {len(json_paths)}"
+    assert len(set(json_paths)) == 21, "hay logical_path duplicados"
     required_sqlite = [s for s in S.SQLITE_STORES if s.required]
     assert len(required_sqlite) == 4, required_sqlite
     for lp in NUEVOS_STORES:
@@ -1946,9 +1950,10 @@ def test_d_duplicate_basename():
             assert "mismo nombre de archivo" in str(exc) or "pisarian" in str(exc), str(exc)
     finally:
         preflight.JSON_STORES = original
-    # El inventario real esta sano: 20 basenames unicos.
+    # El inventario real esta sano: 21 basenames unicos (20 historicos +
+    # mook_db.json, CHP-BACKUP-MOOK-STORE-COVERAGE-01).
     nombres = [os.path.basename(s.logical_path) for s in S.JSON_STORES]
-    assert len(set(nombres)) == len(nombres) == 20, nombres
+    assert len(set(nombres)) == len(nombres) == 21, nombres
 
 
 @case("D10", "privacidad: sin contenido, correos ni conteos individualizables")
@@ -2485,6 +2490,260 @@ def test_l_no_environment_authorization():
 # --------------------------------------------------------------------------
 # Runner
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Casos MK01-MK07 — cobertura de mook_db.json (CHP-BACKUP-MOOK-STORE-COVERAGE-01)
+# --------------------------------------------------------------------------
+#
+# El store canonico del MOOK quedo fuera del inventario original porque no
+# existia cuando se redacto. Estos casos fijan su cobertura para que una
+# reinstalacion del runner no pueda volver a dejarlo fuera en silencio, y para
+# demostrar que se restaura byte a byte.
+
+MOOK_LOGICAL_PATH = fixtures.MOOK_REL
+
+
+def _mook_entry(manifest, key="stores"):
+    for entry in manifest[key]:
+        if entry["logical_path"] == MOOK_LOGICAL_PATH:
+            return entry
+    return None
+
+
+@case("MK01", "inventario: mook_db.json declarado una sola vez, opcional y sin conteo")
+def test_mk_inventory():
+    from chibalete_backup import stores as S
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+
+    assert json_paths.count(MOOK_LOGICAL_PATH) == 1, json_paths
+    assert MOOK_LOGICAL_PATH not in sqlite_paths, "mook_db.json no es una base SQLite"
+    declaradas = [p for p in json_paths + sqlite_paths
+                  if os.path.basename(p) == "mook_db.json"]
+    assert declaradas == [MOOK_LOGICAL_PATH], declaradas
+
+    store = next(s for s in S.JSON_STORES if s.logical_path == MOOK_LOGICAL_PATH)
+    assert store.category == "CANON", store
+    # Sin adaptador: `root_len` sobre un objeto de 4 claves fijas emitiria
+    # siempre 4 y se leeria como un conteo real.
+    assert store.count_adapter is None, store
+    # `runs`/`evidence` acumulan trabajo de menores.
+    assert store.sensitivity == S.SENSITIVITY_MINORS, store
+    assert store.retention_status == S.RETENTION_NEEDS_LEGAL_REVIEW, store
+    # Opcional: un entorno sin MOOK todavia no tiene el archivo.
+    assert store.required is False, store
+
+    # No se amplio ningun directorio ni se colo un glob.
+    assert not any(ch in MOOK_LOGICAL_PATH for ch in "*?["), MOOK_LOGICAL_PATH
+    assert MOOK_LOGICAL_PATH.startswith("data/"), MOOK_LOGICAL_PATH
+
+
+@case("MK02", "mook_db.json presente: se respalda, se anota y la fuente no se toca")
+def test_mk_present_included():
+    env = Env("mk02")
+    fixtures.build_mook_db(env.base)
+    before = fixtures.snapshot_tree(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    # 24 historicos + mook_db.json. identity.db sigue ausente en este fixture.
+    assert len(manifest["stores"]) == 25, len(manifest["stores"])
+
+    entry = _mook_entry(manifest)
+    assert entry is not None, [s["logical_path"] for s in manifest["stores"]]
+    assert entry["kind"] == "json", entry
+    assert entry["category"] == "CANON", entry
+    assert entry["status"] == "included", entry
+    assert entry["integrity_result"] == "ok", entry
+    assert entry["bytes"] == len(fixtures.MOOK_POBLADO), entry
+    assert entry["sha256"] == sha256_file(os.path.join(env.base, MOOK_LOGICAL_PATH)), entry
+    assert entry["sensitivity"] == "minors", entry
+    assert entry["retention_status"] == "NEEDS_LEGAL_REVIEW", entry
+    # Nunca un conteo: seria constante y enganoso.
+    assert "aggregate_count" not in entry, entry
+    # Estando presente, no puede figurar tambien como ausente.
+    assert _mook_entry(manifest, "stores_absent") is None, manifest["stores_absent"]
+
+    # Los 24 stores previos siguen ahi: mook_db.json se suma, no sustituye.
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+
+    assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "MK02")
+
+
+@case("MK03", "mook_db.json ausente: backup ok y ausencia anotada explicitamente")
+def test_mk_absent_tolerated():
+    env = Env("mk03")
+    assert not os.path.exists(os.path.join(env.base, MOOK_LOGICAL_PATH))
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    # Sin MOOK el backup sigue siendo el de 24 stores: la ausencia no resta.
+    assert len(manifest["stores"]) == 24, len(manifest["stores"])
+    assert _mook_entry(manifest) is None, "un store ausente no puede figurar como respaldado"
+
+    # Lo esencial: la ausencia deja rastro y es distinguible de una perdida.
+    ausente = _mook_entry(manifest, "stores_absent")
+    assert ausente is not None, manifest["stores_absent"]
+    assert ausente["status"] == "absent_optional", ausente
+    assert ausente["kind"] == "json", ausente
+    assert "sha256" not in ausente and "bytes" not in ausente, ausente
+
+
+@case("MK04", "mook_db.json vacio pero valido: se respalda igual")
+def test_mk_empty_valid():
+    env = Env("mk04")
+    fixtures.build_mook_db(env.base, raw=fixtures.MOOK_EMPTY)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    entry = _mook_entry(manifest)
+    assert entry is not None, "un MOOK vacio valido debe respaldarse, no omitirse"
+    assert entry["status"] == "included", entry
+    assert entry["bytes"] == len(fixtures.MOOK_EMPTY), entry
+    assert entry["integrity_result"] == "ok", entry
+    assert _mook_entry(manifest, "stores_absent") is None, manifest["stores_absent"]
+
+
+@case("MK05", "restore real de mook_db.json: byte a byte y campos intactos")
+def test_mk_restore_exact():
+    env = Env("mk05")
+    origen = fixtures.build_mook_db(env.base)
+    bytes_origen = open(origen, "rb").read()
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+
+    staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+              if os.path.isdir(p)][0]
+    restaurada = os.path.join(staged, "json", "mook_db.json")
+    assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "json")))
+
+    # Igualdad byte a byte contra la fuente.
+    bytes_restaurados = open(restaurada, "rb").read()
+    assert bytes_restaurados == bytes_origen, "el restore de mook_db.json no es byte-identico"
+    assert sha256_file(restaurada) == sha256_file(origen)
+    assert os.path.getsize(restaurada) == len(bytes_origen)
+
+    # Y ademas parsea y conserva la estructura declarada.
+    doc = json.loads(bytes_restaurados)
+    assert [e["id"] for e in doc["experiences"]] == ["exp-sintetica-0001"], doc["experiences"]
+    assert doc["experiences"][0]["slug"] == "experiencia-sintetica"
+    assert doc["experiences"][0]["currentVersionId"] == "ver-sintetica-0001"
+    assert [v["id"] for v in doc["versions"]] == ["ver-sintetica-0001"], doc["versions"]
+    assert len(doc["versions"][0]["nodes"]) == 2, doc["versions"][0]
+    assert doc["runs"] == [] and doc["evidence"] == []
+
+    # El manifiesto restaurado declara el store como incluido.
+    man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
+    assert _mook_entry(man)["sha256"] == sha256_file(origen)
+
+
+@case("MK06", "mook_db.json ilegible o corrupto: el backup falla de forma visible")
+def test_mk_unreadable_fails_loudly():
+    # (a) JSON corrupto: aborta ANTES de invocar restic, sin snapshot.
+    env = Env("mk06a")
+    fixtures.build_mook_db(env.base, raw=b'{"experiences": [')
+    env.provision_repository()
+    proc = env.run("structured_backup.py", expect=errors.JsonInvalidError.exit_code)
+    assert "mook_db.json" in proc.stderr, proc.stderr[-400:]
+    assert env.snapshots(tag="structured") == [], "no debe quedar snapshot de una captura fallida"
+    assert env.staging_dirs() == [], env.staging_dirs()
+
+    # (b) No es un archivo regular: fail-closed en el preflight. Se usa un
+    # directorio porque la suite corre como root y chmod 000 no le impide leer.
+    env2 = Env("mk06b")
+    os.makedirs(os.path.join(env2.base, MOOK_LOGICAL_PATH), exist_ok=True)
+    env2.provision_repository()
+    proc2 = env2.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "no es un archivo regular" in proc2.stderr, proc2.stderr[-400:]
+    assert env2.snapshots(tag="structured") == [], "no debe quedar snapshot"
+
+    # (c) Symlink: tampoco se sigue, aunque apunte a un JSON valido.
+    env3 = Env("mk06c")
+    real = os.path.join(env3.base, "data", "mook_real.json")
+    os.makedirs(os.path.dirname(real), exist_ok=True)
+    with open(real, "wb") as handle:
+        handle.write(fixtures.MOOK_POBLADO)
+    os.symlink(real, os.path.join(env3.base, MOOK_LOGICAL_PATH))
+    env3.provision_repository()
+    proc3 = env3.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "symlink" in proc3.stderr, proc3.stderr[-400:]
+
+
+@case("MK07", "nada fuera de la allowlist entra, y los arboles fuente quedan intactos")
+def test_mk_no_collateral():
+    env = Env("mk07")
+    fixtures.build_mook_db(env.base)
+
+    # Senuelos con nombres vecinos: ninguno esta declarado en el inventario.
+    senuelos = {
+        "data/mook_db.json.bak": b'{"experiences": ["senuelo"]}',
+        "data/mook_db.json.pre-deploy": b'{"experiences": ["senuelo"]}',
+        "data/mook_backup.json": b'{"experiences": ["senuelo"]}',
+        "data/mook_db_old.json": b'{"experiences": ["senuelo"]}',
+        "data-critical/mook_db.json": b'{"experiences": ["senuelo"]}',
+    }
+    for rel, raw in senuelos.items():
+        path = os.path.join(env.base, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(raw)
+
+    before = fixtures.snapshot_tree(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    declarados = {s["logical_path"] for s in manifest["stores"]}
+    for rel in senuelos:
+        assert rel not in declarados, f"entro un archivo no declarado: {rel}"
+    assert MOOK_LOGICAL_PATH in declarados, declarados
+    # Exactamente un mook_db.json en el manifiesto.
+    assert sum(1 for p in declarados if os.path.basename(p) == "mook_db.json") == 1, declarados
+
+    # Y tampoco entran al snapshot por otra via: el staging solo tiene el
+    # basename declarado, no los senuelos.
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+              if os.path.isdir(p)][0]
+    restaurados = sorted(os.listdir(os.path.join(staged, "json")))
+    assert "mook_db.json" in restaurados, restaurados
+    for ruido in ("mook_db.json.bak", "mook_backup.json", "mook_db_old.json",
+                  "mook_db.json.pre-deploy"):
+        assert ruido not in restaurados, restaurados
+
+    # data/, data-critical/ y uploads: nada borrado, movido ni truncado.
+    after = fixtures.snapshot_tree(env.base)
+    assert_sources_untouched(before, after, "MK07")
+    for rel in list(senuelos) + [MOOK_LOGICAL_PATH]:
+        assert os.path.isfile(os.path.join(env.base, rel)), f"desaparecio del origen: {rel}"
+    uploads_dir = os.path.join(env.base, fixtures.UPLOADS_REL)
+    assert len(os.listdir(uploads_dir)) == 6, os.listdir(uploads_dir)
+
 
 def main() -> int:
     os.makedirs(WORK_ROOT, exist_ok=True)

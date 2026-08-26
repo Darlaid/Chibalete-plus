@@ -121,6 +121,14 @@ def run(args) -> int:
                     retention_status=store.retention_status,
                 )
 
+            # CHP-BACKUP-MOOK-STORE-COVERAGE-01: deja constancia de los stores
+            # OPCIONALES que no existian. Un manifiesto sin esta anotacion no
+            # permite distinguir «aun no se ha creado» de «se perdio».
+            for kind in ("sqlite", "json"):
+                for store in sources["absent"][kind]:
+                    manifest.add_absent(store.logical_path, kind=kind, category=store.category)
+                    log.info("store_absent_optional", store=store.logical_path, kind=kind)
+
             payload = manifest.build("ok")
             manifest_path = os.path.join(staging.path, "manifest.json")
             write_manifest(payload, manifest_path)

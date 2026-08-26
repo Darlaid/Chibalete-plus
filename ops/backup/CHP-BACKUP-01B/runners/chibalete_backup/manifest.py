@@ -50,6 +50,7 @@ class ManifestBuilder:
         self.backup_type = backup_type
         self._started = time.time()
         self._stores: list[dict] = []
+        self._absent: list[dict] = []
         self._warnings: list[str] = []
         self._uploads = {"uploads_file_count": 0, "uploads_total_bytes": 0}
 
@@ -58,6 +59,7 @@ class ManifestBuilder:
             "logical_path": logical_path,
             "kind": kind,
             "category": category,
+            "status": "included",
             "bytes": capture["bytes"],
             "sha256": capture["sha256"],
             "capture_method": capture["capture_method"],
@@ -68,6 +70,32 @@ class ManifestBuilder:
             entry["aggregate_count"] = aggregate
         entry.update(labels)
         self._stores.append(entry)
+
+    def add_absent(self, logical_path: str, kind: str, category: str, **labels) -> None:
+        """Registra un store OPCIONAL que no existia en el origen.
+
+        CHP-BACKUP-MOOK-STORE-COVERAGE-01. Antes, un store con `required=False`
+        que no existia desaparecia del manifiesto sin dejar rastro: «ausente
+        porque todavia no se ha creado» y «ausente porque se perdio» producian
+        exactamente el mismo manifiesto. Anotarlo elimina esa ambiguedad.
+
+        Va en su propia lista, NO en `stores`: `stores` significa «respaldado en
+        este snapshot» y esa semantica no cambia. Un store ausente no tiene
+        bytes ni sha256 que ofrecer, y mezclarlo obligaria a todo consumidor del
+        manifiesto a filtrar por `status` para no contar de mas.
+
+        Los errores de lectura NO llegan aqui: abortan la ejecucion antes de
+        escribir manifiesto alguno, asi que nunca se confunden con una ausencia
+        legitima.
+        """
+        entry = {
+            "logical_path": logical_path,
+            "kind": kind,
+            "category": category,
+            "status": "absent_optional",
+        }
+        entry.update(labels)
+        self._absent.append(entry)
 
     def set_uploads(self, file_count: int, total_bytes: int) -> None:
         self._uploads = {
@@ -87,6 +115,9 @@ class ManifestBuilder:
             "logical_host": LOGICAL_HOST,
             "runner_version": RUNNER_VERSION,
             "stores": self._stores,
+            # Stores opcionales declarados en el inventario que no existian en
+            # el origen. Lista vacia => todo lo declarado se respaldo.
+            "stores_absent": self._absent,
             "uploads_file_count": self._uploads["uploads_file_count"],
             "uploads_total_bytes": self._uploads["uploads_total_bytes"],
             "duration_seconds": round(time.time() - self._started, 3),

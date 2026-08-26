@@ -143,6 +143,35 @@ JSON_STORES: tuple[JsonStore, ...] = (
         retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
         required=False,
     ),
+    # --- CHP-BACKUP-MOOK-STORE-COVERAGE-01 ------------------------------------
+    # Store canonico del MOOK: `experiences`, `versions`, `runs` y `evidence`.
+    # Quedo fuera del inventario original porque el MOOK no existia cuando se
+    # redacto (CHP-BACKUP-01A), no por una decision de exclusion.
+    #
+    # SIN adaptador de conteo a proposito: la raiz es un OBJETO de 4 claves
+    # fijas, asi que `root_len` emitiria siempre 4 —un numero constante que no
+    # dice nada sobre cuantas experiencias o evidencias hay y que se leeria como
+    # un conteo real en el manifiesto—. Vale mas no emitir conteo que emitir uno
+    # enganoso; `bytes` y `sha256` ya detectan truncamiento.
+    #
+    # `runs` y `evidence` acumulan trabajo de participantes menores de edad, de
+    # modo que se clasifica igual que los stores leo_* y `submissions_db.json`:
+    # sensibilidad `minors` y retencion pendiente de revision legal (design §8).
+    #
+    # `required=False`: un entorno donde el MOOK aun no se ha usado no tiene el
+    # archivo, y esa ausencia NO debe tumbar el backup de los demas stores. Se
+    # registra explicitamente en `stores_absent` del manifiesto para que
+    # «ausente porque todavia no existe» no se confunda con «se perdio». Cuando
+    # el archivo existe, su respaldo es obligatorio: un error de lectura o un
+    # JSON invalido abortan la ejecucion antes de invocar restic.
+    JsonStore(
+        "data/mook_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+        required=False,
+    ),
 )
 
 # --- Uploads (inventario §1 mounts; §2.3) ------------------------------------

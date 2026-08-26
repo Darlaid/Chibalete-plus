@@ -93,6 +93,66 @@ IDENTITY_COUNTS = {
 }
 
 
+# --- MOOK (CHP-BACKUP-MOOK-STORE-COVERAGE-01) --------------------------------
+# Store opcional: `build_base` NO lo crea, igual que no crea identity.db. Los
+# casos que lo necesitan lo materializan explicitamente.
+MOOK_REL = "data/mook_db.json"
+
+# Forma de un entorno donde el MOOK existe pero nadie lo ha usado todavia: las
+# cuatro claves presentes y vacias. Es JSON valido y debe respaldarse.
+MOOK_EMPTY = (
+    '{\n'
+    '  "experiences": [],\n'
+    '  "versions": [],\n'
+    '  "runs": [],\n'
+    '  "evidence": []\n'
+    '}\n'
+).encode("utf-8")
+
+# Contenido 100% INVENTADO con la forma del store real: una experiencia
+# publicada con su version. Sirve para demostrar que un restore devuelve los
+# mismos bytes y los mismos campos. Ningun dato procede de produccion.
+MOOK_POBLADO = (
+    '{\n'
+    '  "experiences": [\n'
+    '    {\n'
+    '      "id": "exp-sintetica-0001",\n'
+    '      "slug": "experiencia-sintetica",\n'
+    '      "title": "Experiencia Sintética Ñ",\n'
+    '      "status": "published",\n'
+    '      "currentVersionId": "ver-sintetica-0001"\n'
+    '    }\n'
+    '  ],\n'
+    '  "versions": [\n'
+    '    {\n'
+    '      "id": "ver-sintetica-0001",\n'
+    '      "experienceId": "exp-sintetica-0001",\n'
+    '      "number": 1,\n'
+    '      "nodes": [\n'
+    '        {"id": "n1", "type": "READING"},\n'
+    '        {"id": "n2", "type": "ACTIVITY"}\n'
+    '      ]\n'
+    '    }\n'
+    '  ],\n'
+    '  "runs": [],\n'
+    '  "evidence": []\n'
+    '}\n'
+).encode("utf-8")
+
+
+def build_mook_db(base_dir: str, raw: bytes = MOOK_POBLADO, rel: str = MOOK_REL) -> str:
+    """Materializa un `mook_db.json` sintetico con bytes literales.
+
+    Se escribe en binario a proposito: las pruebas de preservacion byte a byte
+    no deben depender de como la plataforma trate los finales de linea.
+    """
+    path = os.path.join(base_dir, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(raw)
+    return path
+
+
 def build_base(base_dir: str, uploads_files: int = 6, upload_size: int = 20000) -> str:
     """Crea un arbol de datos sintetico con la forma de produccion."""
     for rel, table, rows in SQLITE_FIXTURES:

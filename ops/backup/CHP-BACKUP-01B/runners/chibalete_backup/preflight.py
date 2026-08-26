@@ -110,12 +110,19 @@ def resolve_sources(base_dir: str) -> dict:
     """Resuelve rutas fuente y verifica las obligatorias."""
     assert_store_inventory_sane()
 
+    # CHP-BACKUP-MOOK-STORE-COVERAGE-01: los stores opcionales que no existen se
+    # acumulan aqui para que el runner pueda anotarlos en el manifiesto. Antes se
+    # descartaban en silencio y su ausencia era indistinguible de una perdida.
+    absent = {"sqlite": [], "json": []}
+
     sqlite_paths = []
     for store in SQLITE_STORES:
         path = _resolve_safe(base_dir, store.logical_path, "base SQLite")
         if path is None and store.required:
             raise SourceMissingError(f"base SQLite obligatoria ausente: {store.logical_path}")
-        if path is not None:
+        if path is None:
+            absent["sqlite"].append(store)
+        else:
             sqlite_paths.append((store, path))
 
     json_paths = []
@@ -123,7 +130,9 @@ def resolve_sources(base_dir: str) -> dict:
         path = _resolve_safe(base_dir, store.logical_path, "store JSON")
         if path is None and store.required:
             raise SourceMissingError(f"store JSON obligatorio ausente: {store.logical_path}")
-        if path is not None:
+        if path is None:
+            absent["json"].append(store)
+        else:
             json_paths.append((store, path))
 
     uploads_paths = []
@@ -135,7 +144,12 @@ def resolve_sources(base_dir: str) -> dict:
         if exists:
             uploads_paths.append((source, path))
 
-    return {"sqlite": sqlite_paths, "json": json_paths, "uploads": uploads_paths}
+    return {
+        "sqlite": sqlite_paths,
+        "json": json_paths,
+        "uploads": uploads_paths,
+        "absent": absent,
+    }
 
 
 def estimate_staging(sources: dict) -> dict:
