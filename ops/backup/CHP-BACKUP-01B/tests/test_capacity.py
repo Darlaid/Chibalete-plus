@@ -371,12 +371,17 @@ def test_recovery_point():
 def test_protected_scope():
     print("\n[8] guard de scope protegido (F15)")
     total = len(SQLITE_STORES) + len(JSON_STORES)
-    ok("PROTECTED_DATA_SCOPE_UNCHANGED: 25 stores structured",
-       total == 25 and EXPECTED_STRUCTURED_STORES == 25, f"total={total}")
+    # 26 = los 25 historicos + data/mook_db.json
+    # (CHP-BACKUP-MOOK-STORE-COVERAGE-01). Este ratchet existe para que ampliar
+    # o REDUCIR el scope protegido sea siempre una decision consciente: subirlo
+    # sin anadir el store correspondiente a la lista `must` de abajo dejaria el
+    # guard contando cajas vacias.
+    ok("PROTECTED_DATA_SCOPE_UNCHANGED: 26 stores structured",
+       total == 26 and EXPECTED_STRUCTURED_STORES == 26, f"total={total}")
     paths = {s.logical_path for s in SQLITE_STORES} | {s.logical_path for s in JSON_STORES}
     for must in ("data-critical/usuarios_colegios_oro.json", "data/groups_db.json",
                  "data/access_db.json", "data/content.json", "identity/identity.db",
-                 "data-critical/events.db", "data/progress.db"):
+                 "data-critical/events.db", "data/progress.db", "data/mook_db.json"):
         ok(f"cubierto: {must}", must in paths)
     ok("data/ y data-critical/ presentes en el scope",
        any(p.startswith("data/") for p in paths)
