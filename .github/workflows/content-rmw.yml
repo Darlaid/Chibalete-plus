@@ -1,0 +1,103 @@
+name: content-rmw
+
+# ──────────────────────────────────────────────────────────────────────────
+# CHP-CI-CONTENT-RMW-01 — gate BLOQUEANTE de seguridad RMW entre réplicas.
+#
+# Defecto protegido (CHP-CONTENT-STORE-RMW-01, incidente del 2026-08-26):
+# `content.json` era el ÚNICO store que releía DENTRO del lock con
+# `readJSON(DB_FILE)`, que sirve la caché en proceso (TTL 30 s). Con dos
+# réplicas (`chibalete_api_1` / `chibalete_api_2`) cada una reescribía el array
+# COMPLETO a partir de una instantánea de hasta 30 s y borraba en silencio lo
+# que la otra había añadido. La carga del mook «¿Estás aquí?» creó 39 recursos
+# y solo sobrevivieron 20: 19 destruidos.
+#
+# `npm run test:content-rmw` arranca DOS procesos `server.js` reales contra un
+# store compartido en un directorio temporal y verifica el resultado LEYENDO EL
+# DISCO. Un solo proceso comparte caché y no puede reproducir el defecto; un
+# doble de prueba que evite la caché real probaría justamente lo que no es. Por
+# eso el script encadena antes un guard de integridad que impide degradar la
+# suite a un proceso único o a dobles sin que este gate se ponga rojo.
+#
+# Por qué SIN path filters: este job está pensado para ser un required check en
+# branch protection. Un check filtrado por rutas queda «expected — waiting» para
+# siempre en cualquier PR que no toque esas rutas, y bloquea el merge sin
+# ejecutar nada. Corre siempre; cuesta ~1 min. Esto cubre de sobra los cambios
+# capaces de afectar al defecto: `server/server.js` (caché `_jsonCache`,
+# `readJSON`/`writeJSON`, los 6 flujos RMW), `server/usersLock.js`
+# (`withFileLock`), la propia suite, `package.json`/lockfile y este workflow.
+#
+# Aislamiento: sin secretos, sin red durante la prueba (los proveedores de IA se
+# arrancan con la clave vacía), sin rutas productivas, sin mounts y sin stores
+# reales — un clone limpio no contiene `data/` ni `data-critical/`, y se
+# comprueba. El store de cada run se crea con `mkdtemp` y muere con el runner.
+# ──────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Mínimo imprescindible para el checkout. El job no recibe ningún secreto del
+# repositorio: no hay bloque `secrets`, `env` ni `with` que los referencie.
+permissions:
+  contents: read
+
+concurrency:
+  group: content-rmw-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  content-rmw:
+    name: content-rmw
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalación reproducible (lockfile)
+        run: npm ci
+
+      # El aislamiento no se declara: se comprueba. Si alguien versionara un
+      # store real, la suite dejaría de correr contra datos sintéticos y este
+      # gate perdería su sentido.
+      - name: Ningún store real versionado ni presente en el clone
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files -- data data-critical public/uploads uploads | head -20)
+          if [ -n "$tracked" ]; then
+            echo "::error::Hay stores de datos versionados:"; echo "$tracked"; exit 1
+          fi
+          for d in data data-critical; do
+            if [ -e "$d" ]; then echo "::error::$d existe en el clone"; exit 1; fi
+          done
+          echo "OK — sin stores reales"
+
+      # Guard de integridad de la suite + suite multiproceso, en ese orden.
+      # Sin `continue-on-error`, sin `|| true`: un solo registro perdido deja el
+      # workflow en `failure`.
+      - name: Gate — pérdida de escrituras entre réplicas
+        run: npm run test:content-rmw
+
+      # La suite mata a sus hijos y borra su temporal en un `finally`. Se
+      # verifica, porque un gate que deja procesos vivos contamina el siguiente.
+      - name: No deben quedar procesos hijos ni temporales
+        if: always()
+        run: |
+          set -euo pipefail
+          restos=$(find /tmp -maxdepth 1 -type d -name 'chp_rmw_*' | wc -l)
+          echo "temporales chp_rmw_* restantes: $restos"
+          if [ "$restos" -ne 0 ]; then
+            echo "::error::la suite dejó temporales sin borrar"; find /tmp -maxdepth 1 -name 'chp_rmw_*'; exit 1
+          fi
+          # pgrep se excluye a sí mismo y el script del step vive en un fichero,
+          # no en argv: este patrón no puede detectarse a sí mismo.
+          if pgrep -fa 'server/server\.js'; then
+            echo "::error::quedaron réplicas server.js vivas"; exit 1
+          fi
+          echo "OK — 0 temporales, 0 procesos hijos"
