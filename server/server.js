@@ -198,6 +198,7 @@ if (!process.env.ACCESS_FALLBACK_MODE) {
 app.set('trust proxy', 1);
 
 import { generateAudioForContent } from './ttsService.js';
+import { createTtsProgressWriter } from './ttsProgressWriter.js';
 import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini, GEMINI_TEXT_MODEL } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
@@ -2800,29 +2801,30 @@ app.post('/api/content', async (req, res) => {
             const relativePath = newContent.texto_plano_url.replace(/^\/uploads\//, '');
             const textFullPath = path.join(UPLOAD_DIR, relativePath);
 
-            // Progress Handler (fire-and-forget async to avoid blocking TTS engine)
-            const onProgress = (status) => {
-                (async () => {
-                    try {
-                        await withFileLock(DB_FILE, () => {
-                            _jsonCache.delete(DB_FILE);
-                            const currentList = readJSON(DB_FILE);
-                            const idx = currentList.findIndex(c => c.id === newContent.id);
-                            if (idx !== -1) {
-                                currentList[idx].processingStatus = status;
-                                if (status.status === 'processing') currentList[idx].ttsStatus = 'generando';
-                                if (status.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
-                                if (status.status === 'failed') currentList[idx].ttsStatus = 'error_proveedor';
-                                if (status.status === 'completed') currentList[idx].ttsStatus = 'listo';
-                                writeJSON(DB_FILE, currentList);
-                            }
-                        }, 'contentLock');
-                    } catch (e) { /* ignore DB locks/rates */ }
-                })();
-            };
+            // CHP-TTS-PROGRESS-CALLBACK-RACE-01: el escritor serializa por job y
+            // protege el estado terminal. Antes cada callback lanzaba una tarea
+            // desligada y el orden lo decidía el lock (polling, sin cola FIFO),
+            // así que un `processing` rezagado pisaba el `completed` final.
+            const onProgress = createTtsProgressWriter({
+                contentId: newContent.id,
+                persist: (status) => withFileLock(DB_FILE, () => {
+                    _jsonCache.delete(DB_FILE);
+                    const currentList = readJSON(DB_FILE);
+                    const idx = currentList.findIndex(c => c.id === newContent.id);
+                    if (idx !== -1) {
+                        currentList[idx].processingStatus = status;
+                        if (status.status === 'processing') currentList[idx].ttsStatus = 'generando';
+                        if (status.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
+                        if (status.status === 'failed') currentList[idx].ttsStatus = 'error_proveedor';
+                        if (status.status === 'completed') currentList[idx].ttsStatus = 'listo';
+                        writeJSON(DB_FILE, currentList);
+                    }
+                }, 'contentLock'),
+                onError: (err, status) => log(`[TTS_STATE_WRITE_FAIL] contentId=${newContent.id} status=${status?.status} err=${err?.message}`, 'ERROR'),
+            });
 
             ttsQueue.enqueue(newContent.id, () => generateAudioForContent(newContent.id, textFullPath, UPLOAD_DIR, onProgress))
-                .then(result => {
+                .then(async result => {
                     if (result.success && !result.abortedByProvider) {
                         log(`TTS finished for ${newContent.id}`, 'SUCCESS');
                         const finalStatus = {
@@ -2832,7 +2834,9 @@ app.post('/api/content', async (req, res) => {
                             status: 'completed',
                             lastUpdated: new Date().toISOString()
                         };
-                        onProgress(finalStatus);
+                        // Se ESPERA: el estado terminal debe quedar persistido
+                        // detrás de todos los progresos ya encolados.
+                        await onProgress(finalStatus);
                         log(`TTS for ${newContent.id} marked as LISTO`, 'INFO');
 
                     } else if (result.abortedByProvider) {
@@ -2842,9 +2846,9 @@ app.post('/api/content', async (req, res) => {
                         // Callback already called with 'failed' inside ttsService if catastrophic
                     }
                 })
-                .catch(err => {
+                .catch(async err => {
                     log(`TTS Crash: ${err?.message || String(err)}`, 'ERROR');
-                    onProgress({
+                    await onProgress({
                         percentage: 0, currentSentence: 0, totalSentences: 0, status: 'error_proveedor', error: err.message, lastUpdated: new Date().toISOString()
                     });
                 });
@@ -6988,28 +6992,42 @@ app.post('/api/content/:id/retry', async (req, res) => {
         const relativePath = content.texto_plano_url.replace(/^\/uploads\//, '');
         const textFullPath = path.join(UPLOAD_DIR, relativePath);
 
-        ttsQueue.enqueue(content.id, () => generateAudioForContent(content.id, textFullPath, UPLOAD_DIR, (progress) => {
-            (async () => {
-                try {
-                    await withFileLock(DB_FILE, () => {
-                        _jsonCache.delete(DB_FILE);
-                        const currentList = readJSON(DB_FILE);
-                        const idx = currentList.findIndex(c => c.id === id);
-                        if (idx !== -1) {
-                            currentList[idx].processingStatus = progress;
-                            if (progress.status === 'completed') currentList[idx].ttsStatus = 'listo';
-                            if (progress.status === 'failed' || progress.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
-                            if (progress.status === 'processing') currentList[idx].ttsStatus = 'generando';
-                            writeJSON(DB_FILE, currentList);
-                        }
-                    }, 'contentLock');
-                } catch (e) { /* ignore */ }
-            })();
-        }))
-            .then(r => {
+        // CHP-TTS-PROGRESS-CALLBACK-RACE-01: mismo escritor serializado que en el
+        // alta. Es un job NUEVO, con su propio escritor, así que la regeneración
+        // sí puede volver legítimamente a `generando`.
+        const onRetryProgress = createTtsProgressWriter({
+            contentId: id,
+            persist: (progress) => withFileLock(DB_FILE, () => {
+                _jsonCache.delete(DB_FILE);
+                const currentList = readJSON(DB_FILE);
+                const idx = currentList.findIndex(c => c.id === id);
+                if (idx !== -1) {
+                    currentList[idx].processingStatus = progress;
+                    if (progress.status === 'completed') currentList[idx].ttsStatus = 'listo';
+                    if (progress.status === 'failed' || progress.status === 'error_proveedor') currentList[idx].ttsStatus = 'error_proveedor';
+                    if (progress.status === 'processing') currentList[idx].ttsStatus = 'generando';
+                    writeJSON(DB_FILE, currentList);
+                }
+            }, 'contentLock'),
+            onError: (err, progress) => log(`[TTS_STATE_WRITE_FAIL] contentId=${id} status=${progress?.status} err=${err?.message}`, 'ERROR'),
+        });
+
+        ttsQueue.enqueue(content.id, () => generateAudioForContent(content.id, textFullPath, UPLOAD_DIR, onRetryProgress))
+            .then(async r => {
                 if (r.abortedByProvider) log(`[RETRY_FAIL] contentId=${id} reason=provider_abort`, 'WARN');
-                else if (r.success) log(`[RETRY_SUCCESS] contentId=${id}`, 'INFO');
-                else log(`[RETRY_FAIL] contentId=${id} success=false`, 'WARN');
+                else if (r.success) {
+                    // `ttsService` solo emite `processing` y `error_proveedor`: el
+                    // estado terminal lo pone SIEMPRE el llamador. Sin esto, una
+                    // regeneración correcta se quedaba en `generando` para siempre
+                    // — justo la vía por la que se remedian los registros atascados.
+                    if (!r.duplicateSkipped) {
+                        await onRetryProgress({
+                            percentage: 100, currentSentence: 0, totalSentences: 0,
+                            status: 'completed', lastUpdated: new Date().toISOString(),
+                        });
+                    }
+                    log(`[RETRY_SUCCESS] contentId=${id}`, 'INFO');
+                } else log(`[RETRY_FAIL] contentId=${id} success=false`, 'WARN');
             })
             .catch(e => log(`[RETRY_FAIL] contentId=${id} error=${e?.message || String(e)}`, 'ERROR'));
 
