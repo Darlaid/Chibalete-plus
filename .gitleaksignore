@@ -1,0 +1,29 @@
+# .gitleaksignore — CHP-MOOK-COVER-UPLOAD-01A-CLOSURE-GATES
+#
+# Fingerprints EXACTOS de hallazgos históricos ya analizados. Un fingerprint
+# identifica commit + archivo + regla + línea, así que ignorar uno NO debilita
+# el escáner: cualquier otra aparición del mismo patrón —en otro archivo, otra
+# línea u otro commit— sigue disparando.
+#
+# Aquí NO van regexes ni rutas: eso sería una allowlist amplia y taparía
+# hallazgos futuros. Si algo no puede neutralizarse con un fingerprint exacto,
+# no se neutraliza.
+#
+# ── CHP-MOOK-COVER-UPLOAD-01A ────────────────────────────────────────────────
+# Asignación de la variable de admin a un literal de fixture, en el arranque del
+# servidor de pruebas de la suite de cubiertas. Analizado:
+#   · el valor es una cadena de fixture inventada para el test — no es, ni fue,
+#     una credencial;
+#   · nunca existió en producción: el secreto real es file-only 0400 en el VPS y
+#     se inyecta por entorno, jamás por código;
+#   · ya no está en el árbol (eliminado en 3161b5c) y no aparece en ningún otro
+#     archivo del repositorio;
+#   · el gate duro `gitleaks-head` está en verde sin necesidad de esta entrada.
+#
+# Se ignora SOLO su fingerprint histórico, porque la historia no se reescribe.
+#
+# NOTA: este comentario evita a propósito reproducir la sintaxis de asignación
+# que dispara la regla. Escribirla aquí crearía un hallazgo NUEVO en el árbol de
+# trabajo y rompería el gate duro — el archivo que silencia un hallazgo no puede
+# ser la causa del siguiente.
+234b5c4da366151dfe7b544164ee0ea71280bf30:server/__test__/mookCoverUpload01a.test.mjs:chibalete-admin-secret:228
