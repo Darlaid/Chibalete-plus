@@ -1,14 +1,14 @@
 # CHP-TTS-PROGRESS-CALLBACK-RACE-01 — un progreso tardío pisaba el estado terminal
 
-Veredicto: **GREEN-TTS-PROGRESS-RACE-FIX-LOCAL**.
+Veredicto: **GREEN-TTS-PROGRESS-RACE-FIX-DEPLOYED**  ·  *(era `…-LOCAL` hasta el despliegue)*
 
-Este GREEN autoriza **preparar** el despliegue del fix. **No autoriza desplegarlo,
-reconciliar los 14 registros atascados ni publicar el MOOK.**
+**Desplegado el 2026-08-27** en ambas APIs (`910c735`) y los 14 registros atascados quedaron
+reconciliados. Ver §10. **Nada de esto autoriza publicar el MOOK.**
 
 | | |
 |---|---|
 | Rama | `chp/mook-contract-00` |
-| Producción | `acc2227` (sin tocar) |
+| Producción | `910c735` en `api_1` y `api_2` (era `acc2227` antes del despliegue) |
 | Gate | integrado en `npm run test:content-rmw` → check bloqueante `content-rmw` |
 
 ---
@@ -165,29 +165,34 @@ check `content-rmw`, ya *required* en `main`). **No se creó un workflow nuevo.*
 
 ## 7. Rollback
 
-Sin riesgo productivo: **no se desplegó nada**; producción sigue en `acc2227`,
-que **contiene el defecto**. Los 14 registros atascados siguen como estaban.
+Producción corre `910c735`. La imagen anterior `chibalete/api:acc2227`
+(`0e1d9087e94e`) —que **contiene el defecto**— se conserva, y el override quedó
+respaldado en `/root/chp-r11-override.bak.yml`.
 
-- Revertir el fix: `git revert` del commit de código. `server/ttsProgressWriter.js`
-  queda huérfano y puede borrarse.
+- Revertir el despliegue: devolver `image:` a `chibalete/api:acc2227` en las dos
+  entradas del override y recrear en rolling. Los 14 registros ya reconciliados
+  **no revierten**: son datos, no código, y su estado terminal es el correcto.
+- Revertir el fix en el repo: `git revert` del commit de código.
+  `server/ttsProgressWriter.js` queda huérfano y puede borrarse.
 - Revertir solo el gate: quitar `ttsProgressRace.test.mjs` del script
   `test:content-rmw` en `package.json`.
 
-## 8. Estado del MOOK — sin tocar
+## 8. Estado del MOOK al cierre
 
 | | |
 |---|---|
-| Recursos | 41/41 |
+| Catálogo | 108 · 0 duplicados |
+| Recursos | 41/41 · hashes servidos 41/41 |
+| `ttsStatus` | 16 `no_iniciado` + **25 `listo`** · **0 en `generando`** |
 | Experience | `exp-1787709803882-9ym4tt`, `draft` |
 | Versión | `expv-1787787648329-ooo21e`, v1 `draft` |
 | `currentVersionId` | `null` |
 | Published / runs / evidence | 0 / 0 / 0 |
-| Registros atascados | **14, sin reconciliar** |
+| Registros atascados | **0 — los 14 reconciliados** |
 
-El estado recuperado quedó preservado en el backup canónico programado
-—snapshot `701a0bd8`, 00:01:39Z, `content.json` con 108 registros y
-`mook_db.json` de 109 826 B, integridad ok—, así que no hizo falta lanzar
-runners adicionales.
+Backups: previo `339e66e3` + `433b46cd`; programado tras la carga `701a0bd8`
+(108 registros); **posterior al cierre `0fd2ff39` + `0135c0e7` + verify ok**, con
+restore rehearsal de `mook_db.json` **byte-idéntico** en temporal.
 
 ## 9. Ficheros
 
@@ -198,3 +203,33 @@ runners adicionales.
 | `server/__test__/ttsProgressRace.test.mjs` | nuevo — 26 aserciones |
 | `package.json` | `test:content-rmw` encadena la regresión |
 | `docs/ops/CHP_TTS_PROGRESS_CALLBACK_RACE_01.md` | este documento |
+
+---
+
+## 10. Cierre: desplegado y reconciliado (2026-08-27)
+
+**Deploy.** Imagen `chibalete/api:910c735` construida desde `git archive` (SHA-256
+`45d09ee6…5108cb30`, idéntico en local y VPS). Rolling `api_1` → verificación → `api_2`. Ambas
+healthy, `RestartCount=0`, stores byte-idénticos, frontend y edge sin tocar, 0 5xx.
+
+**El fix no bastaba para desatascar los 14.** El guard del retry devuelve `409 already_running`
+exactamente cuando `ttsStatus` es `generando`, así que **el estado atascado bloqueaba su propia
+reparación**. Verificado en producción: 13 × 409 y 1 × 502 transitorio, **cero escrituras, cero
+jobs, cero chunks**. Es un `return` anterior al lock y a la cola.
+
+> Corrección de lo que este documento afirmaba antes: el fix permite que un retry **termine** bien,
+> pero no que **empiece** sobre un registro atascado. La prueba local no lo detectó porque
+> reintentaba un registro ya en `listo`, donde el guard nunca se dispara.
+
+**Reconciliación metadata-only.** Vía `POST /api/content`, reponiendo el estado terminal exacto del
+código (`ttsStatus: 'listo'`, `processingStatus: {100, 0, 0, 'completed', <ISO>}`). 14 POST → 14 × 200
+→ 14 `CONTENT_SAVE_SUCCESS`, **0 `Triggering TTS`**, 0 chunks nuevos, 0 coste. Los 41 recursos
+conservan todo lo demás byte-idéntico; los 27 no atascados no se tocaron.
+
+**Estado final:** 25/25 recursos textuales en `listo/completed`, 16 podcasts en `no_iniciado`,
+**0 en `generando`**.
+
+**Deuda derivada, no bloqueante:** `CHP-TTS-RETRY-STUCK-STATE-DEADLOCK-01`. El guard impide reparar
+por la vía canónica un registro atascado en `generando`. No afecta a las cargas normales desde
+Studio —con `910c735` ningún registro nuevo puede quedar atascado— y los que lo estaban ya están
+reconciliados.

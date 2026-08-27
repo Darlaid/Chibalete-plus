@@ -1,7 +1,8 @@
 # CHP-MOOK-ESTAS-AQUI-04D — CONTENT LOAD AND PRODUCTION DRAFT
 
-**Veredicto:** 🟡 **`YELLOW-OPERATOR-LOGIN`**
-**Rama:** `chp/mook-contract-00` · **Código productivo:** `ffc90a1`
+**Veredicto:** 🟢 **`GREEN-MOOK-V1-DRAFT-READY-FOR-FINAL-QA`** — ver **Anexo de cierre** al final.
+> *(El veredicto original de esta unidad, `YELLOW-OPERATOR-LOGIN`, se conserva abajo como registro histórico del punto en que se detuvo.)*
+**Rama:** `chp/mook-contract-00` · **Código productivo al cierre:** `910c735` (era `ffc90a1` cuando se escribió lo de abajo)
 **Fecha:** 2026-08-26 · **Operador:** Nicolás Jiménez
 
 > **Fase A completa y GREEN. Cero escrituras ejecutadas.** El preflight, el manifest y el backup
@@ -332,3 +333,108 @@ clasificación, libro padre, portada, estructura de 56 nodos y validaciones prev
 | Publicación / cuenta QA / 04E / 04F | ✅ **no ejecutados** |
 
 **El checkpoint de reanudación sigue siendo el fin de Fase A**, intacto y válido.
+
+---
+---
+
+# ANEXO DE CIERRE — 04D COMPLETADA
+
+**Veredicto:** 🟢 **`GREEN-MOOK-V1-DRAFT-READY-FOR-FINAL-QA`**
+**Fecha de cierre:** 2026-08-27 · **Código productivo:** `910c735` en ambas APIs
+
+> Autoriza únicamente la unidad final de QA y una eventual publicación. **No publica por sí mismo.**
+
+Todo lo anterior a esta línea es el registro histórico del punto en que la unidad se detuvo
+(`YELLOW-OPERATOR-LOGIN`, con el catálogo en 67 registros y sin `mook_db.json`). Lo que sigue
+documenta el recorrido hasta el cierre.
+
+## 1. El arco completo
+
+| Hito | Resultado |
+|---|---|
+| Carga original (R2/R3) | 39 recursos creados… **20 sobrevivieron** |
+| `CHP-CONTENT-STORE-RMW-01` | causa: `content.json` era el único store que releía la caché en proceso *dentro* del lock; cada réplica reescribía el array entero desde una instantánea de hasta 30 s. **19 recursos destruidos** |
+| Corrección RMW | `acc2227`, desplegada; 6 flujos invalidan la caché antes de leer |
+| Gate de CI | `content-rmw`, **bloqueante y *required* en `main`** |
+| Recuperación (R9/R10, bridge R4) | catálogo **89 → 108**, **41/41** recursos, 19 creados / 22 adoptados |
+| `CHP-TTS-PROGRESS-CALLBACK-RACE-01` | 14 recursos textuales atascados en `generando` con el audio ya al 100 % |
+| Corrección de la carrera | `910c735`, desplegada; escritor serializado por job |
+| Reconciliación (R11-R1) | **14/14** en `listo/completed`, solo metadata |
+
+## 2. Estado productivo al cierre
+
+| | |
+|---|---|
+| Catálogo | **108** · 0 duplicados |
+| Recursos MOOK | **41/41** · `standalone:false` 41/41 · hashes servidos 41/41 |
+| `ttsStatus` | 16 `no_iniciado` (podcasts) + **25 `listo`** (todos los textuales) · **0 en `generando`** |
+| Manifests de audio | **25/25 completos** |
+| Extractos | **10/10** con `paginas_impresas` exactas (U+2013) y `parentId: content-1774362922886` |
+| Experience | `exp-1787709803882-9ym4tt` · **`draft`** · `currentVersionId: null` |
+| Versión | `expv-1787787648329-ooo21e` · **v1 `draft`** · sin `publishedAt` |
+| Estructura | 7 módulos / 56 nodos · AUDIO 16 / READING 25 / ACTIVITY 15 · **15/15 privadas** · 0 VIDEO/LEO/PRODUCTION |
+| Publicaciones / runs / evidencias | **0 / 0 / 0** |
+| Invisible para participantes | sí, por **doble condición estructural**: `listPublished` exige `status === 'published' && currentVersionId`, y `startRun` exige `published` |
+
+## 3. La reconciliación de los 14
+
+La vía canónica de regeneración **no servía**: el guard del retry devuelve `409 already_running`
+justo cuando `ttsStatus` es `generando`, así que **el estado atascado bloqueaba su propia
+reparación**. Verificado en producción: 13 × 409 y 1 × 502 transitorio (keep-alive nginx↔Node,
+`RestartCount=0`), **cero escrituras, cero jobs, cero chunks**.
+
+Se reconcilió por el upsert canónico `POST /api/content`, reponiendo **exactamente** el estado
+terminal que el callback habría persistido —`ttsStatus: 'listo'` y
+`processingStatus: {100, 0, 0, 'completed', <ISO>}`, shape tomado del código, no inventado—.
+Seguro porque el handler solo regenera si `texto_plano_url` cambia o si falta el manifest: se
+reenvió la misma URL y los 25 manifests están completos.
+
+**Verificación independiente:** 14 POST → 14 × 200 → 14 `CONTENT_SAVE_SUCCESS` · **0 `Triggering TTS`**
+· 0 retries, uploads, versiones o publicaciones · los 41 conservan **todo lo demás byte-idéntico**
+(comparación clave por clave contra el snapshot previo) · los 27 no atascados **no se tocaron en
+absoluto** · el zombi ajeno `content-1779292030328` quedó fuera de alcance e intacto.
+
+**Cero consumo de proveedor:** 0 chunks MP3 nuevos desde las 03:00 del 26-ago; los 93 del rango
+02:00–03:00 son de la carga original. La caché de audio acierta por índice.
+
+**Durabilidad:** la auditoría de arranque solo marca `pendiente` si el manifest falta, está vacío o
+no parsea, y solo fuerza `error_proveedor` si `status` es `procesando`/`error`. Con manifest completo
+y `status: 'disponible'`, **un reinicio no deshace la reconciliación**.
+
+## 4. Deploy
+
+Imagen construida desde `git archive 910c735` (SHA-256 `45d09ee6…5108cb30`, idéntico en local y VPS;
+949 entradas; 0 carpetas editoriales, `node_modules` ni `.env`). Rolling `api_1` → verificación →
+`api_2`. Ambas en `910c735`, healthy, `RestartCount=0`. **Frontend y edge sin tocar.** Stores
+byte-idénticos antes y después del rolling. Imagen `acc2227` conservada para rollback; override
+respaldado en `/root/chp-r11-override.bak.yml`.
+
+## 5. Backups y restore
+
+| Momento | structured | uploads | verify |
+|---|---|---|---|
+| Previo al deploy | `339e66e3` | `433b46cd` | ok |
+| Programado tras la carga | `701a0bd8` (108 registros) | — | — |
+| **Posterior al cierre** | **`0fd2ff39`** (26 stores, `mook_db.json` 109 826 B) | **`0135c0e7`** | **ok** — 246 snapshots, 210 manifiestos, 0 problemas, dentro de RPO |
+
+**Restore rehearsal:** `restic dump` de `mook_db.json` desde `0fd2ff39` a un `mktemp -d`.
+**Byte-idéntico** (`48dfc05e…058b03`). Contenido validado: 1 experience / 1 versión / 0 runs /
+0 evidencias, `draft`, `currentVersionId: null`, v1 `draft` sin `publishedAt`, 7/56, 16/25/15,
+15/15 privadas. Temporal eliminado. **Nunca se restauró sobre producción**; sin `forget` ni `prune`.
+
+## 6. Deuda abierta
+
+**`CHP-TTS-RETRY-STUCK-STATE-DEADLOCK-01`** — *no bloqueante.* El guard
+`ttsStatus === 'generando' ⇒ 409` impide reparar por la vía canónica un registro atascado en ese
+estado. **No afecta a las cargas normales desde `Subir → Studio`**: con `910c735` el estado terminal
+se persiste siempre, así que ningún registro nuevo puede quedar atascado. Solo afectaba a los que ya
+lo estaban antes del fix, y esos ya están reconciliados. No se trabaja en esta unidad.
+
+## 7. Alcance y qué NO autoriza este cierre
+
+La reparación fue **excepcional, para el primer MOOK**. No se construyó infraestructura reusable de
+importación: los bridges y microbridges fueron temporales y **no están versionados**. Los siguientes
+MOOK se cargan desde **`Subir → Studio de Experiencias`**.
+
+Este GREEN **no autoriza** publicar, crear una v2, iniciar runs o evidencias, ni ejecutar 04E/04F.
+Lo único que habilita es la unidad final de QA.
