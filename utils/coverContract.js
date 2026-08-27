@@ -10,6 +10,17 @@
  *
  * Si estos números se duplicaran en el frontend, tarde o temprano divergirían y
  * el operador vería aceptada en pantalla una imagen que el servidor rechaza.
+ *
+ * **Por qué en `utils/` y no en `server/lib/`.** Nació en `server/lib/` y el
+ * frontend lo importaba cruzando carpetas. Funcionaba en local y en CI —ambos
+ * construyen sobre el árbol completo— pero **`Dockerfile.front` NO copia
+ * `server/`**, así que la imagen productiva de frontend no compilaba:
+ *
+ *     Could not resolve "../../server/lib/coverContract.js"
+ *
+ * `utils/` lo copian **las dos** imágenes, y es el sitio honesto para algo que
+ * de verdad comparten cliente y servidor. Lo destapó el build de la imagen real,
+ * no el build local: un contrato compartido tiene que vivir donde ambos empaquetados lo vean.
  */
 
 /** Tamaño recomendado, el que anuncia la ayuda del formulario. */

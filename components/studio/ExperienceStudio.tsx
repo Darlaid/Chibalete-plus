@@ -24,7 +24,7 @@ import {
 // dependencias de Node, así que el bundle lo importa sin problema.
 import {
     COVER_HELP_TEXT,
-} from '../../server/lib/coverContract.js';
+} from '../../utils/coverContract.js';
 import { optimizeCover, browserDeps } from '../../utils/coverOptimizer.mjs';
 
 const NODE_TYPES = ['READING', 'VIDEO', 'AUDIO', 'LEO', 'ACTIVITY', 'PRODUCTION'] as const;

@@ -27,7 +27,7 @@ import { readImageDimensions } from '../lib/imageDimensions.js';
 import { validateCover, extensionForMime } from '../lib/coverPolicy.js';
 import {
     COVER_SOURCE_MAX_BYTES, COVER_UPLOAD_MAX_BYTES, COVER_HELP_TEXT,
-} from '../lib/coverContract.js';
+} from '../../utils/coverContract.js';
 import { optimizeCover, OPTIMIZE_ERROR } from '../../utils/coverOptimizer.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -659,7 +659,7 @@ console.log('\nC. Contrato visual de los consumidores');
 {
     // La cubierta del libro es de otro sistema: ningún archivo de esta unidad
     // puede escribir `portada_url`.
-    for (const f of ['server/lib/coverPolicy.js', 'server/lib/coverContract.js', 'server/lib/imageDimensions.js']) {
+    for (const f of ['server/lib/coverPolicy.js', 'utils/coverContract.js', 'server/lib/imageDimensions.js', 'utils/coverOptimizer.mjs']) {
         const src = fs.readFileSync(path.join(REPO, f), 'utf8');
         assert.ok(!/portada_url/.test(src), `${f} no debe mencionar portada_url`);
     }

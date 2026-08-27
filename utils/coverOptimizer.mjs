@@ -24,7 +24,7 @@ import {
     COVER_TARGET,
     COVER_QUALITY_LADDER,
     checkCoverDimensions,
-} from '../server/lib/coverContract.js';
+} from './coverContract.js';
 
 /** Códigos estables; la UI decide cómo se muestran. */
 export const OPTIMIZE_ERROR = Object.freeze({

@@ -16,7 +16,7 @@ import {
     COVER_ALLOWED_MIME,
     COVER_UPLOAD_MAX_BYTES,
     checkCoverDimensions,
-} from './coverContract.js';
+} from '../../utils/coverContract.js';
 
 // Re-exportados para que los consumidores de backend tengan una sola puerta.
 export {
@@ -24,7 +24,7 @@ export {
     COVER_SOURCE_MAX_BYTES, COVER_UPLOAD_MAX_BYTES, COVER_TARGET, COVER_TARGET_BYTES,
     COVER_QUALITY_LADDER, COVER_MAX_PIXELS, COVER_ALLOWED_MIME, COVER_HELP_TEXT,
     checkCoverDimensions,
-} from './coverContract.js';
+} from '../../utils/coverContract.js';
 
 /** Extensión canónica por MIME real. El nombre original nunca decide la extensión. */
 const EXT_BY_MIME = Object.freeze({
