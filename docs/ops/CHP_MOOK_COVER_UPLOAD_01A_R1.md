@@ -208,3 +208,11 @@ No hay ninguna pregunta técnica abierta.
 
 `CHP-TEST-MOOKREVIEW-EOL-ASSERTION-01` y «`test:mook` fuera de CI» quedan **registradas y NO se
 trabajan dentro de esta liberación**, por decisión explícita del operador.
+
+
+---
+
+**Continuación:** el tope de selección subió a **50 MiB** en `CHP_MOOK_COVER_UPLOAD_01A_R2.md` —
+🟢 `GREEN-MOOK-COVER-50MIB-SOURCE-READY`— para admitir el arte definitivo de 32,7 MiB.
+🔴 **El activo entregado como «Final corregida» sigue diciendo «¿Estás ahí?»**: es un export nuevo
+(6667 × 3750) pero sin el texto corregido. **01B sigue bloqueada** por el mismo motivo.

@@ -43,7 +43,13 @@ export const COVER_RATIO_TOLERANCE = 0.01;
  * backend sigue aplicando este tope como defensa, porque un cliente puede
  * mentir y el servidor no delega su frontera a nadie.
  */
-export const COVER_SOURCE_MAX_BYTES = 20 * 1024 * 1024;  // 20 MiB — selección
+// R2: el tope de selección subió de 20 a 50 MiB porque el arte definitivo de
+// «¿Estás aquí?» son 32,7 MiB a 6667 × 3750. Es un límite de COMODIDAD: solo
+// gobierna qué puede elegir el operador. El que protege a la red y a los
+// lectores —y al servidor— es el de transmisión, y NO se ha movido.
+// El tope real contra abuso sigue siendo `COVER_MAX_PIXELS` (40 MP), que es
+// lo que acota la memoria del canvas al decodificar.
+export const COVER_SOURCE_MAX_BYTES = 50 * 1024 * 1024;  // 50 MiB — selección
 export const COVER_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;   //  5 MiB — transmisión
 
 /** Medidas de la derivación que produce el Studio. */
@@ -73,7 +79,7 @@ export const COVER_ALLOWED_MIME = Object.freeze(['image/jpeg', 'image/png', 'ima
 
 /** Texto de ayuda del formulario. Fuente única para UI y documentación. */
 export const COVER_HELP_TEXT =
-    'JPG, PNG o WebP de hasta 20 MB. La imagen se optimizará '
+    'JPG, PNG o WebP de hasta 50 MB. La imagen se optimizará '
     + 'automáticamente a 1600 × 900 px antes de subirla.';
 
 /**

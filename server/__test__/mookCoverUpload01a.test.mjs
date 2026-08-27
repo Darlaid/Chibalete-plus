@@ -492,10 +492,18 @@ const srcFile = (bytes, type = 'image/webp') => ({ size: bytes, type });
 }
 
 {
+    // R2: el tope de SELECCIÓN es 50 MiB. Se fija el número, no solo la
+    // constante: si alguien la cambia sin querer, esto lo delata.
+    assert.strictEqual(COVER_SOURCE_MAX_BYTES, 50 * 1024 * 1024, 'el tope de selección es 50 MiB');
+    assert.strictEqual(COVER_UPLOAD_MAX_BYTES, 5 * 1024 * 1024, 'el de transmisión sigue en 5 MiB');
+    ok('los dos topes son 50 MiB (selección) y 5 MiB (transmisión), fijados por valor');
+}
+
+{
     const { deps } = fakeDeps();
     const r = await optimizeCover(srcFile(COVER_SOURCE_MAX_BYTES), deps);
-    assert.strictEqual(r.ok, true, 'exactamente 20 MB debe entrar');
-    ok('fuente de exactamente 20 MB aceptada');
+    assert.strictEqual(r.ok, true, 'exactamente 50 MiB debe entrar');
+    ok('fuente de exactamente 50 MiB aceptada');
 }
 
 {
@@ -503,8 +511,36 @@ const srcFile = (bytes, type = 'image/webp') => ({ size: bytes, type });
     const r = await optimizeCover(srcFile(COVER_SOURCE_MAX_BYTES + 1), deps);
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.code, OPTIMIZE_ERROR.SOURCE_TOO_LARGE);
+    assert.match(r.error, /50 MB/, 'el mensaje debe anunciar el tope real, no uno viejo');
     assert.strictEqual(calls.length, 0, 'no debe decodificar algo que ya rechazó');
-    ok('fuente por encima de 20 MB rechazada antes de decodificar');
+    ok('fuente de 50 MiB + 1 byte rechazada antes de decodificar, con el número correcto');
+}
+
+{
+    // El activo vinculante de R2: 32,7 MiB. Entra con 50 MiB y NO habría entrado
+    // con el tope anterior de 20 MiB — que es la razón de existir de esta unidad.
+    const REAL = 34_285_674;
+    assert.ok(REAL > 20 * 1024 * 1024, 'el arte definitivo superaba el tope viejo');
+    assert.ok(REAL < COVER_SOURCE_MAX_BYTES, 'y entra en el nuevo');
+    const { deps } = fakeDeps({ size: { width: 6667, height: 3750 }, sizeAt: () => 1_100_000 });
+    const r = await optimizeCover(srcFile(REAL, 'image/png'), deps);
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.width, 1600); assert.strictEqual(r.height, 900);
+    assert.strictEqual(r.sourceBytes, REAL);
+    ok('activo vinculante de 32,7 MiB y 6667 × 3750 aceptado y derivado a 1600 × 900');
+}
+
+{
+    // 25 MP entran; el guard real contra abuso sigue siendo el de píxeles.
+    const { deps } = fakeDeps({ size: { width: 6667, height: 3750 } });
+    const r = await optimizeCover(srcFile(34_285_674, 'image/png'), deps);
+    assert.strictEqual(r.ok, true);
+    const abusiva = fakeDeps({ size: { width: 30000, height: 16875 } });
+    const r2 = await optimizeCover(srcFile(10_000_000, 'image/png'), abusiva.deps);
+    assert.strictEqual(r2.ok, false);
+    assert.strictEqual(r2.code, 'TOO_MANY_PIXELS');
+    assert.strictEqual(abusiva.calls.length, 0, 'no debe redibujar una bomba de píxeles');
+    ok('subir el tope de peso NO relajó el de 40 MP: 25 MP entra, 506 MP no');
 }
 
 {
@@ -612,11 +648,12 @@ console.log('\nC. Contrato visual de los consumidores');
 
 {
     // El texto de ayuda es contractual: si cambia, debe cambiar aquí también.
-    assert.match(COVER_HELP_TEXT, /hasta 20 MB/);
+    assert.match(COVER_HELP_TEXT, /hasta 50 MB/);
+    assert.ok(!/20 MB/.test(COVER_HELP_TEXT), 'la ayuda no puede seguir anunciando el tope viejo');
     assert.match(COVER_HELP_TEXT, /1600 × 900/);
     assert.match(COVER_HELP_TEXT, /optimizar/);
     assert.ok(!/máximo 5 MB/.test(COVER_HELP_TEXT), 'la ayuda ya no debe anunciar el tope de 5 MB al operador');
-    ok('la ayuda anuncia el límite de SELECCIÓN (20 MB) y la optimización automática');
+    ok('la ayuda anuncia el límite de SELECCIÓN (50 MB) y la optimización automática');
 }
 
 {

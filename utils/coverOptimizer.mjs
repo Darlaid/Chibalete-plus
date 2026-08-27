@@ -69,7 +69,11 @@ export async function optimizeCover(file, deps) {
         return {
             ok: false,
             code: OPTIMIZE_ERROR.SOURCE_TOO_LARGE,
-            error: `La imagen pesa ${MB(file.size)} MB y el máximo que se puede seleccionar es 20 MB.`,
+            // El número se DERIVA de la constante. Escribirlo a mano hacía que
+            // el mensaje mintiera en cuanto el tope cambiaba, que es justo lo
+            // que pasó al pasar de 20 a 50 MiB.
+            error: `La imagen pesa ${MB(file.size)} MB y el máximo que se puede `
+                + `seleccionar es ${Math.round(COVER_SOURCE_MAX_BYTES / (1024 * 1024))} MB.`,
         };
     }
 
