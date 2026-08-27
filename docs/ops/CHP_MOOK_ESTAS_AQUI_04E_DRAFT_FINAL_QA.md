@@ -176,3 +176,10 @@ Requiere, en este orden:
 3. **Rollback disponible:** `POST /api/experiences/:id/archive` — no destructivo.
 
 Hasta que B-1 se resuelva, el estado estable y correcto del mook es **borrador productivo verificado**.
+
+---
+
+**Continuación:** la publicación se ejecutó y cerró en
+`CHP_MOOK_ESTAS_AQUI_04F_GENERAL_RELEASE.md` — 🟢 `GREEN-MOOK-ESTAS-AQUI-V1-PRODUCTION`.
+v1 es la versión vigente para las 247 cuentas activas. **B-1 `YELLOW-AUDIENCE-DECISION` se resolvió
+aceptando la liberación general.**
