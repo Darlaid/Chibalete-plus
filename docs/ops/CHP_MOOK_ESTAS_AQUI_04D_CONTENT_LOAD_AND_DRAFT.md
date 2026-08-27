@@ -438,3 +438,9 @@ MOOK se cargan desde **`Subir → Studio de Experiencias`**.
 
 Este GREEN **no autoriza** publicar, crear una v2, iniciar runs o evidencias, ni ejecutar 04E/04F.
 Lo único que habilita es la unidad final de QA.
+
+---
+
+**Continuación:** la unidad final de QA se ejecutó y cerró en
+`CHP_MOOK_ESTAS_AQUI_04E_DRAFT_FINAL_QA.md` — 🟢 `GREEN-MOOK-V1-DRAFT-QA-PASSED`.
+El borrador v1 queda **apto para publicación**; **04F sigue bloqueada por B-1**.
