@@ -4,8 +4,8 @@
 **Autoriza reanudar el preflight de deploy con el nuevo HEAD. NO autoriza desplegar.**
 **Rama:** `chp/mook-contract-00` · **Base:** `b1297f6` · **Cero producción, cero deploy.**
 
-⚠️ **Hallazgo editorial que requiere tu decisión antes de publicar la cubierta:** el arte dice
-**«¿Estás ahí?»** y el MOOK se llama **«¿Estás aquí?»**. Ver §6.
+✅ **Hallazgo editorial RESUELTO** por decisión vinculante del operador: el MOOK conserva
+«¿Estás aquí?» y el arte se corrige. Ver §6.
 
 ---
 
@@ -86,7 +86,7 @@ stream desde su ruta original).
 | Calidad | ✅ 0.90, el primer peldaño; 517 ms |
 | Legibilidad visual | ✅ ilustración nítida, tipografía limpia |
 | Subtítulo | ✅ «Pensar, elegir y atender en la era del scroll» |
-| **Título** | ⚠️ **«¿Estás ahí?», no «¿Estás aquí?»** — ver §6 |
+| **Título** | ❌ decía **«¿Estás ahí?»**, no «¿Estás aquí?» → **error del arte, se corrige** (§6). Este activo queda descartado como cubierta definitiva |
 
 ### Por la UI autenticada
 
@@ -165,23 +165,29 @@ incluye, pero el workflow corre pasos sueltos y ese no está—. Dos deudas real
 
 ---
 
-## 6. ⚠️ HALLAZGO EDITORIAL: EL TÍTULO NO COINCIDE
+## 6. ✅ HALLAZGO EDITORIAL — RESUELTO
 
-La validación pedía «título exacto **¿Estás aquí?**». El arte dice **«¿Estás ahí?»**.
+La validación pedía «título exacto **¿Estás aquí?**». El arte decía **«¿Estás ahí?»** — verificado
+con zoom sobre la derivación. El subtítulo sí era correcto.
 
-Verificado con zoom sobre la derivación: **ahí**, no **aquí**. El subtítulo sí es correcto.
+### Decisión vinculante del operador (2026-08-27)
 
-En el hero conviven las dos formas: la cubierta dice «¿Estás **ahí**?» y la ficha, justo debajo,
-«¿Estás **aquí**?». El nombre del archivo dice «estás aquí» mientras el arte dice «ahí», lo que
-sugiere un descuido más que una decisión —pero **no me corresponde decidirlo**.
+> El MOOK conserva su título canónico **«¿Estás aquí?»**.
+> **«¿Estás ahí?» es un error del arte y será corregido.**
+> No renombrar la Experience ni modificar código.
 
-**Tres salidas posibles**, todas tuyas:
+De las tres salidas planteadas, se elige la **segunda**: se corrige el arte.
 
-1. Es deliberado (el libro pregunta «aquí», la cubierta «ahí») → nada que hacer.
-2. Es un error del arte → hay que corregir el PNG/WebP.
-3. El MOOK debería llamarse «¿Estás ahí?» → cambiar el título de la Experience.
+**Consecuencias operativas:**
 
-**El código está listo en cualquiera de los tres casos.** Solo cambia qué archivo se sube.
+- ❌ **No se renombra** la Experience. `title` sigue siendo «¿Estás aquí?» en producción, intacto.
+- ❌ **No se toca código.** El uploader ya sirve para cualquier archivo que cumpla el contrato; el
+  título del arte no es una variable del sistema.
+- ⏸️ **01B queda BLOQUEADA** hasta que el operador entregue la ruta del archivo corregido.
+- El activo validado en esta unidad —`Cubierta estás aquí - Web 1600x900.webp`— **queda descartado
+  como cubierta definitiva**: sirvió para probar la derivación, no para publicarse.
+
+**Lo único que falta para reanudar 01B es la ruta del nuevo archivo.** Todo lo demás está verificado.
 
 ---
 
@@ -197,4 +203,8 @@ uploads · sin trabajar deudas ajenas.
 
 Este GREEN **autoriza reanudar el preflight de deploy con el nuevo HEAD**; no autoriza desplegar.
 
-Antes de retomar 01B conviene cerrar §6: es la única pregunta abierta, y es editorial.
+**01B permanece bloqueada por decisión del operador**, a la espera de la ruta del arte corregido.
+No hay ninguna pregunta técnica abierta.
+
+`CHP-TEST-MOOKREVIEW-EOL-ASSERTION-01` y «`test:mook` fuera de CI» quedan **registradas y NO se
+trabajan dentro de esta liberación**, por decisión explícita del operador.
