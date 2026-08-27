@@ -25,7 +25,7 @@ import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eve
 import * as libraryStore from './lib/libraryStore.js';
 import * as experienceStore from './lib/experienceStore.js';
 // CHP-MOOK-COVER-UPLOAD-01A — contrato de la cubierta, compartido con el frontend.
-import { validateCover, extensionForMime, COVER_MAX_BYTES } from './lib/coverPolicy.js';
+import { validateCover, extensionForMime, COVER_UPLOAD_MAX_BYTES } from './lib/coverPolicy.js';
 import {
     emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
     emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
@@ -1766,7 +1766,7 @@ const coverUploader = () => {
         },
         // El tope se aplica DURANTE la escritura: multer aborta al superarlo,
         // así que un archivo de 5 GB nunca llega a ocupar 5 GB en disco.
-        limits: { fileSize: COVER_MAX_BYTES, files: 1 },
+        limits: { fileSize: COVER_UPLOAD_MAX_BYTES, files: 1 },
     }).single('file');
     return _coverUpload;
 };

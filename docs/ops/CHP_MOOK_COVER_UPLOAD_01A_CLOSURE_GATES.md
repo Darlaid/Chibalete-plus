@@ -242,3 +242,12 @@ siguen intactas, y el MOOK sigue publicado y sano.
   (`navegador → vite:5173 → proxy:3000 → backend:3001`). Solo desarrollo; nada de esto se versiona.
 - Todo el fixture vivió fuera del repositorio. `git status` quedó limpio salvo las dos carpetas
   editoriales untracked de siempre.
+
+
+---
+
+**Continuación:** el bloqueo por peso se resolvió en `CHP_MOOK_COVER_UPLOAD_01A_R1.md` —
+🟢 `GREEN-MOOK-COVER-AUTO-OPTIMIZATION-READY`. El Studio ahora deriva la cubierta a 1600 × 900 WebP
+antes de subirla (el activo real pasó de **6,74 MB a 0,28 MB**), el original no se toca y el backend
+conserva su tope de 5 MB. ⚠️ Queda una pregunta **editorial** abierta: el arte dice «¿Estás **ahí**?»
+y el MOOK se llama «¿Estás **aquí**?».

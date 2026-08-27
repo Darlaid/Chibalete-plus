@@ -14,14 +14,15 @@
 import { readImageDimensions } from './imageDimensions.js';
 import {
     COVER_ALLOWED_MIME,
-    COVER_MAX_BYTES,
+    COVER_UPLOAD_MAX_BYTES,
     checkCoverDimensions,
 } from './coverContract.js';
 
 // Re-exportados para que los consumidores de backend tengan una sola puerta.
 export {
     COVER_RECOMMENDED, COVER_MIN, COVER_RATIO, COVER_RATIO_TOLERANCE,
-    COVER_MAX_BYTES, COVER_MAX_PIXELS, COVER_ALLOWED_MIME, COVER_HELP_TEXT,
+    COVER_SOURCE_MAX_BYTES, COVER_UPLOAD_MAX_BYTES, COVER_TARGET, COVER_TARGET_BYTES,
+    COVER_QUALITY_LADDER, COVER_MAX_PIXELS, COVER_ALLOWED_MIME, COVER_HELP_TEXT,
     checkCoverDimensions,
 } from './coverContract.js';
 
@@ -60,7 +61,7 @@ export function validateCover({ buffer, mime, size }) {
         return { ok: false, code: 'EMPTY_FILE', error: 'El archivo está vacío.' };
     }
 
-    if (size > COVER_MAX_BYTES) {
+    if (size > COVER_UPLOAD_MAX_BYTES) {
         const mb = (size / (1024 * 1024)).toFixed(1);
         return {
             ok: false,

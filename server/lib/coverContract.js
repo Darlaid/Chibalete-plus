@@ -31,8 +31,35 @@ export const COVER_RATIO = 16 / 9;
  */
 export const COVER_RATIO_TOLERANCE = 0.01;
 
-/** 5 MB. */
-export const COVER_MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * Dos límites distintos, y la distinción es el corazón de esta unidad.
+ *
+ * `COVER_SOURCE_MAX_BYTES` es lo que el operador puede SELECCIONAR: un original
+ * editorial pesa lo que pesa, y rechazarlo obligaba a que alguien lo
+ * recomprimiera a mano fuera del sistema.
+ *
+ * `COVER_UPLOAD_MAX_BYTES` es lo que viaja por la red y se sirve a los lectores.
+ * No sube: el Studio deriva una versión optimizada y solo esa se transmite. El
+ * backend sigue aplicando este tope como defensa, porque un cliente puede
+ * mentir y el servidor no delega su frontera a nadie.
+ */
+export const COVER_SOURCE_MAX_BYTES = 20 * 1024 * 1024;  // 20 MiB — selección
+export const COVER_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;   //  5 MiB — transmisión
+
+/** Medidas de la derivación que produce el Studio. */
+export const COVER_TARGET = { width: 1600, height: 900 };
+
+/**
+ * Objetivo de peso de la derivación. No es un límite: es la meta razonable para
+ * no servir cabeceras pesadas. El límite duro es `COVER_UPLOAD_MAX_BYTES`.
+ */
+export const COVER_TARGET_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Escalera de calidad, recorrida en orden y SIN búsqueda binaria: el resultado
+ * debe ser reproducible. La misma imagen produce siempre el mismo archivo.
+ */
+export const COVER_QUALITY_LADDER = Object.freeze([0.90, 0.85, 0.80]);
 
 /**
  * Tope de píxeles: frena la "bomba de descompresión", una imagen de pocos KB
@@ -46,8 +73,8 @@ export const COVER_ALLOWED_MIME = Object.freeze(['image/jpeg', 'image/png', 'ima
 
 /** Texto de ayuda del formulario. Fuente única para UI y documentación. */
 export const COVER_HELP_TEXT =
-    'Recomendado: 1600 × 900 px, proporción 16:9. JPG, PNG o WebP, máximo 5 MB. '
-    + 'Mantén títulos, rostros y elementos importantes dentro del área central.';
+    'JPG, PNG o WebP de hasta 20 MB. La imagen se optimizará '
+    + 'automáticamente a 1600 × 900 px antes de subirla.';
 
 /**
  * Reglas de dimensión compartidas por cliente y servidor.

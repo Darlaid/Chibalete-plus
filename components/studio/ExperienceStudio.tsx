@@ -23,8 +23,9 @@ import {
 // CHP-MOOK-COVER-UPLOAD-01A — mismos números que aplica el backend. Sin
 // dependencias de Node, así que el bundle lo importa sin problema.
 import {
-    COVER_ALLOWED_MIME, COVER_MAX_BYTES, COVER_HELP_TEXT, checkCoverDimensions,
+    COVER_HELP_TEXT,
 } from '../../server/lib/coverContract.js';
+import { optimizeCover, browserDeps } from '../../utils/coverOptimizer.mjs';
 
 const NODE_TYPES = ['READING', 'VIDEO', 'AUDIO', 'LEO', 'ACTIVITY', 'PRODUCTION'] as const;
 type NodeType = typeof NODE_TYPES[number];
@@ -402,8 +403,12 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
     const [info, setInfo] = useState({ title: '', description: '', imageUrl: '', durationLabel: '', audience: '' });
     // CHP-MOOK-COVER-UPLOAD-01A — estado del uploader de cubierta.
     const coverInputRef = useRef<HTMLInputElement>(null);
-    const [coverState, setCoverState] = useState<'idle' | 'uploading' | 'done'>('idle');
+    const [coverState, setCoverState] = useState<'idle' | 'optimizing' | 'uploading' | 'done'>('idle');
     const [coverError, setCoverError] = useState<string | null>(null);
+    // Resumen «original → optimizada», para que el operador vea qué se subió.
+    const [coverInfo, setCoverInfo] = useState<string | null>(null);
+    // Una sola fuente para «hay trabajo en curso»: la usa el botón y el input.
+    const coverBusy = coverState === 'optimizing' || coverState === 'uploading';
     const [objetivo, setObjetivo] = useState('');
     const [modules, setModules] = useState<StudioModule[]>([]);
     const [readOnlyRoute, setReadOnlyRoute] = useState(false);
@@ -448,49 +453,41 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
      * operador la aplique al guardar Información. Así la subida es reversible
      * —basta con no guardar— y no muta nada por accidente.
      *
-     * La validación local es cortesía contra los mismos números del backend.
-     * Si el navegador no puede decodificar la imagen, NO se bloquea la subida:
-     * se deja que decida el servidor, que es la autoridad.
+     * CHP-…-01A-R1: el original NO se sube. Se decodifica en memoria, se
+     * redibuja a 1600 × 900 y se transmite solo la derivación optimizada. El
+     * archivo del disco del operador no se toca en ningún momento.
      */
     const uploadCover = async (file: File) => {
-        if (!experienceId || coverState === 'uploading') return;
+        if (!experienceId || coverBusy) return;
         setCoverError(null);
+        setCoverInfo(null);
+        setCoverState('optimizing');
 
-        if (!COVER_ALLOWED_MIME.includes(file.type)) {
-            setCoverError('El archivo no es una imagen JPG, PNG o WebP.');
+        // El resultado es una unión discriminada declarada por JSDoc en un
+        // módulo .mjs; TS no la estrecha, así que se anota en el punto de uso.
+        const res: {
+            ok: boolean; error?: string; blob?: Blob; type?: string; quality?: number;
+            sourceBytes?: number; outputBytes?: number;
+        } = await optimizeCover(file, browserDeps());
+
+        if (!res.ok) {
+            setCoverError(res.error ?? 'No se pudo preparar la imagen.');
+            setCoverState('idle');
             return;
         }
-        if (file.size > COVER_MAX_BYTES) {
-            setCoverError(`La imagen pesa ${(file.size / (1024 * 1024)).toFixed(1)} MB y el máximo es 5 MB.`);
-            return;
-        }
 
-        const localUrl = URL.createObjectURL(file);
-        try {
-            const dims = await new Promise<{ w: number; h: number } | null>((resolve) => {
-                const img = new Image();
-                img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-                img.onerror = () => resolve(null);
-                img.src = localUrl;
-            });
-            if (dims) {
-                // `checkCoverDimensions` vive en un módulo .js compartido con el
-                // backend; su unión de retorno llega por JSDoc y TS no la estrecha
-                // con `!verdict.ok`. Se anota explícitamente en vez de castear:
-                // conserva el tipo y no silencia nada.
-                const verdict: { ok: boolean; error?: string } = checkCoverDimensions(dims.w, dims.h);
-                if (!verdict.ok) {
-                    setCoverError(verdict.error ?? 'La imagen no cumple el contrato de cubierta.');
-                    return;
-                }
-            }
-        } finally {
-            URL.revokeObjectURL(localUrl);
-        }
+        const mb = (n: number) => (n / (1024 * 1024)).toFixed(1);
+        setCoverInfo(`Original ${mb(res.sourceBytes!)} MB → optimizada ${mb(res.outputBytes!)} MB `
+            + `(1600 × 900, calidad ${res.quality}).`);
+
+        // El backend nombra el archivo por su MIME real, así que basta con una
+        // extensión coherente; el nombre del cliente nunca decide nada.
+        const ext = res.type === 'image/webp' ? 'webp' : 'jpg';
+        const derived = new File([res.blob!], `cubierta.${ext}`, { type: res.type });
 
         setCoverState('uploading');
         try {
-            const url = await dataService.uploadExperienceCover(experienceId, file);
+            const url = await dataService.uploadExperienceCover(experienceId, derived);
             setInfo(s => ({ ...s, imageUrl: url }));
             markDirty();
             setCoverState('done');
@@ -509,6 +506,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
         setObjetivo(''); setModules([]); setReadOnlyRoute(false); setDirty(false); setErrors({});
         setSaveState('idle'); setSaveError(null); setEditingNode(null); setConfirmDelete(null); setConfirmExit(false); setConfirmPublish(false);
         setPreviewNodeId(null);
+        setCoverState('idle'); setCoverError(null); setCoverInfo(null);
     };
 
     const openNew = () => { resetEditor(); setTab('info'); setView('editor'); };
@@ -831,19 +829,20 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                         </div>
 
                         <input ref={coverInputRef} type="file" accept="image/jpeg,image/png,image/webp"
-                            className="hidden" onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadCover(f); }} />
+                            className="hidden" onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f && !coverBusy) uploadCover(f); }} />
 
                         <div className="mt-3 flex items-center gap-3">
                             <button type="button"
                                 onClick={() => coverInputRef.current?.click()}
-                                // Doble clic: mientras hay una subida en vuelo el botón
+                                // Doble clic: mientras se optimiza o se sube, el botón
                                 // queda inerte. Es la barrera que 04F echó en falta en
                                 // «Publicar», donde solo el 409 del backend evitó el daño.
-                                disabled={coverState === 'uploading' || expStatus === 'archived' || !experienceId}
+                                disabled={coverBusy || expStatus === 'archived' || !experienceId}
                                 className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
-                                {coverState === 'uploading' ? 'Subiendo…' : 'Subir nueva cubierta'}
+                                {coverState === 'optimizing' ? 'Optimizando…' : coverState === 'uploading' ? 'Subiendo…' : 'Subir nueva cubierta'}
                             </button>
-                            {coverState === 'uploading' && <span className="text-xs text-gray-500" role="status">Validando la imagen…</span>}
+                            {coverState === 'optimizing' && <span className="text-xs text-gray-500" role="status">Redimensionando a 1600 × 900…</span>}
+                            {coverState === 'uploading' && <span className="text-xs text-gray-500" role="status">Subiendo la versión optimizada…</span>}
                             {coverState === 'done' && <span className="text-xs text-green-600" role="status">Cubierta lista. Guarda Información para aplicarla.</span>}
                         </div>
 
@@ -853,6 +852,10 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
 
                         {coverError && (
                             <p className="text-sm text-red-600 mt-2" role="alert">{coverError}</p>
+                        )}
+
+                        {coverInfo && !coverError && (
+                            <p className="text-xs text-gray-600 dark:text-gray-300 mt-2" role="status">{coverInfo}</p>
                         )}
 
                         <p className="text-xs text-gray-500 mt-2">{COVER_HELP_TEXT}</p>

@@ -6,6 +6,8 @@
  *   A. Política pura      — dimensiones, ratio, peso, spoofing, corrupción.
  *   B. Endpoint real HTTP — auth, rol, límites, doble clic, y la garantía de
  *                           que subir una cubierta NO muta el store.
+ *   D. Derivación (01A-R1) — la escalera de calidad que optimiza el original
+ *                           antes de subirlo, con primitivas de navegador falsas.
  *   C. Contrato visual    — que los consumidores declaren 16:9 + cover + center.
  *
  * La capa B levanta el servidor de verdad contra un fixture aislado. Sin eso,
@@ -23,7 +25,10 @@ import { fileURLToPath } from 'node:url';
 
 import { readImageDimensions } from '../lib/imageDimensions.js';
 import { validateCover, extensionForMime } from '../lib/coverPolicy.js';
-import { COVER_MAX_BYTES, COVER_HELP_TEXT } from '../lib/coverContract.js';
+import {
+    COVER_SOURCE_MAX_BYTES, COVER_UPLOAD_MAX_BYTES, COVER_HELP_TEXT,
+} from '../lib/coverContract.js';
+import { optimizeCover, OPTIMIZE_ERROR } from '../../utils/coverOptimizer.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '../..');
@@ -139,7 +144,7 @@ for (const [label, make] of [['PNG', makePng], ['JPEG', makeJpeg], ['WebP', make
 }
 
 {
-    const v = validateCover({ buffer: makePng(1600, 900), mime: 'image/png', size: COVER_MAX_BYTES + 1 });
+    const v = validateCover({ buffer: makePng(1600, 900), mime: 'image/png', size: COVER_UPLOAD_MAX_BYTES + 1 });
     assert.strictEqual(v.ok, false);
     assert.strictEqual(v.code, 'TOO_LARGE');
     ok('archivo por encima de 5 MB se rechaza');
@@ -377,7 +382,7 @@ try {
     }
 
     {
-        const big = Buffer.concat([makePng(1600, 900), Buffer.alloc(COVER_MAX_BYTES + 1024)]);
+        const big = Buffer.concat([makePng(1600, 900), Buffer.alloc(COVER_UPLOAD_MAX_BYTES + 1024)]);
         const r = await post(EXP_ID, form(big, 'grande.png', 'image/png'), ADMIN);
         assert.strictEqual(r.status, 413, `esperaba 413, vino ${r.status}`);
         ok('archivo mayor de 5 MB: 413, cortado por multer antes de terminar de escribir');
@@ -424,6 +429,154 @@ try {
     try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
+
+// ───────────────── D. DERIVACIÓN AUTOMÁTICA (01A-R1) ─────────────────────────
+
+console.log('\nD. Optimización automática en el navegador');
+
+/**
+ * Primitivas falsas y DETERMINISTAS. El navegador prueba los píxeles; aquí se
+ * prueba la escalera de decisión, que es donde vive la lógica.
+ *
+ * `sizeAt` traduce calidad → bytes, así se puede modelar cualquier original.
+ */
+function fakeDeps({ size = { width: 3334, height: 1875 }, sizeAt = () => 900_000,
+    webp = true, decodeFails = false, encodeFails = false } = {}) {
+    const calls = [];
+    return {
+        calls,
+        deps: {
+            decodeSize: async () => (decodeFails ? null : size),
+            render: async (_f, { width, height, type, quality }) => {
+                calls.push({ width, height, type, quality });
+                if (encodeFails) return null;
+                return { size: sizeAt(quality), type };
+            },
+            supportsWebp: () => webp,
+        },
+    };
+}
+const srcFile = (bytes, type = 'image/webp') => ({ size: bytes, type });
+
+{
+    const { deps, calls } = fakeDeps({ sizeAt: () => 1_200_000 });
+    const r = await optimizeCover(srcFile(7_069_200), deps);
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.width, 1600); assert.strictEqual(r.height, 900);
+    assert.strictEqual(r.type, 'image/webp');
+    assert.strictEqual(r.quality, 0.90, 'debe quedarse en el primer peldaño');
+    assert.strictEqual(calls.length, 1, 'no debe codificar de más');
+    assert.ok(r.outputBytes < COVER_UPLOAD_MAX_BYTES);
+    ok('fuente de 6,74 MB aceptada y derivada a 1600 × 900 WebP en un solo intento');
+}
+
+{
+    // Primer peldaño se pasa; el segundo entra. La escalera debe recorrerse EN
+    // ORDEN y detenerse en cuanto cabe.
+    const sizes = { 0.90: 6_000_000, 0.85: 4_000_000, 0.80: 1_000_000 };
+    const { deps, calls } = fakeDeps({ sizeAt: (q) => sizes[q] });
+    const r = await optimizeCover(srcFile(9_000_000), deps);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.quality, 0.85);
+    assert.deepStrictEqual(calls.map(c => c.quality), [0.90, 0.85]);
+    ok('la escalera baja a 0.85 solo cuando 0.90 no cabe, y se detiene ahí');
+}
+
+{
+    const { deps, calls } = fakeDeps({ sizeAt: () => 6_000_000 });
+    const r = await optimizeCover(srcFile(9_000_000), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, OPTIMIZE_ERROR.STILL_TOO_LARGE);
+    assert.deepStrictEqual(calls.map(c => c.quality), [0.90, 0.85, 0.80], 'debe agotar la escalera');
+    ok('si ni a 0.80 baja de 5 MB: error y NO se envía nada');
+}
+
+{
+    const { deps } = fakeDeps();
+    const r = await optimizeCover(srcFile(COVER_SOURCE_MAX_BYTES), deps);
+    assert.strictEqual(r.ok, true, 'exactamente 20 MB debe entrar');
+    ok('fuente de exactamente 20 MB aceptada');
+}
+
+{
+    const { deps, calls } = fakeDeps();
+    const r = await optimizeCover(srcFile(COVER_SOURCE_MAX_BYTES + 1), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, OPTIMIZE_ERROR.SOURCE_TOO_LARGE);
+    assert.strictEqual(calls.length, 0, 'no debe decodificar algo que ya rechazó');
+    ok('fuente por encima de 20 MB rechazada antes de decodificar');
+}
+
+{
+    const { deps } = fakeDeps({ webp: false });
+    const r = await optimizeCover(srcFile(7_000_000), deps);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.type, 'image/jpeg');
+    ok('navegador sin WebP: fallback a JPEG de alta calidad');
+}
+
+{
+    const { deps } = fakeDeps({ decodeFails: true });
+    const r = await optimizeCover(srcFile(1_000_000), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, OPTIMIZE_ERROR.DECODE_FAILED);
+    ok('fallo de decodificación se comunica sin lanzar');
+}
+
+{
+    const { deps } = fakeDeps({ encodeFails: true });
+    const r = await optimizeCover(srcFile(1_000_000), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, OPTIMIZE_ERROR.ENCODE_FAILED);
+    ok('fallo de códec se comunica sin lanzar');
+}
+
+{
+    const { deps } = fakeDeps();
+    const r = await optimizeCover(srcFile(1_000_000, 'application/pdf'), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, OPTIMIZE_ERROR.MIME_NOT_ALLOWED);
+    ok('formato inválido rechazado antes de tocar el decodificador');
+}
+
+{
+    // El ratio se juzga sobre el ORIGINAL. Si se juzgara después de redibujar a
+    // 1600 × 900, cualquier proporción pasaría y deformaríamos en silencio.
+    const { deps, calls } = fakeDeps({ size: { width: 1600, height: 1200 } });
+    const r = await optimizeCover(srcFile(1_000_000), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 'BAD_RATIO');
+    assert.strictEqual(calls.length, 0, 'no debe redibujar algo con proporción inválida');
+    ok('un 4:3 se rechaza ANTES de redibujar: optimizar no puede tapar deformar');
+}
+
+{
+    const { deps } = fakeDeps({ size: { width: 1024, height: 576 } });
+    const r = await optimizeCover(srcFile(1_000_000), deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 'TOO_SMALL');
+    ok('un original bajo el mínimo no se «arregla» ampliándolo');
+}
+
+{
+    // Reproducibilidad: la misma entrada produce exactamente la misma salida.
+    const a = await optimizeCover(srcFile(7_069_200), fakeDeps({ sizeAt: () => 1_234_567 }).deps);
+    const b = await optimizeCover(srcFile(7_069_200), fakeDeps({ sizeAt: () => 1_234_567 }).deps);
+    assert.deepStrictEqual(
+        { q: a.quality, t: a.type, n: a.outputBytes },
+        { q: b.quality, t: b.type, n: b.outputBytes });
+    ok('la derivación es reproducible: sin búsqueda binaria, misma entrada = misma salida');
+}
+
+{
+    const { deps } = fakeDeps({ sizeAt: () => 1_500_000 });
+    const r = await optimizeCover(srcFile(7_069_200), deps);
+    assert.strictEqual(r.sourceBytes, 7_069_200);
+    assert.strictEqual(r.outputBytes, 1_500_000);
+    assert.deepStrictEqual(r.sourceSize, { width: 3334, height: 1875 });
+    ok('se reportan tamaño original y optimizado para mostrarlos al operador');
+}
+
 // ─────────────────────────── C. CONTRATO VISUAL ──────────────────────────────
 
 console.log('\nC. Contrato visual de los consumidores');
@@ -445,8 +598,13 @@ console.log('\nC. Contrato visual de los consumidores');
         'la etiqueta antigua debe haber desaparecido del formulario principal');
     assert.match(src, /Subir nueva cubierta/);
     assert.match(src, /aspectRatio: '16 \/ 9'/, 'la previsualización debe ser 16:9');
-    assert.match(src, /coverState === 'uploading'/, 'debe existir estado de carga');
-    assert.match(src, /disabled=\{coverState === 'uploading'/, 'protección contra doble clic');
+    assert.match(src, /coverState === 'optimizing'/, 'debe existir estado de optimización');
+    assert.match(src, /coverState === 'uploading'/, 'debe existir estado de subida');
+    assert.match(src, /const coverBusy = coverState === 'optimizing' \|\| coverState === 'uploading'/,
+        'el guard de ocupado debe cubrir AMBAS fases, no solo la subida');
+    assert.match(src, /disabled=\{coverBusy/, 'protección contra doble clic en el botón');
+    assert.match(src, /if \(f && !coverBusy\)/, 'el input tampoco debe aceptar archivos mientras hay trabajo');
+    assert.match(src, /optimizeCover\(file, browserDeps\(\)\)/, 'la subida debe pasar por la derivación');
     assert.match(src, /COVER_HELP_TEXT/, 'el texto de ayuda debe venir del contrato compartido');
     assert.match(src, /O usar la URL de una imagen ya subida/, 'la vía manual se conserva');
     ok('Studio → Información: cubierta, previsualización 16:9, estados y vía manual');
@@ -454,11 +612,11 @@ console.log('\nC. Contrato visual de los consumidores');
 
 {
     // El texto de ayuda es contractual: si cambia, debe cambiar aquí también.
+    assert.match(COVER_HELP_TEXT, /hasta 20 MB/);
     assert.match(COVER_HELP_TEXT, /1600 × 900/);
-    assert.match(COVER_HELP_TEXT, /16:9/);
-    assert.match(COVER_HELP_TEXT, /5 MB/);
-    assert.match(COVER_HELP_TEXT, /área central/);
-    ok('el texto de ayuda anuncia tamaño, proporción, peso y zona segura');
+    assert.match(COVER_HELP_TEXT, /optimizar/);
+    assert.ok(!/máximo 5 MB/.test(COVER_HELP_TEXT), 'la ayuda ya no debe anunciar el tope de 5 MB al operador');
+    ok('la ayuda anuncia el límite de SELECCIÓN (20 MB) y la optimización automática');
 }
 
 {
