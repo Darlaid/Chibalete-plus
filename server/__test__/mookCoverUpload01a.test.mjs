@@ -225,7 +225,11 @@ const child = spawn(process.execPath, [path.join(REPO, 'server', 'server.js')], 
         ...process.env,
         NODE_ENV: 'test', PORT: String(PORT),
         USERS_DB: USERS, CHP_DATA_DIR: DATA, UPLOADS_ROOT: UPLOADS,
-        ADMIN_SECRET: 'fixture-secret',
+        // Deliberadamente SIN ADMIN_SECRET: la vía que esta suite ejercita es la
+        // de usuario con rol, y `requireAdminAccess` cae a ella cuando no hay
+        // secreto. Además, un literal aquí dispararía la regla
+        // `chibalete-admin-secret` de gitleaks — y con razón: un secreto de
+        // fixture en el repo sigue siendo un secreto en el repo.
     },
     stdio: ['ignore', 'pipe', 'pipe'],
 });
