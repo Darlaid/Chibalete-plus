@@ -409,7 +409,15 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
     const [coverInfo, setCoverInfo] = useState<string | null>(null);
     // Una sola fuente para «hay trabajo en curso»: la usa el botón y el input.
     const coverBusy = coverState === 'optimizing' || coverState === 'uploading';
-    const [objetivo, setObjetivo] = useState('');
+    // CHP-STUDIO-OBJECTIVES-MULTI-01 — los objetivos SIEMPRE fueron `string[]` en
+    // el contrato. El Studio los guardaba como un único textarea, así que cargaba
+    // `objectives[0]` y guardaba `[uno]`: cualquier versión creada desde aquí
+    // colapsaba N objetivos a 1, en silencio. Ahora el formulario es una lista.
+    const [objetivos, setObjetivos] = useState<string[]>(['']);
+    // Instantánea de la ruta tal como se cargó. Sirve para no escribir una versión
+    // cuando el operador solo tocó metadata: comparar contra lo cargado es la única
+    // forma de distinguir «guardó sin cambios» de «cambió los objetivos».
+    const routeBaseline = useRef<string>('');
     const [modules, setModules] = useState<StudioModule[]>([]);
     const [readOnlyRoute, setReadOnlyRoute] = useState(false);
     const [tab, setTab] = useState<'info' | 'ruta' | 'preview' | 'publicacion'>('info');
@@ -503,7 +511,8 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
     const resetEditor = () => {
         setExperienceId(null); setExpStatus('draft'); setDraftVersionId(null); setPublishedVersion(null); setDraftVersionNum(null);
         setInfo({ title: '', description: '', imageUrl: '', durationLabel: '', audience: '' });
-        setObjetivo(''); setModules([]); setReadOnlyRoute(false); setDirty(false); setErrors({});
+        setObjetivos(['']); setModules([]); setReadOnlyRoute(false); setDirty(false); setErrors({});
+        routeBaseline.current = '';
         setSaveState('idle'); setSaveError(null); setEditingNode(null); setConfirmDelete(null); setConfirmExit(false); setConfirmPublish(false);
         setPreviewNodeId(null);
         setCoverState('idle'); setCoverError(null); setCoverInfo(null);
@@ -528,10 +537,26 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
         setDraftVersionId(lastDraft?.id ?? null);
         setDraftVersionNum(lastDraft?.version ?? null);
         setPublishedVersion(current?.version ?? null);
-        setObjetivo(working?.objectives?.[0] ?? '');
-        setModules(working ? deepCopy(working.modules ?? []) : []);
+        const loadedObjectives: string[] = Array.isArray(working?.objectives) ? [...working.objectives] : [];
+        setObjetivos(loadedObjectives.length ? loadedObjectives : ['']);
+        const loadedModules = working ? deepCopy(working.modules ?? []) : [];
+        setModules(loadedModules);
+        routeBaseline.current = JSON.stringify({ objectives: loadedObjectives, modules: loadedModules });
         setReadOnlyRoute(!lastDraft && !!current);
         setTab(initialTab); setView('editor');
+    };
+
+    /**
+     * Normaliza los objetivos para el contrato: recorta, descarta vacíos y
+     * CONSERVA EL ORDEN. No impone máximo: el contrato no lo tiene y no es este
+     * el sitio para inventar uno.
+     */
+    const cleanObjectives = (): string[] => objetivos.map(o => o.trim()).filter(Boolean);
+
+    /** ¿La ruta difiere de como se cargó? Si no, no hay versión que escribir. */
+    const routeChanged = (): boolean => {
+        if (!routeBaseline.current) return true;   // experiencia nueva
+        return JSON.stringify({ objectives: cleanObjectives(), modules: cleanModules() }) !== routeBaseline.current;
     };
 
     // ── Validación (2): clara, por campo, asociada ──
@@ -596,8 +621,10 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
         }
         // La ruta se versiona solo cuando existe estructura mínima (el store exige ≥1 módulo con nodos).
         const hasRoute = modules.length > 0 && modules.every(m => m.nodes.length > 0);
-        if (hasRoute && !readOnlyRoute) {
-            const body = { objectives: objetivo.trim() ? [objetivo.trim()] : [], modules: cleanModules() };
+        // Solo se toca la versión si la ruta CAMBIÓ. Guardar únicamente metadata
+        // —la cubierta, por ejemplo— no puede arrastrar una versión consigo.
+        if (hasRoute && !readOnlyRoute && routeChanged()) {
+            const body = { objectives: cleanObjectives(), modules: cleanModules() };
             if (draftVersionId) {
                 const r = await dataService.updateStudioDraftVersion(draftVersionId, body);
                 if (!r.ok) { setSaveState('error'); setSaveError(r.error ?? 'No se pudo guardar la ruta'); return false; }
@@ -606,6 +633,9 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                 if (!r.ok) { setSaveState('error'); setSaveError(r.error ?? 'No se pudo crear el borrador de la ruta'); return false; }
                 setDraftVersionId(r.data.id); setDraftVersionNum(r.data.version);
             }
+        }
+        if (hasRoute && !readOnlyRoute) {
+            routeBaseline.current = JSON.stringify({ objectives: cleanObjectives(), modules: cleanModules() });
         }
         setDirty(false); setSaveState('saved');
         loadList();
@@ -625,7 +655,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
     const newVersionFromPublished = async () => {
         if (!experienceId) return;
         setSaveState('saving'); setSaveError(null);
-        const body = { objectives: objetivo.trim() ? [objetivo.trim()] : [], modules: cleanModules() };
+        const body = { objectives: cleanObjectives(), modules: cleanModules() };
         const r = await dataService.createStudioDraftVersion(experienceId, body);
         if (!r.ok) { setSaveState('error'); setSaveError(r.error ?? 'No se pudo crear la nueva versión'); return; }
         setDraftVersionId(r.data.id); setDraftVersionNum(r.data.version);
@@ -807,13 +837,42 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                             disabled={expStatus === 'archived'} rows={3}
                             className="w-full mt-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
                     </div>
-                    <div>
-                        <label htmlFor="st-obj" className="block text-sm font-medium text-gray-700 dark:text-gray-200">Objetivo pedagógico (se guarda con la versión de la ruta)</label>
-                        <textarea id="st-obj" value={objetivo} onChange={e => { setObjetivo(e.target.value); markDirty(); }}
-                            disabled={expStatus === 'archived' || readOnlyRoute} rows={2}
-                            className="w-full mt-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
-                        {readOnlyRoute && <p className="text-xs text-gray-500 mt-1">La versión publicada es inmutable — crea una nueva versión para cambiar el objetivo.</p>}
-                    </div>
+                    {/* CHP-STUDIO-OBJECTIVES-MULTI-01 — una lista, no un textarea. */}
+                    <fieldset disabled={expStatus === 'archived' || readOnlyRoute} className="border-0 p-0 m-0">
+                        <legend className="block text-sm font-medium text-gray-700 dark:text-gray-200">
+                            Objetivos pedagógicos (se guardan con la versión de la ruta)
+                        </legend>
+                        <ul className="mt-1 space-y-2">
+                            {objetivos.map((o, i) => (
+                                <li key={i} className="flex items-start gap-2">
+                                    <span aria-hidden className="mt-2 text-xs text-gray-400 w-4 shrink-0 text-right">{i + 1}.</span>
+                                    <textarea
+                                        id={i === 0 ? 'st-obj' : `st-obj-${i}`}
+                                        aria-label={`Objetivo pedagógico ${i + 1}`}
+                                        value={o} rows={2}
+                                        onChange={e => {
+                                            const val = e.target.value;
+                                            setObjetivos(list => list.map((x, j) => (j === i ? val : x)));
+                                            markDirty();
+                                        }}
+                                        className="w-full p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
+                                    <button type="button"
+                                        onClick={() => { setObjetivos(list => (list.length > 1 ? list.filter((_, j) => j !== i) : [''])); markDirty(); }}
+                                        aria-label={`Quitar objetivo ${i + 1}`}
+                                        title="Quitar este objetivo"
+                                        className="mt-1 p-2 rounded-lg text-gray-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-gray-700 disabled:opacity-40">
+                                        <Trash size={16} aria-hidden />
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                        <button type="button"
+                            onClick={() => { setObjetivos(list => [...list, '']); markDirty(); }}
+                            className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-indigo-600 hover:underline">
+                            <Plus size={14} aria-hidden /> Añadir objetivo
+                        </button>
+                    </fieldset>
+                    {readOnlyRoute && <p className="text-xs text-gray-500 -mt-2">La versión publicada es inmutable — crea una nueva versión para cambiar los objetivos.</p>}
                     {/* CHP-MOOK-COVER-UPLOAD-01A — cubierta propia de la Experience. */}
                     <div>
                         <span className="block text-sm font-medium text-gray-700 dark:text-gray-200">Cubierta del MOOK</span>

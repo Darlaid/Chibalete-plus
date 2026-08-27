@@ -613,6 +613,56 @@ const srcFile = (bytes, type = 'image/webp') => ({ size: bytes, type });
     ok('se reportan tamaño original y optimizado para mostrarlos al operador');
 }
 
+
+// ───────────── E. OBJETIVOS MÚLTIPLES (CHP-STUDIO-OBJECTIVES-MULTI-01) ────────
+
+console.log('\nE. Objetivos múltiples en el Studio');
+
+{
+    const src = fs.readFileSync(path.join(REPO, 'components', 'studio', 'ExperienceStudio.tsx'), 'utf8');
+
+    assert.ok(!/setObjetivo\(working\?\.objectives\?\.\[0\]/.test(src),
+        'ya no puede cargarse solo el primer objetivo');
+    assert.ok(!/objectives: objetivo\.trim\(\)/.test(src),
+        'ya no puede guardarse un array de uno');
+    ok('el colapso N→1 desapareció de carga y de guardado');
+
+    assert.match(src, /const \[objetivos, setObjetivos\] = useState<string\[\]>/, 'el estado es una lista');
+    assert.match(src, /Array\.isArray\(working\?\.objectives\) \? \[\.\.\.working\.objectives\] : \[\]/,
+        'se cargan TODOS los objetivos');
+    ok('el formulario carga la lista completa de objetivos');
+
+    assert.match(src, /objetivos\.map\(o => o\.trim\(\)\)\.filter\(Boolean\)/,
+        'normaliza con trim y descarta vacíos preservando el orden');
+    assert.ok(!/slice\(0, *\d+\)/.test(src.slice(src.indexOf('const cleanObjectives'), src.indexOf('const routeChanged'))),
+        'no se inventa un máximo que el contrato no tiene');
+    ok('normalización: trim, sin vacíos, orden preservado y sin máximos inventados');
+
+    assert.match(src, /if \(hasRoute && !readOnlyRoute && routeChanged\(\)\)/,
+        'guardar metadata sola no puede arrastrar una versión');
+    assert.match(src, /const routeChanged = \(\): boolean =>/, 'existe la comparación contra lo cargado');
+    assert.match(src, /routeBaseline\.current = JSON\.stringify/, 'se registra la instantánea de carga');
+    ok('sin cambios en la ruta no se escribe versión: se compara contra lo cargado');
+
+    // La publicación sigue siendo un acto explícito y separado del guardado.
+    const saveBody = src.slice(src.indexOf('const save = async'), src.indexOf('const publish = async'));
+    assert.ok(!/publishStudioVersion/.test(saveBody), 'guardar NUNCA publica');
+    assert.match(src, /const publish = async \(\) => \{[\s\S]{0,400}?publishStudioVersion/,
+        'publicar es una acción propia');
+    ok('guardar crea borrador; publicar sigue siendo un acto explícito aparte');
+
+    assert.match(src, /aria-label=\{`Objetivo pedagógico \$\{i \+ 1\}`\}/, 'cada campo etiquetado');
+    assert.match(src, /aria-label=\{`Quitar objetivo \$\{i \+ 1\}`\}/, 'el botón de quitar es accesible');
+    assert.match(src, /Añadir objetivo/, 'existe acción de añadir');
+    assert.match(src, /<fieldset disabled=\{expStatus === 'archived' \|\| readOnlyRoute\}/,
+        'la versión publicada sigue siendo inmutable desde el formulario');
+    ok('accesibilidad: etiqueta por campo, acciones nombradas y fieldset que respeta la inmutabilidad');
+
+    assert.match(src, /optimizeCover\(file, browserDeps\(\)\)/, 'el uploader sigue en su sitio');
+    assert.match(src, /aspectRatio: '16 \/ 9'/, 'la previsualización 16:9 no se tocó');
+    ok('sin regresión del uploader ni de su previsualización 16:9');
+}
+
 // ─────────────────────────── C. CONTRATO VISUAL ──────────────────────────────
 
 console.log('\nC. Contrato visual de los consumidores');
