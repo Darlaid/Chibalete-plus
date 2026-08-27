@@ -178,10 +178,19 @@ El botón queda **inerte** mientras hay una subida en vuelo. Es la barrera que *
 | `test:content-rmw` (gate bloqueante) | ✅ **GREEN** |
 | `test:store-isolation` | ✅ **stores reales: 0 modificados / 0 creados / 0 eliminados** |
 | `npm run build` | ✅ compila (valida el import compartido del contrato) |
+| `typecheck:baseline` | ✅ **sin regresiones TS** (ver nota abajo) |
 
 **Rojo pre-existente y ajeno:** `test:analytics` da **43 ✓ / 3 ✗**. Verificado con `git stash`
 sobre **HEAD limpio**: **43 ✓ / 3 ✗ idéntico**. No lo introduce esta unidad. Los 3 fallos son samples
 ausentes de eventos `experience_*` en el registry de analítica.
+
+### Nota: regresión de TypeScript detectada por CI y corregida
+
+El primer push introdujo un error TS real: `checkCoverDimensions` vive en un módulo `.js` compartido
+con el backend y su unión de retorno llega por JSDoc, así que TS **no la estrecha** con `!verdict.ok`.
+Se corrigió anotando el tipo explícitamente en el Studio —no con un cast ni con `any`—. El baseline
+de typecheck vuelve a **sin regresiones**. No se regeneró el baseline: hay 13 errores ajenos ya
+resueltos por otros, y bajarlo sería trabajar deuda ajena.
 
 ### Matiz honesto: 401 en vez de 403
 

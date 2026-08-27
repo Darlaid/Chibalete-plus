@@ -474,8 +474,15 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                 img.src = localUrl;
             });
             if (dims) {
-                const verdict = checkCoverDimensions(dims.w, dims.h);
-                if (!verdict.ok) { setCoverError(verdict.error); return; }
+                // `checkCoverDimensions` vive en un módulo .js compartido con el
+                // backend; su unión de retorno llega por JSDoc y TS no la estrecha
+                // con `!verdict.ok`. Se anota explícitamente en vez de castear:
+                // conserva el tipo y no silencia nada.
+                const verdict: { ok: boolean; error?: string } = checkCoverDimensions(dims.w, dims.h);
+                if (!verdict.ok) {
+                    setCoverError(verdict.error ?? 'La imagen no cumple el contrato de cubierta.');
+                    return;
+                }
             }
         } finally {
             URL.revokeObjectURL(localUrl);
