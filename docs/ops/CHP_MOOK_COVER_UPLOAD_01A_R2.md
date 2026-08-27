@@ -127,3 +127,13 @@ el activo real, de punta a punta.
 
 `CHP-TEST-MOOKREVIEW-EOL-ASSERTION-01` y «`test:mook` fuera de CI» siguen registradas y **fuera de
 esta liberación**, por decisión explícita del operador.
+
+
+---
+
+**Continuación y cierre:** el arco terminó en `CHP_MOOK_OBJECTIVES_AND_COVER_PRODUCTION.md` —
+🟢 `GREEN-MOOK-OBJECTIVES-AND-COVER-PRODUCTION`. El arte corregido (32,7 MiB, 6667 × 3750, con el
+título ya en «¿Estás aquí?») se derivó a **276 976 B** y está aplicado en producción sobre
+`api:e70c0f1` ×2 y `front:obj-ab380ed`. Por el camino, aplicar la cubierta destapó
+`CHP-STUDIO-OBJECTIVES-COLLAPSE-ON-SAVE-01` —el Studio colapsaba N objetivos a 1 al guardar—,
+corregido en `ab380ed`. Vigente: **v4 con los 3 objetivos exactos**; v1, v2 y v3 conservadas intactas.
