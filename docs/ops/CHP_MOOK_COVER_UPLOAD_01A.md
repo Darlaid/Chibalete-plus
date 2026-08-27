@@ -1,6 +1,6 @@
 # CHP-MOOK-COVER-UPLOAD-01A — CUBIERTA PROPIA Y CARGA SEGURA
 
-**Estado:** 🟢 **`GREEN-MOOK-COVER-UPLOAD-READY-FOR-DEPLOY`**
+**Estado:** 🟢 **`GREEN-MOOK-COVER-UPLOAD-READY-FOR-DEPLOY`** (código) · 🟡 **deploy BLOQUEADO** por la cubierta
 **Este GREEN no autoriza desplegar ni cambiar la cubierta productiva.**
 **Rama:** `chp/mook-contract-00`
 **Fecha:** 2026-08-27
@@ -256,3 +256,12 @@ en 04F.
 
 El deploy de este código es una unidad aparte: implica reconstruir la imagen de frontend y hacer swap
 del bind mount de `server/` con restart escalonado, y **no está autorizado por este GREEN**.
+
+
+---
+
+**Continuación:** los tres gates previos al deploy se cerraron en
+`CHP_MOOK_COVER_UPLOAD_01A_CLOSURE_GATES.md` — 🟡 **`YELLOW-COVER-PENDING-DEFINITIVE-ART`**.
+`/api/upload` y gitleaks quedan **resueltos**; la QA visual a 1440 y 390 px **pasa**. Lo que bloquea
+el deploy es el **activo**: la cubierta vertical del libro (1241 × 2126) pierde el 67 % de su alto en
+un marco 16:9 y el título queda fuera. Falta una cubierta propia 1600 × 900.
