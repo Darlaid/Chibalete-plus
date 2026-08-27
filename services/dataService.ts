@@ -741,6 +741,63 @@ class DataService {
         });
     }
 
+    /**
+     * CHP-MOOK-COVER-UPLOAD-01A — sube la cubierta de una Experience.
+     *
+     * Endpoint propio (`/api/experiences/:id/cover`), no `/api/upload`: aquel
+     * acepta 2 GiB y once familias de archivo porque sirve al catálogo
+     * editorial; una cubierta necesita 5 MB, tres formatos y 16:9.
+     *
+     * Devuelve SOLO la URL. No modifica la Experience: `imageUrl` cambia
+     * cuando el operador guarda la sección Información.
+     *
+     * Sobre el timeout: se aborta a los 60 s y se lanza un error MARCADO como
+     * ambiguo (`ambiguous: true`). Un upload que no responde puede haber
+     * llegado igualmente al servidor, así que el llamador NO debe reintentar a
+     * ciegas —duplicaría el archivo—; debe pedir al operador que recargue y
+     * compruebe. Reintentar es una decisión humana, no automática.
+     */
+    async uploadExperienceCover(experienceId: string, file: File): Promise<string> {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60_000);
+
+        let res: Response;
+        try {
+            res = await fetch(`${this.apiUrl}/experiences/${encodeURIComponent(experienceId)}/cover`, {
+                method: 'POST',
+                body: formData,
+                credentials: 'same-origin',
+                signal: controller.signal,
+            });
+        } catch (e) {
+            const err = new Error(
+                (e as Error).name === 'AbortError'
+                    ? 'La subida no respondió a tiempo. Recarga la página y comprueba si la cubierta llegó antes de volver a intentarlo.'
+                    : 'No se pudo contactar con el servidor durante la subida.',
+            ) as Error & { ambiguous?: boolean };
+            err.ambiguous = true;
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
+
+        let data: { url?: string; error?: string } = {};
+        try {
+            data = await res.json();
+        } catch {
+            // El servidor pudo devolver HTML (por ejemplo un 413 de nginx).
+            data = { error: `HTTP ${res.status}` };
+        }
+
+        if (!res.ok || !data.url) {
+            throw new Error(data.error || `No se pudo subir la cubierta (HTTP ${res.status}).`);
+        }
+        return data.url;
+    }
+
     // W1: Best-effort orphan cleanup. Called from SubirContenido when metadata save fails
     // after files were already uploaded. Fire-and-forget — failures are silently ignored.
     async purgeOrphanFile(url: string): Promise<void> {

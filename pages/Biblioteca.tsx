@@ -159,7 +159,14 @@ const Biblioteca: React.FC = () => {
             return (
                 <div className="animate-in fade-in duration-500 mt-8 space-y-8">
                     <Link to={`/experiencias/${destacada.id}`} className="block rounded-3xl overflow-hidden bg-gradient-to-br from-indigo-600 to-purple-700 text-white shadow-xl hover:shadow-2xl transition-shadow">
-                        {destacada.imageUrl && <img src={destacada.imageUrl} alt="" className="w-full h-44 object-cover opacity-80" />}
+                        {/* CHP-MOOK-COVER-UPLOAD-01A — contrato visual único de las
+                            cubiertas de Experience: 16:9, recorte centrado. Antes era
+                            `h-44` fijo, que a distintos anchos daba proporciones de
+                            2:1 a 3:1 y recortaba la cubierta de forma impredecible. */}
+                        {destacada.imageUrl && (
+                            <img src={destacada.imageUrl} alt="" className="w-full opacity-80"
+                                style={{ aspectRatio: '16 / 9', objectFit: 'cover', objectPosition: 'center' }} />
+                        )}
                         <div className="p-8">
                             <span className="text-xs uppercase tracking-widest text-indigo-200">Experiencia destacada</span>
                             <h3 className="text-3xl font-bold mt-2">{destacada.title}</h3>

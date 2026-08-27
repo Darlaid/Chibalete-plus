@@ -4,6 +4,7 @@ import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
 import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import helmet from 'helmet';
@@ -23,6 +24,8 @@ import { cleanupExpiredSessions } from './db/sessionStore.js';
 import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
 import * as libraryStore from './lib/libraryStore.js';
 import * as experienceStore from './lib/experienceStore.js';
+// CHP-MOOK-COVER-UPLOAD-01A — contrato de la cubierta, compartido con el frontend.
+import { validateCover, extensionForMime, COVER_MAX_BYTES } from './lib/coverPolicy.js';
 import {
     emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
     emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
@@ -1724,6 +1727,114 @@ app.post('/api/experiences/:id/archive', requireAdminAccess, async (req, res) =>
         log(`[MOOK] experience archived: ${exp.id}`);
         res.json(exp);
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
+});
+
+// ── CHP-MOOK-COVER-UPLOAD-01A — cubierta propia de la Experience ───────────
+//
+// Ruta PROPIA y deliberadamente separada de /api/upload: aquel acepta 2 GiB y
+// once familias de archivo porque sirve al catálogo editorial entero. Una
+// cubierta necesita justo lo contrario —5 MB, tres formatos, 16:9—, y heredar
+// aquellos límites sería heredar una semántica que no le corresponde.
+//
+// El endpoint NO toca `mook_db.json`: solo deja el archivo en disco y devuelve
+// su URL. `imageUrl` cambia cuando el operador guarda la sección Información,
+// que es lo que mantiene la edición bajo su control.
+//
+// El uploader se construye en el primer request y no en import-time: `TEMP_DIR`
+// y `multer` se definen más abajo en este archivo y en evaluación de módulo
+// estarían en zona muerta temporal (TDZ).
+let _coverUpload = null;
+const coverUploader = () => {
+    if (_coverUpload) return _coverUpload;
+    _coverUpload = multer({
+        storage: multer.diskStorage({
+            destination: (req, file, cb) => cb(null, TEMP_DIR),
+            filename: (req, file, cb) => {
+                // El nombre original NUNCA llega al disco: se reduce a un slug
+                // alfanumérico. Eso neutraliza `../`, bytes nulos, rutas
+                // absolutas y nombres reservados de Windows de una sola vez.
+                const slug = path.basename(file.originalname, path.extname(file.originalname))
+                    .replace(/[^a-z0-9]/gi, '_').toLowerCase().slice(0, 40) || 'cubierta';
+                cb(null, `${slug}-${Date.now()}-${Math.round(Math.random() * 1e9)}.part`);
+            },
+        }),
+        // Capa 1 (nominal): descarta lo evidente antes de escribir un byte.
+        // No se confía en ella — la que decide es la validación por magic bytes.
+        fileFilter: (req, file, cb) => {
+            if (/^image\/(jpeg|png|webp)$/.test(file.mimetype)) return cb(null, true);
+            cb(new Error('Solo se aceptan imágenes JPG, PNG o WebP.'));
+        },
+        // El tope se aplica DURANTE la escritura: multer aborta al superarlo,
+        // así que un archivo de 5 GB nunca llega a ocupar 5 GB en disco.
+        limits: { fileSize: COVER_MAX_BYTES, files: 1 },
+    }).single('file');
+    return _coverUpload;
+};
+
+app.post('/api/experiences/:id/cover', requireAdminAccess, (req, res) => {
+    // La Experience debe existir ANTES de aceptar bytes: si no, se rechaza sin
+    // haber escrito nada en disco.
+    const exp = readMook().experiences.find(e => e.id === req.params.id);
+    if (!exp) return res.status(404).json({ error: 'La Experiencia no existe.' });
+
+    coverUploader()(req, res, async (err) => {
+        if (err) {
+            if (err.code === 'LIMIT_FILE_SIZE') {
+                return res.status(413).json({ error: 'La imagen supera el máximo de 5 MB.' });
+            }
+            return res.status(400).json({ error: err.message });
+        }
+        if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
+
+        const tempPath = req.file.path;
+        try {
+            // Capa 2: MIME real por magic bytes. La extensión y el
+            // Content-Type del cliente son declaraciones, no evidencia.
+            const detected = await fileTypeFromFile(tempPath);
+            const mime = detected?.mime ?? null;
+
+            // Capa 3: dimensiones y ratio leídos de la cabecera real.
+            const fh = await fsp.open(tempPath, 'r');
+            let header;
+            try {
+                header = Buffer.alloc(Math.min(65536, req.file.size));
+                await fh.read(header, 0, header.length, 0);
+            } finally { await fh.close(); }
+
+            const verdict = validateCover({ buffer: header, mime, size: req.file.size });
+            if (!verdict.ok) {
+                safeUnlink(tempPath);
+                log(`[COVER_REJECT] exp=${exp.id} code=${verdict.code} mime=${mime ?? 'none'}`, 'SECURITY');
+                const status = verdict.code === 'TOO_LARGE' ? 413
+                    : verdict.code === 'MIME_NOT_ALLOWED' ? 415
+                        : 400;
+                return res.status(status).json({ error: verdict.error, code: verdict.code });
+            }
+
+            // La extensión la fija el MIME real, no el nombre que envió el cliente.
+            const destDir = path.join(UPLOAD_DIR, 'experience-covers');
+            if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+
+            const finalName = path.basename(req.file.filename, '.part') + extensionForMime(verdict.mime);
+            const finalPath = path.join(destDir, finalName);
+
+            // Cero overwrite: el nombre lleva timestamp + aleatorio, pero la
+            // garantía no se deja a la probabilidad. `wx` falla si existe.
+            fs.copyFileSync(tempPath, finalPath, fs.constants.COPYFILE_EXCL);
+            safeUnlink(tempPath);
+
+            const url = `/uploads/experience-covers/${finalName}`;
+            log(`[COVER_UPLOAD] exp=${exp.id} url=${url} ${verdict.width}x${verdict.height} mime=${verdict.mime}`, 'SUCCESS');
+
+            // Solo la URL canónica. No se toca el store: `imageUrl` cambia
+            // cuando el operador guarda Información.
+            return res.status(201).json({ url });
+        } catch (e) {
+            safeUnlink(tempPath);
+            log(`[COVER_FAIL] exp=${req.params.id} error=${e.message}`, 'ERROR');
+            return res.status(415).json({ error: 'La imagen no pudo procesarse. Puede estar corrupta o incompleta.' });
+        }
+    });
 });
 
 // ── Usuario (actor = sesión canónica; sin identidades del cliente) ──────────

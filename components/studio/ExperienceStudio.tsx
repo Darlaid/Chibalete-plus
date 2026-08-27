@@ -20,6 +20,11 @@ import type { Content } from '../../types';
 import {
     Plus, Pencil, Trash, ArrowUp, ArrowDown, Eye, Search, X, CheckCircle2, Archive, AlertTriangle, BookOpen,
 } from 'lucide-react';
+// CHP-MOOK-COVER-UPLOAD-01A — mismos números que aplica el backend. Sin
+// dependencias de Node, así que el bundle lo importa sin problema.
+import {
+    COVER_ALLOWED_MIME, COVER_MAX_BYTES, COVER_HELP_TEXT, checkCoverDimensions,
+} from '../../server/lib/coverContract.js';
 
 const NODE_TYPES = ['READING', 'VIDEO', 'AUDIO', 'LEO', 'ACTIVITY', 'PRODUCTION'] as const;
 type NodeType = typeof NODE_TYPES[number];
@@ -395,6 +400,10 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
     const [publishedVersion, setPublishedVersion] = useState<number | null>(null);
     const [draftVersionNum, setDraftVersionNum] = useState<number | null>(null);
     const [info, setInfo] = useState({ title: '', description: '', imageUrl: '', durationLabel: '', audience: '' });
+    // CHP-MOOK-COVER-UPLOAD-01A — estado del uploader de cubierta.
+    const coverInputRef = useRef<HTMLInputElement>(null);
+    const [coverState, setCoverState] = useState<'idle' | 'uploading' | 'done'>('idle');
+    const [coverError, setCoverError] = useState<string | null>(null);
     const [objetivo, setObjetivo] = useState('');
     const [modules, setModules] = useState<StudioModule[]>([]);
     const [readOnlyRoute, setReadOnlyRoute] = useState(false);
@@ -431,6 +440,61 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
         window.addEventListener('beforeunload', h);
         return () => window.removeEventListener('beforeunload', h);
     }, [dirty]);
+
+    /**
+     * CHP-MOOK-COVER-UPLOAD-01A — sube una cubierta y rellena `imageUrl`.
+     *
+     * NO guarda la Experience: deja la URL en el formulario para que el
+     * operador la aplique al guardar Información. Así la subida es reversible
+     * —basta con no guardar— y no muta nada por accidente.
+     *
+     * La validación local es cortesía contra los mismos números del backend.
+     * Si el navegador no puede decodificar la imagen, NO se bloquea la subida:
+     * se deja que decida el servidor, que es la autoridad.
+     */
+    const uploadCover = async (file: File) => {
+        if (!experienceId || coverState === 'uploading') return;
+        setCoverError(null);
+
+        if (!COVER_ALLOWED_MIME.includes(file.type)) {
+            setCoverError('El archivo no es una imagen JPG, PNG o WebP.');
+            return;
+        }
+        if (file.size > COVER_MAX_BYTES) {
+            setCoverError(`La imagen pesa ${(file.size / (1024 * 1024)).toFixed(1)} MB y el máximo es 5 MB.`);
+            return;
+        }
+
+        const localUrl = URL.createObjectURL(file);
+        try {
+            const dims = await new Promise<{ w: number; h: number } | null>((resolve) => {
+                const img = new Image();
+                img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+                img.onerror = () => resolve(null);
+                img.src = localUrl;
+            });
+            if (dims) {
+                const verdict = checkCoverDimensions(dims.w, dims.h);
+                if (!verdict.ok) { setCoverError(verdict.error); return; }
+            }
+        } finally {
+            URL.revokeObjectURL(localUrl);
+        }
+
+        setCoverState('uploading');
+        try {
+            const url = await dataService.uploadExperienceCover(experienceId, file);
+            setInfo(s => ({ ...s, imageUrl: url }));
+            markDirty();
+            setCoverState('done');
+        } catch (e) {
+            // Un fallo ambiguo (timeout, red caída) NO se reintenta solo: el
+            // archivo pudo haber llegado igualmente y un reintento ciego
+            // duplicaría la cubierta. Se pide inspección humana.
+            setCoverError((e as Error).message);
+            setCoverState('idle');
+        }
+    };
 
     const resetEditor = () => {
         setExperienceId(null); setExpStatus('draft'); setDraftVersionId(null); setPublishedVersion(null); setDraftVersionNum(null);
@@ -745,11 +809,56 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                             className="w-full mt-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
                         {readOnlyRoute && <p className="text-xs text-gray-500 mt-1">La versión publicada es inmutable — crea una nueva versión para cambiar el objetivo.</p>}
                     </div>
+                    {/* CHP-MOOK-COVER-UPLOAD-01A — cubierta propia de la Experience. */}
                     <div>
-                        <label htmlFor="st-img" className="block text-sm font-medium text-gray-700 dark:text-gray-200">Ilustración (URL de una imagen ya subida)</label>
-                        <input id="st-img" value={info.imageUrl} onChange={e => { setInfo(s => ({ ...s, imageUrl: e.target.value })); markDirty(); }}
-                            disabled={expStatus === 'archived'} placeholder="/uploads/… o https://…"
-                            className="w-full mt-1 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
+                        <span className="block text-sm font-medium text-gray-700 dark:text-gray-200">Cubierta del MOOK</span>
+
+                        {/* Marco 16:9 idéntico al que usa Biblioteca, para que lo
+                            que se ve aquí sea lo que verá el participante. */}
+                        <div className="mt-2 w-full max-w-md rounded-xl overflow-hidden border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-900"
+                            style={{ aspectRatio: '16 / 9' }}>
+                            {info.imageUrl
+                                ? <img src={info.imageUrl} alt="Vista previa de la cubierta"
+                                    className="w-full h-full" style={{ objectFit: 'cover', objectPosition: 'center' }} />
+                                : <div className="w-full h-full grid place-items-center text-xs text-gray-500">Sin cubierta</div>}
+                        </div>
+
+                        <input ref={coverInputRef} type="file" accept="image/jpeg,image/png,image/webp"
+                            className="hidden" onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadCover(f); }} />
+
+                        <div className="mt-3 flex items-center gap-3">
+                            <button type="button"
+                                onClick={() => coverInputRef.current?.click()}
+                                // Doble clic: mientras hay una subida en vuelo el botón
+                                // queda inerte. Es la barrera que 04F echó en falta en
+                                // «Publicar», donde solo el 409 del backend evitó el daño.
+                                disabled={coverState === 'uploading' || expStatus === 'archived' || !experienceId}
+                                className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
+                                {coverState === 'uploading' ? 'Subiendo…' : 'Subir nueva cubierta'}
+                            </button>
+                            {coverState === 'uploading' && <span className="text-xs text-gray-500" role="status">Validando la imagen…</span>}
+                            {coverState === 'done' && <span className="text-xs text-green-600" role="status">Cubierta lista. Guarda Información para aplicarla.</span>}
+                        </div>
+
+                        {!experienceId && (
+                            <p className="text-xs text-gray-500 mt-2">Guarda la Experiencia una primera vez para poder subir su cubierta.</p>
+                        )}
+
+                        {coverError && (
+                            <p className="text-sm text-red-600 mt-2" role="alert">{coverError}</p>
+                        )}
+
+                        <p className="text-xs text-gray-500 mt-2">{COVER_HELP_TEXT}</p>
+
+                        {/* La vía manual por URL se conserva: es como se resolvió la
+                            cubierta del primer MOOK, reutilizando un activo ya subido. */}
+                        <details className="mt-3">
+                            <summary className="text-xs text-gray-500 cursor-pointer">O usar la URL de una imagen ya subida</summary>
+                            <input id="st-img" value={info.imageUrl} onChange={e => { setInfo(s => ({ ...s, imageUrl: e.target.value })); markDirty(); }}
+                                disabled={expStatus === 'archived'} placeholder="/uploads/… o https://…"
+                                aria-label="URL de una imagen ya subida"
+                                className="w-full mt-2 p-2 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
+                        </details>
                     </div>
                     <div className="grid sm:grid-cols-2 gap-4">
                         <div>
