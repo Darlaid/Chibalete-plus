@@ -185,3 +185,11 @@ recorrido normal, no de los controles de revisión.
 No se tocó Studio, contratos, APIs, stores, contenido editorial, versiones ni uploader.
 **No se cierra `CHP-CI-FRONT-IMAGE-BUILD-COVERAGE-01`**, que sigue abierta junto a
 `CHP-TEST-MOOKREVIEW-EOL-ASSERTION-01` y «`test:mook` fuera de CI».
+
+
+---
+
+**Continuación:** las tres deudas de verificación que este documento dejaba abiertas se cerraron en
+`CHP_CI_MOOK_RELEASE_GATES_01.md` — 🟢 `GREEN-CI-MOOK-RELEASE-GATES` (`5f6fc64`). CI ya construye la
+imagen real de `Dockerfile.front` como **gate bloqueante** y ejecuta **`test:mook`** automáticamente;
+la aserción EOL de `mookReview01` dejó de fallar sobre código correcto en clones Linux.
