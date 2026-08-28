@@ -167,6 +167,17 @@ jobs:
       - name: Integridad de la imagen construida
         run: node scripts/verify-image-integrity.mjs chibalete/api:integrity
 
+      # CHP-CI-MOOK-RELEASE-GATES-01 — la imagen de FRONTEND tambien se construye
+      # aqui, y BLOQUEA. Ya se construia en `trivy-image`, pero ese job lleva
+      # `continue-on-error: true` y ademas falla antes por CVEs de la imagen base:
+      # su senal era inalcanzable. Por eso 01B llego a produccion con un import
+      # que resolvia en el arbol completo pero no en la imagen — `Dockerfile.front`
+      # no copia `server/`. Un `npm run build` NO sustituye a esto: solo el build
+      # real con el mismo Dockerfile y el mismo contexto reproduce esa frontera.
+      # Sin registry, sin publicar y sin secretos: se etiqueta local para CI.
+      - name: Build front image (Dockerfile.front real, gate bloqueante)
+        run: docker build -f Dockerfile.front -t chibalete/front:integrity .
+
   trivy-image:
     runs-on: ubuntu-latest
     continue-on-error: true       # reporta CVEs de imagen base sin bloquear el workflow

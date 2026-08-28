@@ -33,6 +33,15 @@ on:
       - 'package.json'
       - 'tsconfig.json'
       - '.github/workflows/identity-preflight.yml'
+      - 'pages/**'
+      - 'components/**'
+      - 'utils/**'
+      - 'engines/**'
+      - 'index.tsx'
+      - 'App.tsx'
+      - 'vite.config.ts'
+      - 'nginx.prod.conf'
+      - '.dockerignore'
   pull_request:
     paths:
       - 'server/**'
@@ -48,6 +57,15 @@ on:
       - 'package.json'
       - 'tsconfig.json'
       - '.github/workflows/identity-preflight.yml'
+      - 'pages/**'
+      - 'components/**'
+      - 'utils/**'
+      - 'engines/**'
+      - 'index.tsx'
+      - 'App.tsx'
+      - 'vite.config.ts'
+      - 'nginx.prod.conf'
+      - '.dockerignore'
   workflow_dispatch:
 
 permissions:
@@ -132,6 +150,13 @@ jobs:
 
       - name: Typecheck sin regresiones (ops/ excluido por tsconfig)
         run: npm run typecheck:baseline
+
+      # CHP-CI-MOOK-RELEASE-GATES-01 — las 76 aserciones de MOOK dejan de
+      # depender de que alguien las lance a mano. Es la suite real, no una
+      # reducida: experienceStore, runtime, studio, review, pilot, freeze,
+      # bitácora privada, audio a11y, cubierta y navegación de revisión.
+      - name: Suites MOOK (Experiencias, Studio, Runtime, cubierta y navegación)
+        run: npm run test:mook
 
       - name: Build de producción
         run: npm run build

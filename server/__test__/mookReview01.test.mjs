@@ -74,6 +74,45 @@ t('el reenvío exige ser el dueño; la vista del participante no expone reviewer
     assert.ok(!JSON.stringify(view).includes('admin-1'), 'la proyección del participante no incluye reviewerId');
 });
 
+
+/**
+ * CHP-CI-MOOK-RELEASE-GATES-01 — normalización de fin de línea.
+ *
+ * Solo unifica CRLF y CR sueltos a LF. NO recorta, NO colapsa espacios y NO
+ * toca ninguna otra cosa: una línea de más, un espacio distinto o texto en otro
+ * orden siguen siendo diferencias reales y deben seguir fallando.
+ */
+const normalizeEol = (s) => String(s).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+/**
+ * «El mediador jamás pasa», expresado como el invariante que de verdad importa.
+ *
+ * La versión anterior buscaba el literal `return true;\n    if (isMediatorRole`
+ * y afirmaba que NO debía aparecer. Pero ese literal es exactamente la forma del
+ * código CORRECTO —`if (admin) return true;` seguido del gate de mediador—, así
+ * que la aserción solo pasaba porque en Windows el archivo tiene CRLF y el
+ * patrón con `\n` no casaba. En cualquier clon Linux, donde el blob de git está
+ * en LF, fallaba sobre código correcto.
+ *
+ * Lo que se comprueba ahora es el invariante real y es INDEPENDIENTE del fin de
+ * línea: hay un único `return true`, es el del administrador, está ANTES del
+ * gate de mediador, y la rama del mediador responde 403 y devuelve false.
+ */
+function assertMediatorNeverPasses(body) {
+    const returnTrues = body.match(/return true;/g) ?? [];
+    assert.strictEqual(returnTrues.length, 1, 'solo debe existir UN return true en el guard');
+
+    const idxTrue = body.indexOf('return true;');
+    const idxMediator = body.indexOf('isMediatorRole');
+    assert.ok(idxTrue !== -1 && idxMediator !== -1, 'el guard debe contemplar admin y mediador');
+    assert.ok(idxTrue < idxMediator, 'el único return true es el del admin, antes del gate de mediador');
+
+    const mediatorBranch = body.slice(idxMediator);
+    assert.ok(!mediatorBranch.includes('return true'), 'la rama del mediador jamás devuelve true');
+    assert.ok(mediatorBranch.includes('MEDIATOR_SCOPE_GATED'), 'el mediador cae en el gate declarado');
+    assert.ok(mediatorBranch.includes('return false;'), 'la rama del mediador devuelve false');
+}
+
 // 4 — mediador fail-closed (estructural: la ruta lo gatea, sin cola global)
 const serverSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'server.js'), 'utf8');
 t('estructural: mediador sin scope = 403 fail-closed; solo administrador opera la revisión', () => {
@@ -82,10 +121,10 @@ t('estructural: mediador sin scope = 403 fail-closed; solo administrador opera l
     for (const route of ['/api/experiences/review/queue', '/api/experiences/review/:evidenceId/detail', '/api/experiences/review/:evidenceId/feedback', '/api/experiences/review/:evidenceId/request-changes']) {
         assert.ok(serverSrc.includes(route), `ruta ${route} presente`);
     }
-    const guardBody = serverSrc.slice(serverSrc.indexOf('function requireReviewAccess'), serverSrc.indexOf('function resolveParticipantName'));
+    const guardBody = normalizeEol(serverSrc.slice(serverSrc.indexOf('function requireReviewAccess'), serverSrc.indexOf('function resolveParticipantName')));
     assert.ok(guardBody.includes(`roles.includes('administrador')`), 'admin explícito');
     assert.ok(guardBody.includes('isMediatorRole'), 'mediador contemplado y gateado');
-    assert.ok(!guardBody.includes('return true;\n    if (isMediatorRole'), 'el mediador jamás pasa');
+    assertMediatorNeverPasses(guardBody);
     // el actor de las mutaciones se deriva de la sesión, no del cliente
     assert.ok(serverSrc.includes('reviewerId: req.user.id'), 'reviewer derivado de sesión');
     assert.ok(serverSrc.includes('userId: req.user.id, text: req.body?.text'), 'dueño del reenvío derivado de sesión');
@@ -219,3 +258,47 @@ t('estructural: bundles legacy, Studio y pestaña técnica retirada', () => {
 });
 
 console.log(`\nmookReview01: ${passed} tests OK`);
+
+// ─────────── Cobertura del arreglo EOL (CHP-CI-MOOK-RELEASE-GATES-01) ────────
+// Demuestra las dos mitades: el MISMO contenido pasa con LF y con CRLF, y una
+// diferencia REAL sigue fallando. Sin esto, «normalizar» podría ser un atajo
+// para dejar de comprobar.
+
+const GUARD_OK = "function requireReviewAccess(req, res) {\n    const roles = req.user?.roles || [];\n    if (roles.includes(`administrador`)) return true;\n    if (isMediatorRole(req.user)) {\n        res.status(403).json({ code: 'MEDIATOR_SCOPE_GATED' });\n        return false;\n    }\n    return false;\n}\n";
+const GUARD_MEDIATOR_PASSES = "function requireReviewAccess(req, res) {\n    const roles = req.user?.roles || [];\n    if (roles.includes(`administrador`)) return true;\n    if (isMediatorRole(req.user)) {\n        res.status(403).json({ code: 'MEDIATOR_SCOPE_GATED' });\n        return true;\n    }\n    return false;\n}\n";
+
+t('EOL: el mismo guard pasa con LF y con CRLF', () => {
+    const lf = normalizeEol(GUARD_OK);
+    const crlf = normalizeEol(GUARD_OK.replace(/\n/g, '\r\n'));
+    const cr = normalizeEol(GUARD_OK.replace(/\n/g, '\r'));
+    assert.strictEqual(lf, crlf, 'LF y CRLF deben normalizar al mismo texto');
+    assert.strictEqual(lf, cr, 'CR suelto también');
+    assertMediatorNeverPasses(lf);
+    assertMediatorNeverPasses(crlf);
+    assertMediatorNeverPasses(cr);
+});
+
+t('EOL: una diferencia REAL sigue fallando, con cualquier terminador', () => {
+    for (const variante of [GUARD_MEDIATOR_PASSES, GUARD_MEDIATOR_PASSES.replace(/\n/g, '\r\n')]) {
+        assert.throws(() => assertMediatorNeverPasses(normalizeEol(variante)),
+            /return true/, 'un mediador que devuelve true DEBE seguir fallando');
+    }
+    // Y la normalización no puede tapar contenido ausente ni texto distinto.
+    assert.throws(() => assertMediatorNeverPasses(normalizeEol(
+        GUARD_OK.replace('MEDIATOR_SCOPE_GATED', 'OTRA_COSA'))), /gate declarado/);
+    // Sin ningún `return false`, la rama del mediador deja de ser fail-closed.
+    assert.throws(() => assertMediatorNeverPasses(normalizeEol(
+        GUARD_OK.replace(/return false;/g, ''))), /devuelve false/);
+    // Y el ORDEN importa: si el `return true` cayera DESPUÉS del gate, falla.
+    const invertido = [
+        'function requireReviewAccess(req, res) {',
+        '    if (isMediatorRole(req.user)) {',
+        "        res.status(403).json({ code: 'MEDIATOR_SCOPE_GATED' });",
+        '        return false;',
+        '    }',
+        "    if (roles.includes('administrador')) return true;",
+        '    return false;',
+        '}',
+    ].join('\n');
+    assert.throws(() => assertMediatorNeverPasses(normalizeEol(invertido)), /antes del gate/);
+});
