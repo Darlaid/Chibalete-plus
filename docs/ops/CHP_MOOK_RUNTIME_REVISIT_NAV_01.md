@@ -4,7 +4,7 @@
 **Rama:** `chp/mook-contract-00` · **Commit:** `356f2fe` · **Fecha:** 2026-08-28
 **Release:** frontend `chibalete/front:nav-356f2fe` · APIs **sin tocar** en `chibalete/api:e70c0f1` ×2
 
-⏸️ **Pendiente: la comprobación interactiva en producción es de Nicolás.** Ver §7.
+✅ **QA humana en producción GREEN.** Ver §7.
 
 ---
 
@@ -142,18 +142,41 @@ Deploy registrado en `/root/deploys.log`.
 
 ---
 
-## 7. ⏸️ QA PRODUCTIVA INTERACTIVA — PENDIENTE, Y POR QUÉ
+## 7. ✅ QA PRODUCTIVA INTERACTIVA — GREEN
 
-La unidad pide probarlo «con una cuenta lectora autorizada **sin completar nuevos nodos**» y, a la
-vez, confirmar que **run/evidencias siguen `1/0`**. En producción **ninguna cuenta lectora tiene
-run**: abrir el recorrido con una crearía un segundo run y rompería justamente esa invariante.
+Ejecutada por **Nicolás** sobre el recorrido productivo real:
 
-El único run existente es el del **administrador** —A01 completado, «Carta de entrada» como
-frontera—, que es exactamente el escenario del ejemplo. Y la sesión es **cookie-only**: no puedo
-autenticarme como él.
+> Atrás, Adelantar y recarga funcionan; progreso 1/42 y bloqueos intactos.
 
-Así que la comprobación interactiva le corresponde a Nicolás. Todo lo demás está verificado, y el
-código está confirmado en el bundle servido.
+### Por qué la hizo él y no yo
+
+La unidad pedía una **cuenta lectora** «sin completar nuevos nodos» y, a la vez, confirmar
+**run/evidencias `1/0`**. Las dos cosas no podían cumplirse juntas: en producción **ninguna cuenta
+lectora tiene run**, así que abrir el recorrido con una habría creado un segundo run y roto justo el
+invariante que la fase exigía verificar. El único run es el del administrador —y la sesión es
+**cookie-only**—, así que la comprobación tenía que hacerla él.
+
+### Verificación independiente de lo que reportó
+
+| Comprobación | Resultado |
+|---|---|
+| El contador `1/42` es correcto | ✅ **56 nodos, 42 requeridos**, 14 opcionales (7 AUDIO + 7 ACTIVITY del reto) · 1 requerido completado |
+| La QA no escribió nada | ✅ `mook_db.json` = `5c838328…4c0ba341`, **byte-idéntico** al estado previo |
+| runs / evidencias | ✅ **1 / 0**, run `active` y pineado a **v1** |
+| Versiones | ✅ 4, `currentVersionId` = v4 |
+| Servicios | ✅ 4 healthy, `RestartCount=0` |
+| 5xx en 2 h | ✅ **0** |
+
+**El progreso no se movió ni un paso y el store no registró una sola escritura**, que es exactamente
+lo que la unidad exigía de una navegación de revisión.
+
+### Un matiz honesto sobre los 14 nodos opcionales
+
+Como 14 nodos no son requeridos, el servidor puede marcar como `available` un nodo posterior al
+`current`. La frontera se define como el **nodo `current`**, así que `Adelantar` se detiene ahí y no
+salta a un opcional posterior. **No es una regresión**: antes de esta unidad el Runtime solo expandía
+el `current`, de modo que ese salto tampoco existía. Saltarse opcionales sigue siendo cosa del
+recorrido normal, no de los controles de revisión.
 
 ---
 
