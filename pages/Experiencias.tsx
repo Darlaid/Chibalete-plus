@@ -12,7 +12,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { useAccessCheck } from '../hooks/useAccessCheck';
-import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, Download } from 'lucide-react';
+import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export const NODE_ICON: Record<string, React.ReactNode> = {
     READING: <BookOpen size={16} />, VIDEO: <BookOpen size={16} />, AUDIO: <BookOpen size={16} />,
@@ -189,7 +189,7 @@ export const PrivateJournalEntry: React.FC<{ e: any; node: any }> = ({ e, node }
  * `preview` (STUDIO-01, C11): mismo renderer sin efectos — completar/enviar
  * NO llaman a la API (cero runs, cero evidencia, cero eventos).
  */
-export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean; onUnsaved?: (h: { save: () => Promise<void> } | null) => void; userId?: string }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false, onUnsaved, userId }) => {
+export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTitle: string; route: any; refresh: () => void; preview?: boolean; onUnsaved?: (h: { save: () => Promise<void> } | null) => void; userId?: string; nav?: { canBack: boolean; canForward: boolean; onBack: () => void; onForward: () => void }; revisiting?: boolean }> = ({ node, moduleTitle, experienceTitle, route, refresh, preview = false, onUnsaved, userId, nav, revisiting = false }) => {
     const [answers, setAnswers] = useState<string[]>([]);
     const [text, setText] = useState('');
     const [msg, setMsg] = useState<string | null>(null);
@@ -244,7 +244,11 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
             <p className="text-xs text-gray-400 mb-1">{experienceTitle} · {moduleTitle}</p>
             <div className="flex items-center justify-between">
                 <h4 className="font-bold text-lg text-gray-800 dark:text-gray-100 flex items-center gap-2">{NODE_ICON[node.type]} {node.title}</h4>
-                <span className="text-xs font-bold text-indigo-600 inline-flex items-center gap-1"><Circle size={12} /> Estás aquí</span>
+                {revisiting
+                    // Revisar no es estar: mientras se mira hacia atrás, la tarjeta
+                    // NO puede decir «Estás aquí» — el punto del recorrido no se movió.
+                    ? <span className="text-xs font-bold text-gray-500 inline-flex items-center gap-1"><Clock size={12} aria-hidden /> Revisando</span>
+                    : <span className="text-xs font-bold text-indigo-600 inline-flex items-center gap-1"><Circle size={12} /> Estás aquí</span>}
             </div>
             {node.config?.instruccion && <p className="text-sm text-gray-600 dark:text-gray-300 mt-2">{node.config.instruccion}</p>}
 
@@ -295,7 +299,10 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </>
             )}
 
-            {(node.type === 'READING' || node.type === 'VIDEO' || node.type === 'AUDIO' || node.type === 'LEO') && (
+            {/* Al revisar, la tarjeta es de SOLO LECTURA. `completeNode` reescribe
+                `completedAt` incluso en un nodo ya completado, así que dejar el
+                botón visible convertiría «mirar atrás» en una escritura a un clic. */}
+            {!revisiting && (node.type === 'READING' || node.type === 'VIDEO' || node.type === 'AUDIO' || node.type === 'LEO') && (
                 <button onClick={complete} disabled={busy || (node.resourceRef && !node.resource)} className="mt-2 px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">
                     {node.type === 'LEO' ? 'Ya conversé — validar' : node.type === 'READING' ? 'Terminé esta lectura' : 'Terminé de verlo/escucharlo'}
                 </button>
@@ -307,7 +314,7 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </p>
             )}
 
-            {node.type === 'ACTIVITY' && (
+            {!revisiting && node.type === 'ACTIVITY' && (
                 <div className="space-y-3 mt-2">
                     {(node.config?.preguntas ?? []).map((p: any, i: number) => (
                         <div key={i}>
@@ -327,7 +334,7 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </div>
             )}
 
-            {node.type === 'PRODUCTION' && (
+            {!revisiting && node.type === 'PRODUCTION' && (
                 <div className="space-y-2 mt-2">
                     <p className="text-sm text-gray-600 dark:text-gray-300">{node.config?.consigna}</p>
                     {node.config?.criterioRevision && <p className="text-xs text-gray-500">Criterio de revisión: {node.config.criterioRevision}</p>}
@@ -353,6 +360,25 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </div>
             ))}
             {msg && <p className="mt-2 text-sm text-red-600" role="alert">{msg}</p>}
+
+            {/* CHP-MOOK-RUNTIME-REVISIT-NAV-01 — revisar lo ya alcanzado.
+                Va en su propia fila para NO competir con la acción de
+                finalización, que conserva su jerarquía primaria. Estilo
+                secundario, y `disabled` real en los bordes del recorrido. */}
+            {nav && (
+                <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700 flex flex-wrap items-center justify-end gap-2">
+                    <button type="button" onClick={nav.onBack} disabled={!nav.canBack}
+                        aria-label="Ver el paso anterior"
+                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                        <ChevronLeft size={16} aria-hidden /> Atrás
+                    </button>
+                    <button type="button" onClick={nav.onForward} disabled={!nav.canForward}
+                        aria-label="Volver al paso siguiente ya alcanzado"
+                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                        Adelantar <ChevronRight size={16} aria-hidden />
+                    </button>
+                </div>
+            )}
         </div>
     );
 };
@@ -440,6 +466,7 @@ const MyProductionPanel: React.FC<{ route: any; refresh: () => void }> = ({ rout
                     </div>
                 );
             })}
+
         </section>
     );
 };
@@ -484,6 +511,15 @@ const Experiencias: React.FC = () => {
     const [askExit, setAskExit] = useState(false);
     const onUnsaved = useCallback((h: { save: () => Promise<void> } | null) => setUnsaved(h), []);
 
+    // ── CHP-MOOK-RUNTIME-REVISIT-NAV-01 ────────────────────────────────────
+    // Dos conceptos distintos, y confundirlos sería el error:
+    //   FRONTERA        — el punto del recorrido, lo decide el SERVIDOR
+    //                     (`state === 'current'`). Nunca la mueve esta unidad.
+    //   ELEMENTO VISIBLE — qué tarjeta está expandida ahora mismo.
+    // Revisar hacia atrás cambia SOLO lo segundo. Es estado de pantalla: no se
+    // persiste, no toca la URL y al recargar se vuelve al punto canónico.
+    const [visibleNodeId, setVisibleNodeId] = useState<string | null>(null);
+
     // REVIEW-01: la pestaña técnica de revisión se retiró de esta página (D1);
     // la revisión vive en Aula Viva → Producciones con autorización backend.
 
@@ -498,7 +534,30 @@ const Experiencias: React.FC = () => {
             }
         });
     }, [user, experienceId]);
-    useEffect(() => { currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [route?.progress?.completedRequired]);
+    // La navegación se deriva de lo que YA envía el servidor: `state` por nodo.
+    // No se recalcula el desbloqueo en cliente — sería una segunda fuente de
+    // verdad, y la autoridad es el backend.
+    const flatNodes: any[] = route?.nodes ?? [];
+    const frontierIdx = (() => {
+        const i = flatNodes.findIndex((n: any) => n.state === 'current');
+        if (i !== -1) return i;
+        // Run terminado: no hay 'current'. La frontera es el último no bloqueado.
+        for (let j = flatNodes.length - 1; j >= 0; j--) if (flatNodes[j].state !== 'locked') return j;
+        return -1;
+    })();
+    const visibleIdx = (() => {
+        const i = flatNodes.findIndex((n: any) => n.id === visibleNodeId);
+        return i === -1 ? frontierIdx : i;
+    })();
+    const visibleId: string | null = flatNodes[visibleIdx]?.id ?? null;
+    // Solo se navega entre nodos NO bloqueados y nunca más allá de la frontera.
+    const prevIdx = (() => { for (let j = visibleIdx - 1; j >= 0; j--) if (flatNodes[j].state !== 'locked') return j; return -1; })();
+    const nextIdx = (() => { for (let j = visibleIdx + 1; j <= frontierIdx; j++) if (flatNodes[j].state !== 'locked') return j; return -1; })();
+
+    // Cuando el recorrido avanza de verdad, la revisión se descarta y se vuelve
+    // al punto canónico. Es el mismo disparador que ya usaba el scroll.
+    useEffect(() => { setVisibleNodeId(null); }, [route?.progress?.completedRequired, route?.runId]);
+    useEffect(() => { currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [route?.progress?.completedRequired, visibleNodeId]);
 
     const start = async () => { if (detail) setRoute(await dataService.startExperienceRun(detail.id)); };
     const refresh = async () => { if (route) setRoute(await dataService.startExperienceRun(route.experienceId)); };
@@ -578,8 +637,14 @@ const Experiencias: React.FC = () => {
                                     <span className={`text-xs font-bold px-2 py-1 rounded-full ${MODULE_STATE_LABEL[m.state]?.cls ?? ''}`}>{MODULE_STATE_LABEL[m.state]?.text ?? m.state}</span>
                                 </div>
                                 <div className="space-y-3">
-                                    {m.nodes.map((n: any) => n.state === 'current'
-                                        ? <div key={n.id} ref={currentRef}><NodeShell node={n} moduleTitle={m.title} experienceTitle={detail?.title ?? 'Experiencia'} route={route} refresh={refresh} onUnsaved={onUnsaved} userId={user?.id} /></div>
+                                    {m.nodes.map((n: any) => n.id === visibleId
+                                        ? <div key={n.id} ref={currentRef}><NodeShell node={n} moduleTitle={m.title} experienceTitle={detail?.title ?? 'Experiencia'} route={route} refresh={refresh} onUnsaved={onUnsaved} userId={user?.id}
+                                            nav={{
+                                                canBack: prevIdx !== -1,
+                                                canForward: nextIdx !== -1,
+                                                onBack: () => { if (prevIdx !== -1) setVisibleNodeId(flatNodes[prevIdx].id); },
+                                                onForward: () => { if (nextIdx !== -1) setVisibleNodeId(flatNodes[nextIdx].id); },
+                                            }} revisiting={visibleIdx !== frontierIdx} /></div>
                                         : <NodeRow key={n.id} node={n} route={route} />)}
                                 </div>
                             </section>
