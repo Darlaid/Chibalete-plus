@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import type { Content, Assignment } from '../types';
 import { getOfflineText, saveOfflineText } from '../utils/offlineTextCache';
@@ -55,6 +56,8 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     const { user } = useAuth();
     const location = useLocation();
     const useNavigateTo = useNavigate();
+    // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
+    const fichaPath = useFichaPath(content?.id);
     const queryParams = new URLSearchParams(location.search);
     const initialLang = queryParams.get('lang') === 'en' ? 'en' : (queryParams.get('lang') === 'pt' ? 'pt' : 'es');
 
@@ -943,9 +946,10 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     : 'bg-white/95 dark:bg-gray-800/95 border-gray-200 dark:border-gray-700'
             }`}>
                 <div className="flex items-center">
-                    <button onClick={() => useNavigateTo(`/contenido/${content.id}`)} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 mr-1 min-w-[44px] min-h-[44px] flex items-center justify-center" aria-label="Volver">
+                    <button onClick={() => useNavigateTo(fichaPath)} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 mr-1 min-w-[44px] min-h-[44px] flex items-center justify-center" aria-label="Volver a la ficha del contenido">
                         <ChevronLeft size={24} />
                     </button>
+                    <MookReturnButton compact className="inline-flex items-center gap-1 px-3 py-2 rounded-full border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 mr-1" />
                     <h1 className="font-sans font-bold text-sm truncate max-w-[120px] sm:max-w-[300px]">{content.titulo}</h1>
                 </div>
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import type { Content } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
@@ -18,6 +19,8 @@ declare const pdfjsLib: any;
 const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
     const { user } = useAuth();
     const navigate = useNavigate();
+    // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
+    const fichaPath = useFichaPath(content?.id);
 
     // -- State --
     const [pdfDoc, setPdfDoc] = useState<any>(null);
@@ -476,9 +479,13 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
             {/* Header */}
             <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 h-16 shrink-0 flex items-center justify-between px-4 z-20">
                 <div className="flex items-center gap-2">
-                    <button onClick={() => navigate(-1)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full text-gray-700 dark:text-gray-200">
+                    {/* Antes `navigate(-1)`: la historia del navegador no sabe de
+                        dónde vino la lectura. Ahora vuelve a la ficha CONSERVANDO el
+                        origen, y al lado se ofrece el salto directo al MOOK. */}
+                    <button onClick={() => navigate(fichaPath)} aria-label="Volver a la ficha del contenido" className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full text-gray-700 dark:text-gray-200">
                         <ChevronLeft size={24} />
                     </button>
+                    <MookReturnButton compact className="inline-flex items-center gap-1 px-3 py-2 rounded-full border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" />
                     <h1 className="text-lg font-semibold text-gray-800 dark:text-white truncate max-w-xs">{content.titulo}</h1>
                 </div>
 

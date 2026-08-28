@@ -8,10 +8,12 @@
  * REVIEW-01 la reubique en Aula Viva.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { useAccessCheck } from '../hooks/useAccessCheck';
+// CHP-MOOK-CONTEXTUAL-READING-RETURN-01 — el origen del MOOK viaja por la URL.
+import { withMookContext, resolveReturnNode, MOOK_NODE_PARAM } from '../utils/mookReturn.mjs';
 import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export const NODE_ICON: Record<string, React.ReactNode> = {
@@ -243,7 +245,7 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
         <div className="rounded-2xl border-2 border-indigo-300 dark:border-indigo-700 bg-white dark:bg-gray-800 p-5 shadow-md">
             <p className="text-xs text-gray-400 mb-1">{experienceTitle} · {moduleTitle}</p>
             <div className="flex items-center justify-between">
-                <h4 className="font-bold text-lg text-gray-800 dark:text-gray-100 flex items-center gap-2">{NODE_ICON[node.type]} {node.title}</h4>
+                <h4 tabIndex={-1} className="font-bold text-lg text-gray-800 dark:text-gray-100 flex items-center gap-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">{NODE_ICON[node.type]} {node.title}</h4>
                 {revisiting
                     // Revisar no es estar: mientras se mira hacia atrás, la tarjeta
                     // NO puede decir «Estás aquí» — el punto del recorrido no se movió.
@@ -256,7 +258,12 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 <div className="flex items-center gap-3 my-3 rounded-xl bg-gray-50 dark:bg-gray-900 p-3">
                     {node.resource.portada_url && <img src={node.resource.portada_url} alt="" className="w-10 h-14 object-cover rounded" />}
                     <div className="text-sm text-gray-700 dark:text-gray-200">{node.resource.titulo}<span className="text-gray-400"> · {node.resource.autor}</span></div>
-                    <Link to={`/contenido/${node.resource.id}`} className="ml-auto px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-bold">Abrir {NODE_TYPE_LABEL[node.type]?.toLowerCase() ?? ''}</Link>
+                    {/* El origen viaja explícito: el mismo texto puede abrirse
+                        desde Biblioteca o desde un nodo, y deducirlo del contenido
+                        sería adivinar. En preview no hay recorrido al que volver. */}
+                    <Link to={preview ? `/contenido/${node.resource.id}`
+                        : withMookContext(`/contenido/${node.resource.id}`, { experienceId: route?.experienceId, nodeId: node.id })}
+                        className="ml-auto px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-bold">Abrir {NODE_TYPE_LABEL[node.type]?.toLowerCase() ?? ''}</Link>
                 </div>
             )}
             {node.resourceRef && !node.resource && (
@@ -499,6 +506,7 @@ export const NodeRow: React.FC<{ node: any; route?: any }> = ({ node, route }) =
 const Experiencias: React.FC = () => {
     const { user } = useAuth();
     const { experienceId } = useParams<{ experienceId?: string }>();
+    const location = useLocation();
     const [list, setList] = useState<any[]>([]);
     const [detail, setDetail] = useState<any | null>(null);
     const [route, setRoute] = useState<any | null>(null);
@@ -557,7 +565,28 @@ const Experiencias: React.FC = () => {
     // Cuando el recorrido avanza de verdad, la revisión se descarta y se vuelve
     // al punto canónico. Es el mismo disparador que ya usaba el scroll.
     useEffect(() => { setVisibleNodeId(null); }, [route?.progress?.completedRequired, route?.runId]);
-    useEffect(() => { currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [route?.progress?.completedRequired, visibleNodeId]);
+
+    // Retorno contextual desde una lectura. El `?node=` es una PISTA: se acepta
+    // solo si ese nodo pertenece a este recorrido y no está bloqueado —lo decide
+    // `route.nodes`, que ya viene calculado por el servidor—. Después se limpia
+    // con `replace` para no dejar ciclo en el botón Atrás del navegador y para
+    // que una recarga posterior vuelva al punto canónico.
+    const returnHandled = useRef(false);
+    useEffect(() => {
+        if (!route || returnHandled.current) return;
+        const asked = new URLSearchParams(location.search).get(MOOK_NODE_PARAM);
+        if (!asked) return;
+        returnHandled.current = true;
+        const usable = resolveReturnNode(route.nodes ?? [], asked);
+        if (usable) setVisibleNodeId(usable);
+        navigate(`/experiencias/${route.experienceId}`, { replace: true });
+    }, [route, location.search, navigate]);
+    useEffect(() => {
+        currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        // El foco acompaña al scroll: quien navega con teclado o lector de
+        // pantalla tiene que aterrizar en la tarjeta, no quedarse donde estaba.
+        currentRef.current?.querySelector('h4')?.focus?.();
+    }, [route?.progress?.completedRequired, visibleNodeId]);
 
     const start = async () => { if (detail) setRoute(await dataService.startExperienceRun(detail.id)); };
     const refresh = async () => { if (route) setRoute(await dataService.startExperienceRun(route.experienceId)); };

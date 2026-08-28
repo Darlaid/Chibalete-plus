@@ -40,6 +40,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import { parsePlainTextToA11yBook } from '../utils/a11yDocumentParser';
 import A11yShell from '../components/accesible/A11yShell';
@@ -111,6 +112,8 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
     const id = content.id;
     const { user } = useAuth();
     const navigate = useNavigate();
+    // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
+    const fichaPath = useFichaPath(id);
     const [book,       setBook]    = useState<A11yBook | null>(null);
     const [loading,    setLoading] = useState<boolean>(true);
     const [error,      setError]   = useState<string | null>(null);
@@ -146,7 +149,7 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
     // pudo haberse abierto desde un email o link externo — el destino
     // canónico es la ficha, no "lo anterior".
     const handleBack = useCallback(() => {
-        navigate(`/contenido/${id}`);
+        navigate(fichaPath);
     }, [navigate, id]);
 
     // SC 3.1.1 / 3.1.2 Language of Page / Parts.

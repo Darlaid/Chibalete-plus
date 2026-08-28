@@ -4,6 +4,7 @@ import { useNarrativeInteraction, NARRATIVE_ADVANCE_DELAY_MS } from '../hooks/us
 import { useCameraController, type MoveType } from '../hooks/useCameraController';
 import { useLeoMediator } from '../hooks/useLeoMediator';
 import { useNavigate } from 'react-router-dom';
+import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import { generarMicroResumenRecordatorio } from '../services/geminiService';
@@ -135,6 +136,8 @@ const USE_BLEND_MODE = false;
 
 const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
     const navigate = useNavigate();
+    // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
+    const fichaPath = useFichaPath(content?.id);
     const { user } = useAuth();
     const albumData = useMemo(() => normalizeAlbumData(content.album_data || []), [content.album_data]);
     // Fase 4 — el usuario tiene activado prefers-reduced-motion en el SO.
@@ -1535,7 +1538,7 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
 
                     {/* Primary CTA */}
                     <button
-                        onClick={() => navigate(`/contenido/${content.id}`)}
+                        onClick={() => navigate(fichaPath)}
                         className="w-full px-6 py-3 bg-indigo-500 hover:bg-indigo-400 text-white rounded-2xl font-semibold transition-colors mb-3"
                     >
                         Volver al libro
@@ -1833,7 +1836,8 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
             {/* Header Controls */}
             <div className="absolute top-0 left-0 right-0 z-50 p-4 flex justify-between items-center bg-gradient-to-b from-black/60 to-transparent pointer-events-none">
                 <button
-                    onClick={() => navigate(`/contenido/${content.id}`)}
+                    aria-label="Volver a la ficha del contenido"
+                    onClick={() => navigate(fichaPath)}
                     className="pointer-events-auto p-2 bg-black/30 hover:bg-white/20 rounded-full text-white backdrop-blur-sm border border-white/10"
                 >
                     <ChevronLeft />

@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
+// CHP-MOOK-CONTEXTUAL-READING-RETURN-01
+import { readMookContext, withMookContext, mookReturnPath } from '../utils/mookReturn.mjs';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
@@ -16,6 +18,11 @@ import ContentCard from '../components/ContentCard';
 
 const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
     const navigate = useNavigate();
+    const location = useLocation();
+    // El origen llega por la URL, así que sobrevive a recargar la ficha.
+    const mookCtx = readMookContext(location.search);
+    // Ir a un modo de lectura conservando el origen, si lo hay.
+    const goRead = (path: string) => navigate(withMookContext(path, mookCtx));
     const { user } = useAuth();
     const [relatedContent, setRelatedContent] = useState<Content[]>([]);
     const [reviewText, setReviewText] = useState('');
@@ -209,8 +216,12 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
 
             <div className="relative z-10 p-6 md:p-12 max-w-7xl mx-auto">
                 {/* Breadcrumb / Back */}
-                <Link to="/biblioteca" className="inline-flex items-center text-white/60 hover:text-white mb-8 transition-colors">
-                    <ChevronLeft size={20} className="mr-1"/> Volver
+                {/* El destino del regreso depende de DÓNDE se abrió el contenido,
+                    no de qué contenido es: el mismo texto llega desde Biblioteca y
+                    desde un nodo del MOOK. Sin origen, Biblioteca como siempre. */}
+                <Link to={mookCtx ? (mookReturnPath(mookCtx) ?? '/biblioteca') : '/biblioteca'}
+                    className="inline-flex items-center text-white/60 hover:text-white mb-8 transition-colors">
+                    <ChevronLeft size={20} className="mr-1"/> {mookCtx ? 'Volver al MOOK' : 'Volver'}
                 </Link>
 
                 <div className="flex flex-col md:flex-row gap-10 lg:gap-16">
@@ -334,7 +345,7 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                 {/* Primary CTA */}
                                 {content.tipo === 'libro_album' ? (
                                     <button 
-                                        onClick={() => navigate(`/ver/album/${content.id}`)}
+                                        onClick={() => goRead(`/ver/album/${content.id}`)}
                                         className="flex items-center px-8 py-4 bg-gradient-to-r from-yellow-500 to-orange-600 hover:from-yellow-400 hover:to-orange-500 text-black rounded-full font-bold text-lg shadow-[0_0_30px_rgba(234,179,8,0.4)] hover:-translate-y-1 transition-all duration-300"
                                     >
                                         <Eye size={24} className="mr-3" /> 
@@ -346,8 +357,8 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                         {(content.url_recurso || content.texto_plano_url) ? (
                                           <button 
                                             onClick={() => {
-                                                if (content.texto_plano_url) navigate(`/leer/inmersivo/${content.id}`);
-                                                else navigate(`/leer/pdf/${content.id}`);
+                                                if (content.texto_plano_url) goRead(`/leer/inmersivo/${content.id}`);
+                                                else goRead(`/leer/pdf/${content.id}`);
                                             }}
                                             className="flex items-center px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-bold text-lg shadow-[0_0_30px_rgba(79,70,229,0.4)] hover:shadow-[0_0_40px_rgba(79,70,229,0.6)] hover:-translate-y-1 transition-all duration-300"
                                           >
@@ -370,17 +381,17 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                 {content.tipo !== 'libro_album' && (
                                     <>
                                       {content.texto_plano_url && (
-                                        <button onClick={() => navigate(`/leer/inmersivo/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                        <button onClick={() => goRead(`/leer/inmersivo/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
                                             <Zap size={20} className="mr-2 text-yellow-400"/> Inmersivo
                                         </button>
                                       )}
                                       {content.texto_plano_url && (
-                                        <button onClick={() => navigate(`/leer/texto/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                        <button onClick={() => goRead(`/leer/texto/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
                                             <FileText size={20} className="mr-2 text-green-400"/> Guiado
                                         </button>
                                       )}
                                       {content.texto_plano_url && (
-                                        <button onClick={() => navigate(`/leer/accesible/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                        <button onClick={() => goRead(`/leer/accesible/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
                                             <Glasses size={20} className="mr-2 text-blue-400"/> Accesible
                                         </button>
                                       )}
@@ -391,13 +402,13 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                             {/* Tertiary Actions Grid */}
                             <div className="flex gap-4 pt-4 border-t border-white/10">
                                 {content.tipo !== 'libro_album' && content.url_recurso && (
-                                    <button onClick={() => navigate(`/leer/pdf/${content.id}`)} className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
+                                    <button onClick={() => goRead(`/leer/pdf/${content.id}`)} className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
                                         <Book size={16}/> Ver PDF Original
                                     </button>
                                 )}
                                 {content.ilustraciones_url && content.ilustraciones_url.length > 0 && (
                                     <button 
-                                        onClick={() => navigate(`/galeria/${content.id}`)}
+                                        onClick={() => goRead(`/galeria/${content.id}`)}
                                         className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5"
                                     >
                                         <ImageIcon size={16}/> Galería de Arte

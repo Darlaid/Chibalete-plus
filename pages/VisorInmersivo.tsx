@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
 import { ChevronLeft, Play, Pause, Zap, Clock, Award, SkipForward, Minus, Plus, Infinity as InfinityIcon, Battery, RotateCcw, Settings, Type, AlignLeft, Sun, Moon, MessageCircle, X } from 'lucide-react';
@@ -115,6 +116,8 @@ function selectBestAnchor(
 const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const { user } = useAuth();
     const navigate = useNavigate();
+    // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
+    const fichaPath = useFichaPath(content?.id);
 
     // -----------------------------------------------------------------------
     // PHASE 0: STATE — all initialized with no async dependencies
@@ -2769,7 +2772,9 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 className="absolute top-0 left-0 right-0 z-20 p-6 flex justify-between items-center bg-gradient-to-b from-black/90 to-transparent"
                 style={{ opacity: 1 - tranceIntensity * 0.85, transition: 'opacity 1.5s ease' }}
             >
-                <button onClick={() => navigate(-1)} className="p-2 bg-white/10 rounded-full hover:bg-white/20"><ChevronLeft /></button>
+                {/* Antes `navigate(-1)` — ver nota en VisorPDF. */}
+                <button onClick={() => navigate(fichaPath)} aria-label="Volver a la ficha del contenido" className="p-2 bg-white/10 rounded-full hover:bg-white/20"><ChevronLeft /></button>
+                <MookReturnButton compact />
                 <div className="flex items-center gap-4">
                     <button onClick={() => setIsMenuOpen(!isMenuOpen)} className={`p-2 rounded-full transition-colors ${isMenuOpen ? 'bg-indigo-600' : 'bg-white/10 hover:bg-white/20'}`}>
                         <Settings size={20} />
