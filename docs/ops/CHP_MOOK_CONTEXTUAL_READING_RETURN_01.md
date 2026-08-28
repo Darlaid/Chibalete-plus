@@ -5,8 +5,8 @@
 **Release:** frontend `chibalete/front:ret-162c3e6` · APIs **sin tocar** en `chibalete/api:e70c0f1` ×2
 
 ✅ **QA humana en producción GREEN.** Ver §5.
-⚠️ **Hallazgo ajeno a la unidad, encontrado al verificar:** en producción hay una **v5** publicada
-por el operador que cambia los requeridos de **42 a 48**. Ver §6.
+ℹ️ **Hallazgo ajeno a la unidad, encontrado al verificar y ya resuelto:** en producción hay una **v5**
+que sube los requeridos de **42 a 48**; el operador confirma que es **deliberada**. Ver §6.
 
 ---
 
@@ -121,7 +121,7 @@ se dispara algo más seguido porque volver al nodo remonta el Runtime. Se anota 
 
 ---
 
-## 6. ⚠️ HALLAZGO FUERA DE ALCANCE: v5 EN PRODUCCIÓN, 42 → 48 REQUERIDOS
+## 6. HALLAZGO FUERA DE ALCANCE: v5 EN PRODUCCIÓN, 42 → 48 REQUERIDOS
 
 Al verificar el `3/42` apareció algo que **no está documentado en ninguna unidad**: producción ya no
 tiene 4 versiones sino **5**, y la vigente es `expv-1787884365439-msj4ub` (**v5**), publicada el
@@ -142,8 +142,10 @@ Contiene **dos cambios**:
    los días 4 a 7 siguen opcionales.
 
 Un reto de siete días con los tres primeros obligatorios y los cuatro últimos opcionales es una
-asimetría que **puede ser deliberada o accidental**; el `modhash` de módulos cambió
-(`63216bb8e5536f2e` → `ff11928269f3c52e`). **Queda pendiente de confirmación editorial.**
+asimetría llamativa —el `modhash` de módulos cambió, `63216bb8e5536f2e` → `ff11928269f3c52e`—, así
+que se preguntó antes de tocar nada. **Nicolás confirma que es deliberada** (2026-08-28): los días
+1–3 se piden y los días 4–7 quedan a voluntad. **No hay nada que revertir**; se deja constancia
+porque la publicación no había quedado documentada en ninguna unidad.
 
 Nada de esto afecta a la QA de esta unidad: el único run está **pineado a v1**, así que su contador
 sigue siendo sobre 42. Pero **para las 247 cuentas activas que empiecen ahora**, el recorrido exige
@@ -168,5 +170,5 @@ Las cinco siguen publicadas e **inmutables**; ninguna versión previa fue modifi
 No se tocó Studio, contratos, APIs, stores, contenido editorial, versiones ni uploader. El diff se
 limita al Runtime, la ficha, los cinco visores, el helper compartido y su suite.
 
-Deudas que **siguen abiertas**: `CHP-MOOK-RUN-RESUME-WRITE-ON-READ-01` (§5) y la confirmación
-editorial de la v5 (§6).
+Deuda que **sigue abierta**: `CHP-MOOK-RUN-RESUME-WRITE-ON-READ-01` (§5). El hallazgo de la v5 (§6)
+queda **cerrado como decisión editorial deliberada**.
