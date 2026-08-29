@@ -218,3 +218,21 @@ Este documento no contiene identificadores reales: todo lo relativo a cuentas es
 **Decisión humana, no técnica:** elegir el canal institucional y su responsable, y aclarar si los
 ~180 son equipos o cuentas. Con eso y la franja de uso, el inventario puede cerrarse y la campaña
 redactarse.
+
+## 14. Continuación (2026-08-29)
+
+Decisiones humanas recibidas, que resuelven parte de §7 y §10:
+
+```text
+Responsable por cada equipo:  docente o mediador
+La cifra 180 representa:      cuentas escolares, no equipos
+Ventana general:              14 días (relativa, sin fechas reales)
+```
+
+Con la segunda queda cerrada la ambigüedad de §7: **180 son cuentas escolares**, no equipos, y no
+pueden usarse como inventario físico ni como denominador de migración.
+
+El diseño operacional derivado —inventario, campaña externa, registro por equipo, conciliación y
+gates previos a `T0`— vive en `CHP_IDENTITY_FIELD_UPDATE_CAMPAIGN_01.md`. Ese documento es **diseño,
+no autorización**: la campaña sigue sin iniciarse, sin fechas reales, sin `T0`, sin drain y con
+`ENFORCE` prohibido.
