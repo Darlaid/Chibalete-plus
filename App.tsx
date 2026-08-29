@@ -372,8 +372,20 @@ const AppContent: React.FC = () => {
                 <Route path="/soporte" element={
                     <ProtectedRoute access={getRouteAccess('/soporte')}><Layout><Soporte /></Layout></ProtectedRoute>
                 } />
+                {/*
+                  * /chibalete-lu — PÚBLICA y AISLADA (CHP-IDENTITY-FIELD-PUBLIC-DOWNLOAD-PAGE-01B).
+                  * Es la URL estable de campaña, así que debe abrirse sin sesión. Se conserva
+                  * ProtectedRoute para que el acceso siga resolviéndose desde routePermissions.ts
+                  * (allí es access:'public'), pero NO se envuelve en <Layout>: Layout monta Navbar
+                  * —la navegación privada completa— y Chatbot. Un visitante anónimo no debe verlos.
+                  * Autenticados y anónimos ven exactamente la misma página aislada.
+                  */}
                 <Route path="/chibalete-lu" element={
-                    <ProtectedRoute access={getRouteAccess('/chibalete-lu')}><Layout><ChibaleteLU /></Layout></ProtectedRoute>
+                    <ProtectedRoute access={getRouteAccess('/chibalete-lu')}>
+                        <div className="min-h-screen w-full overflow-y-auto bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-white">
+                            <ChibaleteLU />
+                        </div>
+                    </ProtectedRoute>
                 } />
 
                 {/* Clubes Externos */}

@@ -172,8 +172,8 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
   },
   {
     path: '/chibalete-lu',
-    access: 'authenticated',
-    description: 'Descarga e información de Chibalete LU (app Android liviana) — disponible para todos los usuarios autenticados',
+    access: 'public',
+    description: 'Página pública oficial de descarga de Chibalete LU (app Android liviana). URL estable de campaña: se abre sin sesión, se renderiza aislada (sin Navbar ni Chatbot) y solo expone /api/lu/version',
   },
   {
     path: '/clubs',
