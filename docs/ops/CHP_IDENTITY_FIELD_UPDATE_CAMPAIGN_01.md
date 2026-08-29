@@ -10,6 +10,11 @@ cero mensajes enviados, cero contacto con instituciones, docentes, familias o me
 > **Este documento no autoriza su propia ejecución.** Describe cómo se haría la campaña; no la
 > inicia, no fija fechas reales, no publica enlaces, no abre el drain y no define `T0`.
 
+**Actualización 2026-08-29:** el gate `0.7.1 → 0.9.0` de §5 quedó **resuelto** con QA en dispositivo
+físico. Evidencia: `CHP_IDENTITY_FIELD_UPGRADE_071_090_EVIDENCE_01.md`. De ahí se incorporan a §7 y
+§8 la advertencia de **reautenticación obligatoria** y la exigencia de tener la credencial
+disponible. El veredicto operativo **no cambia**: sigue `AMBER-CAMPAIGN-NOT-YET-AUTHORIZED`.
+
 ---
 
 ## 0. Decisiones humanas vinculantes registradas
@@ -161,28 +166,37 @@ se especifica motor, no se construye el formulario.
 
 ---
 
-## 5. Gate especial para 0.7.1 — bloqueante
+## 5. Gate especial para 0.7.1 — **RESUELTO** (2026-08-29)
 
 ```text
-0.8.0 -> 0.9.0: demostrado en dispositivo
-0.7.1 -> 0.9.0: compatible en teoría, no demostrado en dispositivo
+0.8.0 -> 0.9.0: demostrado previamente en dispositivo
+0.7.1 -> 0.9.0: RESUELTO — demostrado en dispositivo físico
 ```
 
-Lo demostrado sobre `0.7.1` es que comparte `applicationId`, huella de certificado, `versionCode`
-creciente y el mismo esquema Room v4 con migraciones aditivas presentes en su dex, y que el
-comportamiento destructivo solo actúa en downgrade. **Eso no es una demostración en dispositivo y no
-se eleva a «verificada».**
+La ruta `0.7.1 → 0.9.0` quedó demostrada en un dispositivo físico (Android 15 / API 35) con los APK
+auditados: instalación encima sin `uninstall` ni `pm clear`, continuidad de package, UID y
+`firstInstallTime`, libro conservado y accesible sin red, posición y progreso preservados, y
+sincronización posterior funcional. Evidencia completa en
+`CHP_IDENTITY_FIELD_UPGRADE_071_090_EVIDENCE_01.md`.
 
-Regla de ejecución:
+Regla de ejecución vigente:
 
-- **Ningún equipo con `baselineVersion = 0.7.1` recibe instrucciones de actualización masiva** hasta
-  que se complete una **unidad separada de validación no destructiva** en dispositivo, o hasta que se
-  apruebe expresamente un **tratamiento alternativo** documentado.
-- **`UNKNOWN` debe resolverse antes** de indicar la ruta de actualización a esa unidad: mientras no se
-  sepa si es `0.7.1` o `0.8.0`, se trata con la cautela de `0.7.1`.
-- Los equipos `0.8.0` pueden seguir el recorrido de §7 sin esperar a este gate.
+- Los equipos identificados como `0.7.1` quedan **técnicamente habilitados**: ya no existe
+  prohibición técnica de incluirlos en la actualización.
+- **La campaña continúa sin autorización**, por motivos **operativos**, no técnicos. Ver §10 y el
+  veredicto operativo.
+- **`UNKNOWN` debe identificarse antes** de seleccionar la ruta de actualización de esa unidad: la
+  versión instalada se determina mirándola en el equipo, porque `0.7.1` y `0.8.0` emiten el mismo
+  User-Agent legacy y son indistinguibles desde el servidor.
+- Los equipos `0.8.0` siguen el mismo recorrido de §7.
 
-Este gate no se resuelve dentro de esta unidad de diseño.
+Lo que el gate resuelto **no** significa: no demuestra el inventario, no actualiza ningún equipo de
+campo, no da cobertura del parque, no inicia la campaña y no fija `T0`. Un dispositivo probado no
+equivale al parque.
+
+Advertencia que este resultado incorpora al recorrido: **tras actualizar, LU pedirá iniciar sesión de
+nuevo** (`REAUTH_REQUIRED`). Ver §6 del documento de evidencia y los pasos correspondientes en §7 y
+§8.
 
 ---
 
@@ -228,31 +242,44 @@ Reglas de la ventana:
 ## 7. Recorrido por cada equipo elegible
 
 ```text
+tener a mano la credencial de esa unidad
 recibir la instrucción
 abrir únicamente la URL oficial
 descargar el APK
-no desinstalar LU
+no desinstalar LU ni borrar sus datos
 autorizar la instalación cuando Android lo solicite
 instalar sobre la aplicación existente
 abrir LU con internet
-iniciar sesión si es necesario
+iniciar sesión de nuevo — es normal que lo pida
 ejecutar una acción conectada
 observar señal 0.9.0 y 2xx
 obtener confirmación humana
 cerrar la fila
 ```
 
-Notas de ejecución, todas ya demostradas o ya documentadas:
+Notas de ejecución, todas demostradas en dispositivo o ya documentadas:
 
-- **Instalar encima**: mismo `applicationId`, certificado compatible y `versionCode` creciente. No
-  desinstalar: desinstalar puede perder libro y progreso sin necesidad.
+- **Instalar encima**: mismo `applicationId`, certificado idéntico y `versionCode` creciente. No
+  desinstalar y **no borrar los datos de la aplicación**: desinstalar o limpiar datos puede perder
+  libro y progreso sin necesidad ninguna. Instalando encima, ambos se conservan.
 - **Autorización de Android**: el sistema pedirá permiso para instalar desde esta fuente. Es un paso
   humano previsto. **No se promete actualización silenciosa** —es imposible sin `PackageInstaller`,
   MDM ni tienda— y **no se recomienda desactivar ninguna protección general de Android**.
-- **Primer login obligatorio** viniendo de `0.7.1` o `0.8.0`: el cliente legacy no conservaba cookie.
+- **Reautenticación obligatoria** (`REAUTH_REQUIRED`), demostrada en dispositivo: al abrir 0.9.0 con
+  red aparece «Tu sesión expiró. Iniciá sesión de nuevo.» porque el cliente legacy no conservaba
+  cookie. **Es esperado, no es un fallo, y no implica pérdida del libro ni del progreso** — en la
+  prueba, el libro seguía descargado y el progreso intacto con la sesión ya caducada. Sin este aviso
+  previo, un responsable lo leerá como error y detendrá la actualización.
+- **La credencial debe estar disponible antes de empezar**, o el recorrido se interrumpe a mitad, con
+  el equipo ya actualizado y sin poder conciliarse.
 - **Acción conectada**: abrir la app con red y usarla hasta producir una petición autenticada. Es el
-  **único paso observable por el servidor**; los seis anteriores son humanos.
+  **único paso observable por el servidor**; los demás son humanos.
 - **Confirmación humana**: sin ella la unidad no es `UPDATED`, por mucha señal técnica que haya.
+
+> **Nada de opciones de desarrollador.** El recorrido del campo se hace **desde el propio teléfono**:
+> abrir la URL oficial, descargar e instalar. La campaña **no debe pedir a nadie** activar opciones
+> de desarrollador, depuración USB, depuración USB (ajustes de seguridad), instalación vía USB ni
+> usar ADB. Esos permisos fueron un requisito del banco de pruebas, no del recorrido real.
 
 Referencia de descarga:
 
@@ -279,13 +306,19 @@ menores.
 > Hola. Estamos actualizando la aplicación **Chibalete LU** en los equipos que se usan para leer.
 > Te pedimos ayuda con los equipos que están a tu cargo.
 >
+> **Antes de empezar:** ten a mano la contraseña con la que entra cada equipo. Después de actualizar,
+> la aplicación **va a pedir iniciar sesión otra vez**. Es completamente normal y no se pierde nada;
+> pero si no tienes la contraseña a mano, te quedarás a mitad del proceso.
+>
 > Para cada equipo, uno por uno:
 > 1. Abre únicamente esta dirección oficial: `<URL_OFICIAL_CANÓNICA_PENDIENTE_DE_VERIFICACIÓN>`
-> 2. Descarga la aplicación e **instálala encima de la que ya está**. **No desinstales** la actual:
->    si la desinstalas, se puede perder el libro y el progreso.
+> 2. Descarga la aplicación e **instálala encima de la que ya está**. **No desinstales** la actual y
+>    **no borres sus datos**: si lo haces, se puede perder el libro y el progreso. Instalando encima,
+>    se conservan.
 > 3. Android te pedirá autorizar la instalación. Es normal: acéptala solo para esta descarga.
 > 4. Abre la aplicación **con internet**.
-> 5. **Inicia sesión si te lo pide** (la primera vez tras actualizar suele pedirlo).
+> 5. **Te va a pedir iniciar sesión de nuevo. Es normal, no es un error**: entra con la cuenta de
+>    siempre de ese equipo. El libro y el progreso siguen ahí.
 > 6. Entra a un libro o abre la lista de lecturas, para que la aplicación se conecte una vez.
 > 7. Anota en el formato que te enviamos el **código del equipo** y que quedó actualizado.
 >
@@ -303,9 +336,12 @@ menores.
 > Hola. Recordatorio a mitad de la ventana de actualización de **Chibalete LU**.
 >
 > Si aún tienes equipos sin actualizar, el procedimiento es el mismo: abrir la dirección oficial
-> `<URL_OFICIAL_CANÓNICA_PENDIENTE_DE_VERIFICACIÓN>`, instalar **encima** sin desinstalar, abrir la
-> aplicación con internet, iniciar sesión si lo pide y entrar una vez a un libro o a la lista de
-> lecturas.
+> `<URL_OFICIAL_CANÓNICA_PENDIENTE_DE_VERIFICACIÓN>`, instalar **encima** sin desinstalar ni borrar
+> datos, abrir la aplicación con internet, **iniciar sesión de nuevo cuando lo pida —es normal— y**
+> entrar una vez a un libro o a la lista de lecturas.
+>
+> Recuerda tener a mano la contraseña de cada equipo antes de empezar: la aplicación la pedirá
+> siempre después de actualizar, y no significa que se haya perdido nada.
 >
 > Cuéntanos también los casos que **no** se pudieron hacer: equipos que ya no se usan, que ya no
 > tienen la aplicación, o a los que no tienes acceso. Esos casos también hay que registrarlos, con su
@@ -323,6 +359,10 @@ menores.
 >
 > Recuerda que la confirmación es **por equipo**, aunque compartan cuenta, y que solo necesitamos el
 > **código del equipo**: sin nombres, sin correos, sin datos de menores.
+>
+> Un equipo cuenta como actualizado solo si, después de instalar, **se pudo iniciar sesión de nuevo**
+> y abrir una vez un libro o la lista de lecturas. Si se quedó pidiendo la contraseña y no la tenías,
+> márcalo como pendiente y dinos: no es un fallo del equipo.
 >
 > Si quedó algún equipo con error o sin poder actualizarse, escríbenos y lo resolvemos caso por caso.
 
@@ -393,7 +433,31 @@ Cero producción, SSH, HTTP y tráfico sintético.
 
 Este documento no contiene identificadores reales, PII, secretos ni URL inventada.
 
-## 12. Único siguiente paso
+## 12. Estado operativo
+
+```text
+AMBER-CAMPAIGN-NOT-YET-AUTHORIZED
+```
+
+Bloqueantes restantes, **todos humanos u operativos, ninguno técnico**:
+
+```text
+responsables concretos por institución   pendiente
+URL pública canónica verificada          pendiente
+fechas reales aprobadas                  pendiente
+inventario físico                        por construir
+```
+
+Invariantes que no cambian con el gate resuelto:
+
+```text
+180        = cuentas escolares, no equipos
+T0         = no definido
+drain      = no iniciado
+ENFORCE    = prohibido
+```
+
+## 13. Único siguiente paso
 
 **Decisión humana, no técnica:** designar a los docentes o mediadores responsables por institución y
 verificar la **URL oficial canónica** de descarga. Sin responsables concretos y sin esa URL
