@@ -283,7 +283,7 @@ commit + scp deliberado, **no** por edición en el VPS.)
 | `/var/www/chibalete/data/` | `data.tar.gz` | JSONs vivos completos |
 | `/var/www/chibalete/data-critical/` | `data-critical.tar.gz` | Auditoría, vault, leo memory |
 | `/var/www/chibalete/server/` | `server.tar.gz` | Código backend en bind mount |
-| `/opt/chibaleteplus/docker-compose.yml` | `docker-compose.yml` (copia plana) | Topología canónica |
+| `/opt/chibaleteplus/docker-compose.yml` | `docker-compose.yml` (copia plana) | Compose **base**. ⚠️ Este script **no** copia `docker-compose.override.yml`, que es el que declara la imagen efectiva. La topología completa la respalda el backup canónico offsite — ver 7.1.4b |
 | `/var/www/chibalete/public/uploads/` | `uploads-manifest.txt` | **Sólo lista** (path+size+mtime), NO contenido |
 
 Cada `.tar.gz` lleva su `sha256` registrado en `metadata.json` (formato
@@ -298,6 +298,30 @@ JSON parseable, schema_version `1.0`).
 - ❌ Logs de containers (`/var/lib/docker/containers/*/...`)
 - ❌ Estado off-host (no hay disaster recovery a otro datacenter)
 - ❌ Encriptación at-rest (los backups quedan en el mismo host que prod)
+- ❌ `/opt/chibaleteplus/docker-compose.override.yml` — ver 7.1.4b
+
+### 7.1.4b Topología Compose: la respalda el backup canónico, no este script
+
+Producción carga **base + override** mergeados, y la imagen efectiva de `front`,
+`api_1` y `api_2` está declarada en el **override**. Este script pre-deploy sólo
+copia la base, así que **no basta como respaldo de la topología**.
+
+Desde `CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B`, el backup canónico offsite
+(`structured-backup`, restic) incluye **ambos** archivos:
+
+```text
+topology/docker-compose.yml
+topology/docker-compose.override.yml
+```
+
+Reglas del contrato:
+
+- **Ambos son obligatorios.** Si falta cualquiera, el backup **falla de forma
+  visible** y no produce snapshot. Una topología a medias no se respalda en
+  silencio.
+- Se copian **byte a byte**, sin parsear el YAML, y su `sha256` va al manifiesto.
+- Se copian **por nombre exacto**: no se recorre `/opt/chibaleteplus`. `.env`,
+  `*.bak.*` y `*.pre-*` están excluidos por política y no pueden entrar.
 
 ### 7.1.5 Estructura de salida
 
@@ -387,7 +411,35 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DATA RESTORE from $TS <actor> <razón>" >> 
 Para `server.tar.gz` el restart staggered es exactamente el del flujo
 de rollback backend, sección 15.)
 
-**Restore de `docker-compose.yml`:**
+**Restore de la topología Compose desde el backup canónico (recomendado):**
+
+```bash
+# Restaurar SOLO los dos Compose a un directorio temporal AISLADO.
+T=$(mktemp -d)
+restic restore <SNAPSHOT> --target "$T" --include '*/topology/*'
+find "$T" -name 'docker-compose*.yml'
+
+# Comparar contra los vivos ANTES de decidir nada.
+for f in docker-compose.yml docker-compose.override.yml; do
+  echo "$f"
+  sha256sum "/opt/chibaleteplus/$f"
+  find "$T" -name "$f" -exec sha256sum {} +
+done
+```
+
+> 🔴 **Nunca se aplica automáticamente lo restaurado.** Un Compose del snapshot
+> puede ser anterior al último deploy: aplicarlo a ciegas revertiría las
+> imágenes en producción. Un hash distinto **no** prueba corrupción — hay que
+> leerlo contra la fecha del snapshot y el RPO. Sustituir el archivo vivo es
+> una decisión humana, y después exige el swap y el reload del edge de §11.
+>
+> El directorio temporal se borra **validando antes su ruta exacta**; nunca se
+> borran snapshots ni backups.
+
+**Restore de `docker-compose.yml` desde el backup pre-deploy local (parcial):**
+
+> ⚠️ Este artefacto sólo contiene la **base**. No restaura el override y por
+> tanto **no restituye la topología efectiva**.
 ```bash
 TS=2026-05-07T23-14-55Z
 B=/root/backups/chibalete/$TS

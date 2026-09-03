@@ -77,6 +77,47 @@ class ToolUnavailable(RuntimeError):
 # Utilidades
 # --------------------------------------------------------------------------
 
+# Contenido sintetico de la topologia Compose. Ni imagenes ni secretos reales:
+# solo lo justo para que sea un YAML plausible y distinguible entre ambos.
+TOPOLOGY_FIXTURE = {
+    "docker-compose.yml": """services:
+  front:
+    image: synthetic/front:base
+  api_1:
+    image: synthetic/api:base
+    env_file:
+      - .env
+""",
+    "docker-compose.override.yml": """services:
+  front:
+    image: synthetic/front:override
+  api_1:
+    image: synthetic/api:override
+""",
+}
+
+
+def build_topology(path: str) -> None:
+    """Crea el directorio de topologia sintetico de un entorno de prueba.
+
+    Ademas de los dos Compose escribe el ruido que el directorio real tiene y
+    que NUNCA debe entrar al backup: .env y copias ad-hoc.
+    """
+    os.makedirs(path, exist_ok=True)
+    for name, body in TOPOLOGY_FIXTURE.items():
+        with open(os.path.join(path, name), "w", encoding="utf-8") as handle:
+            handle.write(body)
+    # Ruido deliberado: si alguna vez se recorriera el directorio, estos
+    # apareceran en el manifiesto y las pruebas TP06/TP07 lo detectarian.
+    noise = {
+        ".env": "SYNTHETIC_NOT_A_SECRET=placeholder",
+        "docker-compose.override.yml.bak-pre-x-1": "services: {}",
+        "docker-compose.yml.bak.2026": "services: {}",
+    }
+    for name, body in noise.items():
+        with open(os.path.join(path, name), "w", encoding="utf-8") as handle:
+            handle.write(body)
+
 def fresh(name: str) -> str:
     """Directorio limpio para un caso, SIEMPRE validado contra el sandbox.
 
@@ -134,8 +175,14 @@ class Env:
         self.config_dir = os.path.join(root, "etc")
         self.repo = os.path.join(root, "repo")
         self.lock = os.path.join(root, "lock")
+        self.topology = os.path.join(root, "topology-src")
         os.makedirs(self.base, exist_ok=True)
         os.makedirs(self.work, exist_ok=True)
+        os.makedirs(self.topology, exist_ok=True)
+        # CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B: la topologia Compose es
+        # OBLIGATORIA, asi que todo entorno de prueba debe tenerla o el runner
+        # aborta. Contenido sintetico: ninguna imagen ni secreto reales.
+        build_topology(self.topology)
         fixtures.build_base(self.base, uploads_files=uploads_files)
         self.secrets = fixtures.build_config(
             self.config_dir,
@@ -154,6 +201,10 @@ class Env:
         ]
         if runner != "verify_backup.py":
             cmd += ["--base-dir", self.base]
+        # Solo structured_backup.py declara --topology-dir. Pasarselo a los
+        # demas produciria "unrecognized arguments".
+        if runner == "structured_backup.py":
+            cmd += ["--topology-dir", self.topology]
         if extra:
             cmd += extra
         child_env = None
@@ -177,6 +228,8 @@ class Env:
             "--lock-path", self.lock,
             "--base-dir", self.base,
         ]
+        if runner == "structured_backup.py":
+            cmd += ["--topology-dir", self.topology]
         if extra:
             cmd += extra
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -3039,6 +3092,143 @@ def test_gs_no_ballast_path_literal():
     assert ("def " + "fill_filesystem") not in fuente, "la funcion de lastre volvio al harness"
     for var in ("LOWSPACE", "LOWINO", "FULLFS"):
         assert (var + " =") not in fuente, f"volvio la constante {var}"
+
+
+# --------------------------------------------------------------------------
+# TP01-TP08 - topologia Compose efectiva (CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B)
+#
+# Hasta 01A el backup canonico no respaldaba ningun Compose. El que gobierna
+# que imagenes corren -docker-compose.override.yml- no estaba en ningun
+# snapshot: RPO infinito sobre la topologia. Estas pruebas fijan que entra,
+# que se preserva byte a byte, y sobre todo QUE NO entra.
+# --------------------------------------------------------------------------
+
+@case("TP01", "topologia: ambos Compose se copian y quedan en el manifiesto")
+def test_topology_both_captured():
+    env = Env("tp01")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    by_path = {item["logical_path"]: item for item in manifest["stores"]}
+    for name in ("docker-compose.yml", "docker-compose.override.yml"):
+        entry = by_path.get("topology/" + name)
+        assert entry is not None, "falta en el manifiesto: " + name
+        assert entry["kind"] == "topology", entry
+        assert entry["category"] == "CFG", entry
+        assert entry["status"] == "included", entry
+        assert entry["integrity_result"] == "ok", entry
+        assert len(entry["sha256"]) == 64, entry
+        assert entry["bytes"] > 0, entry
+
+
+@case("TP02", "topologia: bytes preservados (sha256 fuente == manifiesto)")
+def test_topology_bytes_preserved():
+    env = Env("tp02")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    by_path = {item["logical_path"]: item for item in manifest["stores"]}
+    for name in ("docker-compose.yml", "docker-compose.override.yml"):
+        source = os.path.join(env.topology, name)
+        with open(source, "rb") as handle:
+            expected = hashlib.sha256(handle.read()).hexdigest()
+        got = by_path["topology/" + name]
+        assert got["sha256"] == expected, name + ": sha256 no coincide con la fuente"
+        assert got["bytes"] == os.path.getsize(source), name
+
+
+@case("TP03", "topologia: ambos Compose son distinguibles entre si")
+def test_topology_files_are_distinct():
+    env = Env("tp03")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    by_path = {item["logical_path"]: item for item in env.manifests()[-1]["stores"]}
+    base = by_path["topology/docker-compose.yml"]["sha256"]
+    override = by_path["topology/docker-compose.override.yml"]["sha256"]
+    assert base != override, "base y override no pueden compartir sha256 en el fixture"
+
+
+@case("TP04", "topologia: falta el override -> fallo visible, sin snapshot")
+def test_topology_missing_override_fails():
+    env = Env("tp04")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    before = len(env.snapshots())
+    os.unlink(os.path.join(env.topology, "docker-compose.override.yml"))
+    proc = env.run("structured_backup.py", expect=errors.SourceMissingError.exit_code)
+    assert "topologia" in proc.stderr, proc.stderr
+    assert "docker-compose.override.yml" in proc.stderr, proc.stderr
+    assert len(env.snapshots()) == before, "no debe crearse snapshot sin la topologia"
+    assert env.staging_dirs() == [], "staging no limpiado"
+
+
+@case("TP05", "topologia: symlink rechazado fail-closed")
+def test_topology_symlink_rejected():
+    env = Env("tp05")
+    env.provision_repository()
+    target = os.path.join(env.topology, "docker-compose.override.yml")
+    outside = os.path.join(env.root, "fuera.yml")
+    with open(outside, "w", encoding="utf-8") as handle:
+        handle.write("services: {}")
+    os.unlink(target)
+    os.symlink(outside, target)
+    proc = env.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "symlink" in proc.stderr, proc.stderr
+    assert env.staging_dirs() == [], "staging no limpiado"
+
+
+@case("TP06", "topologia: .env y copias ad-hoc NUNCA entran")
+def test_topology_noise_excluded():
+    env = Env("tp06")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    paths = [item["logical_path"] for item in env.manifests()[-1]["stores"]]
+    for prohibido in (".env", "bak-pre-", ".bak."):
+        ofensores = [path for path in paths if prohibido in path]
+        assert ofensores == [], "entro material excluido: " + repr(ofensores)
+    topology_paths = sorted(path for path in paths if path.startswith("topology/"))
+    assert topology_paths == [
+        "topology/docker-compose.override.yml",
+        "topology/docker-compose.yml",
+    ], topology_paths
+
+
+@case("TP07", "topologia: no se recorre el directorio padre")
+def test_topology_parent_not_walked():
+    env = Env("tp07")
+    env.provision_repository()
+    # Un archivo extra, con nombre no declarado, en el mismo directorio.
+    extra = os.path.join(env.topology, "docker-compose.prod.yml")
+    with open(extra, "w", encoding="utf-8") as handle:
+        handle.write("services: {}")
+    env.run("structured_backup.py", expect=0)
+    paths = [item["logical_path"] for item in env.manifests()[-1]["stores"]]
+    assert "topology/docker-compose.prod.yml" not in paths, paths
+    assert len([path for path in paths if path.startswith("topology/")]) == 2, paths
+
+
+@case("TP08", "topologia: el resolver rechaza nombres no declarados")
+def test_topology_resolver_rejects_undeclared():
+    from chibalete_backup import stores as stores_mod
+
+    # Defensa en profundidad: aunque el runner solo itere el inventario fijo,
+    # el resolver debe rechazar cualquier nombre no declarado, y todo lo que
+    # sea una ruta en vez de un nombre.
+    for nombre in ("otro.yml", "../fuera.yml", "sub/dir.yml", ".env"):
+        try:
+            stores_mod.resolve_topology_file(
+                stores_mod.TopologyFile(nombre), tempfile.gettempdir()
+            )
+        except stores_mod.PreflightError:
+            continue
+        raise AssertionError("el resolver acepto un nombre no declarado: " + nombre)
+
+    # El inventario declarado es exactamente de dos archivos, ambos obligatorios.
+    assert [item.name for item in stores_mod.TOPOLOGY_FILES] == [
+        "docker-compose.yml",
+        "docker-compose.override.yml",
+    ]
+    assert all(item.required for item in stores_mod.TOPOLOGY_FILES)
 
 
 def main() -> int:

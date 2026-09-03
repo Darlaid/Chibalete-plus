@@ -32,6 +32,7 @@ Antes de ejecutar 01B, el operador debe (manualmente):
    backup runner (systemd timers, con flock)          bucket PRIVADO: chibalete-backups
      ├─ SQLite: Online Backup API → staging/*.bak         (repo restic cifrado cliente, AES-256)
      ├─ JSON: copia atómica → staging/*.json          ◄── restic backup (dedup)
+     ├─ topología: copia byte a byte → staging/topology/  ◄──
      ├─ manifest.json (hashes, conteos, sin PII)      ◄──
      ├─ uploads: restic backup DIRECTO (incremental)  ◄──
      └─ verificación: restic check                    ◄── (retención destructiva DESHABILITADA)
@@ -39,6 +40,42 @@ Antes de ejecutar 01B, el operador debe (manualmente):
 
 - **Capa A (Hostinger):** *disaster recovery* de infra (semanal). 01B no la toca.
 - **Capa B (esta):** granular, cifrada, off-site independiente, restaurable por store/fecha.
+
+## 2.1 Topología Compose efectiva (CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B)
+
+Hasta esta unidad, el backup canónico no respaldaba **ningún** archivo Compose.
+El que gobierna qué imágenes corren en producción es
+`/opt/chibaleteplus/docker-compose.override.yml` —`docker compose` mergea base y
+override, y el override gana— y no existía en ningún snapshot: RPO infinito
+sobre la topología. Perdido el host, los datos volvían desde B2, pero la
+topología efectiva había que reconstruirla a mano contra una base que declara
+tags de hace meses.
+
+Contrato:
+
+| | |
+|---|---|
+| Origen | `/opt/chibaleteplus/`, constante — **no** parametrizable en producción |
+| Archivos | exactamente dos: `docker-compose.yml` y `docker-compose.override.yml` |
+| Obligatoriedad | **ambos**. Si falta cualquiera, el backup falla y no hay snapshot |
+| Ubicación en el snapshot | `topology/<nombre>` |
+| Método | copia byte a byte (`file_copy`), atómica: temporal + `rename(2)` |
+| Integridad | `sha256` calculado sobre la **copia**, registrado en el manifiesto |
+| `kind` en el manifiesto | `topology`; `category` `CFG` |
+
+Lo que deliberadamente **no** es: un mecanismo genérico para rutas absolutas.
+El directorio es una constante y sólo se aceptan esos dos nombres. No hay glob,
+no se recorre el padre, y el resolver es fail-closed ante nombres con
+separadores, `..`, rutas absolutas, symlinks, no-regulares y cualquier nombre
+alcanzado por `EXCLUDED_NAME_PATTERNS`.
+
+Esto importa porque `/opt/chibaleteplus` contiene además `.env` —los secretos
+de la aplicación— y decenas de copias ad-hoc `*.bak-*` / `*.pre-*`. Recorrer ese
+directorio habría metido el `.env` en el backup. Copiar por nombre exacto lo
+hace estructuralmente imposible.
+
+El tamaño (unos pocos KB) queda absorbido por `MANIFEST_RESERVE_BYTES` (256 KB)
+del preflight: no se modificó el cálculo dinámico de espacio de §7.
 
 ## 3. Política de bucket (Corrección 3)
 

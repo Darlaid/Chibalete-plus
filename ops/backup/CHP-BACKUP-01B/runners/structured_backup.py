@@ -22,8 +22,10 @@ ejercitar el runner con rutas sinteticas en las pruebas. Las units NO los pasan.
 """
 
 import argparse
+import hashlib
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -46,10 +48,79 @@ from chibalete_backup.preflight import (  # noqa: E402
 from chibalete_backup.restic import Restic  # noqa: E402
 from chibalete_backup.safelog import SafeLogger  # noqa: E402
 from chibalete_backup.sqlite_capture import capture_sqlite  # noqa: E402
-from chibalete_backup.stores import DEFAULT_BASE_DIR, DEFAULT_WORK_DIR  # noqa: E402
+from chibalete_backup.stores import (  # noqa: E402
+    DEFAULT_BASE_DIR,
+    DEFAULT_WORK_DIR,
+    TOPOLOGY_STAGING_DIR,
+    resolve_topology,
+)
 
 BACKUP_TYPE = "structured"
 TAG = "structured"
+
+# Tamano de bloque de la copia byte a byte de los archivos de topologia.
+_TOPOLOGY_CHUNK = 1024 * 1024
+
+# CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B: metodo de captura declarado en el
+# manifiesto. Distinto de los de SQLite/JSON porque aqui no hay parseo ni
+# validacion semantica: se preservan los bytes tal cual.
+TOPOLOGY_CAPTURE_METHOD = "file_copy"
+
+
+def capture_topology(source_path: str, dest_path: str, logger) -> dict:
+    """Copia byte a byte un archivo de topologia. Devuelve solo metadata.
+
+    Misma disciplina que `capture_json`: temporal en el MISMO filesystem del
+    destino + `rename(2)`, y el sha256 se calcula sobre la COPIA, no sobre la
+    fuente, para que el manifiesto describa lo que de verdad viaja al snapshot.
+
+    NO se parsea el YAML ni se registra ninguna clave o valor: estos archivos
+    declaran variables de entorno por nombre y el runner no debe leerlas.
+    """
+    dest_dir = os.path.dirname(dest_path)
+    os.makedirs(dest_dir, exist_ok=True)
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=dest_dir, prefix=".partial-")
+    try:
+        with open(source_path, "rb") as src, os.fdopen(tmp_fd, "wb") as dst:
+            while True:
+                chunk = src.read(_TOPOLOGY_CHUNK)
+                if not chunk:
+                    break
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(tmp_path, dest_path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    size = os.path.getsize(dest_path)
+    digest = hashlib.sha256()
+    with open(dest_path, "rb") as handle:
+        while True:
+            chunk = handle.read(_TOPOLOGY_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+
+    # El log nombra el archivo y su metadata tecnica, nunca su contenido.
+    logger.info(
+        "topology_captured",
+        file=os.path.basename(dest_path),
+        bytes=size,
+        capture_method=TOPOLOGY_CAPTURE_METHOD,
+        integrity_result="ok",
+    )
+
+    return {
+        "bytes": size,
+        "sha256": sha256,
+        "capture_method": TOPOLOGY_CAPTURE_METHOD,
+        "integrity_result": "ok",
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-dir", default=DEFAULT_BASE_DIR, help=argparse.SUPPRESS)
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR, help=argparse.SUPPRESS)
     parser.add_argument("--lock-path", default=DEFAULT_LOCK_PATH, help=argparse.SUPPRESS)
+    # Solo para ejercitar el runner con un directorio sintetico en las pruebas.
+    # La unit systemd NO lo pasa: en produccion rige la constante TOPOLOGY_DIR.
+    parser.add_argument("--topology-dir", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--initialize-empty-repository",
         action="store_true",
@@ -81,6 +155,10 @@ def run(args) -> int:
     check_tools()
 
     sources = resolve_sources(args.base_dir)
+    # CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B: se resuelve ANTES del lock y
+    # antes de tocar el repositorio. Ambos archivos son obligatorios, asi que
+    # la ausencia de cualquiera aborta aqui, de forma visible y sin efectos.
+    topology = resolve_topology(args.topology_dir)
     estimate = estimate_staging(sources)
     log.info("staging_estimate", **estimate)
 
@@ -119,6 +197,23 @@ def run(args) -> int:
                     capture=capture,
                     sensitivity=store.sensitivity,
                     retention_status=store.retention_status,
+                )
+
+            # CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B: la topologia Compose
+            # efectiva. Va en su propia carpeta del staging para que el restore
+            # pueda pedir exactamente estos dos archivos sin arrastrar stores.
+            # Su tamano (unos pocos KB) queda absorbido por MANIFEST_RESERVE_BYTES
+            # del preflight, que reserva 256 KB.
+            topology_dir_staged = os.path.join(staging.path, TOPOLOGY_STAGING_DIR)
+            os.makedirs(topology_dir_staged, exist_ok=True)
+            for topology_file, source_path in topology:
+                dest = os.path.join(topology_dir_staged, topology_file.name)
+                capture = capture_topology(source_path, dest, log)
+                manifest.add_store(
+                    f"{TOPOLOGY_STAGING_DIR}/{topology_file.name}",
+                    kind="topology",
+                    category="CFG",
+                    capture=capture,
                 )
 
             # CHP-BACKUP-MOOK-STORE-COVERAGE-01: deja constancia de los stores

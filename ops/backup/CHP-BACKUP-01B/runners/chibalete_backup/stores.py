@@ -5,7 +5,10 @@ Anadir un store nuevo (p. ej. identity.db cuando `identity_sqlite` pase a
 hardcodeadas.
 """
 
+import os
 from dataclasses import dataclass, field
+
+from .errors import PreflightError, SourceMissingError
 
 # Base productiva. Los mounts host->contenedor del inventario §1 cuelgan de aqui.
 DEFAULT_BASE_DIR = "/var/www/chibalete"
@@ -180,6 +183,41 @@ UPLOADS_SOURCES: tuple[UploadsSource, ...] = (
     UploadsSource("public/uploads"),
 )
 
+# --- Topologia Compose efectiva (CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B) ---
+#
+# Que problema resuelve: hasta 01A el backup canonico no respaldaba NINGUN
+# archivo Compose. El que gobierna que imagenes corren en produccion es
+# `docker-compose.override.yml` —`docker compose` mergea base + override—, y no
+# existia en ningun snapshot, ni offsite ni local. Perdido el host, los datos
+# volvian desde restic pero la topologia efectiva habia que reconstruirla a
+# mano contra una base que declara tags de hace meses.
+#
+# Por que NO es un mecanismo generico: el directorio es una constante y solo se
+# aceptan estos dos nombres exactos. No hay glob, no se recorre el padre y no se
+# admite ninguna otra ruta absoluta. `/opt/chibaleteplus` contiene ademas `.env`
+# y decenas de copias ad-hoc (`*.bak-*`, `*.pre-*`) que NUNCA deben entrar.
+TOPOLOGY_DIR = "/opt/chibaleteplus"
+
+# Subcarpeta del staging donde aterrizan. Nombre inequivoco: ni `sqlite/` ni
+# `json/` deben poder confundirse con esto al restaurar.
+TOPOLOGY_STAGING_DIR = "topology"
+
+
+@dataclass(frozen=True)
+class TopologyFile:
+    # Nombre exacto del archivo, SIN separadores: nunca una ruta.
+    name: str
+    # Ambos son obligatorios: un backup sin la topologia efectiva no cumple su
+    # proposito, asi que la ausencia debe fallar de forma visible, no anotarse
+    # como `absent_optional`.
+    required: bool = True
+
+
+TOPOLOGY_FILES: tuple[TopologyFile, ...] = (
+    TopologyFile("docker-compose.yml"),
+    TopologyFile("docker-compose.override.yml"),
+)
+
 # Sufijos que acompanan a una base SQLite en WAL y cuentan para el espacio.
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm")
 
@@ -193,6 +231,81 @@ EXCLUDED_NAME_PATTERNS = (
     ".claude",
     ".env",
 )
+
+
+def _assert_topology_name_declared(name: str) -> None:
+    """El nombre debe estar en el inventario fijo. Defensa en profundidad.
+
+    Aunque el unico llamador itera sobre TOPOLOGY_FILES, esta comprobacion
+    impide que un futuro atajo pase un nombre arbitrario y convierta esto en el
+    mecanismo generico que deliberadamente no es.
+    """
+    if name not in {tf.name for tf in TOPOLOGY_FILES}:
+        raise PreflightError(f"archivo de topologia no declarado: {name!r}")
+
+
+def resolve_topology_file(topology_file: TopologyFile, topology_dir: str | None = None) -> str:
+    """Devuelve la ruta validada de un archivo de topologia.
+
+    Fail-closed ante todo lo que no sea un archivo regular contenido
+    DIRECTAMENTE en `topology_dir`: nombres con separadores, `..`, symlinks,
+    dispositivos, y cualquier nombre alcanzado por EXCLUDED_NAME_PATTERNS
+    (`.env`, `*.bak.*`, `*.pre-*`, ...).
+
+    Nunca devuelve None: si el archivo es obligatorio y falta, revienta. Ambos
+    lo son, asi que en la practica la ausencia SIEMPRE aborta el backup.
+    """
+    base_dir = TOPOLOGY_DIR if topology_dir is None else topology_dir
+    name = topology_file.name
+
+    _assert_topology_name_declared(name)
+
+    # El nombre es un nombre, no una ruta: ni separadores, ni `..`, ni absoluto.
+    if name != os.path.basename(name) or os.path.isabs(name) or os.sep in name:
+        raise PreflightError(f"nombre de topologia invalido: {name!r}")
+    if "/" in name or name in (".", ".."):
+        raise PreflightError(f"nombre de topologia invalido: {name!r}")
+
+    # Las exclusiones del backup ordinario tambien rigen aqui.
+    if _matches_excluded(name):
+        raise PreflightError(f"nombre de topologia excluido por politica: {name!r}")
+
+    path = os.path.join(base_dir, name)
+
+    if not os.path.lexists(path):
+        if topology_file.required:
+            raise SourceMissingError(f"archivo de topologia obligatorio ausente: {name}")
+        return ""
+
+    if os.path.islink(path):
+        raise PreflightError(f"archivo de topologia es un symlink; se exige regular: {name}")
+    if not os.path.isfile(path):
+        raise PreflightError(f"archivo de topologia no es un archivo regular: {name}")
+
+    # No basta con no ser symlink: el destino real debe colgar directamente del
+    # directorio de topologia aprobado.
+    base_real = os.path.realpath(base_dir)
+    real = os.path.realpath(path)
+    if os.path.dirname(real) != base_real:
+        raise PreflightError(f"archivo de topologia escapa del directorio aprobado: {name}")
+
+    return path
+
+
+def resolve_topology(topology_dir: str | None = None) -> list[tuple[TopologyFile, str]]:
+    """Resuelve los dos archivos de topologia. Cualquier fallo aborta."""
+    resolved: list[tuple[TopologyFile, str]] = []
+    for topology_file in TOPOLOGY_FILES:
+        path = resolve_topology_file(topology_file, topology_dir)
+        if path:
+            resolved.append((topology_file, path))
+    return resolved
+
+
+def _matches_excluded(name: str) -> bool:
+    from fnmatch import fnmatch
+
+    return any(fnmatch(name, pattern) for pattern in EXCLUDED_NAME_PATTERNS)
 
 
 def count_adapter(name: str | None):
