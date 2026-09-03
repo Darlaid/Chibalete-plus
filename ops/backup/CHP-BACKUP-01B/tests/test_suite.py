@@ -79,6 +79,12 @@ class ToolUnavailable(RuntimeError):
 
 # Contenido sintetico de la topologia Compose. Ni imagenes ni secretos reales:
 # solo lo justo para que sea un YAML plausible y distinguible entre ambos.
+# CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B: la topologia anade exactamente
+# estas entradas al manifiesto. Los conteos historicos de stores se expresan
+# como `<datos> + TOPOLOGY_STORE_COUNT` para que siga leyendose que la cifra de
+# datos no cambio y que el unico delta es la topologia.
+TOPOLOGY_STORE_COUNT = 2
+
 TOPOLOGY_FIXTURE = {
     "docker-compose.yml": """services:
   front:
@@ -946,7 +952,7 @@ def test_integration_manifest_in_snapshot():
     assert local["duration_seconds"] >= 0
     assert local["warnings"] == []
     kinds = {s["kind"] for s in local["stores"]}
-    assert kinds == {"sqlite", "json"}, kinds
+    assert kinds == {"sqlite", "json", "topology"}, kinds
     methods = {s["capture_method"] for s in local["stores"]}
     assert "sqlite_online_backup_api" in methods
 
@@ -1889,11 +1895,14 @@ def test_d_inventario():
     env.run("structured_backup.py", expect=0)
     manifest = env.manifests()[-1]
     paths = [s["logical_path"] for s in manifest["stores"]]
-    assert len(manifest["stores"]) == 24, f"se esperaban 24 stores, hay {len(manifest['stores'])}"
+    esperados = 24 + TOPOLOGY_STORE_COUNT
+    assert len(manifest["stores"]) == esperados, (
+        f"se esperaban {esperados} stores (24 de datos + topologia), "
+        f"hay {len(manifest['stores'])}")
     kinds = {}
     for s in manifest["stores"]:
         kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
-    assert kinds == {"sqlite": 4, "json": 20}, kinds
+    assert kinds == {"sqlite": 4, "json": 20, "topology": TOPOLOGY_STORE_COUNT}, kinds
     for lp in NUEVOS_STORES:
         assert paths.count(lp) == 1, f"{lp} no aparece exactamente una vez en el manifiesto"
     for lp in STORES_PREVIOS:
@@ -2136,7 +2145,7 @@ def test_d_restore_24_stores():
     staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
               if os.path.isdir(p)][0]
     man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
-    assert len(man["stores"]) == 24, len(man["stores"])
+    assert len(man["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(man["stores"])
     jdir = os.path.join(staged, "json")
     restaurados = sorted(os.listdir(jdir))
     assert len(restaurados) == 20, restaurados
@@ -2145,6 +2154,20 @@ def test_d_restore_24_stores():
         assert name in restaurados, f"{name} no se restauro"
         assert sha256_file(os.path.join(jdir, name)) == sha256_file(os.path.join(env.base, lp)), (
             f"{lp}: el restore no es byte-identico a la fuente")
+
+    # CHP-BACKUP-COMPOSE-OVERRIDE-COVERAGE-01B: la topologia tiene que sobrevivir
+    # a un restore REAL, no solo aparecer en el manifiesto. Va en su propia
+    # carpeta, asi que no altera el conteo de `json/` de arriba.
+    tdir = os.path.join(staged, "topology")
+    restaurada = sorted(os.listdir(tdir))
+    assert restaurada == [
+        "docker-compose.override.yml",
+        "docker-compose.yml",
+    ], restaurada
+    for name in restaurada:
+        assert sha256_file(os.path.join(tdir, name)) == sha256_file(
+            os.path.join(env.topology, name)), (
+            f"topology/{name}: el restore no es byte-identico a la fuente")
 
 
 @case("D13", "el store opcional ausente no rompe el backup")
@@ -2156,7 +2179,7 @@ def test_d_optional_absent():
     manifest = env.manifests()[-1]
     paths = [s["logical_path"] for s in manifest["stores"]]
     assert "data/users_db.backup.1773870779.json" not in paths
-    assert len(manifest["stores"]) == 23, len(manifest["stores"])
+    assert len(manifest["stores"]) == 23 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
     for lp in STORES_PREVIOS:
         assert lp in paths
 
@@ -2336,11 +2359,11 @@ def test_id_snapshot_25():
     manifest = env.manifests()[-1]
 
     assert manifest["result"] == "ok", manifest["result"]
-    assert len(manifest["stores"]) == 25, len(manifest["stores"])
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
     kinds = {}
     for s in manifest["stores"]:
         kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
-    assert kinds == {"sqlite": 5, "json": 20}, kinds
+    assert kinds == {"sqlite": 5, "json": 20, "topology": TOPOLOGY_STORE_COUNT}, kinds
 
     paths = [s["logical_path"] for s in manifest["stores"]]
     assert paths.count(IDENTITY_LOGICAL_PATH) == 1, paths
@@ -2385,7 +2408,7 @@ def test_id_restore():
     staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
               if os.path.isdir(p)][0]
     man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
-    assert len(man["stores"]) == 25, len(man["stores"])
+    assert len(man["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(man["stores"])
 
     # El staging nombra cada copia por basename: la copia restaurada es
     # sqlite/identity.db, venga de donde venga su ruta logica.
@@ -2425,7 +2448,7 @@ def test_id_legacy_path_ignored():
     assert IDENTITY_LEGACY_PATH not in paths, "se respaldo la ruta legacy de identity.db"
     assert IDENTITY_LOGICAL_PATH not in paths, "no habia identity.db en la ruta canonica"
     # Sin identity.db en su sitio, el backup sigue siendo el de 24 stores.
-    assert len(manifest["stores"]) == 24, len(manifest["stores"])
+    assert len(manifest["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
     assert manifest["result"] == "ok", manifest["result"]
     for lp in STORES_PREVIOS:
         assert lp in paths, f"store previo ausente del manifiesto: {lp}"
@@ -2653,7 +2676,7 @@ def test_mk_present_included():
 
     assert manifest["result"] == "ok", manifest["result"]
     # 24 historicos + mook_db.json. identity.db sigue ausente en este fixture.
-    assert len(manifest["stores"]) == 25, len(manifest["stores"])
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
 
     entry = _mook_entry(manifest)
     assert entry is not None, [s["logical_path"] for s in manifest["stores"]]
@@ -2688,7 +2711,7 @@ def test_mk_absent_tolerated():
 
     assert manifest["result"] == "ok", manifest["result"]
     # Sin MOOK el backup sigue siendo el de 24 stores: la ausencia no resta.
-    assert len(manifest["stores"]) == 24, len(manifest["stores"])
+    assert len(manifest["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
     assert _mook_entry(manifest) is None, "un store ausente no puede figurar como respaldado"
 
     # Lo esencial: la ausencia deja rastro y es distinguible de una perdida.
