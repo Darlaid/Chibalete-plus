@@ -285,13 +285,19 @@ Referencia de descarga:
 
 ```text
 Artefacto canónico documentado:  /uploads/chibalete-lu-0.9.0.apk (versionName 0.9.0, versionCode 10)
-URL pública a comunicar:         <URL_OFICIAL_CANÓNICA_PENDIENTE_DE_VERIFICACIÓN>
+URL pública a comunicar:         https://chibaleteplus.chibaleteeditores.com/#/chibalete-lu
 ```
 
-La ruta del artefacto está documentada en `CHP_IDENTITY_LU_CANONICAL_DISTRIBUTION_01.md`; la **URL
-pública completa que se entregaría a las instituciones no está demostrada en la documentación** y
-debe verificarse antes del Día 1. Hasta entonces se usa el placeholder, literalmente, en todo
-borrador de comunicación.
+La ruta del artefacto está documentada en `CHP_IDENTITY_LU_CANONICAL_DISTRIBUTION_01.md`. La **URL
+pública quedó resuelta el 2026-09-03**: la página de descarga está desplegada, es estable y se abre
+sin sesión. Evidencia en `CHP_IDENTITY_FIELD_PUBLIC_DOWNLOAD_PAGE_DEPLOY_01.md`.
+
+**Se comunica la página, nunca el binario.** La URL de campaña es siempre la página
+`/#/chibalete-lu`, no la ruta directa `/uploads/chibalete-lu-0.9.0.apk`: la página es la que muestra
+la versión disponible, la advertencia de instalar encima sin borrar datos y el aviso de
+reautenticación. Un enlace binario directo entrega el archivo sin ninguna de esas instrucciones, que
+son precisamente lo que evita que un responsable pierda libro y progreso o interprete la
+reautenticación como un fallo.
 
 ---
 
@@ -311,7 +317,8 @@ menores.
 > pero si no tienes la contraseña a mano, te quedarás a mitad del proceso.
 >
 > Para cada equipo, uno por uno:
-> 1. Abre únicamente esta dirección oficial: `<URL_OFICIAL_CANÓNICA_PENDIENTE_DE_VERIFICACIÓN>`
+> 1. Abre únicamente esta dirección oficial:
+>    `https://chibaleteplus.chibaleteeditores.com/#/chibalete-lu`
 > 2. Descarga la aplicación e **instálala encima de la que ya está**. **No desinstales** la actual y
 >    **no borres sus datos**: si lo haces, se puede perder el libro y el progreso. Instalando encima,
 >    se conservan.
@@ -336,7 +343,7 @@ menores.
 > Hola. Recordatorio a mitad de la ventana de actualización de **Chibalete LU**.
 >
 > Si aún tienes equipos sin actualizar, el procedimiento es el mismo: abrir la dirección oficial
-> `<URL_OFICIAL_CANÓNICA_PENDIENTE_DE_VERIFICACIÓN>`, instalar **encima** sin desinstalar ni borrar
+> `https://chibaleteplus.chibaleteeditores.com/#/chibalete-lu`, instalar **encima** sin desinstalar ni borrar
 > datos, abrir la aplicación con internet, **iniciar sesión de nuevo cuando lo pida —es normal— y**
 > entrar una vez a un libro o a la lista de lecturas.
 >
@@ -443,23 +450,34 @@ Bloqueantes restantes, **todos humanos u operativos, ninguno técnico**:
 
 ```text
 responsables concretos por institución   pendiente
-URL pública canónica verificada          pendiente
 fechas reales aprobadas                  pendiente
 inventario físico                        por construir
 ```
 
-Invariantes que no cambian con el gate resuelto:
+Resuelto el 2026-09-03:
+
+```text
+URL pública canónica   RESUELTO — página estable, anónima y desplegada
+                       https://chibaleteplus.chibaleteeditores.com/#/chibalete-lu
+                       Evidencia: CHP_IDENTITY_FIELD_PUBLIC_DOWNLOAD_PAGE_DEPLOY_01.md
+```
+
+El veredicto **no cambia**: sigue `AMBER-CAMPAIGN-NOT-YET-AUTHORIZED`. Tener la URL elimina un
+bloqueante de comunicación, no autoriza la campaña ni sustituye ninguno de los tres pendientes
+anteriores. **Publicar la página no notificó, no descargó y no actualizó ningún dispositivo.**
+
+Invariantes que no cambian ni con el gate resuelto ni con la URL pública desplegada:
 
 ```text
 180        = cuentas escolares, no equipos
 T0         = no definido
 drain      = no iniciado
 ENFORCE    = prohibido
+campaña    = no iniciada
 ```
 
 ## 13. Único siguiente paso
 
-**Decisión humana, no técnica:** designar a los docentes o mediadores responsables por institución y
-verificar la **URL oficial canónica** de descarga. Sin responsables concretos y sin esa URL
-verificada, la campaña no puede solicitarse; y con el gate `0.7.1` abierto, tampoco puede lanzarse de
-forma masiva.
+**Decisión humana, no técnica:** designar a los docentes o mediadores responsables por institución.
+La **URL oficial canónica** ya no es un pendiente: quedó resuelta el 2026-09-03 y está en §7. Sin
+responsables concretos, la campaña no puede solicitarse.
