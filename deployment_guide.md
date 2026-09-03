@@ -83,10 +83,36 @@ este documento simultáneamente.
 | `chibalete_api_1` | service | `chibalete/api:latest` | 4 bind mounts a `/var/www/chibalete/` | `unless-stopped` |
 | `chibalete_api_2` | service | `chibalete/api:latest` | mismos 4 bind mounts | `unless-stopped` |
 
-**Compose canónico:** `/opt/chibaleteplus/docker-compose.yml` — la **única**
-fuente de verdad. Cualquier `docker-compose.prod.yml` o `docker-compose.yml`
-en otras rutas (`/root/apps-spa/`, `deployment_package/`) es legacy o
-artefacto de experimentación; **no gobierna producción**.
+**Compose canónico — DOS archivos que se cargan juntos:**
+
+```text
+/opt/chibaleteplus/docker-compose.yml            (base)
+/opt/chibaleteplus/docker-compose.override.yml   (override, auto-mergeado)
+```
+
+`docker compose`, ejecutado desde `/opt/chibaleteplus`, **carga ambos y mergea el
+override sobre la base**. La configuración efectiva es el resultado del merge, no
+el contenido de ninguno de los dos por separado.
+
+> 🔴 **En la topología vigente, la imagen efectiva de `front` está declarada en el
+> override, no en la base.** La base puede contener un tag antiguo y obsoleto sin
+> que eso afecte a lo que corre: el override gana. Lo mismo ocurre con `api_1` y
+> `api_2`. Consecuencia operativa para el deploy frontend: ver §11-F4.
+
+Cualquier `docker-compose.prod.yml` o `docker-compose.yml` en otras rutas
+(`/root/apps-spa/`, `deployment_package/`) es legacy o artefacto de
+experimentación; **no gobierna producción**.
+
+La autoridad última no es ningún archivo, sino la config resuelta:
+
+```bash
+cd /opt/chibaleteplus && docker compose config --images
+```
+
+Si una auditoría futura demuestra otra topología Compose (override retirado,
+archivos adicionales vía `-f`, `COMPOSE_FILE` en el entorno), **detenerse y
+actualizar este runbook**. No asumir en silencio que la imagen efectiva vive en
+otro archivo.
 
 **Network:** `chibalete_net` (bridge interno). Los containers se descubren
 entre sí por nombre DNS (`chibalete_front`, `chibalete_api_1`, etc.).
@@ -130,22 +156,29 @@ Dos workers Express idénticos. Misma imagen `chibalete/api:latest`. Misma versi
 ```
 Local                       VPS
 ─────                       ───
-git checkout                ssh root@72.60.158.97
-npm run build               docker load -i /tmp/front-RELEASE.tar
-docker build                cp docker-compose.yml docker-compose.yml.bak-$TS
-  -f Dockerfile.front       sed -i 's|image: $OLD_TAG|image: $NEW_TAG|' compose
-  -t chibalete/front:TAG    docker compose up -d --no-deps front
-docker save chibalete/      docker exec chibalete_edge nginx -t
-  front:TAG -o front.tar    docker exec chibalete_edge nginx -s reload
-scp front.tar VPS:/tmp/     curl https://... → 200
+git checkout                docker load -i /tmp/front-$SLUG.tar
+npm run build               docker compose config --images   (localizar imagen efectiva)
+docker build                cp docker-compose.override.yml \
+  -f Dockerfile.front          docker-compose.override.yml.bak-pre-$SLUG-$TS
+  -t chibalete/front:$NEW_TAG
+                            sed -i 's|image: $OLD_TAG|image: $NEW_TAG|' \
+docker save chibalete/         docker-compose.override.yml
+  front:$NEW_TAG -o tar     docker compose config --images   (verificar el merge)
+sha256sum front.tar         docker compose up -d --no-deps front
+scp front.tar VPS:/tmp/     docker exec chibalete_edge nginx -t
+                            docker exec chibalete_edge nginx -s reload
+                            curl https://... → 200
 ```
 
 **Reglas:**
-- ✅ Cada deploy frontend produce una **imagen nueva con tag inmutable** (`YYYY-MM-DD-<slug>`).
+- ✅ Cada deploy frontend produce una **imagen nueva con tag inmutable**.
+- ✅ La imagen se construye **fuera del VPS** y se transfiere con **checksum verificado**. El VPS no construye el frontend.
+- ✅ El swap de tag se hace en el **archivo que declara la imagen efectiva** — hoy `docker-compose.override.yml`. Confirmarlo con `docker compose config --images` antes de escribir.
 - ✅ El tag anterior (`OLD_TAG`) se **conserva en disco** del VPS al menos 7 días para rollback rápido.
 - ✅ El `nginx -s reload` del edge **es obligatorio** tras recrear `chibalete_front`.
 - 🔴 Nunca se modifica el frontend "en caliente" dentro del container.
 - 🔴 Nunca se copia `dist/` a `/var/www/`.
+- 🔴 Nunca se edita la imagen de `front` en el compose base mientras el override la fije. Ver el aviso de **deploy fantasma** en §11-F4.
 
 ---
 
@@ -391,7 +424,8 @@ Para cualquiera de estos casos, abrir sprint dedicado.
 
 | Ruta | Qué es | Quién la toca |
 |---|---|---|
-| `/opt/chibaleteplus/docker-compose.yml` | Compose canónico | Scripts de deploy (lectura/edición controlada) |
+| `/opt/chibaleteplus/docker-compose.yml` | Compose base | Scripts de deploy (lectura). **No es el destino del swap de imagen** mientras el override la fije |
+| `/opt/chibaleteplus/docker-compose.override.yml` | Override auto-mergeado; **declara la imagen efectiva de `front`, `api_1` y `api_2`** | Scripts de deploy (edición controlada, con backup previo) |
 | `/opt/chibaleteplus/nginx/nginx.conf` | Config nginx del edge | Solo cambios deliberados, requiere `nginx -t` y `nginx -s reload` |
 | `/var/www/chibalete/data/` | JSONs vivos | Solo `chibalete_api_1` y `chibalete_api_2` con `withFileLock` |
 | `/var/www/chibalete/data-critical/` | Datos sensibles | Idem |
@@ -434,7 +468,8 @@ Para cualquiera de estos casos, abrir sprint dedicado.
 | 8 | Toda operación destructiva queda **registrada** en `/root/deploys.log` con TS, actor, RELEASE_TAG |
 
 ### 10.2 Política de tags
-- Frontend: `chibalete/front:YYYY-MM-DD-<slug>` (inmutable, ej. `2026-05-06-membership-cache`)
+- Frontend: `chibalete/front:<SLUG>-<git-sha-corto>`, inmutable. `SLUG` identifica la unidad de trabajo. El tag anterior (`OLD_TAG`) nunca se reescribe: es el punto de rollback.
+- El tag efectivo en producción se consulta con `docker compose config --images`, nunca leyendo un archivo compose suelto.
 - Backend: el tag de la imagen api permanece `latest`. El SHA del código backend se rastrea por el `git log` del directorio `/var/www/chibalete/server/` (que es un checkout git en el VPS).
 
 ### 10.3 Política de retention
@@ -461,43 +496,106 @@ FASE F1 — TRANSFERIR IMAGEN
   [ ] ssh: docker images chibalete/front: confirmar $NEW_TAG presente
   [ ] ssh: docker images chibalete/front: confirmar $OLD_TAG aún presente (rollback ready)
 
-FASE F2 — BACKUP COMPOSE
-  [ ] ssh: TS=$(date +%Y%m%d-%H%M%S)
-  [ ] ssh: cp /opt/chibaleteplus/docker-compose.yml \
-                /opt/chibaleteplus/docker-compose.yml.bak-$TS
-  [ ] ssh: ls -lh /opt/chibaleteplus/docker-compose.yml.bak-$TS
+FASE F2 — LOCALIZAR EL ARCHIVO QUE DECLARA LA IMAGEN EFECTIVA
+  [ ] ssh: cd /opt/chibaleteplus && docker compose config --images
+            → anotar la imagen efectiva de front (= OLD_TAG)
+  [ ] ssh: grep -n "image:" docker-compose.override.yml
+  [ ] ssh: grep -n "image:" docker-compose.yml
+            → identificar en cuál de los dos aparece OLD_TAG.
+              Hoy: el override. Si apareciera solo en la base, ver F4-bis.
 
-FASE F3 — IDENTIFICAR OLD_TAG
+FASE F3 — IDENTIFICAR OLD_TAG Y VERIFICAR UNICIDAD
   [ ] ssh: OLD_TAG=$(docker inspect chibalete_front --format '{{.Config.Image}}')
   [ ] ssh: confirmar OLD_TAG != NEW_TAG (deploy idempotente sería abort)
+  [ ] ssh: grep -c "image: $OLD_TAG" docker-compose.override.yml
+            → debe ser EXACTAMENTE 1 en la entrada image: del service front.
+              Cero o más de una  →  STOP — COMPOSE TARGET AMBIGUOUS
+              (cero = la imagen se declara en otro sitio; más de una = el sed
+               tocaría servicios que no son front)
 
-FASE F4 — EDITAR COMPOSE
+FASE F4 — BACKUP Y SWAP DEL OVERRIDE
+  [ ] ssh: TS=$(date -u +%Y%m%dT%H%M%SZ)   ← se fija EN EL VPS, no en local
+  [ ] ssh: cp /opt/chibaleteplus/docker-compose.override.yml \
+              /opt/chibaleteplus/docker-compose.override.yml.bak-pre-$SLUG-$TS
+  [ ] ssh: ls -lh /opt/chibaleteplus/docker-compose.override.yml.bak-pre-$SLUG-$TS
+            → tamaño > 0
   [ ] ssh: sed -i "s|image: $OLD_TAG|image: $NEW_TAG|" \
-                  /opt/chibaleteplus/docker-compose.yml
-  [ ] ssh: grep "image: $NEW_TAG" docker-compose.yml → debe aparecer
-  [ ] ssh: grep "image: $OLD_TAG" docker-compose.yml → NO debe aparecer
+                  /opt/chibaleteplus/docker-compose.override.yml
+  [ ] ssh: diff docker-compose.override.yml.bak-pre-$SLUG-$TS \
+                docker-compose.override.yml
+            → EXACTAMENTE una línea funcional modificada (la image: de front).
+              Más de una  →  restaurar el backup y abortar.
+
+FASE F4-bis — VERIFICAR EL MERGE ANTES DE APLICAR  (BLOQUEANTE)
+  [ ] ssh: cd /opt/chibaleteplus && docker compose config --images
+            front         = $NEW_TAG          ← debe haber cambiado
+            api_1, api_2  = imagen anterior   ← sin cambio
+            edge          = imagen anterior   ← sin cambio
+            Si front sigue mostrando OLD_TAG, se editó el archivo equivocado:
+            restaurar el backup y volver a F2.
 
 FASE F5 — RECREAR FRONT (sin tocar otros services)
   [ ] ssh: cd /opt/chibaleteplus && docker compose up -d --no-deps front
 
 FASE F6 — VALIDAR FRONT INTERNO
   [ ] ssh: docker ps | grep chibalete_front → status=Up con $NEW_TAG
-  [ ] ssh: loop max 15s:
-            docker exec chibalete_edge wget -qO- http://chibalete_front:80/
+  [ ] ssh: esperar health:
+            docker inspect chibalete_front --format '{{.State.Health.Status}}'
+            → healthy (loop con timeout; no continuar sin él)
+  [ ] ssh: docker exec chibalete_edge wget -qO- http://chibalete_front:80/
 
-FASE F7 — RELOAD EDGE
+FASE F7 — RELOAD EDGE  (OBLIGATORIO, no cosmético)
   [ ] ssh: docker exec chibalete_edge nginx -t  (validar sintaxis)
   [ ] ssh: docker exec chibalete_edge nginx -s reload
+  → El upstream del frontend es ESTÁTICO (`server chibalete_front:80` dentro de
+    un bloque `upstream`). nginx resuelve ese nombre UNA SOLA VEZ al cargar la
+    config. El container recreado recibe IP nueva: sin reload el edge apunta a
+    una dirección muerta y responde 502.
+  → NO se edita ni se recrea el edge. Solo `nginx -t` + `nginx -s reload`.
 
 FASE F8 — VALIDAR PÚBLICO
   [ ] curl -sI https://chibaleteplus.chibaleteeditores.com/ → HTTP 200
+  [ ] curl -s https://.../ | grep -oE '/assets/index-[^"]+\.js'
+        → hash DISTINTO al pre-deploy (prueba de que sirve el bundle nuevo)
   [ ] navegador: hard refresh (Ctrl+Shift+R) → bundle nuevo carga
+  [ ] rutas con fragmento (`/#/...`): SOLO se validan en navegador. `curl` no
+      envía el fragmento al servidor y no prueba nada sobre esas rutas.
 
 FASE F9 — REGISTRAR
-  [ ] ssh: echo "$TS frontend $NEW_TAG <actor>" >> /root/deploys.log
+  [ ] ssh: escribir la entrada DENTRO del shell remoto, para que $TS y $NEW_TAG
+           se expandan allí y no en la máquina local:
+
+           ssh root@VPS 'bash -s' <<'REMOTE'
+             TS=$(date -u +%Y%m%dT%H%M%SZ)
+             BAK=$(ls -t /opt/chibaleteplus/docker-compose.override.yml.bak-pre-* | head -1)
+             echo "$TS frontend <NEW_TAG> (<UNIDAD>; rollback <OLD_TAG>; override $(basename $BAK)) actor=<actor>" \
+               >> /root/deploys.log
+           REMOTE
+
+  → Comillas SIMPLES en el heredoc y en cualquier comando ssh que use variables
+    remotas. Con comillas dobles, `$TS` se expande en el shell LOCAL —donde no
+    existe— y la entrada queda truncada. Ocurrió el 2026-09-03 y hubo que
+    corregirla con una segunda entrada append-only.
 ```
 
 > 🔴 **Si CUALQUIER paso F5–F8 falla → rollback inmediato (sección 14).**
+
+### 11.1 Aviso: el deploy fantasma
+
+```text
+Editar docker-compose.yml mientras docker-compose.override.yml fija otra
+imagen no despliega el frontend nuevo. El comando puede terminar sin error
+y recrear el servicio con la imagen anterior.
+```
+
+Es el modo de fallo más peligroso de este procedimiento porque **es silencioso**:
+`sed` no encuentra `OLD_TAG` en el archivo base y no cambia nada —sin error—, el
+override sigue fijando la imagen vieja, `docker compose up -d --no-deps front`
+recrea el container con esa imagen vieja y devuelve éxito, el health check pasa,
+y `curl /` responde 200. Todo verde, cero código nuevo desplegado.
+
+Las dos defensas son **F4-bis** (`docker compose config --images` antes de
+aplicar) y el **hash del bundle** en F8. Ninguna de las dos es opcional.
 
 ---
 
@@ -640,36 +738,57 @@ T5 ───── ✅ deploy completo
 ```
 PRE-REQUISITOS
   ✓ OLD_TAG sigue presente: docker image inspect $OLD_TAG
-  ✓ Backup compose existe: ls -t /opt/chibaleteplus/docker-compose.yml.bak-*
+  ✓ Backup del OVERRIDE existe:
+      ls -t /opt/chibaleteplus/docker-compose.override.yml.bak-pre-*
 
 PASO RF.1 — Snapshot del estado fallido
-  ssh: cp /opt/chibaleteplus/docker-compose.yml \
-            /opt/chibaleteplus/docker-compose.yml.failed-$TS
+  ssh: cp /opt/chibaleteplus/docker-compose.override.yml \
+            /opt/chibaleteplus/docker-compose.override.yml.failed-$TS
 
-PASO RF.2 — Restaurar compose desde backup
-  ssh: BAK=$(ls -t /opt/chibaleteplus/docker-compose.yml.bak-* | head -1)
+PASO RF.2 — Restaurar el OVERRIDE desde backup
+  ssh: BAK=$(ls -t /opt/chibaleteplus/docker-compose.override.yml.bak-pre-* | head -1)
   ssh: grep "image: $OLD_TAG" $BAK  → debe aparecer
-  ssh: cp $BAK /opt/chibaleteplus/docker-compose.yml
+  ssh: cp $BAK /opt/chibaleteplus/docker-compose.override.yml
+  → Se restaura el mismo archivo que se editó en F4. El compose base NO se toca
+    ni en el deploy ni en el rollback.
 
-PASO RF.3 — Recrear front con OLD_TAG
+PASO RF.2-bis — Verificar el merge antes de aplicar  (BLOQUEANTE)
+  ssh: cd /opt/chibaleteplus && docker compose config --images
+        front         = $OLD_TAG          ← debe haber vuelto
+        api_1, api_2  = imagen anterior   ← sin cambio
+        edge          = imagen anterior   ← sin cambio
+
+PASO RF.3 — Recrear ÚNICAMENTE front con OLD_TAG
   ssh: cd /opt/chibaleteplus && docker compose up -d --no-deps front
 
 PASO RF.4 — Esperar healthy
-  ssh: loop 15s:
-        docker exec chibalete_edge wget -qO- http://chibalete_front:80/
+  ssh: loop con timeout:
+        docker inspect chibalete_front --format '{{.State.Health.Status}}'
+  ssh: docker exec chibalete_edge wget -qO- http://chibalete_front:80/
 
-PASO RF.5 — Reload edge
+PASO RF.5 — Reload edge (obligatorio: upstream estático, IP nueva)
   ssh: docker exec chibalete_edge nginx -t
   ssh: docker exec chibalete_edge nginx -s reload
+  → No editar ni recrear el edge.
 
 PASO RF.6 — Validar HTTP público
   curl -sI https://... → 200
+  curl -s https://.../ | grep -oE '/assets/index-[^"]+\.js'
+    → hash del bundle ANTERIOR (confirma que revirtió de verdad)
 
-PASO RF.7 — Registrar
-  ssh: echo "$TS rollback frontend $NEW_TAG → $OLD_TAG <actor>" >> /root/deploys.log
+PASO RF.7 — Registrar (variables expandidas EN EL VPS)
+  ssh root@VPS 'bash -s' <<'REMOTE'
+    TS=$(date -u +%Y%m%dT%H%M%SZ)
+    echo "$TS ROLLBACK frontend <NEW_TAG> -> <OLD_TAG> reason=<motivo> actor=<actor>" \
+      >> /root/deploys.log
+  REMOTE
 ```
 
 > 🔴 Si OLD_TAG **no existe** localmente en VPS → rollback imposible vía Docker. Requiere reconstruir imagen vieja desde commit anterior y reintentar.
+>
+> 🔴 **No revertir editando el compose base.** Si el override sigue fijando la
+> imagen fallida, restaurar la base no cambia nada: el rollback sería tan
+> fantasma como el deploy. Ver §11.1.
 
 ---
 
@@ -790,16 +909,27 @@ LOCAL
 [ ] git pull --rebase origin master
 [ ] npm run verify → todos los asserts verdes
 [ ] npm run build → dist/ generado sin warnings rojos
-[ ] docker build -t chibalete/front:$NEW_TAG .
-[ ] docker save → tar generado
+[ ] docker build --pull -f Dockerfile.front -t chibalete/front:$NEW_TAG .
+[ ] docker save | gzip → artefacto generado
+[ ] sha256sum del artefacto anotado (se compara en el VPS antes del load)
 [ ] anunciar en canal: "deploy frontend $NEW_TAG en T-5min"
 
 VPS
 [ ] ssh: df -h /var → > 20% disponible
 [ ] ssh: docker ps → todos los containers UP, restarts=0
 [ ] ssh: docker images chibalete/front: $OLD_TAG presente (rollback ready)
-[ ] ssh: cp docker-compose.yml a .bak-$TS y verificar tamaño > 0
+[ ] ssh: cd /opt/chibaleteplus && docker compose config --images
+          → anotar la imagen efectiva de front; identificar en QUÉ archivo
+            está declarada (hoy: docker-compose.override.yml)
+[ ] ssh: grep -c "image: $OLD_TAG" docker-compose.override.yml → debe ser 1
+          (cero o >1 → STOP — COMPOSE TARGET AMBIGUOUS)
+[ ] ssh: cp docker-compose.override.yml a
+          .bak-pre-$SLUG-$TS y verificar tamaño > 0
 ```
+
+> El backup y el swap se hacen sobre el archivo que declara la **imagen
+> efectiva**. Editar el compose base mientras el override la fije produce un
+> **deploy fantasma** (§11.1).
 
 ### 18.2 Pre-deploy backend
 
@@ -885,7 +1015,8 @@ SMOKES (manuales en navegador, dos sesiones)
 | 7 | `nano server/server.js` dentro del container con `docker exec` | Cambios "en caliente" se pierden al próximo restart, no quedan en git, no son auditables |
 | 8 | Hotfix dentro del container (`docker exec ... apt install`, etc.) | El cambio se pierde al rebuild de imagen. Imposible reproducir en otro ambiente |
 | 9 | `docker restart chibalete_edge` "porque sí" | Edge tiene IPs upstream cacheadas; reiniciar sin razón puede romper temporalmente la conexión a front/api |
-| 10 | Asumir que `docker-compose.prod.yml` (en repo) gobierna producción | El compose canónico vive en `/opt/chibaleteplus/docker-compose.yml`. El del repo es ejemplo histórico |
+| 10 | Asumir que `docker-compose.prod.yml` (en repo) gobierna producción | El compose productivo vive en `/opt/chibaleteplus/`: base + `docker-compose.override.yml`. El del repo es ejemplo histórico |
+| 11 | Cambiar la imagen de `front` editando el compose **base** mientras el override la fija | Es un **deploy fantasma**: termina sin error y recrea el service con la imagen anterior (§11.1). El destino del swap se determina con `docker compose config --images` |
 | 11 | Editar `/etc/nginx/sites-available/*` esperando que afecte algo | nginx system NO corre. La config real está dentro del container `chibalete_edge` |
 | 12 | Restart simultáneo de `api_1` y `api_2` | Ambos containers down a la vez = backend caído = todos los requests fallan |
 | 13 | `docker rmi chibalete/api:latest` o cualquier imagen activa | Si los containers se reinician después, no encuentran imagen y fallan |
@@ -959,11 +1090,14 @@ ssh root@VPS "curl -sH 'x-admin-secret: $SEC' \
 **Diagnóstico:**
 ```bash
 ssh root@VPS "docker images chibalete/front"
-ssh root@VPS "grep 'image:' /opt/chibaleteplus/docker-compose.yml"
+ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"
+ssh root@VPS "grep -n 'image:' /opt/chibaleteplus/docker-compose.override.yml"
+ssh root@VPS "grep -n 'image:' /opt/chibaleteplus/docker-compose.yml"
 ```
 
 **Solución:**
-1. Confirmar que el tag en compose coincide con el de `docker images`.
+1. Confirmar que el tag de la config resuelta (`config --images`, que ya
+   incluye el merge del override) coincide con el de `docker images`.
 2. Re-cargar la imagen: `docker load -i /tmp/front-$TAG.tar`.
 3. Si el tar no llegó al VPS, repetir el `scp`.
 
@@ -1040,7 +1174,8 @@ ssh root@VPS "cd /var/www/chibalete/server && git status"
 | Término | Definición |
 |---|---|
 | **Bind mount** | Carpeta del host expuesta dentro del container vía `volumes:` en compose. Cambios en el host se ven inmediatamente en el container y viceversa |
-| **Compose canónico** | El único `docker-compose.yml` que gobierna producción: `/opt/chibaleteplus/docker-compose.yml` |
+| **Compose canónico** | El par que gobierna producción, cargado y mergeado junto: `/opt/chibaleteplus/docker-compose.yml` (base) + `/opt/chibaleteplus/docker-compose.override.yml` (override). La configuración efectiva es el merge, y se consulta con `docker compose config --images` |
+| **Deploy fantasma** | Deploy que termina sin error y sin desplegar nada, por editar un archivo compose que el merge sobrescribe. Ver §11.1 |
 | **Edge** | El container `chibalete_edge`, único expuesto a Internet. Hace TLS y reverse proxy |
 | **Healthy** | Container responde HTTP 200 a `/api/health`. Distinto de "running" (que solo significa que el proceso PID 1 está vivo) |
 | **OLD_TAG / NEW_TAG** | Etiquetas Docker semánticas (formato `YYYY-MM-DD-<slug>`) usadas en deploy/rollback frontend |
@@ -1057,7 +1192,7 @@ ssh root@VPS "cd /var/www/chibalete/server && git status"
 
 ## 24. Referencias
 
-- **Compose canónico**: `/opt/chibaleteplus/docker-compose.yml` (en VPS)
+- **Compose canónico**: `/opt/chibaleteplus/docker-compose.yml` + `/opt/chibaleteplus/docker-compose.override.yml` (en VPS, mergeados)
 - **Nginx edge config**: `/opt/chibaleteplus/nginx/nginx.conf` (en VPS)
 - **Backups**: `/root/backups/chibalete/$TS/` (retention 7 días)
 - **Deploy log**: `/root/deploys.log` (append-only)
