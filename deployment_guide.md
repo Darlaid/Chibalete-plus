@@ -105,8 +105,20 @@ experimentación; **no gobierna producción**.
 
 La autoridad última no es ningún archivo, sino la config resuelta:
 
+> **Sobre el marcador `chp-evidence-ratchet: allow` que acompaña a estas
+> órdenes.** El ratchet de evidencia bloquea el subcomando `config` de `docker
+> compose` porque, sin acotar, imprime la configuración efectiva **con los valores
+> del entorno** — así se persistieron credenciales en su día. La regla sólo
+> reconoce `-q`/`--quiet` como salida acotada. `--images` también lo es: emite **únicamente los nombres
+> de imagen** necesarios para verificar qué resolvió el merge, y no imprime ni la
+> configuración ni valores de entorno. Por eso cada una de esas líneas lleva la
+> excepción **en su propia línea**, la más estrecha que el ratchet admite; no se
+> añadió ningún patrón, baseline ni exención global. Un `config` sin acotar
+> sigue bloqueando, que es lo que debe hacer.
+
+
 ```bash
-cd /opt/chibaleteplus && docker compose config --images
+cd /opt/chibaleteplus && docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
 ```
 
 Si una auditoría futura demuestra otra topología Compose (override retirado,
@@ -157,13 +169,13 @@ Dos workers Express idénticos. Misma imagen `chibalete/api:latest`. Misma versi
 Local                       VPS
 ─────                       ───
 git checkout                docker load -i /tmp/front-$SLUG.tar
-npm run build               docker compose config --images   (localizar imagen efectiva)
+npm run build               docker compose config --images   (localizar imagen efectiva)  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
 docker build                cp docker-compose.override.yml \
   -f Dockerfile.front          docker-compose.override.yml.bak-pre-$SLUG-$TS
   -t chibalete/front:$NEW_TAG
                             sed -i 's|image: $OLD_TAG|image: $NEW_TAG|' \
 docker save chibalete/         docker-compose.override.yml
-  front:$NEW_TAG -o tar     docker compose config --images   (verificar el merge)
+  front:$NEW_TAG -o tar     docker compose config --images   (verificar el merge)  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
 sha256sum front.tar         docker compose up -d --no-deps front
 scp front.tar VPS:/tmp/     docker exec chibalete_edge nginx -t
                             docker exec chibalete_edge nginx -s reload
@@ -173,7 +185,7 @@ scp front.tar VPS:/tmp/     docker exec chibalete_edge nginx -t
 **Reglas:**
 - ✅ Cada deploy frontend produce una **imagen nueva con tag inmutable**.
 - ✅ La imagen se construye **fuera del VPS** y se transfiere con **checksum verificado**. El VPS no construye el frontend.
-- ✅ El swap de tag se hace en el **archivo que declara la imagen efectiva** — hoy `docker-compose.override.yml`. Confirmarlo con `docker compose config --images` antes de escribir.
+- ✅ El swap de tag se hace en el **archivo que declara la imagen efectiva** — hoy `docker-compose.override.yml`. Confirmarlo con `docker compose config --images` antes de escribir. <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 - ✅ El tag anterior (`OLD_TAG`) se **conserva en disco** del VPS al menos 7 días para rollback rápido.
 - ✅ El `nginx -s reload` del edge **es obligatorio** tras recrear `chibalete_front`.
 - 🔴 Nunca se modifica el frontend "en caliente" dentro del container.
@@ -521,7 +533,7 @@ Para cualquiera de estos casos, abrir sprint dedicado.
 
 ### 10.2 Política de tags
 - Frontend: `chibalete/front:<SLUG>-<git-sha-corto>`, inmutable. `SLUG` identifica la unidad de trabajo. El tag anterior (`OLD_TAG`) nunca se reescribe: es el punto de rollback.
-- El tag efectivo en producción se consulta con `docker compose config --images`, nunca leyendo un archivo compose suelto.
+- El tag efectivo en producción se consulta con `docker compose config --images`, nunca leyendo un archivo compose suelto. <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 - Backend: el tag de la imagen api permanece `latest`. El SHA del código backend se rastrea por el `git log` del directorio `/var/www/chibalete/server/` (que es un checkout git en el VPS).
 
 ### 10.3 Política de retention
@@ -549,7 +561,7 @@ FASE F1 — TRANSFERIR IMAGEN
   [ ] ssh: docker images chibalete/front: confirmar $OLD_TAG aún presente (rollback ready)
 
 FASE F2 — LOCALIZAR EL ARCHIVO QUE DECLARA LA IMAGEN EFECTIVA
-  [ ] ssh: cd /opt/chibaleteplus && docker compose config --images
+  [ ] ssh: cd /opt/chibaleteplus && docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
             → anotar la imagen efectiva de front (= OLD_TAG)
   [ ] ssh: grep -n "image:" docker-compose.override.yml
   [ ] ssh: grep -n "image:" docker-compose.yml
@@ -579,7 +591,7 @@ FASE F4 — BACKUP Y SWAP DEL OVERRIDE
               Más de una  →  restaurar el backup y abortar.
 
 FASE F4-bis — VERIFICAR EL MERGE ANTES DE APLICAR  (BLOQUEANTE)
-  [ ] ssh: cd /opt/chibaleteplus && docker compose config --images
+  [ ] ssh: cd /opt/chibaleteplus && docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
             front         = $NEW_TAG          ← debe haber cambiado
             api_1, api_2  = imagen anterior   ← sin cambio
             edge          = imagen anterior   ← sin cambio
@@ -646,7 +658,7 @@ override sigue fijando la imagen vieja, `docker compose up -d --no-deps front`
 recrea el container con esa imagen vieja y devuelve éxito, el health check pasa,
 y `curl /` responde 200. Todo verde, cero código nuevo desplegado.
 
-Las dos defensas son **F4-bis** (`docker compose config --images` antes de
+Las dos defensas son **F4-bis** (`docker compose config --images` antes de <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 aplicar) y el **hash del bundle** en F8. Ninguna de las dos es opcional.
 
 ---
@@ -805,7 +817,7 @@ PASO RF.2 — Restaurar el OVERRIDE desde backup
     ni en el deploy ni en el rollback.
 
 PASO RF.2-bis — Verificar el merge antes de aplicar  (BLOQUEANTE)
-  ssh: cd /opt/chibaleteplus && docker compose config --images
+  ssh: cd /opt/chibaleteplus && docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
         front         = $OLD_TAG          ← debe haber vuelto
         api_1, api_2  = imagen anterior   ← sin cambio
         edge          = imagen anterior   ← sin cambio
@@ -970,7 +982,7 @@ VPS
 [ ] ssh: df -h /var → > 20% disponible
 [ ] ssh: docker ps → todos los containers UP, restarts=0
 [ ] ssh: docker images chibalete/front: $OLD_TAG presente (rollback ready)
-[ ] ssh: cd /opt/chibaleteplus && docker compose config --images
+[ ] ssh: cd /opt/chibaleteplus && docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
           → anotar la imagen efectiva de front; identificar en QUÉ archivo
             está declarada (hoy: docker-compose.override.yml)
 [ ] ssh: grep -c "image: $OLD_TAG" docker-compose.override.yml → debe ser 1
@@ -1068,7 +1080,7 @@ SMOKES (manuales en navegador, dos sesiones)
 | 8 | Hotfix dentro del container (`docker exec ... apt install`, etc.) | El cambio se pierde al rebuild de imagen. Imposible reproducir en otro ambiente |
 | 9 | `docker restart chibalete_edge` "porque sí" | Edge tiene IPs upstream cacheadas; reiniciar sin razón puede romper temporalmente la conexión a front/api |
 | 10 | Asumir que `docker-compose.prod.yml` (en repo) gobierna producción | El compose productivo vive en `/opt/chibaleteplus/`: base + `docker-compose.override.yml`. El del repo es ejemplo histórico |
-| 11 | Cambiar la imagen de `front` editando el compose **base** mientras el override la fija | Es un **deploy fantasma**: termina sin error y recrea el service con la imagen anterior (§11.1). El destino del swap se determina con `docker compose config --images` |
+| 11 | Cambiar la imagen de `front` editando el compose **base** mientras el override la fija | Es un **deploy fantasma**: termina sin error y recrea el service con la imagen anterior (§11.1). El destino del swap se determina con `docker compose config --images` | <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 | 11 | Editar `/etc/nginx/sites-available/*` esperando que afecte algo | nginx system NO corre. La config real está dentro del container `chibalete_edge` |
 | 12 | Restart simultáneo de `api_1` y `api_2` | Ambos containers down a la vez = backend caído = todos los requests fallan |
 | 13 | `docker rmi chibalete/api:latest` o cualquier imagen activa | Si los containers se reinician después, no encuentran imagen y fallan |
@@ -1142,7 +1154,7 @@ ssh root@VPS "curl -sH 'x-admin-secret: $SEC' \
 **Diagnóstico:**
 ```bash
 ssh root@VPS "docker images chibalete/front"
-ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"
+ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
 ssh root@VPS "grep -n 'image:' /opt/chibaleteplus/docker-compose.override.yml"
 ssh root@VPS "grep -n 'image:' /opt/chibaleteplus/docker-compose.yml"
 ```
@@ -1226,7 +1238,7 @@ ssh root@VPS "cd /var/www/chibalete/server && git status"
 | Término | Definición |
 |---|---|
 | **Bind mount** | Carpeta del host expuesta dentro del container vía `volumes:` en compose. Cambios en el host se ven inmediatamente en el container y viceversa |
-| **Compose canónico** | El par que gobierna producción, cargado y mergeado junto: `/opt/chibaleteplus/docker-compose.yml` (base) + `/opt/chibaleteplus/docker-compose.override.yml` (override). La configuración efectiva es el merge, y se consulta con `docker compose config --images` |
+| **Compose canónico** | El par que gobierna producción, cargado y mergeado junto: `/opt/chibaleteplus/docker-compose.yml` (base) + `/opt/chibaleteplus/docker-compose.override.yml` (override). La configuración efectiva es el merge, y se consulta con `docker compose config --images` | <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 | **Deploy fantasma** | Deploy que termina sin error y sin desplegar nada, por editar un archivo compose que el merge sobrescribe. Ver §11.1 |
 | **Edge** | El container `chibalete_edge`, único expuesto a Internet. Hace TLS y reverse proxy |
 | **Healthy** | Container responde HTTP 200 a `/api/health`. Distinto de "running" (que solo significa que el proceso PID 1 está vivo) |

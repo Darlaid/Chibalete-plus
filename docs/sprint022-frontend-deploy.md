@@ -125,10 +125,21 @@ Antes de tocar nada, los siguientes ítems deben estar TODOS verdes:
 | V2 | api_1 + api_2 sin restart loop | `ssh root@72.60.158.97 "docker ps --format '{{.Names}} {{.RestartCount}}' \| grep api"` (esperado: ambos `0` o estable) |
 | V3 | Disco VPS libre | `ssh root@72.60.158.97 "df -BG /var/lib/docker"` (≥3 GB libres) |
 | V4 | Ambos compose existen y son readable | `ssh root@VPS "test -r /opt/chibaleteplus/docker-compose.yml && test -r /opt/chibaleteplus/docker-compose.override.yml && echo OK"` |
-| V4b | La imagen efectiva de `front` se resuelve y se sabe dónde está declarada | `ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"` + `grep -n image:` en ambos archivos (ver §4.0) |
+| V4b | La imagen efectiva de `front` se resuelve y se sabe dónde está declarada | `ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"` + `grep -n image:` en ambos archivos (ver §4.0) | <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 | V5 | Tag actual de `chibalete_front` documentado | ver §1.3 abajo — **BLOQUEANTE para rollback** |
 | V6 | Health endpoint OK | `curl -sf https://chibaleteplus.chibaleteeditores.com/api/health \| head` |
 | V7 | Sin deploy lock backend activo | `ssh root@72.60.158.97 "test -d /var/run/chib-deploy.lock && echo LOCK \|\| echo OK"` |
+
+> **Sobre el marcador `chp-evidence-ratchet: allow` que acompaña a estas
+> órdenes.** El ratchet de evidencia bloquea el subcomando `config` de `docker
+> compose` porque, sin acotar, imprime la configuración efectiva **con los valores
+> del entorno** — así se persistieron credenciales en su día. La regla sólo
+> reconoce `-q`/`--quiet` como salida acotada. `--images` también lo es: emite **únicamente los nombres
+> de imagen** necesarios para verificar qué resolvió el merge, y no imprime ni la
+> configuración ni valores de entorno. Por eso cada una de esas líneas lleva la
+> excepción **en su propia línea**, la más estrecha que el ratchet admite; no se
+> añadió ningún patrón, baseline ni exención global. Un `config` sin acotar
+> sigue bloqueando, que es lo que debe hacer.
 
 ### 1.3 Documentar tag previo (rollback target)
 
@@ -138,7 +149,7 @@ Antes de tocar nada, los siguientes ítems deben estar TODOS verdes:
 ssh root@72.60.158.97 '
   echo "=== docker-compose service front ==="
   echo "--- imagen efectiva (merge base + override) ---"
-  cd /opt/chibaleteplus && docker compose config --images
+  cd /opt/chibaleteplus && docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
   echo "--- declaracion en el override (destino del swap) ---"
   grep -A 5 "^  front:" /opt/chibaleteplus/docker-compose.override.yml | grep image:
   echo "--- declaracion en la base (informativa; puede estar obsoleta) ---"
@@ -300,14 +311,14 @@ procedimiento.**
 ssh root@VPS 'bash -s' <<'REMOTE'
   cd /opt/chibaleteplus
   echo "=== imagen efectiva resuelta (base + override mergeados) ==="
-  docker compose config --images
+  docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
   echo "=== donde esta declarada ==="
   grep -n "image:" docker-compose.override.yml
   grep -n "image:" docker-compose.yml
 REMOTE
 ```
 
-`docker compose config --images` es la **autoridad**: ningún archivo suelto lo
+`docker compose config --images` es la **autoridad**: ningún archivo suelto lo <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 es. Anotar de ahí el `OLD_TAG` de `front` e identificar en cuál de los dos
 archivos aparece. Hoy: el override.
 
@@ -386,7 +397,7 @@ ssh root@VPS 'bash -s' <<'REMOTE'
   cd /opt/chibaleteplus
   docker compose config --quiet && echo 'compose valido' || echo 'ABORTAR'
   echo "=== imagenes efectivas tras el swap ==="
-  docker compose config --images
+  docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
 REMOTE
 ```
 
@@ -648,7 +659,7 @@ REMOTE
 ssh root@VPS 'bash -s' <<'REMOTE'
   cd /opt/chibaleteplus
   docker compose config --quiet && echo OK
-  docker compose config --images
+  docker compose config --images  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
   # front = OLD_TAG (debe haber vuelto); api_1/api_2/edge sin cambio
 REMOTE
 
@@ -678,7 +689,7 @@ docker exec chibalete_edge nginx -s reload
 | R5 | `nginx -t` del edge sigue válido | `ssh root@72.60.158.97 "docker exec chibalete_edge nginx -t"` |
 | R6 | Config del edge **sin cambios** (no se debió tocar en deploy ni rollback) | `ssh root@72.60.158.97 "docker exec chibalete_edge sha256sum /etc/nginx/conf.d/default.conf"` — comparar con valor pre-deploy si se anotó, o como sanity check de que no fue modificado |
 | R7 | `docker-compose.override.yml` revertido a estado pre-deploy | `ssh root@VPS "diff /opt/chibaleteplus/docker-compose.override.yml /opt/chibaleteplus/docker-compose.override.yml.bak-pre-<SLUG>-<TS>"` — debe ser vacío |
-| R7b | La imagen efectiva volvió al tag previo | `ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"` → `front` = `OLD_TAG`; api_1/api_2/edge sin cambio |
+| R7b | La imagen efectiva volvió al tag previo | `ssh root@VPS "cd /opt/chibaleteplus && docker compose config --images"` → `front` = `OLD_TAG`; api_1/api_2/edge sin cambio | <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 
 #### 7.2.2 Estado HTTP / bundle
 
@@ -892,7 +903,7 @@ ssh root@72.60.158.97 "
 # Localizar la imagen efectiva y respaldar el OVERRIDE (variables en el shell REMOTO)
 ssh root@VPS 'bash -s' <<'REMOTE'
   cd /opt/chibaleteplus
-  docker compose config --images            # autoridad: de aqui sale OLD_TAG
+  docker compose config --images            # autoridad: de aqui sale OLD_TAG  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
   TS=$(date -u +%Y%m%dT%H%M%SZ)
   cp docker-compose.override.yml "docker-compose.override.yml.bak-pre-<SLUG>-${TS}"
 REMOTE
@@ -902,7 +913,7 @@ ssh root@VPS "sed -i 's|image: $OLD_TAG|image: $NEW_TAG|' /opt/chibaleteplus/doc
 ssh root@VPS "
   cd /opt/chibaleteplus
   docker compose config --quiet
-  docker compose config --images            # front=NEW_TAG, resto sin cambio (BLOQUEANTE)
+  docker compose config --images            # front=NEW_TAG, resto sin cambio (BLOQUEANTE)  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
   docker compose up -d --no-deps front
   docker exec chibalete_edge nginx -t
   docker exec chibalete_edge nginx -s reload
