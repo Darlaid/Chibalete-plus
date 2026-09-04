@@ -7,12 +7,12 @@ Cierra el gap que abrió `01A` (preflight read-only):
 `YELLOW-COMPOSE-OVERRIDE-BACKUP-COVERAGE-GAP-CONFIRMED`.
 
 ```text
-ESTADO: PENDIENTE DE EJECUCIÓN
+GREEN-COMPOSE-TOPOLOGY-BACKUP-AND-RESTORE-VERIFIED
 ```
 
-Este documento se crea con la implementación y se completa tras el backup
-controlado y el restore aislado. Mientras diga «pendiente de ejecución», la
-cobertura está **escrita y probada en CI, pero no demostrada en producción**.
+La topología Compose efectiva entra en el backup canónico offsite y se
+demostró recuperable byte a byte desde un snapshot real, en un directorio
+aislado, sin aplicar nada a producción.
 
 ---
 
@@ -116,35 +116,108 @@ La suite completa sólo se ejecuta en su sandbox: el harness es fail-closed y
 **aborta en un host productivo** sin flag de bypass. En este proyecto ese
 sandbox es el contenedor efímero de CI, con restic y systemd reales.
 
+Resultado de CI, `backup-suite-sandboxed` sobre `1201c51`:
+
 ```text
-PENDIENTE: resultado de CI (suite canónica, 113 casos)
+=== RESUMEN: 113/113 PASS ===
+SUITE_RESULT=GREEN
 ```
+
+TP01–TP08 en verde, y los 105 casos previos también.
+
+**Regresión detectada y corregida en el camino.** El primer intento
+(`dccf610`) dejó la suite en `104/113`: nueve casos preexistentes —D01, D12,
+D13, I4, ID02, ID03, ID04, MK02, MK03— fijaban por número cuántos stores trae
+el manifiesto (24, 25, 23) y que el conjunto de `kind` era `{sqlite, json}`.
+Las dos entradas de topología desplazan todos esos conteos, así que fallaban
+sobre código correcto: la aserción codificaba el contrato anterior.
+
+Se corrigió en `1201c51` expresándolos como `<datos> + TOPOLOGY_STORE_COUNT`
+en lugar de un número nuevo, para que siga leyéndose que la cifra de stores de
+**datos** no cambió y que el único delta es la topología. Un store de datos
+perdido en silencio sigue rompiendo la aserción, que es exactamente para lo que
+existe. `D12` ganó además la comprobación que faltaba: que la topología
+sobrevive a un **restore real de restic** y vuelve byte-idéntica, no sólo que
+aparece en el manifiesto.
 
 ## 5. Backup controlado
 
+Una sola corrida del mecanismo canónico, lanzada por su propia unit systemd y
+con su lock normal. Ni una segunda «para confirmar».
+
 ```text
-PENDIENTE DE EJECUCIÓN
+run_id     structured-20260903T235012Z-2a314fe0
+snapshot   02e66630
+inicio     2026-09-03T23:50:12Z
+fin        2026-09-03T23:50:25Z   (13 s)
+resultado  ok  (ExecMainStatus=0)
+stores     28  ->  sqlite: 5 | json: 21 | topology: 2
 ```
 
-- snapshot:
-- timestamp:
-- duración:
-- resultado:
-- `topology/docker-compose.yml` en el manifiesto:
-- `topology/docker-compose.override.yml` en el manifiesto:
+Entradas de topología en el manifiesto:
+
+| `logical_path` | bytes | `sha256` | método |
+|---|---|---|---|
+| `topology/docker-compose.yml` | 4981 | `3765c4e7…21156` | `file_copy` |
+| `topology/docker-compose.override.yml` | 4493 | `5a6f3d7a…b9f778` | `file_copy` |
+
+Ambas con `integrity_result: ok`, `category: CFG`, `status: included`. Los
+tamaños coinciden exactamente con los archivos vivos.
+
+Control negativo sobre el manifiesto real: **cero** entradas que contengan
+`.env` o `bak-pre-`.
+
+### 5.1 Confirmación desatendida (cadencia normal, no provocada)
+
+Once minutos después, el timer disparó su corrida ordinaria. **No la lancé yo**:
+es la cadencia de siempre, ejecutando ya el runner nuevo sin supervisión.
+
+```text
+run_id     structured-20260904T000132Z-ea67545a
+inicio     2026-09-04T00:01:32Z
+fin        2026-09-04T00:01:45Z   (13 s)
+resultado  ok  (ExecMainStatus=0)
+stores     28, con topology/docker-compose.yml y topology/docker-compose.override.yml
+```
+
+Importa porque el despliegue del runner puso código nuevo en la ruta que un
+timer ejecuta sin nadie mirando. Que la primera corrida automática saliera
+`ok` cierra ese riesgo con evidencia, no con confianza.
 
 ## 6. Restore aislado y comparación por hash
 
+Directorio temporal creado con `mktemp -d`, y restore acotado con
+`--include '*/topology/*'`: **sólo los dos Compose**, ningún store, ningún
+upload.
+
 ```text
-PENDIENTE DE EJECUCIÓN
+restic restore 02e66630 --target <mktemp -d> --include '*/topology/*'
+rc=0   restaurados: 2 archivos
 ```
 
-- directorio temporal:
-- `sha256` vivo / restaurado — base:
-- `sha256` vivo / restaurado — override:
-- permisos del archivo vivo sin modificar:
-- nada aplicado a `/opt/chibaleteplus`:
-- ningún contenedor recreado:
+| Archivo | `sha256` vivo | `sha256` restaurado | |
+|---|---|---|---|
+| `docker-compose.yml` | `3765c4e7…21156` | `3765c4e7…21156` | **byte-idéntico** |
+| `docker-compose.override.yml` | `5a6f3d7a…b9f778` | `5a6f3d7a…b9f778` | **byte-idéntico** |
+
+Los dos hashes coinciden además con los del manifiesto: manifiesto, snapshot y
+archivo vivo son consistentes entre sí.
+
+Invariantes verificados **después** del restore:
+
+```text
+permisos vivos sin modificar    docker-compose.yml           600 root:root
+                                docker-compose.override.yml  644 root:root
+mtime de ambos vivos            sin cambio
+aplicado a /opt/chibaleteplus   NADA
+contenedores recreados          NINGUNO (4/4 healthy, RestartCount=0)
+snapshots borrados              NINGUNO
+```
+
+El directorio temporal se eliminó validando antes su ruta exacta: `realpath`,
+comprobación de que es un directorio, de que no es un symlink y de que coincide
+con el patrón `/tmp/chp-topology-restore-??????` de esta unidad. Sin esa
+validación no se borra nada.
 
 ## 7. Límites y rollback del runner
 
@@ -158,9 +231,23 @@ Rollback del runner: se respaldan los archivos que se reemplazan, con sus
 hashes, y ante divergencia o fallo se restaura la versión anterior de
 inmediato.
 
-```text
-PENDIENTE: archivos respaldados y hashes
-```
+Se desplegaron **dos módulos** bajo `/opt/chibalete-backup/runners/`,
+extraídos del commit exacto `1201c51` con `git show`, de modo que lo que corre
+en producción es literalmente el contenido de ese commit:
+
+| Archivo | `sha256` anterior (respaldado) | `sha256` desplegado = commit |
+|---|---|---|
+| `chibalete_backup/stores.py` | `d25bb6a9…a5561` | `3bdad9ef…d31c6` |
+| `structured_backup.py` | `0117729e…b9973` | `30049b83…21b9c` |
+
+Respaldo de la versión anterior:
+`/root/chp-backup-topology-01b/runner-rollback-20260903T234942Z/`
+
+Rollback: copiar esos dos archivos de vuelta. No requiere reconstruir nada, no
+toca el repositorio restic y no depende de este commit.
+
+Permisos y propietario sin cambio (`644 root:root`), sintaxis validada en el
+propio VPS con `python3 -m py_compile`.
 
 ## 8. Lo que esto no resuelve
 
@@ -172,8 +259,24 @@ PENDIENTE: archivos respaldados y hashes
 - `deployment_guide.md` §3 sigue describiendo `chibalete_front` sin mounts,
   cuando tiene seis de sólo lectura. Fuera de alcance.
 
-## 9. Único siguiente paso
+## 9. Estado de la cobertura
 
-```text
-PENDIENTE
-```
+La matriz que `01A` dejó en **0 de 5** para el override queda así:
+
+| Componente | Base | Override |
+|---|---|---|
+| Selección de backup | **sí**, canónico | **sí**, canónico |
+| Presencia en último snapshot | **sí** (`02e66630`) | **sí** (`02e66630`) |
+| Recuperación legible | **sí**, byte-idéntica | **sí**, byte-idéntica |
+| Restore documentado | **sí** (`deployment_guide.md` §7.1.8) | **sí** |
+| Restore ensayado | **sí** (esta unidad + `D12` en CI) | **sí** |
+
+RPO de la topología efectiva: pasa de **infinito** a la cadencia del backup
+canónico (~24 h, con corridas cada 6 h).
+
+## 10. Único siguiente paso
+
+Volver al objetivo principal de campaña: **designar responsables concretos por
+institución y aprobar fechas reales**, para poder construir el inventario
+físico. Es una decisión humana. La campaña sigue
+`AMBER-CAMPAIGN-NOT-YET-AUTHORIZED`.
