@@ -1,0 +1,272 @@
+{
+  "unit": "CHP-ACCESS-FILBO-CONSOLIDATE-01B-R1",
+  "purpose": "Manifiesto preparado del corte de acceso de la cohorte FilBo. NO ejecutado, NO programado.",
+  "group_id": "group-1777177383528",
+  "institution_id": "school-1777176810244",
+  "cutoff_local": "2026-09-16T00:00:00-05:00",
+  "cutoff_utc": "2026-09-16T05:00:00Z",
+  "timezone": "America/Bogota",
+  "expected_users": 62,
+  "expected_readers": 61,
+  "expected_mediators": 1,
+  "action": "accountStatus=disabled",
+  "excluded_accounts": {
+    "reason": "cuentas FilBo sin grupo, fuera de alcance por decision humana",
+    "ids": [
+      "user-1777214026863",
+      "user-1778175346157"
+    ]
+  },
+  "sha256_algorithm": "sha256(json.dumps(accounts, separators=(\",\",\":\"), sort_keys=True))",
+  "sha256": "ff19b8d4b17a01d92493cbbd8333391f04ae45def3693f3b6df54469c39d4d86",
+  "accounts": [
+    {
+      "id": "user-1777177383214",
+      "role": "member"
+    },
+    {
+      "id": "user-1777177383996",
+      "role": "member"
+    },
+    {
+      "id": "user-1777177384590",
+      "role": "member"
+    },
+    {
+      "id": "user-1777177385133",
+      "role": "member"
+    },
+    {
+      "id": "user-1777177385674",
+      "role": "member"
+    },
+    {
+      "id": "user-1777177386211",
+      "role": "member"
+    },
+    {
+      "id": "user-1777177386728",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473693295",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473693999",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473694606",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473695312",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473695960",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473696508",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473697050",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473697587",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473698123",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473698655",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473699256",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473699770",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473700300",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473700852",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473701398",
+      "role": "member"
+    },
+    {
+      "id": "user-1777473701928",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568389215",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568389795",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568390346",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568390908",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568391459",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568391996",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568392547",
+      "role": "member"
+    },
+    {
+      "id": "user-1777568393086",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687427817",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687428451",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687429192",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687429901",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687430618",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687431341",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687432052",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687432721",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687433377",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687434060",
+      "role": "member"
+    },
+    {
+      "id": "user-1777687434798",
+      "role": "member"
+    },
+    {
+      "id": "user-1777820603019",
+      "role": "member"
+    },
+    {
+      "id": "user-1777820603968",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900271853",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900272492",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900273131",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900273718",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900274306",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900274890",
+      "role": "member"
+    },
+    {
+      "id": "user-1777900275459",
+      "role": "member"
+    },
+    {
+      "id": "user-1778258611853",
+      "role": "member"
+    },
+    {
+      "id": "user-1778513743214",
+      "role": "member"
+    },
+    {
+      "id": "user-1778514151436",
+      "role": "member"
+    },
+    {
+      "id": "user-1781223321961",
+      "role": "member"
+    },
+    {
+      "id": "user-1781223322431",
+      "role": "member"
+    },
+    {
+      "id": "user-1781223322761",
+      "role": "member"
+    },
+    {
+      "id": "user-1781223323090",
+      "role": "member"
+    },
+    {
+      "id": "user-1781227355883",
+      "role": "member"
+    },
+    {
+      "id": "user-1781631750879",
+      "role": "member"
+    },
+    {
+      "id": "user-1782319947344",
+      "role": "member"
+    },
+    {
+      "id": "user-1785170474112",
+      "role": "mediator"
+    }
+  ]
+}
