@@ -59,7 +59,13 @@ import { ingestPedagogicalFile } from './leoIngester.js';
 import { normalizeRequest, dispatchInteraction } from './leoOrchestrator.js';
 import { getMediatorStudentSummary, getMediatorContentHistory } from './leoMediatorViewService.js';
 import { getActivationOutputsForUser } from './leoActivationService.js';
-import { createAccessService } from './accessService.js';
+import {
+    createAccessService,
+    // CHP-ACCESS-PEDAGOGY-01D-B — predicate único de material pedagógico.
+    classifyUploadPath,
+    isPedagogyRestrictedItem,
+    normalizeUploadRequestPath,
+} from './accessService.js';
 import {
     init as initMetrics,
     computeStudentMetrics,
@@ -264,11 +270,20 @@ app.use(metricsMiddleware);
 
 // Key by userId for authenticated requests — prevents shared school NAT IPs from
 // exhausting a single bucket for all students. Falls back to IP for anonymous traffic.
+// CHP-ACCESS-PEDAGOGY-01D-B — ruta del autorizador de assets que el edge
+// consulta por `auth_request`. Se declara aquí porque el rate limiter debe
+// eximirla: el edge la consulta UNA VEZ POR ASSET, y el cubo de 1500/15 min
+// está dimensionado para llamadas de aplicación. Sin la exención, /uploads/
+// empezaría a devolver 429 — esta unidad rompería justo los assets generales
+// que debe preservar. El endpoint no escribe nada y su location es `internal`.
+const UPLOADS_AUTHZ_PATH = '/api/internal/uploads-authz';
+
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 1500,
     keyGenerator: (req) => req.headers['x-user-id'] || ipKeyGenerator(req),
-    skip: (req) => req.path === '/api/health',
+    skip: (req) => req.path === '/api/health'
+        || String(req.originalUrl || req.url || '').split('?')[0] === UPLOADS_AUTHZ_PATH,
     standardHeaders: true,
     legacyHeaders: false,
 });
@@ -2014,10 +2029,53 @@ app.post('/api/experiences/evidence/:evidenceId/resubmit', requireUserAuth, asyn
 });
 // --- END CHP-MOOK-01 -------------------------------------------------------
 
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-ACCESS-PEDAGOGY-01D-B — IDENTIDAD DEL OBSERVADOR
+//
+// Resuelve quién mira, para decidir la visibilidad del material pedagógico.
+// Mismo patrón que el resto del fichero: en compat/enforce manda la sesión
+// firmada; en modo 'off' se conserva el contrato histórico (x-user-id). Nunca
+// acepta una identidad por header cuando el modo de sesión lo prohíbe.
+// ────────────────────────────────────────────────────────────────────────────
+const PEDAGOGY_PRIVILEGED_ROLES = ['administrador', 'mediador'];
+
+const pedagogyRolesOf = (user) => (Array.isArray(user?.roles)
+    ? user.roles
+    : (user?.role ? [user.role] : (user?.rol ? [user.rol] : [])));
+
+async function resolveViewerPrincipal(req) {
+    // Autoridad de máquina/operador (x-admin-secret file-only): ve todo.
+    if (await isAdminRequest(req)) return { machine: true, user: null, roles: ['administrador'] };
+
+    let userId = null;
+    if (sessionIssuanceEnabled()) {
+        const d = await sessionAuth.authenticate(req);
+        if (d.ok) userId = d.userId;
+    } else {
+        userId = req.headers['x-user-id'] || null;
+    }
+    if (!userId) return { machine: false, user: null, roles: [] };
+
+    const user = readJSON(USERS_DB).find(u => u.id === userId);
+    if (!user || !isUserActive(user)) return { machine: false, user: null, roles: [] };
+    return { machine: false, user, roles: pedagogyRolesOf(user) };
+}
+
+const viewerSeesPedagogy = (viewer) =>
+    (viewer?.roles || []).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
+
 // --- CONTENT ROUTES ---
-app.get('/api/content', (req, res) => {
+// CHP-ACCESS-PEDAGOGY-01D-B: el listado aplica el MISMO predicate que el
+// preflight. Los lectores no ven material pedagógico independiente; mediador,
+// administrador y la autoridad de máquina siguen viendo el catálogo completo.
+// Los nodos de Experience (`standalone === false`) no se filtran nunca.
+app.get('/api/content', async (req, res) => {
     try {
-        res.json(readJSON(DB_FILE));
+        const all = readJSON(DB_FILE);
+        if (!Array.isArray(all)) return res.json(all);
+        const viewer = await resolveViewerPrincipal(req);
+        if (viewerSeesPedagogy(viewer)) return res.json(all);
+        return res.json(all.filter(item => !isPedagogyRestrictedItem(item)));
     } catch (error) {
         res.status(500).json({ error: 'Failed to read database' });
     }
@@ -2126,6 +2184,16 @@ app.get('/api/content/:id/access', async (req, res) => {
             // Sin restricción institucional activa → acceso total (legado para mediadores sin configuración)
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
             return res.json({ allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' });
+        }
+
+        // CHP-ACCESS-PEDAGOGY-01D-B: llegados aquí el usuario NO es administrador
+        // ni mediador (ambos retornaron arriba). El material pedagógico
+        // independiente le está vedado por encima de asignaciones, scopes y
+        // fallback legacy. Los nodos de Experience (`standalone === false`) no
+        // son PEDAGOGY_RESTRICTED, así que siguen su camino habitual.
+        if (isPedagogyRestrictedItem(content)) {
+            log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via PEDAGOGY_RESTRICTED`, 'ACCESS');
+            return res.status(403).json({ allowed: false, reason: 'Material pedagógico reservado a mediadores.' });
         }
 
         // 6. Verificar excepción por asignación pedagógica (Aula Viva)
@@ -2278,6 +2346,50 @@ app.get('/api/content/:id/access', async (req, res) => {
             errorCode: 'ACCESS_CHECK_FAILED',
             reason:    'Error de servidor al verificar acceso.',
         });
+    }
+});
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-ACCESS-PEDAGOGY-01D-B — AUTORIZADOR DE ASSETS PARA EL EDGE
+//
+// El edge sigue resolviendo /uploads/ con `alias` y sirviendo los bytes él
+// mismo; solo consulta este endpoint por `auth_request` antes de entregarlos.
+// Node no lee el fichero, no lo proxya y no devuelve metadata: solo veredicto.
+//
+//   general / público / Experience / compartido / no mapeado → 204 (sin sesión)
+//   pedagogía independiente + sin sesión                      → 401
+//   pedagogía independiente + lector                          → 403
+//   pedagogía independiente + mediador o administrador        → 204 + X-CHP-Cache
+//   ruta inválida o traversal                                 → 404
+//   error técnico                                             → 500
+//
+// La location que lo publica es `internal`: inalcanzable desde internet.
+// ────────────────────────────────────────────────────────────────────────────
+app.get(UPLOADS_AUTHZ_PATH, async (req, res) => {
+    try {
+        const normalized = normalizeUploadRequestPath(req.get('x-original-uri') || '');
+        if (!normalized.ok) {
+            log(`[uploads-authz] URI rechazada (${normalized.reason})`, 'ACCESS');
+            return res.status(404).end();
+        }
+
+        // Solo la pedagogía independiente exige identidad. Todo lo demás
+        // conserva EXACTAMENTE su comportamiento público actual.
+        if (classifyUploadPath(normalized.path, readJSON(DB_FILE)) !== 'PEDAGOGY_RESTRICTED') {
+            return res.status(204).end();
+        }
+
+        const viewer = await resolveViewerPrincipal(req);
+        if (!viewer.machine && !viewer.user) return res.status(401).end();
+        if (!viewerSeesPedagogy(viewer)) return res.status(403).end();
+
+        // Autorizado: el edge no debe publicarlo en cachés compartidas.
+        res.set('X-CHP-Cache', 'private');
+        return res.status(204).end();
+    } catch (e) {
+        log(`[uploads-authz] Error inesperado: ${e.message}`, 'ERROR');
+        return res.status(500).end();
     }
 });
 
@@ -9401,9 +9513,14 @@ app.get('/api/content/my-catalog', requireUserAuth, (req, res) => {
         const { titleIds, collectionIds } = getAccessibleContentIds(userId);
         const allContent = readJSON(DB_FILE);
 
+        // CHP-ACCESS-PEDAGOGY-01D-B: mismo predicate que /api/content. Una regla
+        // explícita no convierte a un lector en destinatario de material
+        // pedagógico independiente; el preflight lo denegaría igualmente.
+        const seesPedagogy = pedagogyRolesOf(req.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
         const catalog = allContent.filter(item =>
-            titleIds.includes(item.id) ||
-            (item.collectionId && collectionIds.includes(item.collectionId))
+            (titleIds.includes(item.id) ||
+                (item.collectionId && collectionIds.includes(item.collectionId))) &&
+            (seesPedagogy || !isPedagogyRestrictedItem(item))
         );
 
         res.json({

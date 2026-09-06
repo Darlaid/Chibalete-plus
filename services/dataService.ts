@@ -1853,11 +1853,14 @@ class DataService {
     }
 
     getContenidos(roles: string[], checkAccessForUserId?: string): Content[] {
-        // BYPASS ADMINISTRADOR: el admin ve TODO el catálogo incluyendo
-        // contenido tipo 'contexto_pedagogico' (guías pedagógicas internas).
-        // Lectores y mediadores no tienen acceso a ese tipo.
+        // CHP-ACCESS-PEDAGOGY-01D-B: el filtro por tipo que vivía aquí ocultaba
+        // 'contexto_pedagogico' también a los MEDIADORES, y solo cubría uno de
+        // los tres tipos pedagógicos. Era una segunda política, divergente de la
+        // del servidor. El backend es ahora la única fuente de verdad: filtra el
+        // material pedagógico independiente en GET /api/content según el rol, y
+        // este catálogo se limita a reflejar su respuesta.
         const rolesHasAdmin = hasAdminRole(roles);
-        let baseContent = rolesHasAdmin ? this.content : this.content.filter(c => c.tipo !== 'contexto_pedagogico');
+        let baseContent = this.content;
 
         // BYPASS ADMIN + MEDIADOR (FASE 5): admin y mediadores ven el catálogo
         // completo sin restricción por usuario. Solo los lectores pasan por el
@@ -2307,8 +2310,9 @@ class DataService {
     }
 
     getContenidosHijos(parentId: string, roles: string[] = []): Content[] {
-        const rolesHasAdmin = hasAdminRole(roles);
-        return this.content.filter(c => c.parentId === parentId && (rolesHasAdmin || c.tipo !== 'contexto_pedagogico'));
+        // CHP-ACCESS-PEDAGOGY-01D-B: sin filtro por tipo — `this.content` ya
+        // llega filtrado por el backend según el rol de la sesión.
+        return this.content.filter(c => c.parentId === parentId);
     }
 
     getNuevosTitulos(roles: string[]): Content[] {
