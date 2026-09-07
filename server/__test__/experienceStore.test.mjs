@@ -10,6 +10,7 @@ import {
     createExperience, createDraftVersion, updateDraftVersion, publishVersion,
     startRun, completeNode, submitEvidence, reviewEvidence, runProgress,
     listPublished, computeRouteView, attachLeoEvidenceRefs,
+    requestChanges, resubmitEvidence,
 } from '../lib/experienceStore.js';
 import { validateEvent, getMeta } from '../analytics/eventRegistry.js';
 
@@ -158,9 +159,9 @@ t('J: los 6 eventos MOOK validan contra el eventRegistry canónico (categoría e
     const cases = [
         ['experience_started', base],
         ['node_started', { ...base, nodeId: 'n1', nodeType: 'READING' }],
-        ['node_completed', { ...base, nodeId: 'n1', nodeType: 'READING' }],
+        ['node_completed', { ...base, nodeId: 'n1', nodeType: 'READING', required: true }],   // CANONICAL-EVENTS-01B (aditivo)
         ['evidence_submitted', { ...base, nodeId: 'n4', nodeType: 'PRODUCTION', evidenceId: 'evid-1', requiresReview: true }],
-        ['evidence_reviewed', { experienceId: 'e1', experienceVersionId: 'v1', evidenceId: 'evid-1', decision: 'aprobado' }],
+        ['evidence_reviewed', { experienceId: 'e1', experienceVersionId: 'v1', evidenceId: 'evid-1', reviewerId: 'user-mediador', decision: 'aprobado' }],   // CANONICAL-EVENTS-01B (aditivo)
         ['experience_completed', { ...base, requiredNodes: 4 }],
     ];
     for (const [name, payload] of cases) {
@@ -225,6 +226,107 @@ t('nodos bloqueados hasta completar requeridos anteriores; run idempotente por u
 t('tipos de nodo congelados; normalize tolera basura', () => {
     assert.deepEqual([...NODE_TYPES], ['READING', 'VIDEO', 'AUDIO', 'LEO', 'ACTIVITY', 'PRODUCTION']);
     assert.deepEqual(normalizeMookStore(null), emptyMookStore());
+});
+
+// ── CHP-MOOK-CANONICAL-EVENTS-01B: las transiciones se informan y ocurren UNA vez ──
+t('N: completeNode informa nodeTransitioned/nodeRequired/experienceTransitioned; el retry no transita ni pisa completedAt', () => {
+    const { doc, exp } = pilotDoc();
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    const first = completeNode(doc, run.id, 'n1-leer');
+    assert.deepEqual([first.nodeTransitioned, first.nodeRequired, first.experienceTransitioned], [true, true, false]);
+    const at = run.nodeStates['n1-leer'].completedAt;
+    const again = completeNode(doc, run.id, 'n1-leer');
+    assert.deepEqual([again.nodeTransitioned, again.nodeRequired, again.experienceTransitioned], [false, true, false]);
+    assert.equal(run.nodeStates['n1-leer'].completedAt, at, 'el retry conserva la marca original');
+    assert.equal(again.progress.completedRequired, 1);
+});
+
+t('O: el nodo opcional transita en el dominio pero se informa nodeRequired=false', () => {
+    const { doc, exp } = pilotDoc();
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    completeNode(doc, run.id, 'n1-leer');
+    completeNode(doc, run.id, 'n2-leo', { leoInterchanges: 3 });
+    submitEvidence(doc, { runId: run.id, nodeId: 'n3-actividad', userId: 'user-a', payload: { answers: ['r1', 'r2', 'r3'] } });
+    submitEvidence(doc, { runId: run.id, nodeId: 'n4-produccion', userId: 'user-a', payload: { text: words(160) } });
+    const opt = submitEvidence(doc, { runId: run.id, nodeId: 'n5-cierre', userId: 'user-a', payload: { answers: ['cambió'] } });
+    assert.deepEqual([opt.created, opt.nodeTransitioned, opt.nodeRequired, opt.experienceTransitioned], [true, true, false, false]);
+    assert.equal(run.nodeStates['n5-cierre'].status, 'completed', 'el dominio sí lo completa');
+});
+
+t('P: experienceTransitioned solo en la llamada que cierra el run; después nada transita', () => {
+    const { doc, exp } = pilotDoc();
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    completeNode(doc, run.id, 'n1-leer');
+    completeNode(doc, run.id, 'n2-leo', { leoInterchanges: 3 });
+    const a = submitEvidence(doc, { runId: run.id, nodeId: 'n3-actividad', userId: 'user-a', payload: { answers: ['r1', 'r2', 'r3'] } });
+    assert.equal(a.experienceTransitioned, false);
+    const closing = submitEvidence(doc, { runId: run.id, nodeId: 'n4-produccion', userId: 'user-a', payload: { text: words(160) } });
+    assert.deepEqual([closing.experienceTransitioned, closing.run.status], [true, 'completed']);
+    const completedAt = run.completedAt;
+    const retry = submitEvidence(doc, { runId: run.id, nodeId: 'n4-produccion', userId: 'user-a', payload: { text: words(160) } });
+    assert.deepEqual([retry.created, retry.nodeTransitioned, retry.experienceTransitioned], [false, false, false]);
+    const idle = completeNode(doc, run.id, 'n1-leer');
+    assert.deepEqual([idle.nodeTransitioned, idle.experienceTransitioned], [false, false]);
+    assert.equal(run.completedAt, completedAt, 'el cierre no se re-sella');
+});
+
+t('Q: reintento de la misma entrega inicial → misma evidencia, sin segunda evidencia ni nueva completitud', () => {
+    const { doc, exp } = pilotDoc();
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    completeNode(doc, run.id, 'n1-leer');
+    completeNode(doc, run.id, 'n2-leo', { leoInterchanges: 3 });
+    const first = submitEvidence(doc, { runId: run.id, nodeId: 'n3-actividad', userId: 'user-a', payload: { answers: ['r1', 'r2', 'r3'] } });
+    assert.equal(first.created, true);
+    const retry = submitEvidence(doc, { runId: run.id, nodeId: 'n3-actividad', userId: 'user-a', payload: { answers: ['r1', 'r2', 'r3'] } });
+    assert.equal(retry.created, false);
+    assert.equal(retry.evidence.id, first.evidence.id, 'se reutiliza la evidencia existente');
+    assert.equal(doc.evidence.length, 1, 'no se crea una segunda evidencia');
+    assert.deepEqual(run.nodeStates['n3-actividad'].evidenceIds, [first.evidence.id]);
+    assert.equal(retry.nodeTransitioned, false);
+});
+
+t('R: resubmit solo desde REVISION_REQUESTED; repetirlo tras consumir la transición se rechaza', () => {
+    const { doc, exp } = pilotDoc();
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    completeNode(doc, run.id, 'n1-leer');
+    completeNode(doc, run.id, 'n2-leo', { leoInterchanges: 3 });
+    submitEvidence(doc, { runId: run.id, nodeId: 'n3-actividad', userId: 'user-a', payload: { answers: ['r1', 'r2', 'r3'] } });
+    const { evidence } = submitEvidence(doc, { runId: run.id, nodeId: 'n4-produccion', userId: 'user-a', payload: { text: words(160) } });
+    assert.throws(() => resubmitEvidence(doc, evidence.id, { userId: 'user-a', text: words(170) }), (e) => e.code === 'INVALID_TRANSITION');
+    requestChanges(doc, evidence.id, { reviewerId: 'admin-1', comment: 'ajusta la tesis' });
+    const re = resubmitEvidence(doc, evidence.id, { userId: 'user-a', text: words(170) });
+    assert.equal(re.review.status, 'RESUBMITTED');
+    assert.equal(re.versions.length, 2, 'la entrega anterior se conserva');
+    assert.throws(() => resubmitEvidence(doc, evidence.id, { userId: 'user-a', text: words(170) }), (e) => e.code === 'INVALID_TRANSITION');
+    assert.equal(doc.evidence.length, 2, 'ninguna evidencia nueva');
+});
+
+t('T: la bitácora privada sigue siendo append-only: cada guardado crea evidencia y emite, pero el nodo transita una sola vez', () => {
+    const doc = emptyMookStore();
+    const exp = createExperience(doc, { slug: 'bit', title: 'Bitácora' });
+    const v = createDraftVersion(doc, exp.id, { nodes: [{ id: 'bit', type: 'ACTIVITY', title: 'Bitácora', config: { instruccion: 'Escribe', preguntas: [{ texto: '¿Cómo estás?' }], privado: true } }] }, bookExists);
+    publishVersion(doc, v.id);
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    const d1 = submitEvidence(doc, { runId: run.id, nodeId: 'bit', userId: 'user-a', payload: { answers: ['día 1'] } });
+    const d2 = submitEvidence(doc, { runId: run.id, nodeId: 'bit', userId: 'user-a', payload: { answers: ['día 2'] } });
+    const d3 = submitEvidence(doc, { runId: run.id, nodeId: 'bit', userId: 'user-a', payload: { answers: ['día 2'] } });
+    assert.deepEqual([d1.created, d2.created, d3.created], [true, true, true], 'cada guardado es un registro (evidence_submitted por cada uno)');
+    assert.deepEqual([d1.nodeTransitioned, d2.nodeTransitioned, d3.nodeTransitioned], [true, false, false], 'node_completed solo la primera vez');
+    assert.equal(doc.evidence.length, 3);
+    assert.equal(new Set(doc.evidence.map(e => e.id)).size, 3);
+    assert.equal(run.nodeStates.bit.completedAt, d1.run.nodeStates.bit.completedAt, 'la marca de completitud original se conserva');
+});
+
+t('S: la revisión cierra una sola vez (ALREADY_REVIEWED conservado)', () => {
+    const { doc, exp } = pilotDoc();
+    const { run } = startRun(doc, { userId: 'user-a', experienceId: exp.id });
+    completeNode(doc, run.id, 'n1-leer');
+    completeNode(doc, run.id, 'n2-leo', { leoInterchanges: 3 });
+    submitEvidence(doc, { runId: run.id, nodeId: 'n3-actividad', userId: 'user-a', payload: { answers: ['r1', 'r2', 'r3'] } });
+    const { evidence } = submitEvidence(doc, { runId: run.id, nodeId: 'n4-produccion', userId: 'user-a', payload: { text: words(160) } });
+    const ev = reviewEvidence(doc, evidence.id, { reviewerId: 'admin-1', decision: 'aprobado' });
+    assert.equal(ev.review.reviewerId, 'admin-1');
+    assert.throws(() => reviewEvidence(doc, evidence.id, { reviewerId: 'admin-1', decision: 'aprobado' }), (e) => e.code === 'ALREADY_REVIEWED');
 });
 
 console.log(`experienceStore.test.mjs OK — ${passed} escenarios`);

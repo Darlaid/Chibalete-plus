@@ -297,28 +297,36 @@ function nodeAvailable(v, run, nodeId) {
 export function completeNode(doc, runId, nodeId, { leoInterchanges } = {}) {
     const run = doc.runs.find(r => r.id === runId);
     if (!run) throw err('RUN_NOT_FOUND', `run no existe: ${runId}`);
-    if (run.status === 'completed') return { run, progress: runProgress(doc, run) };
     const v = versionOfRun(doc, run);
     const node = versionNodes(v).find(n => n.id === nodeId);
+    // CANONICAL-EVENTS-01B: los flags dicen si ESTA llamada transitó algo. Una
+    // petición repetida (run ya cerrado o nodo ya completado) no transita y
+    // conserva `completedAt`; el caller no emite hechos sin transición.
+    const idle = () => ({ run, progress: runProgress(doc, run), nodeTransitioned: false, nodeRequired: node?.required === true, experienceTransitioned: false });
+    if (run.status === 'completed') return idle();
     if (!node) throw err('NODE_NOT_FOUND', `nodo no existe en la versión: ${nodeId}`);
     if (!nodeAvailable(v, run, nodeId)) throw err('NODE_LOCKED', 'nodo bloqueado: completa los requeridos anteriores');
     if (['ACTIVITY', 'PRODUCTION'].includes(node.type)) {
         throw err('NODE_NEEDS_EVIDENCE', `${node.type} se completa enviando la evidencia`);
     }
+    if (run.nodeStates[nodeId]?.status === 'completed') return idle();
     if (node.type === 'LEO' && (leoInterchanges ?? 0) < node.config.minIntercambios) {
         throw err('LEO_MIN_INTERCHANGES', `el nodo LEO exige ≥${node.config.minIntercambios} intercambios (lleva ${leoInterchanges ?? 0})`);
     }
     run.nodeStates[nodeId] = { ...(run.nodeStates[nodeId] || {}), status: 'completed', completedAt: nowIso(), evidenceIds: run.nodeStates[nodeId]?.evidenceIds ?? [] };
-    return finalize(doc, run);
+    const { progress, experienceTransitioned } = finalize(doc, run);
+    return { run, progress, nodeTransitioned: true, nodeRequired: node.required === true, experienceTransitioned };
 }
 
 function finalize(doc, run) {
     const progress = runProgress(doc, run);
+    let experienceTransitioned = false;
     if (progress.completed && run.status !== 'completed') {
         run.status = 'completed';
         run.completedAt = nowIso();
+        experienceTransitioned = true;
     }
-    return { run, progress };
+    return { run, progress, experienceTransitioned };
 }
 
 // ── Evidencia (SOLO envíos ACTIVITY/PRODUCTION) ─────────────────────────────
@@ -333,6 +341,18 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
     const node = versionNodes(v).find(n => n.id === nodeId);
     if (!node) throw err('NODE_NOT_FOUND', `nodo no existe: ${nodeId}`);
     if (!['ACTIVITY', 'PRODUCTION'].includes(node.type)) throw err('NODE_NO_EVIDENCE', `${node.type} no recibe envíos`);
+    // CANONICAL-EVENTS-01B: reintento de la MISMA entrega inicial. La UI solo
+    // ofrece «Enviar» en el nodo frontera y un nodo completado es de solo
+    // lectura, así que una segunda petición sobre run+nodo es un reintento: se
+    // reutiliza la evidencia existente, sin crear otra ni transitar nada. El
+    // reenvío tras ajustes solicitados tiene su propia transición (resubmit).
+    // EXCEPCIÓN por contrato: la bitácora privada (ESTAS-AQUI-01) es APPEND-ONLY —
+    // cada guardado es un registro independiente, nunca un reintento.
+    const prior = run.nodeStates[nodeId];
+    if (prior?.status === 'completed' && prior.evidenceIds?.length && !isPrivateActivityNode(v, nodeId)) {
+        const existing = doc.evidence.find(e => e.id === prior.evidenceIds[prior.evidenceIds.length - 1]);
+        if (existing) return { evidence: existing, run, progress: runProgress(doc, run), created: false, nodeTransitioned: false, nodeRequired: node.required === true, experienceTransitioned: false };
+    }
     if (!nodeAvailable(v, run, nodeId)) throw err('NODE_LOCKED', 'nodo bloqueado');
 
     if (node.type === 'ACTIVITY') {
@@ -364,9 +384,11 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
         } : {}),
     };
     doc.evidence.push(ev);
-    run.nodeStates[nodeId] = { status: 'completed', completedAt: nowIso(), evidenceIds: [...(run.nodeStates[nodeId]?.evidenceIds ?? []), ev.id] };
-    const { progress } = finalize(doc, run);
-    return { evidence: ev, run, progress };
+    // Una bitácora privada ya completada suma un registro sin volver a transitar el nodo.
+    const nodeTransitioned = prior?.status !== 'completed';
+    run.nodeStates[nodeId] = { status: 'completed', completedAt: nodeTransitioned ? nowIso() : prior.completedAt, evidenceIds: [...(prior?.evidenceIds ?? []), ev.id] };
+    const { progress, experienceTransitioned } = finalize(doc, run);
+    return { evidence: ev, run, progress, created: true, nodeTransitioned, nodeRequired: node.required === true, experienceTransitioned };
 }
 
 // ── Bitácora privada (CHP-MOOK-ESTAS-AQUI-01) ───────────────────────────────

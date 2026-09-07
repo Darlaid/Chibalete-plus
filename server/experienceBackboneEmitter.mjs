@@ -10,7 +10,9 @@
  *   4. Sin PII: jamás viaja el texto de producciones/respuestas (eso vive en
  *      ExperienceEvidence); los payloads conforman los schemas zod del
  *      eventRegistry (categoría 'experience').
- *   5. Mode='experience' en el envelope.
+ *   5. Mode='experience' en el envelope. `sessionId` = SOLO la sesión
+ *      autenticada real que aporta la ruta (`req.auth.sessionId`); `runId`
+ *      viaja en el payload y jamás suplanta a la sesión (CANONICAL-EVENTS-01B).
  *
  * NO es un pipeline nuevo: reutiliza `recordCanonicalEvent` (mismo sink
  * canónico events.db que el resto del backbone).
@@ -23,14 +25,16 @@ function _enabled() {
     catch { return false; }
 }
 
-function _envelope(event, userId, payload) {
+function _envelope(event, { actorId, sessionId }, payload) {
     return {
         eventId: ulid(),
         event,
         mode: 'experience',
-        userId: String(userId || 'anon'),
+        userId: String(actorId || 'anon'),
         contentId: null,
-        sessionId: String(payload.runId || ulid()),
+        // Sin sesión firmada (modo off / legacy) queda vacía: nunca se rellena
+        // con `runId` ni con un ulid inventado.
+        sessionId: sessionId ? String(sessionId) : null,
         clientTs: Date.now(),
         version: 1,
         payload,
@@ -47,9 +51,9 @@ function _safeEmit(envelope, log) {
     }
 }
 
-const mk = (event) => ({ userId, ...payload }, log) => {
+const mk = (event) => ({ actorId, sessionId, ...payload }, log) => {
     if (!_enabled()) return { ok: false, reason: 'disabled' };
-    return _safeEmit(_envelope(event, userId, payload), log);
+    return _safeEmit(_envelope(event, { actorId, sessionId }, payload), log);
 };
 
 export const emitExperienceStarted   = mk('experience_started');

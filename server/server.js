@@ -1619,6 +1619,12 @@ async function mutateMook(fn) {
 
 const readMook = () => experienceStore.normalizeMookStore(readJSON(MOOK_DB));
 
+// CANONICAL-EVENTS-01B: contexto de emisión derivado SOLO de la request
+// autenticada. `sessionId` es la sesión firmada real o nada — en modo off o con
+// la cabecera legacy no hay sesión canónica y queda vacía; jamás se rellena con
+// `runId` (que viaja en el payload) ni con identidades del cliente.
+const mookCtx = (req) => ({ actorId: req.user.id, sessionId: req.auth?.sessionId ?? null });
+
 // Conteo SERVER-SIDE de intercambios Leo para completitud del nodo LEO:
 // interacciones del usuario sobre el contentId del nodo desde el inicio del run.
 function countLeoInterchangesFor(run, node) {
@@ -1641,20 +1647,28 @@ function mookModuleIdOf(doc, run, nodeId) {
     } catch { return undefined; }
 }
 
-function emitCurrentNodeStarted(doc, run) {
+function emitCurrentNodeStarted(doc, run, ctx) {
     try {
         const view = experienceStore.computeRouteView(doc, run, []);
         const current = view.nodes.find(n => n.state === 'current');
         if (current) {
-            void emitNodeStarted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId: current.id, nodeType: current.type, moduleId: mookModuleIdOf(doc, run, current.id) }, log);
+            void emitNodeStarted({ actorId: run.userId, sessionId: ctx?.sessionId ?? null, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId: current.id, nodeType: current.type, moduleId: mookModuleIdOf(doc, run, current.id) }, log);
         }
     } catch { /* telemetría jamás rompe el flujo */ }
 }
 
-function emitCompletionEvents(run, nodeId, nodeType, progress, moduleId) {
-    void emitNodeCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, nodeId, nodeType, moduleId }, log);
-    if (progress.completed) {
-        void emitExperienceCompleted({ userId: run.userId, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id, requiredNodes: progress.totalRequired }, log);
+// CANONICAL-EVENTS-01B: un hecho por transición REAL, decidida por el store.
+// `node_completed` solo si el nodo transitó en esta llamada Y es requerido;
+// `experience_completed` solo si el run cerró en esta llamada. Un reintento
+// (run cerrado, nodo ya completado) no emite nada.
+function emitCompletionEvents(out, nodeId, nodeType, moduleId, ctx) {
+    const run = out.run;
+    const base = { actorId: run.userId, sessionId: ctx?.sessionId ?? null, experienceId: run.experienceId, experienceVersionId: run.experienceVersionId, runId: run.id };
+    if (out.nodeTransitioned && out.nodeRequired) {
+        void emitNodeCompleted({ ...base, nodeId, nodeType, moduleId, required: true }, log);
+    }
+    if (out.experienceTransitioned) {
+        void emitExperienceCompleted({ ...base, requiredNodes: out.progress.totalRequired }, log);
     }
 }
 
@@ -1883,8 +1897,8 @@ app.post('/api/experiences/:id/run', requireUserAuth, async (req, res) => {
         await mutateMook((doc) => { out = experienceStore.startRun(doc, { userId: req.user.id, experienceId: req.params.id }); });
         const doc = readMook();
         if (out.created) {
-            void emitExperienceStarted({ userId: req.user.id, experienceId: out.run.experienceId, experienceVersionId: out.run.experienceVersionId, runId: out.run.id }, log);
-            emitCurrentNodeStarted(doc, out.run);
+            void emitExperienceStarted({ ...mookCtx(req), experienceId: out.run.experienceId, experienceVersionId: out.run.experienceVersionId, runId: out.run.id }, log);
+            emitCurrentNodeStarted(doc, out.run, mookCtx(req));
         }
         res.status(out.created ? 201 : 200).json({ ...experienceStore.computeRouteView(doc, out.run, contentList), evidence: myEvidenceSummary(doc, out.run, req.user.id) });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
@@ -1917,8 +1931,9 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth,
             out.nodeType = node?.type;
         });
         const docPost = readMook();
-        emitCompletionEvents(out.run, req.params.nodeId, out.nodeType, out.progress, mookModuleIdOf(docPost, out.run, req.params.nodeId));
-        emitCurrentNodeStarted(docPost, out.run);
+        const ctx = mookCtx(req);
+        emitCompletionEvents(out, req.params.nodeId, out.nodeType, mookModuleIdOf(docPost, out.run, req.params.nodeId), ctx);
+        if (out.nodeTransitioned) emitCurrentNodeStarted(docPost, out.run, ctx);
         res.json({ progress: out.progress, status: out.run.status });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
@@ -1932,11 +1947,17 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth,
                 userId: req.user.id, payload: req.body ?? {},
             });
         });
+        // Reintento de la misma entrega inicial: misma evidencia, sin transición
+        // de dominio y sin hechos. 200 (no 201) porque no se creó nada.
+        if (!out.created) {
+            return res.status(200).json({ evidenceId: out.evidence.id, review: out.evidence.review, progress: out.progress, status: out.run.status });
+        }
         const docPost = readMook();
+        const ctx = mookCtx(req);
         const modId = mookModuleIdOf(docPost, out.run, out.evidence.nodeId);
-        void emitEvidenceSubmitted({ userId: req.user.id, experienceId: out.evidence.experienceId, experienceVersionId: out.evidence.experienceVersionId, runId: out.run.id, nodeId: out.evidence.nodeId, nodeType: out.evidence.nodeType, moduleId: modId, evidenceId: out.evidence.id, requiresReview: out.evidence.requiresReview }, log);
-        emitCompletionEvents(out.run, out.evidence.nodeId, out.evidence.nodeType, out.progress, modId);
-        emitCurrentNodeStarted(docPost, out.run);
+        void emitEvidenceSubmitted({ ...ctx, experienceId: out.evidence.experienceId, experienceVersionId: out.evidence.experienceVersionId, runId: out.run.id, nodeId: out.evidence.nodeId, nodeType: out.evidence.nodeType, moduleId: modId, evidenceId: out.evidence.id, requiresReview: out.evidence.requiresReview }, log);
+        emitCompletionEvents(out, out.evidence.nodeId, out.evidence.nodeType, modId, ctx);
+        emitCurrentNodeStarted(docPost, out.run, ctx);
         res.status(201).json({ evidenceId: out.evidence.id, review: out.evidence.review, progress: out.progress, status: out.run.status });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
@@ -2018,7 +2039,9 @@ app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res
                 feedback: req.body?.feedback,
             });
         });
-        void emitEvidenceReviewed({ userId: ev.userId, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, evidenceId: ev.id, decision: ev.review.decision }, log);
+        // El sujeto del hecho sigue siendo el participante (dueño de la evidencia);
+        // el revisor queda explícito en el payload y la sesión es la del revisor.
+        void emitEvidenceReviewed({ actorId: ev.userId, sessionId: req.auth?.sessionId ?? null, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, evidenceId: ev.id, reviewerId: req.user.id, decision: ev.review.decision }, log);
         log(`[MOOK] evidence reviewed: ${ev.id} -> ${ev.review.decision}`);
         res.json({ id: ev.id, review: ev.review });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
@@ -2035,7 +2058,7 @@ app.post('/api/experiences/evidence/:evidenceId/resubmit', requireUserAuth, asyn
         });
         const docPost = readMook();
         const run = docPost.runs.find(r => r.id === ev.runId);
-        void emitEvidenceSubmitted({ userId: req.user.id, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, runId: ev.runId, nodeId: ev.nodeId, nodeType: ev.nodeType, moduleId: run ? mookModuleIdOf(docPost, run, ev.nodeId) : undefined, evidenceId: ev.id, requiresReview: ev.requiresReview }, log);
+        void emitEvidenceSubmitted({ ...mookCtx(req), experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, runId: ev.runId, nodeId: ev.nodeId, nodeType: ev.nodeType, moduleId: run ? mookModuleIdOf(docPost, run, ev.nodeId) : undefined, evidenceId: ev.id, requiresReview: ev.requiresReview }, log);
         res.json({ id: ev.id, status: ev.review.status, versionsCount: ev.versions.length });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });

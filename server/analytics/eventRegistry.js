@@ -124,11 +124,17 @@ const SCHEMAS = {
 
     // EXPERIENCE / MOOK (6) — CHP-ADR-MOOK §9. Payloads mínimos, sin PII ni
     // texto libre (la producción vive en ExperienceEvidence, no en telemetría).
+    // CANONICAL-EVENTS-01B: `node_completed.required` distingue el hecho mínimo
+    // (nodo requerido) del cierre de un nodo opcional; `evidence_reviewed.reviewerId`
+    // hace explícito al revisor — el sujeto del evento sigue siendo el participante.
+    // Ambos ADITIVOS y opcionales en el schema (mismo precedente que `moduleId`: los
+    // payloads previos siguen validando y no hay bump de REGISTRY_VERSION); el emisor
+    // del servidor los envía SIEMPRE.
     experience_started:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1) }).strip(),
     node_started:               z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), moduleId: z.string().min(1).optional() }).strip(),
-    node_completed:             z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), moduleId: z.string().min(1).optional() }).strip(),
+    node_completed:             z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), required: z.boolean().optional(), moduleId: z.string().min(1).optional() }).strip(),
     evidence_submitted:         z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), nodeId: z.string().min(1), nodeType: z.string().max(20), moduleId: z.string().min(1).optional(), evidenceId: z.string().min(1), requiresReview: z.boolean() }).strip(),
-    evidence_reviewed:          z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), evidenceId: z.string().min(1), decision: z.enum(['aprobado', 'con_comentarios']) }).strip(),
+    evidence_reviewed:          z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), evidenceId: z.string().min(1), reviewerId: z.string().min(1).optional(), decision: z.enum(['aprobado', 'con_comentarios']) }).strip(),
     experience_completed:       z.object({ experienceId: z.string().min(1), experienceVersionId: z.string().min(1), runId: z.string().min(1), requiredNodes: z.number().int().nonnegative() }).strip(),
 
     // SYSTEM (6)
