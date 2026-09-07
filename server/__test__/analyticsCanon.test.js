@@ -108,11 +108,18 @@ const SAMPLES = {
     archive_started: { cutoffTs: Date.now()-1, candidate: 50 },
     archive_completed: { archived:120, cutoffTs: Date.now()-1, durationMs:80 },
     shadow_divergence_detected: { domain:'analytics', legacy: 100, canon: 98, missing: 2 },
+    // experience (MOOK) — contrato de CHP-MOOK-CANONICAL-EVENTS-01B/01C
+    experience_started:   { experienceId:'exp1', experienceVersionId:'ver1', runId:'run1' },
+    node_started:         { experienceId:'exp1', experienceVersionId:'ver1', runId:'run1', nodeId:'n1', nodeType:'READING', moduleId:'m1' },
+    node_completed:       { experienceId:'exp1', experienceVersionId:'ver1', runId:'run1', nodeId:'n1', nodeType:'READING', required:true, moduleId:'m1' },
+    evidence_submitted:   { experienceId:'exp1', experienceVersionId:'ver1', runId:'run1', nodeId:'n2', nodeType:'PRODUCTION', evidenceId:'evid1', requiresReview:true },
+    evidence_reviewed:    { experienceId:'exp1', experienceVersionId:'ver1', evidenceId:'evid1', reviewerId:'adm1', decision:'aprobado' },
+    experience_completed: { experienceId:'exp1', experienceVersionId:'ver1', runId:'run1', requiredNodes:4 },
 };
 
 console.log('\n[1] eventRegistry — taxonomía completa, cobertura, rejection');
-ok(`EVENT_CATEGORIES = ${EVENT_CATEGORIES.length} (12 PASO 1: +session/pdf/guided/album/leo)`,
-    EVENT_CATEGORIES.length === 12);
+ok(`EVENT_CATEGORIES = ${EVENT_CATEGORIES.length} (12 PASO 1 + experience de CHP-MOOK-01)`,
+    EVENT_CATEGORIES.length === 13 && EVENT_CATEGORIES.includes('experience'));
 ok('cada evento del registry tiene sample válido en el test',
    EVENT_NAMES.every(n => SAMPLES[n]),
    `faltan: ${EVENT_NAMES.filter(n => !SAMPLES[n]).join(',')}`);

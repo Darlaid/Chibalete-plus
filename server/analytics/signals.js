@@ -157,6 +157,58 @@ export const SIGNALS = Object.freeze([
       saber_pisa: 'NO aplica — no hay marco evaluativo establecido',
       confidence_now: 'low',
       notes: 'OBSERVADA — JAMÁS infiere emoción real del estudiante. Solo cuenta interacciones cuyo objetivo pedagógico fue emocional (e.g., el estudiante usó Leo para hablar de cómo se sintió leyendo). NO usar para diagnóstico afectivo.' },
+
+    // ──────────────────────────────────────────────────────────────────────
+    // CHP-MOOK-CANONICAL-EVENTS-01C — hechos canónicos de Experience (MOOK).
+    // Conteos deterministas por ventana con dimensión OBLIGATORIA
+    // `experienceVersionId` (meta.by_version): un evento sin versión no cuenta y
+    // versiones distintas jamás se mezclan. Sujeto = user_id del evento, salvo
+    // `revisiones_realizadas`, cuyo sujeto es payload.reviewerId: la revisión se
+    // proyecta al revisor, nunca al participante, y sin reviewerId no se infiere.
+    // Sin institución ni grupo (M1-B).
+    // ──────────────────────────────────────────────────────────────────────
+
+    { id: 'experiencias_iniciadas',
+      source_events: ['experience_started'],
+      formula: 'count(experience_started) por user por experienceVersionId en ventana',
+      window: '28d', scope: 'user',
+      utility: 'Experiences realmente iniciadas (run creado), por versión publicada',
+      saber_pisa: 'NO aplica — hecho de participación',
+      confidence_now: 'high' },
+
+    { id: 'nodos_requeridos_completados',
+      source_events: ['node_completed'],
+      formula: 'count(node_completed where payload.required === true) por user por experienceVersionId',
+      window: '28d', scope: 'user',
+      utility: 'avance real del recorrido: solo nodos requeridos, una vez por transición',
+      saber_pisa: 'Saber: persistencia en tareas (proxy)',
+      confidence_now: 'high',
+      notes: 'required ausente o false no cuenta: el cierre de un nodo opcional no es el hecho mínimo.' },
+
+    { id: 'experiencias_completadas',
+      source_events: ['experience_completed'],
+      formula: 'count(experience_completed) por user por experienceVersionId en ventana',
+      window: '28d', scope: 'user',
+      utility: 'Experiences cerradas (todos los requeridos completados)',
+      saber_pisa: 'Saber: persistencia (proxy)',
+      confidence_now: 'high' },
+
+    { id: 'evidencias_enviadas',
+      source_events: ['evidence_submitted'],
+      formula: 'count(evidence_submitted) por user por experienceVersionId en ventana',
+      window: '28d', scope: 'user',
+      utility: 'producciones y actividades entregadas (incluye reenvíos tras ajustes)',
+      saber_pisa: 'Saber: producción escrita (proxy de volumen, no de calidad)',
+      confidence_now: 'high' },
+
+    { id: 'revisiones_realizadas',
+      source_events: ['evidence_reviewed'],
+      formula: 'count(evidence_reviewed where payload.reviewerId === sujeto) por experienceVersionId',
+      window: '28d', scope: 'user',
+      utility: 'revisiones humanas cerradas por cada revisor (mediador/administrador)',
+      saber_pisa: 'NO aplica — hecho de mediación',
+      confidence_now: 'high',
+      notes: 'Sujeto = payload.reviewerId, NO user_id (que es el participante). Sin reviewerId no se atribuye a nadie.' },
 ]);
 
 export const SIGNAL_IDS = Object.freeze(SIGNALS.map(s => s.id));

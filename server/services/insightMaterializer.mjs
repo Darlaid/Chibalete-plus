@@ -28,7 +28,7 @@ import { getInsightsExtDb, getStatements } from '../db/insightsDbExt.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
     || path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
-let _eventsRawDb = null, _stmtBatch = null, _stmtUserHistory = null;
+let _eventsRawDb = null, _stmtBatch = null, _stmtUserHistory = null, _stmtReviewerHistory = null;
 function getRawEventsDb() {
     if (_eventsRawDb) return _eventsRawDb;
     _eventsRawDb = new Database(EVENTS_PATH, { readonly: true, fileMustExist: false });
@@ -37,11 +37,45 @@ function getRawEventsDb() {
         `SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`);
     _stmtUserHistory = _eventsRawDb.prepare(
         `SELECT * FROM events WHERE user_id = ? AND server_ts >= ? ORDER BY server_ts ASC LIMIT ?`);
+    // CHP-MOOK-CANONICAL-EVENTS-01C: las revisiones se proyectan al REVISOR
+    // (payload.reviewerId), cuyo user_id no es el de la fila. Filtro textual
+    // acotado al evento; signalCompute vuelve a comparar reviewerId exacto.
+    _stmtReviewerHistory = _eventsRawDb.prepare(
+        `SELECT * FROM events WHERE event = 'evidence_reviewed' AND server_ts >= ? AND payload_json LIKE ? ORDER BY server_ts ASC LIMIT ?`);
     return _eventsRawDb;
 }
 export function closeMaterializerEventsDb() {
     if (_eventsRawDb) { try { _eventsRawDb.close(); } catch {} _eventsRawDb = null; }
-    _stmtBatch = _stmtUserHistory = null;
+    _stmtBatch = _stmtUserHistory = _stmtReviewerHistory = null;
+}
+
+/** reviewerId de una fila evidence_reviewed (null si no viene: no se infiere). */
+function reviewerIdOf(row) {
+    if (!row || row.event !== 'evidence_reviewed') return null;
+    try {
+        const p = JSON.parse(row.payload_json || '{}');
+        return (p && typeof p.reviewerId === 'string' && p.reviewerId) ? p.reviewerId : null;
+    } catch { return null; }
+}
+
+/** Añade `row` al bucket de su sujeto y, si es una revisión, también al del revisor. */
+function bucketBySubject(byUser, row) {
+    if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
+    byUser.get(row.user_id).push(row);
+    const rid = reviewerIdOf(row);
+    if (rid && rid !== row.user_id) {
+        if (!byUser.has(rid)) byUser.set(rid, []);
+        byUser.get(rid).push(row);
+    }
+}
+
+/** Historia del sujeto: sus filas + las revisiones que firmó como reviewerId (sin duplicar). */
+function subjectHistory(userId, sinceTs) {
+    const own = _stmtUserHistory.all(String(userId), sinceTs, 20_000);
+    const reviewed = _stmtReviewerHistory.all(sinceTs, `%"reviewerId":"${String(userId)}"%`, 20_000);
+    if (reviewed.length === 0) return own;
+    const seen = new Set(own.map(r => r.id));
+    return own.concat(reviewed.filter(r => !seen.has(r.id))).sort((a, b) => a.server_ts - b.server_ts);
 }
 import { computeUserSignals, computeUserProfile } from './signalCompute.mjs';
 import { SIGNAL_IDS } from '../analytics/signals.js';
@@ -130,8 +164,7 @@ export function runOnce(opts = {}) {
             if (ev.id > maxId) maxId = ev.id;
             // Tolerancia a evento corrupto: si falta user_id O event → skip + count.
             if (!ev || !ev.user_id || !ev.event) { result.skippedCorrupted++; continue; }
-            if (!byUser.has(ev.user_id)) byUser.set(ev.user_id, []);
-            byUser.get(ev.user_id).push(ev);
+            bucketBySubject(byUser, ev);
         }
 
         const periodKey = `${PERIOD_DAYS}d`;
@@ -151,9 +184,9 @@ export function runOnce(opts = {}) {
                     const sinceTs = nowTs - PERIOD_DAYS * 86400_000;
                     // RAW: necesita payload_json + server_ts + id sin transform.
                     getRawEventsDb();
-                    history = _stmtUserHistory.all(String(userId), sinceTs, 20_000);
+                    history = subjectHistory(userId, sinceTs);
                 } catch { history = _evsInBatch; }
-                const sig = computeUserSignals(history, { nowTs, windowDays: PERIOD_DAYS });
+                const sig = computeUserSignals(history, { nowTs, windowDays: PERIOD_DAYS, userId: String(userId) });
                 // Persistir signal_snapshots (user scope)
                 for (const sid of SIGNAL_IDS) {
                     const s = sig[sid];
@@ -320,8 +353,7 @@ export function rebuildInsights(opts) {
         const byUser = new Map();
         for (const e of inRange) {
             if (!e.user_id) continue;
-            if (!byUser.has(e.user_id)) byUser.set(e.user_id, []);
-            byUser.get(e.user_id).push(e);
+            bucketBySubject(byUser, e);
         }
         if (dryRun) {
             out.wouldUpsert = byUser.size * SIGNAL_IDS.length + byUser.size; // signals + profile
@@ -330,7 +362,7 @@ export function rebuildInsights(opts) {
         }
         const tx = getInsightsExtDb().transaction(() => {
             for (const [userId, evs] of byUser) {
-                const sig = computeUserSignals(evs, { nowTs: toTs, windowDays: PERIOD_DAYS });
+                const sig = computeUserSignals(evs, { nowTs: toTs, windowDays: PERIOD_DAYS, userId: String(userId) });
                 const profile = computeUserProfile(sig, { nowTs: toTs });
                 for (const sid of SIGNAL_IDS) {
                     const s = sig[sid]; if (!s) continue;

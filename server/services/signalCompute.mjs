@@ -183,6 +183,35 @@ export function computeUserSignals(events, ctx) {
         }
     }
 
+    // ── CHP-MOOK-CANONICAL-EVENTS-01C: hechos de Experience por versión ─────
+    // Conteos por experienceVersionId (dimensión obligatoria: sin versión no se
+    // cuenta; versiones distintas jamás se mezclan). Sujeto = user_id del
+    // evento, salvo `revisiones_realizadas`: sujeto = payload.reviewerId, que el
+    // materializer entrega como ctx.userId. Sin ctx.userId o sin reviewerId la
+    // revisión no se atribuye a nadie — jamás al participante.
+    {
+        const payloadOf = (e) => { try { const p = JSON.parse(e.payload_json || '{}'); return p && typeof p === 'object' ? p : {}; } catch { return {}; } };
+        const countByVersion = (name, accept = () => true) => {
+            const by = {};
+            let total = 0;
+            for (const e of byEvent(name)) {
+                const p = payloadOf(e);
+                const ver = typeof p.experienceVersionId === 'string' && p.experienceVersionId ? p.experienceVersionId : null;
+                if (!ver || !accept(p)) continue;
+                by[ver] = (by[ver] || 0) + 1;
+                total++;
+            }
+            return { value: total, confidence: total > 0 ? 'high' : 'low',
+                meta: { by_version: by, total, window_days: ctx.windowDays } };
+        };
+        const me = typeof ctx?.userId === 'string' && ctx.userId ? ctx.userId : null;
+        out.experiencias_iniciadas       = countByVersion('experience_started');
+        out.nodos_requeridos_completados = countByVersion('node_completed', (p) => p.required === true);
+        out.experiencias_completadas     = countByVersion('experience_completed');
+        out.evidencias_enviadas          = countByVersion('evidence_submitted');
+        out.revisiones_realizadas        = countByVersion('evidence_reviewed', (p) => !!me && typeof p.reviewerId === 'string' && p.reviewerId === me);
+    }
+
     // ── 10-15+: stubs registrados (contrato existe; cómputo deferred) ──────
     // Cubre TODAS las signals no calculadas — incluyendo las Leo cuando el
     // flag está OFF y cualquier signal nueva que se agregue al catálogo.

@@ -181,6 +181,79 @@ try {
         } catch { threw = true; }
         ok('reader API tolera inputs inexistentes sin lanzar', threw === false);
     }
+
+    console.log('\n[H] CHP-MOOK-CANONICAL-EVENTS-01C — proyecciones de Experience por versión');
+    {
+        const sig = (uid, id) => {
+            const row = reader.getScopeSignals('user', uid).find(r => r.signal_id === id);
+            return row ? { value: row.metric_value, meta: JSON.parse(row.metadata_json || '{}') } : null;
+        };
+        const exp = (v, extra) => ({ experienceId: 'exp1', experienceVersionId: v, runId: 'run-' + v, ...extra });
+        const E = 'experience';
+        seed([
+            // participante u10, versión v1: inicio, 2 requeridos + 1 opcional + 1 sin `required`, 2 evidencias, cierre
+            { event_id:'x01', event:'experience_started',   mode:E, user_id:'u10', session_id:'', ts:d(3), payload: exp('v1') },
+            { event_id:'x02', event:'node_completed',       mode:E, user_id:'u10', session_id:'', ts:d(3), payload: exp('v1', { nodeId:'n1', nodeType:'READING',  required:true }) },
+            { event_id:'x03', event:'node_completed',       mode:E, user_id:'u10', session_id:'', ts:d(3), payload: exp('v1', { nodeId:'n2', nodeType:'ACTIVITY', required:true }) },
+            { event_id:'x04', event:'node_completed',       mode:E, user_id:'u10', session_id:'', ts:d(3), payload: exp('v1', { nodeId:'n3', nodeType:'ACTIVITY', required:false }) },
+            { event_id:'x05', event:'node_completed',       mode:E, user_id:'u10', session_id:'', ts:d(3), payload: exp('v1', { nodeId:'n4', nodeType:'READING' }) },
+            { event_id:'x06', event:'evidence_submitted',   mode:E, user_id:'u10', session_id:'', ts:d(2), payload: exp('v1', { nodeId:'n2', nodeType:'ACTIVITY',   evidenceId:'ev1', requiresReview:false }) },
+            { event_id:'x07', event:'evidence_submitted',   mode:E, user_id:'u10', session_id:'', ts:d(2), payload: exp('v1', { nodeId:'n5', nodeType:'PRODUCTION', evidenceId:'ev2', requiresReview:true }) },
+            { event_id:'x08', event:'experience_completed', mode:E, user_id:'u10', session_id:'', ts:d(2), payload: exp('v1', { requiredNodes: 3 }) },
+            // misma participante, versión v2: solo inicio + 1 requerido
+            { event_id:'x09', event:'experience_started',   mode:E, user_id:'u10', session_id:'', ts:d(1), payload: exp('v2') },
+            { event_id:'x10', event:'node_completed',       mode:E, user_id:'u10', session_id:'', ts:d(1), payload: exp('v2', { nodeId:'n1', nodeType:'READING', required:true }) },
+            // otro participante u11 en v1
+            { event_id:'x11', event:'experience_started',   mode:E, user_id:'u11', session_id:'', ts:d(1), payload: exp('v1') },
+            // revisiones: adm1 revisa ev2 de u10; una revisión SIN reviewerId no se atribuye a nadie
+            { event_id:'x12', event:'evidence_reviewed',    mode:E, user_id:'u10', session_id:'', ts:d(1), payload: { experienceId:'exp1', experienceVersionId:'v1', evidenceId:'ev2', reviewerId:'adm1', decision:'aprobado' } },
+            { event_id:'x13', event:'evidence_reviewed',    mode:E, user_id:'u10', session_id:'', ts:d(1), payload: { experienceId:'exp1', experienceVersionId:'v1', evidenceId:'ev3', decision:'con_comentarios' } },
+        ]);
+        const rH = materializer.runOnce({ nowTs: NOW });
+        ok('H0) batch experience procesado', rH.ok && rH.processed >= 13);
+        const st = sig('u10', 'experiencias_iniciadas');
+        ok('1) inicio por versión: u10 = 2 (v1:1, v2:1)', st?.value === 2 && st.meta.by_version.v1 === 1 && st.meta.by_version.v2 === 1);
+        const nr = sig('u10', 'nodos_requeridos_completados');
+        ok('2) nodo requerido completado: v1 = 2', nr?.meta.by_version.v1 === 2);
+        ok('3) nodo opcional (required:false) ignorado: total = 3 (v1:2 + v2:1)', nr?.value === 3 && nr.meta.total === 3);
+        ok('4) required ausente ignorado (x05 no suma)', nr?.meta.by_version.v1 === 2);
+        const ec = sig('u10', 'experiencias_completadas');
+        ok('5) Experience completada: v1 = 1 y v2 ausente', ec?.value === 1 && ec.meta.by_version.v1 === 1 && ec.meta.by_version.v2 === undefined);
+        const ev = sig('u10', 'evidencias_enviadas');
+        ok('6) evidencias enviadas: v1 = 2', ev?.value === 2 && ev.meta.by_version.v1 === 2);
+        const rv = sig('adm1', 'revisiones_realizadas');
+        ok('7) revisión atribuida al revisor adm1 (v1 = 1)', rv?.value === 1 && rv.meta.by_version.v1 === 1);
+        ok('   el participante u10 no recibe revisiones_realizadas', sig('u10', 'revisiones_realizadas')?.value === 0);
+        ok('8) revisión sin reviewerId no se infiere (adm1 sigue en 1; u11 en 0)', rv?.value === 1 && sig('u11', 'revisiones_realizadas')?.value === 0);
+        ok('9) versiones nunca se mezclan: v2 solo tiene inicio 1 y nodo 1, sin cierre', st.meta.by_version.v2 === 1 && nr.meta.by_version.v2 === 1 && ec.meta.by_version.v2 === undefined);
+        const s11 = sig('u11', 'experiencias_iniciadas');
+        ok('10) dos participantes independientes: u11 = 1 (v1) y u10 sigue en 2', s11?.value === 1 && s11.meta.by_version.v1 === 1 && st.value === 2);
+
+        const rH2 = materializer.runOnce({ nowTs: NOW });
+        ok('11) segunda ejecución: 0 procesados y conteos idénticos', rH2.ok && rH2.processed === 0
+            && sig('u10', 'nodos_requeridos_completados')?.value === 3 && sig('adm1', 'revisiones_realizadas')?.value === 1);
+
+        // 12) interrupción y reanudación: lotes de 1 evento desde el watermark, sin duplicar lo confirmado
+        seed([
+            { event_id:'x14', event:'node_completed',    mode:E, user_id:'u10', session_id:'', ts:d(0), payload: exp('v2', { nodeId:'n2', nodeType:'ACTIVITY', required:true }) },
+            { event_id:'x15', event:'evidence_reviewed', mode:E, user_id:'u11', session_id:'', ts:d(0), payload: { experienceId:'exp1', experienceVersionId:'v1', evidenceId:'ev9', reviewerId:'adm1', decision:'aprobado' } },
+        ]);
+        const p1 = materializer.runOnce({ nowTs: NOW, batchLimit: 1 });
+        const p2 = materializer.runOnce({ nowTs: NOW, batchLimit: 1 });
+        const p3 = materializer.runOnce({ nowTs: NOW });
+        ok('12) reanudación por watermark: 1+1+0 procesados y conteos exactos (u10 v2 = 2, adm1 = 2)',
+            p1.processed === 1 && p2.processed === 1 && p3.processed === 0
+            && sig('u10', 'nodos_requeridos_completados')?.meta.by_version.v2 === 2 && sig('adm1', 'revisiones_realizadas')?.value === 2);
+
+        const c1 = sig('u1', 'continuidad_semanal'); const dv = sig('u1', 'diversidad_lectora');
+        ok('13) señales reading_* de u1 sin regresión', !!c1 && typeof c1.value === 'number' && !!dv && dv.value >= 1);
+        ok('    u1 tiene las señales experience en 0 (sin contaminación)', sig('u1', 'experiencias_iniciadas')?.value === 0);
+
+        const rdb = ext.getInsightsExtDb();
+        const inst = rdb.prepare("SELECT COUNT(*) AS n FROM cohort_rollups WHERE scope_type IN ('group','school','org')").get().n;
+        const scopes = rdb.prepare("SELECT COUNT(*) AS n FROM signal_snapshots WHERE scope_type <> 'user'").get().n;
+        ok('14) cero rollups por institución/grupo y cero snapshots fuera del scope user', inst === 0 && scopes === 0);
+    }
 } finally {
     materializer.closeMaterializerEventsDb();
     ext.closeInsightsExtDb();
