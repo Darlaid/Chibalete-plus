@@ -261,29 +261,41 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// CHP-ACCESS-PEDAGOGY-01D-B — ruta del autorizador de assets que el edge
+// consulta por `auth_request`. El edge la consulta UNA VEZ POR ASSET, así que
+// dos capas ordinarias deben eximirla: el rate limiter (el cubo de 1500/15 min
+// está dimensionado para llamadas de aplicación; sin la exención, /uploads/
+// empezaría a devolver 429 y esta unidad rompería justo los assets generales
+// que debe preservar) y el access-log (una página con decenas de assets
+// produciría una línea por asset y ahogaría el log útil). El endpoint no
+// escribe nada y su location es `internal`.
+const UPLOADS_AUTHZ_PATH = '/api/internal/uploads-authz';
+
+// Ruta efectiva del request, sin query. `req.path` solo sirve en middleware
+// montado en la raíz: bajo `app.use('/api/', ...)` Express ya recortó el
+// prefijo, así que compararlo contra '/api/...' no coincide nunca.
+const requestPathname = (req) => String(req.originalUrl || req.url || '').split('?')[0];
+
 // P0.6 — access-log estructurado (request-id + redaction). DESPUÉS de
 // json() para no interferir el parseo; ANTES de las rutas para cubrir todo.
 // Incremental: el log() legacy sigue intacto. Rollback = borrar esta línea.
-app.use(httpLogger);
+// CHP-ACCESS-PEDAGOGY-01D-B-R3: la subrequest interna del edge queda fuera del
+// access-log ordinario. Todo lo demás — request-id, niveles, redaction y el
+// resto de las rutas — sigue exactamente igual.
+app.use((req, res, next) => (
+    requestPathname(req) === UPLOADS_AUTHZ_PATH ? next() : httpLogger(req, res, next)
+));
 // P2-B — latencia/errores por ruta (overhead ~0 si METRICS_ENABLED off).
 app.use(metricsMiddleware);
 
 // Key by userId for authenticated requests — prevents shared school NAT IPs from
 // exhausting a single bucket for all students. Falls back to IP for anonymous traffic.
-// CHP-ACCESS-PEDAGOGY-01D-B — ruta del autorizador de assets que el edge
-// consulta por `auth_request`. Se declara aquí porque el rate limiter debe
-// eximirla: el edge la consulta UNA VEZ POR ASSET, y el cubo de 1500/15 min
-// está dimensionado para llamadas de aplicación. Sin la exención, /uploads/
-// empezaría a devolver 429 — esta unidad rompería justo los assets generales
-// que debe preservar. El endpoint no escribe nada y su location es `internal`.
-const UPLOADS_AUTHZ_PATH = '/api/internal/uploads-authz';
-
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 1500,
     keyGenerator: (req) => req.headers['x-user-id'] || ipKeyGenerator(req),
     skip: (req) => req.path === '/api/health'
-        || String(req.originalUrl || req.url || '').split('?')[0] === UPLOADS_AUTHZ_PATH,
+        || requestPathname(req) === UPLOADS_AUTHZ_PATH,
     standardHeaders: true,
     legacyHeaders: false,
 });

@@ -60,15 +60,23 @@ const PRESENTATION_ASSET_FIELDS = Object.freeze(['portada_url', 'ilustraciones_u
 
 const UPLOADS_PREFIX = '/uploads/';
 
-/** Normaliza un valor del catálogo a su ruta `/uploads/…` comparable. */
-function canonicalUploadPath(value) {
+/**
+ * Normaliza un valor del catálogo a su ruta `/uploads/…` comparable.
+ *
+ * `decode:false` para las rutas que YA vienen decodificadas una vez por
+ * `normalizeUploadRequestPath`: volver a decodificarlas sería un segundo
+ * decode sobre una entrada ya validada.
+ */
+function canonicalUploadPath(value, { decode = true } = {}) {
     if (typeof value !== 'string') return null;
     const at = value.indexOf(UPLOADS_PREFIX);
     if (at < 0) return null;
     let p = value.slice(at);
     const cut = p.search(/[?#]/);
     if (cut >= 0) p = p.slice(0, cut);
-    try { p = decodeURIComponent(p); } catch { /* valor sin escapar: se compara literal */ }
+    if (decode) {
+        try { p = decodeURIComponent(p); } catch { /* valor sin escapar: se compara literal */ }
+    }
     return p.replace(/\/{2,}/g, '/');
 }
 
@@ -110,9 +118,77 @@ export function isPedagogyRestrictedItem(item) {
     return classifyContentItem(item) === 'PEDAGOGY_RESTRICTED';
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-ACCESS-PEDAGOGY-01D-B-R3 — TTS GENERADO
+//
+// El audio de TTS no se referencia nunca en el catálogo: los productores lo
+// escriben bajo una convención de RUTA y el frontend lo pide por convención.
+//
+//   ttsService.generateAudioForContent → /uploads/audio/<contentId>/manifest.json
+//                                        /uploads/audio/<contentId>/chunk_….mp3
+//   albumTtsService                    → /uploads/audio/<contentId>/album/<hash>.mp3
+//                                                                  <hash>.json
+//   server.js (borrado de contenido)   → rmSync(<uploads>/audio/<id>)
+//
+// El `contentId` ocupa SIEMPRE el primer segmento tras `/uploads/audio/`, sin
+// depender de título ni de nombre humano. `ttsService` lo usa crudo;
+// `albumTtsService` le aplica una normalización de segmento — se prueban las
+// dos formas contra el `id` del catálogo, sin listas ni IDs hardcodeados.
+//
+// La clase se hereda del registro dueño, así que el audio de un material
+// pedagógico independiente queda tan protegido como su PDF. Fuera de la
+// convención (p. ej. la caché global `/uploads/audio/immersive/<hash>`, que
+// es por hash de texto y no pertenece a ningún contenido) no hay dueño y la
+// ruta conserva `UNMAPPED_ASSET`.
+// ────────────────────────────────────────────────────────────────────────────
+
+const AUDIO_PREFIX = `${UPLOADS_PREFIX}audio/`;
+
+/** Normalización de segmento de `albumTtsService.safeSeg` (única copia local). */
+const safeAudioSegment = (s) => String(s ?? '').replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 80);
+
 /**
- * Clase de una ruta de /uploads/ según sus referencias en el catálogo.
- * @returns {'PEDAGOGY_RESTRICTED'|'PUBLIC_ASSET'|'GENERAL'|'UNMAPPED_ASSET'}
+ * Segmento de `contentId` de una ruta de TTS, o null si no cumple la
+ * convención. NO decodifica: la ruta del edge ya pasó por
+ * `normalizeUploadRequestPath`, y un segundo decode reabriría el traversal.
+ */
+function ttsContentSegment(uploadPath) {
+    const p = canonicalUploadPath(uploadPath, { decode: false });
+    if (!p || !p.startsWith(AUDIO_PREFIX)) return null;
+    const rest = p.slice(AUDIO_PREFIX.length);
+    const slash = rest.indexOf('/');
+    // Sin fichero debajo no hay asset que servir (es el directorio del contenido).
+    if (slash <= 0) return null;
+    const seg = rest.slice(0, slash);
+    if (seg === '.' || seg === '..' || /[\\\0]/.test(seg)) return null;
+    return seg;
+}
+
+/**
+ * Clase del registro dueño de una ruta de TTS, o null si no hay dueño.
+ * Si varios ids colapsaran al mismo segmento normalizado, gana el más
+ * restrictivo: la protección no puede depender de un empate.
+ */
+function ttsOwnerClass(uploadPath, contentList) {
+    const seg = ttsContentSegment(uploadPath);
+    if (!seg) return null;
+
+    let owner = null;
+    for (const item of Array.isArray(contentList) ? contentList : []) {
+        const id = item?.id;
+        if (typeof id !== 'string' || id.length === 0) continue;
+        if (id !== seg && safeAudioSegment(id) !== seg) continue;
+        const cls = classifyContentItem(item);
+        if (cls === 'PEDAGOGY_RESTRICTED') return 'PEDAGOGY_RESTRICTED';
+        owner = owner ?? cls;
+    }
+    return owner;
+}
+
+/**
+ * Clase de una ruta de /uploads/ según sus referencias en el catálogo y, para
+ * el audio generado, según el registro dueño de la convención de TTS.
+ * @returns {'PEDAGOGY_RESTRICTED'|'EMBEDDED_EXPERIENCE'|'PUBLIC_ASSET'|'GENERAL'|'UNMAPPED_ASSET'}
  */
 export function classifyUploadPath(uploadPath, contentList) {
     const target = canonicalUploadPath(uploadPath);
@@ -133,7 +209,9 @@ export function classifyUploadPath(uploadPath, contentList) {
         }
     }
 
-    if (!referenced) return 'UNMAPPED_ASSET';
+    // Sin referencia en el catálogo: el audio de TTS hereda la clase de su
+    // contenido; lo demás sigue sin mapear.
+    if (!referenced) return ttsOwnerClass(uploadPath, contentList) ?? 'UNMAPPED_ASSET';
     if (presentationRef) return 'PUBLIC_ASSET';
     // Una sola referencia general o de Experience basta para no restringir:
     // el fichero compartido general/pedagógico se trata como general.

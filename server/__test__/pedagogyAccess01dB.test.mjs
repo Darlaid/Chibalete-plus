@@ -141,6 +141,39 @@ ok('APK y ruta no vinculada quedan sin mapear',
     classifyUploadPath(APK_PATH, CATALOG) === 'UNMAPPED_ASSET'
     && classifyUploadPath(UNLINKED_PATH, CATALOG) === 'UNMAPPED_ASSET');
 
+// R3 — el audio de TTS no se referencia en el catálogo: se clasifica por la
+// convención de ruta `/uploads/audio/<contentId>/…` heredando la clase del
+// registro dueño. `ped-*` cubre los tres tipos pedagógicos de PED_TYPES.
+console.log('\n[1b] TTS generado');
+ok('el manifest de pedagogía hereda la restricción',
+    classifyUploadPath('/uploads/audio/ped-0/manifest.json', CATALOG) === 'PEDAGOGY_RESTRICTED',
+    `→ ${classifyUploadPath('/uploads/audio/ped-0/manifest.json', CATALOG)}`);
+ok('los chunks de pedagogía heredan la restricción',
+    classifyUploadPath('/uploads/audio/ped-1/chunk_abc123_openai_tts-1.mp3', CATALOG) === 'PEDAGOGY_RESTRICTED');
+ok('el cache de álbum de pedagogía hereda la restricción',
+    classifyUploadPath('/uploads/audio/ped-2/album/deadbeef1234.mp3', CATALOG) === 'PEDAGOGY_RESTRICTED');
+ok('el TTS de contenido general sigue siendo general',
+    classifyUploadPath('/uploads/audio/gen-5/manifest.json', CATALOG) === 'GENERAL',
+    `→ ${classifyUploadPath('/uploads/audio/gen-5/manifest.json', CATALOG)}`);
+ok('el TTS de un nodo de Experience se clasifica como embebido',
+    classifyUploadPath('/uploads/audio/exp-0/manifest.json', CATALOG) === 'EMBEDDED_EXPERIENCE',
+    `→ ${classifyUploadPath('/uploads/audio/exp-0/manifest.json', CATALOG)}`);
+ok('un contentId inexistente queda sin mapear',
+    classifyUploadPath('/uploads/audio/no-existe-en-el-catalogo/manifest.json', CATALOG) === 'UNMAPPED_ASSET');
+ok('la caché global inmersiva (por hash, sin dueño) queda sin mapear',
+    classifyUploadPath('/uploads/audio/immersive/abcdef012345.mp3', CATALOG) === 'UNMAPPED_ASSET');
+ok('el directorio sin fichero no cumple la convención',
+    classifyUploadPath('/uploads/audio/ped-0', CATALOG) === 'UNMAPPED_ASSET'
+    && classifyUploadPath('/uploads/audio/', CATALOG) === 'UNMAPPED_ASSET');
+ok('la clase no depende de la extensión del fichero',
+    ['.mp3', '.wav', '.json', '.bin'].every(ext =>
+        classifyUploadPath(`/uploads/audio/ped-0/x${ext}`, CATALOG) === 'PEDAGOGY_RESTRICTED'));
+ok('un id que exige normalización de segmento también resuelve',
+    classifyUploadPath('/uploads/audio/con_espacio/manifest.json',
+        [{ id: 'con espacio', tipo: 'guia', titulo: 'Con espacio' }]) === 'PEDAGOGY_RESTRICTED');
+ok('la ruta de TTS no se decodifica dos veces',
+    classifyUploadPath('/uploads/audio/%2e%2e/ped-0/manifest.json', CATALOG) === 'UNMAPPED_ASSET');
+
 console.log('\n[2] Normalización de URI');
 ok('traversal codificado denegado',
     normalizeUploadRequestPath('/uploads/%2e%2e/etc/passwd').ok === false);
@@ -186,6 +219,21 @@ ok('no se tocan upstreams, TLS ni el vhost de Studio BI',
     && NGINX.includes('server_name studio.chibaleteeditores.com;'));
 ok('nginx.prod.conf queda fuera de esta unidad',
     !fs.readFileSync(path.join(REPO, 'nginx.prod.conf'), 'utf8').includes('auth_request'));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3b. Ficha de detalle — sin filtro local por tipo (R3)
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('\n[3b] Ficha de detalle');
+const DETALLE = fs.readFileSync(path.join(REPO, 'pages', 'PaginaDetalleLibro.tsx'), 'utf8');
+ok('la ficha ya no descarta `contexto_pedagogico` en el cliente',
+    !/tipo\s*!==\s*['"]contexto_pedagogico['"]/.test(DETALLE));
+ok('la ficha no filtra por ningún tipo pedagógico',
+    PED_TYPES.every(t => !DETALLE.includes(`'${t}'`)));
+ok('la ficha sigue consumiendo el listado ya autorizado por el backend',
+    DETALLE.includes('dataService.getContenidosHijos(content.id'));
+const DATASVC = fs.readFileSync(path.join(REPO, 'services', 'dataService.ts'), 'utf8');
+ok('el servicio de datos tampoco filtra los hijos por tipo',
+    /getContenidosHijos\([^)]*\)[^}]*?return this\.content\.filter\(c => c\.parentId === parentId\);/s.test(DATASVC));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. Server real
@@ -277,6 +325,18 @@ try {
     ok('el administrador recibe 108 registros', admList.status === 200 && admList.body.length === 108,
         `→ ${admList.status} / ${admList.body?.length}`);
 
+    // R3 — la ficha de detalle ya no filtra en el cliente, así que lo que ve
+    // cada rol es exactamente lo que el backend le entrega.
+    const conTipo = (list, tipo) => list.filter(c => c.tipo === tipo).length;
+    ok('el lector no recibe ningún `contexto_pedagogico` desde el backend',
+        conTipo(readerList.body, 'contexto_pedagogico') === 0,
+        `→ ${conTipo(readerList.body, 'contexto_pedagogico')}`);
+    ok('el mediador sí recibe `contexto_pedagogico` desde el backend',
+        conTipo(medList.body, 'contexto_pedagogico') > 0,
+        `→ ${conTipo(medList.body, 'contexto_pedagogico')}`);
+    ok('el administrador también lo recibe',
+        conTipo(admList.body, 'contexto_pedagogico') > 0);
+
     // ── Preflight ───────────────────────────────────────────────────────────
     console.log('\n[5] Preflight de acceso');
     const rPed = await preflight('ped-0', 'RDR');
@@ -328,6 +388,43 @@ try {
     const admAsset = await authz('/uploads/ped-0.pdf', 'ADM');
     ok('administrador → pedagogía = 204', admAsset.status === 204, `→ ${admAsset.status}`);
 
+    // R3 — el audio generado del material pedagógico queda tan protegido como
+    // su PDF: sin él, el texto completo seguía saliendo por el manifest.
+    console.log('\n[7b] Autorizador sobre TTS generado');
+    const TTS_PED_MANIFEST = '/uploads/audio/ped-0/manifest.json';
+    const ttsNoSession = await authz(TTS_PED_MANIFEST);
+    ok('TTS de pedagogía sin sesión → 401', ttsNoSession.status === 401, `→ ${ttsNoSession.status}`);
+    const ttsReader = await authz(TTS_PED_MANIFEST, 'RDR');
+    ok('TTS de pedagogía + lector → 403', ttsReader.status === 403, `→ ${ttsReader.status}`);
+    ok('el 403 del TTS no devuelve bytes', (await ttsReader.text()) === '');
+    const ttsMed = await authz('/uploads/audio/ped-1/chunk_abc_openai_tts-1.mp3', 'MED');
+    ok('TTS de pedagogía + mediador → 204', ttsMed.status === 204, `→ ${ttsMed.status}`);
+    ok('el TTS pedagógico autorizado se marca privado',
+        ttsMed.headers.get('x-chp-cache') === 'private');
+    const ttsAdm = await authz('/uploads/audio/ped-2/album/deadbeef1234.mp3', 'ADM');
+    ok('TTS de pedagogía + administrador → 204', ttsAdm.status === 204, `→ ${ttsAdm.status}`);
+
+    for (const [label, uri] of [
+        ['TTS de contenido general sin sesión', '/uploads/audio/gen-5/manifest.json'],
+        ['TTS de nodo Experience sin sesión', '/uploads/audio/exp-0/manifest.json'],
+        ['TTS de contentId inexistente sin sesión', '/uploads/audio/no-existe/manifest.json'],
+        ['caché inmersiva global sin sesión', '/uploads/audio/immersive/abcdef012345.mp3'],
+    ]) {
+        const r = await authz(uri);
+        ok(`${label} → 204`, r.status === 204, `→ ${r.status}`);
+        if (r.status === 204) ok(`${label} no se marca privado`, !r.headers.get('x-chp-cache'));
+    }
+
+    for (const [label, uri] of [
+        ['traversal codificado bajo /audio/', '/uploads/audio/%2e%2e/%2e%2e/etc/passwd'],
+        ['traversal literal bajo /audio/', '/uploads/audio/../../etc/passwd'],
+        ['backslash bajo /audio/', '/uploads/audio/ped-0\\manifest.json'],
+        ['codificación inválida bajo /audio/', '/uploads/audio/ped-0/%ZZ.mp3'],
+    ]) {
+        const r = await authz(uri);
+        ok(`${label} → 404`, r.status === 404, `→ ${r.status}`);
+    }
+
     console.log('\n[8] Lo que NO debe cambiar');
     for (const [label, uri] of [
         ['libro general sin sesión', '/uploads/gen-5.pdf'],
@@ -355,6 +452,18 @@ try {
         const r = await authz(uri);
         ok(`${label} → 404`, r.status === 404, `→ ${r.status}`);
     }
+
+    // ── Ruido del access-log ────────────────────────────────────────────────
+    // El edge consulta el autorizador UNA VEZ POR ASSET: sin exención, una
+    // página con decenas de imágenes deja decenas de líneas por visita.
+    console.log('\n[10] Access-log del autorizador');
+    await fetch(`${BASE}/api/content`, { headers: asUser('MED') });
+    await authz('/uploads/gen-5.pdf');
+    await sleep(500);
+    ok('la subrequest interna no entra al access-log ordinario',
+        !bootLog.includes('/api/internal/uploads-authz'));
+    ok('las rutas API ordinarias se siguen registrando',
+        /"url":"[^"]*\/api\/content/.test(bootLog));
 } catch (e) {
     console.error('  ✗ fallo de la suite:', e.message);
     fail++;

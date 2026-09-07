@@ -45,9 +45,11 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
     const [otherAssignment, setOtherAssignment] = useState<OfflineAssignment | null>(null);
 
     useEffect(() => {
+        // CHP-ACCESS-PEDAGOGY-01D-B-R3: sin filtro local por tipo. El catálogo ya
+        // llega autorizado por el backend según el rol de la sesión: el lector no
+        // recibe la pedagogía independiente y el mediador sí la ve en la ficha.
         Promise.resolve(dataService.getContenidosHijos(content.id, user?.roles || [])).then(children => {
-            const filtered = children.filter(c => c.tipo !== 'contexto_pedagogico');
-            setRelatedContent(filtered);
+            setRelatedContent(children);
         });
         if(user) {
             const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
