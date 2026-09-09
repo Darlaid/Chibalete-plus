@@ -556,9 +556,11 @@ export function participantEvidenceView(ev, { privado = false } = {}) {
  * del participante (nombre, jamás credenciales/correo); el scoping institucional
  * fino sigue gateado por M1-B (la autorización la impone la ruta, no esta vista).
  */
-export function reviewListView(doc, resolveName = () => null) {
+export function reviewListView(doc, resolveName = () => null, ownerAllowed = () => true) {
+    // REVIEW-IDENTITY-INTEGRATION-01A: `ownerAllowed(userId)` lo decide la ruta
+    // desde la autoridad canónica (membership del revisor); por defecto no filtra.
     return doc.evidence
-        .filter(e => e.requiresReview)
+        .filter(e => e.requiresReview && ownerAllowed(e.userId))
         .map(e => {
             ensureReviewShape(e);
             const exp = doc.experiences.find(x => x.id === e.experienceId);

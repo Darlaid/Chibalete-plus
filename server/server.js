@@ -1962,24 +1962,71 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth,
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
-// ── Revisión humana (REVIEW-01) ─────────────────────────────────────────────
-// REGLA DE SEGURIDAD (M1-B pendiente): el sistema aún NO puede demostrar el
-// scope institucional de un mediador, así que el acceso de mediador queda
-// FAIL-CLOSED (403 explícito, sin cola global, sin fallback inventado). Solo
-// el rol administrador — el único cuyo alcance reconoce el contrato actual —
-// opera la revisión. La activación de mediadores llega con M1-B.
+// ── Revisión humana (REVIEW-01 + REVIEW-IDENTITY-INTEGRATION-01A) ───────────
+// Alcance del mediador derivado SOLO de autoridad canónica existente:
+//   sesión firmada → usuario canónico activo → membership activa de mediador
+//   (group.mediatorIds) → grupo → institución (group.organizationId).
+// Con identidad legacy (modo off, o compat sin cookie: cabecera autoafirmada)
+// el mediador sigue FAIL-CLOSED (403 MEDIATOR_SCOPE_GATED): la autoridad nueva
+// exige la sesión canónica. Nada enviado por el cliente (userId, reviewerId,
+// groupId, institutionId, rol, nombres de colegio) participa en la decisión.
+// El rol administrador conserva su alcance global previo.
+function mediatorReviewScope(req) {
+    if (req.auth?.authMethod !== 'session') return { ok: false, reason: 'legacy_identity' };
+    const me = normalizeUser(req.user);
+    let groups;
+    try { groups = readJSON(GROUPS_DB); } catch { groups = []; }
+    const mine = (Array.isArray(groups) ? groups : [])
+        .map(normalizeGroup)
+        .filter(g => g && g.mediatorIds.includes(me.id))
+        // Institución: si grupo y mediador declaran organizationId, deben coincidir.
+        .filter(g => !g.organizationId || !me.organizationId || g.organizationId === me.organizationId);
+    if (mine.length === 0) return { ok: false, reason: 'no_active_membership' };
+    // El dueño de la producción debe ser miembro de uno de esos grupos y, si
+    // ambos declaran institución, pertenecer a la misma que el grupo.
+    let usersById;
+    try { usersById = new Map(readJSON(USERS_DB).map(x => [x.id, x])); } catch { usersById = new Map(); }
+    const allows = (ownerId) => mine.some(g => {
+        if (!g.memberIds.includes(ownerId)) return false;
+        const owner = usersById.get(ownerId);
+        const ownerOrg = owner ? normalizeUser(owner).organizationId : null;
+        return !g.organizationId || !ownerOrg || g.organizationId === ownerOrg;
+    });
+    return { ok: true, allows };
+}
+
+/** true (admin) | scope (mediador con alcance) | false (ya respondió 403). */
 function requireReviewAccess(req, res) {
     const roles = req.user?.roles || [];
     if (roles.includes('administrador')) return true;
     if (isMediatorRole(req.user)) {
+        const scope = mediatorReviewScope(req);
+        if (scope.ok) return scope;
         res.status(403).json({
-            error: 'La revisión para mediadores se habilita cuando el sistema pueda garantizar el alcance institucional de tu cola.',
+            error: 'La revisión para mediadores exige sesión canónica y membership activa como mediador en un grupo.',
             code: 'MEDIATOR_SCOPE_GATED',
         });
         return false;
     }
     res.status(403).json({ error: 'No autorizado para revisar producciones', code: 'REVIEW_FORBIDDEN' });
     return false;
+}
+
+/**
+ * Autoriza al actor sobre UNA evidencia por el grupo de su dueño. Se evalúa
+ * ANTES de mutar: una denegación no escribe nada. Si la evidencia no existe se
+ * deja pasar para que el store responda 404 exactamente como hasta ahora.
+ */
+function requireReviewScope(req, res, evidenceId) {
+    const access = requireReviewAccess(req, res);
+    if (!access) return false;
+    if (access === true) return true;
+    const ev = readMook().evidence.find(e => e.id === evidenceId);
+    if (ev && !access.allows(ev.userId)) {
+        res.status(403).json({ error: 'Esta producción no pertenece a un grupo donde tengas membership activa de mediador', code: 'REVIEW_FORBIDDEN' });
+        return false;
+    }
+    return true;
 }
 
 // Identificación MÍNIMA permitida del participante: nombre del padrón canónico
@@ -1993,21 +2040,24 @@ function resolveParticipantName(userId) {
 
 app.get('/api/experiences/review/queue', requireUserAuth, (req, res) => {
     try {
-        if (!requireReviewAccess(req, res)) return;
-        res.json(experienceStore.reviewListView(readMook(), resolveParticipantName));
+        const access = requireReviewAccess(req, res);
+        if (!access) return;
+        // Admin: bandeja global. Mediador: solo producciones de participantes de sus grupos.
+        const ownerAllowed = access === true ? () => true : access.allows;
+        res.json(experienceStore.reviewListView(readMook(), resolveParticipantName, ownerAllowed));
     } catch (e) { res.status(500).json({ error: 'No se pudo leer la cola de revisión' }); }
 });
 
 app.get('/api/experiences/review/:evidenceId/detail', requireUserAuth, (req, res) => {
     try {
-        if (!requireReviewAccess(req, res)) return;
+        if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         res.json(experienceStore.reviewDetailView(readMook(), req.params.evidenceId, resolveParticipantName));
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
 app.post('/api/experiences/review/:evidenceId/feedback', requireUserAuth, async (req, res) => {
     try {
-        if (!requireReviewAccess(req, res)) return;
+        if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         let ev;
         await mutateMook((doc) => {
             ev = experienceStore.addReviewFeedback(doc, req.params.evidenceId, { reviewerId: req.user.id, comment: req.body?.comment });
@@ -2018,7 +2068,7 @@ app.post('/api/experiences/review/:evidenceId/feedback', requireUserAuth, async 
 
 app.post('/api/experiences/review/:evidenceId/request-changes', requireUserAuth, async (req, res) => {
     try {
-        if (!requireReviewAccess(req, res)) return;
+        if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         let ev;
         await mutateMook((doc) => {
             ev = experienceStore.requestChanges(doc, req.params.evidenceId, { reviewerId: req.user.id, comment: req.body?.comment });
@@ -2030,7 +2080,7 @@ app.post('/api/experiences/review/:evidenceId/request-changes', requireUserAuth,
 
 app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res) => {
     try {
-        if (!requireReviewAccess(req, res)) return;
+        if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         let ev;
         await mutateMook((doc) => {
             ev = experienceStore.reviewEvidence(doc, req.params.evidenceId, {

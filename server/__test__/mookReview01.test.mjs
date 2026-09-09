@@ -121,10 +121,24 @@ t('estructural: mediador sin scope = 403 fail-closed; solo administrador opera l
     for (const route of ['/api/experiences/review/queue', '/api/experiences/review/:evidenceId/detail', '/api/experiences/review/:evidenceId/feedback', '/api/experiences/review/:evidenceId/request-changes']) {
         assert.ok(serverSrc.includes(route), `ruta ${route} presente`);
     }
-    const guardBody = normalizeEol(serverSrc.slice(serverSrc.indexOf('function requireReviewAccess'), serverSrc.indexOf('function resolveParticipantName')));
+    const guardBody = normalizeEol(serverSrc.slice(serverSrc.indexOf('function requireReviewAccess'), serverSrc.indexOf('function requireReviewScope')));
     assert.ok(guardBody.includes(`roles.includes('administrador')`), 'admin explícito');
     assert.ok(guardBody.includes('isMediatorRole'), 'mediador contemplado y gateado');
-    assertMediatorNeverPasses(guardBody);
+    // REVIEW-IDENTITY-INTEGRATION-01A: el mediador ya NO está gateado en bloque,
+    // pero solo pasa con alcance canónico (sesión firmada + membership). El
+    // único `return true` sigue siendo el del administrador; la rama del mediador
+    // devuelve el alcance resuelto server-side o cae en el gate declarado.
+    const returnTrues = guardBody.match(/return true;/g) ?? [];
+    assert.strictEqual(returnTrues.length, 1, 'solo el administrador devuelve true');
+    assert.ok(guardBody.indexOf('return true;') < guardBody.indexOf('isMediatorRole'), 'admin antes del gate de mediador');
+    const mediatorBranch = guardBody.slice(guardBody.indexOf('isMediatorRole'));
+    assert.ok(!mediatorBranch.includes('return true'), 'la rama del mediador jamás devuelve true incondicional');
+    assert.ok(mediatorBranch.includes('mediatorReviewScope(req)'), 'el alcance del mediador se resuelve server-side');
+    assert.ok(mediatorBranch.includes('MEDIATOR_SCOPE_GATED') && mediatorBranch.includes('return false;'), 'sin alcance → gate declarado, fail-closed');
+    const scopeBody = normalizeEol(serverSrc.slice(serverSrc.indexOf('function mediatorReviewScope'), serverSrc.indexOf('function requireReviewAccess')));
+    assert.ok(scopeBody.includes(`req.auth?.authMethod !== 'session'`), 'la identidad legacy (x-user-id) no concede el alcance');
+    assert.ok(scopeBody.includes('mediatorIds.includes(me.id)') && scopeBody.includes('memberIds.includes(ownerId)'), 'membership canónica: mediador del grupo y dueño miembro');
+    assert.ok(!/req\.(body|query|params)/.test(scopeBody), 'nada del cliente participa en el alcance');
     // el actor de las mutaciones se deriva de la sesión, no del cliente
     assert.ok(serverSrc.includes('reviewerId: req.user.id'), 'reviewer derivado de sesión');
     assert.ok(serverSrc.includes('userId: req.user.id, text: req.body?.text'), 'dueño del reenvío derivado de sesión');
