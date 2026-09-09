@@ -303,7 +303,8 @@ try {
             && storeEvidence(EV.P1.id).history.filter(h => h.type === 'reviewed').length === 1,
             `→ ${b8r.status}/${b8a.status} rows=${rows.length}`);
         const row = rows[0] ?? {};
-        const actor = row.actor_id ?? row.actorId ?? row.payload?.actorId;
+        // El emisor persiste `actorId` como sujeto de la fila (`user_id`).
+        const actor = row.user_id ?? row.userId ?? row.actor_id ?? row.payload?.actorId;
         ok('B8c. el hecho conserva participante (sujeto) y reviewerId de sesión, sin PII',
             actor === 'P1' && row.payload?.reviewerId === 'MED1' && row.payload?.evidenceId === EV.P1.id
             && !JSON.stringify(row).includes('@fx.test') && !JSON.stringify(row).includes('Nombre P1'),
