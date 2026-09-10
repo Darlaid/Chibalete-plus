@@ -10025,7 +10025,10 @@ app.post('/api/events', requireEventsWriteAuth, (req, res) => {
         if (!userId) return res.status(400).end();
         const { event, ts, ...rest } = req.body ?? {};
         if (typeof event !== 'string') return res.status(400).json({ error: 'event required' });
-        log(`[EVENT] ${event} user=${userId} ts=${ts ?? Date.now()} ${JSON.stringify(rest)}`);
+        // CHP-EVENT-REQUEST-LOG-PAYLOAD-MINIMIZATION-01A: el cuerpo de la solicitud
+        // (payload, ids, texto libre) ya NO se escribe en el log del proceso. Método,
+        // ruta y estado los registra el access-log HTTP (pino); la señal de dual-write
+        // de abajo solo lleva contadores fijos generados por el servidor.
 
         // ── DUAL-WRITE Backbone v1 (Fase 0) ──────────────────────────────────
         // Antes los eventos warn-level del Inmersivo (manifest_fail, tts_fail,
@@ -10036,10 +10039,10 @@ app.post('/api/events', requireEventsWriteAuth, (req, res) => {
             if (dualResult.accepted || dualResult.deduplicated) {
                 log(`[EVENTS_V1] dual-write event: accepted=${dualResult.accepted} dedup=${dualResult.deduplicated}`, 'INFO');
             } else if (dualResult.rejected) {
-                log(`[EVENTS_V1] dual-write event rejected (${dualResult.reason})`, 'WARN');
+                log('[EVENTS_V1] dual-write event: rejected=1', 'WARN');
             }
         } catch (e) {
-            log(`[EVENTS_V1] dual-write event error: ${e.message}`, 'WARN');
+            log('[EVENTS_V1] dual-write event: error=1', 'WARN');
         }
 
         res.json({ ok: true });
