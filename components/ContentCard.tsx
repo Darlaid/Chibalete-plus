@@ -166,7 +166,7 @@ const ContentCard: React.FC<ContentCardProps> = ({ content, progress, onUpdatePr
         <div className="flex justify-between items-start gap-2">
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100 leading-tight truncate" title={content.titulo}>
-              <Link to={`/contenido/${content.id}`} className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
+              <Link to={`/contenido/${content.id}`} className="block truncate min-h-6 leading-6 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
                 {content.titulo}
               </Link>
             </h3>

@@ -460,6 +460,7 @@ const Biblioteca: React.FC = () => {
                     </div>
                     <input
                         type="text"
+                        aria-label="Buscar título, autor o tema"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder="Buscar título, autor o tema..."

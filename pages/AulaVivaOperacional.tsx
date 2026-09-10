@@ -78,13 +78,17 @@ const AulaVivaOperacional: React.FC = () => {
     // Fase 3B — fetch del timeline longitudinal cuando cambia el estudiante.
     // Defensivo: cualquier fallo deja timeline=null y el componente degrada
     // a su EmptyState interno.
+    // CHP-WCAG-01C AULAVIVA-02 (4.1.3): anuncio del cambio de lector sin mover el foco.
+    const [selectionAnnounce, setSelectionAnnounce] = useState('');
     const refreshTimeline = useCallback(async (userId: string) => {
         setTimelineLoading(true);
         try {
             const t = await aulaVivaOperationalService.getStudentTimeline(userId);
             setTimeline(t);
+            setSelectionAnnounce(`Lector ${userId} seleccionado. Recomendaciones y timeline cargados.`);
         } catch {
             setTimeline(null);
+            setSelectionAnnounce(`Lector ${userId} seleccionado. No se pudo cargar el timeline.`);
         } finally {
             setTimelineLoading(false);
         }
@@ -237,6 +241,7 @@ const AulaVivaOperacional: React.FC = () => {
                                         <button
                                             type="button"
                                             onClick={() => setSelectedStudent(item.user_id)}
+                                            aria-pressed={selectedStudent === item.user_id}
                                             className={`w-full flex items-center justify-between gap-3 px-2 py-3 text-left
                                                         hover:bg-gray-50 rounded ${
                                                           selectedStudent === item.user_id ? 'bg-blue-50' : ''
@@ -295,6 +300,7 @@ const AulaVivaOperacional: React.FC = () => {
                 </div>
 
                 {/* ── Fase 3B: timeline longitudinal del lector seleccionado ── */}
+                <p role="status" aria-live="polite" className="sr-only">{selectionAnnounce}</p>
                 {selectedStudent && (
                     <section className="mt-6 bg-white rounded-lg border border-gray-200 p-4">
                         <h2 className="text-lg font-medium text-gray-900 mb-3 flex items-center gap-2">
@@ -342,10 +348,10 @@ const AulaVivaOperacional: React.FC = () => {
                 </section>
 
                 {/* ── System health footnote ────────────────────────────────── */}
-                <footer className="mt-6 text-xs text-gray-400 text-center">
+                <footer className="mt-6 text-xs text-gray-600 text-center">
                     Estado del sistema:&nbsp;
                     {status?.materializer_ready?.ready
-                        ? <span className="text-emerald-600">operacional</span>
+                        ? <span className="text-emerald-700">operacional</span>
                         : <span className="text-amber-600">{status?.materializer_ready?.reason || 'pendiente'}</span>}
                     &nbsp;· última actualización {status?.ts ? new Date(status.ts).toLocaleTimeString() : '—'}
                 </footer>

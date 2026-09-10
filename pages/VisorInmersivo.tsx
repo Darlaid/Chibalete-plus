@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
@@ -118,6 +118,9 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const navigate = useNavigate();
     // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
     const fichaPath = useFichaPath(content?.id);
+    // CHP-WCAG-01C BIBLIOTECA-10: el control de la ficha que abrió el visor vuelve con el foco.
+    const routerLocation = useLocation();
+    const goBackToFicha = () => navigate(fichaPath, { state: { returnFocus: (routerLocation.state as { returnFocus?: string } | null)?.returnFocus ?? 'inmersivo' } });
 
     // -----------------------------------------------------------------------
     // PHASE 0: STATE — all initialized with no async dependencies
@@ -2749,7 +2752,9 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     // loop de hardResync.
 
     return (
-        <div className={`relative h-screen w-full overflow-hidden font-sans select-none ${theme === 'high-contrast' ? 'bg-black text-white' : 'bg-neutral-950 text-white'}`}>
+        <div role="main" aria-label={content?.titulo ?? 'Lectura inmersiva'} className={`relative h-screen w-full overflow-hidden font-sans select-none ${theme === 'high-contrast' ? 'bg-black text-white' : 'bg-neutral-950 text-white'}`}>
+            {/* CHP-WCAG-01C BIBLIOTECA-05: landmark y encabezado accesibles del visor. */}
+            <h1 className="sr-only">{content?.titulo}</h1>
 
             {/* AUDIO (Hidden) — refs y handlers delegados al hook */}
             <audio
@@ -2773,7 +2778,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 style={{ opacity: 1 - tranceIntensity * 0.85, transition: 'opacity 1.5s ease' }}
             >
                 {/* Antes `navigate(-1)` — ver nota en VisorPDF. */}
-                <button onClick={() => navigate(fichaPath)} aria-label="Volver a la ficha del contenido" className="p-2 bg-white/10 rounded-full hover:bg-white/20"><ChevronLeft /></button>
+                <button onClick={goBackToFicha} aria-label="Volver a la ficha del contenido" className="p-2 bg-white/10 rounded-full hover:bg-white/20"><ChevronLeft /></button>
                 <MookReturnButton compact />
                 <div className="flex items-center gap-4">
                     <button onClick={() => setIsMenuOpen(!isMenuOpen)} aria-label="Ajustes de lectura" aria-expanded={isMenuOpen} className={`p-2 rounded-full transition-colors ${isMenuOpen ? 'bg-indigo-600' : 'bg-white/10 hover:bg-white/20'}`}>

@@ -255,6 +255,20 @@ t('estructural: el modal de revisión contiene Tab/Shift+Tab, cierra con Escape 
     assert.ok(tabSrc.includes('p-4 pb-28 sm:pb-4 overflow-y-auto'), 'espacio inferior para que el FAB de Leo no tape los controles a 320 px');
 });
 
+// 13c — CHP-WCAG-FIVE-SURFACES-01C REVIEW-02..05
+t('estructural: Aula Viva expone estado de pestañas, nombres de selectores y contraste en Producciones', () => {
+    const aulaSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'pages', 'AulaViva.tsx'), 'utf8');
+    for (const k of ['analytics', 'tasks', 'producciones']) assert.ok(aulaSrc.includes(`aria-pressed={activeTab === '${k}'}`), `pestaña ${k} con estado`);
+    assert.ok(aulaSrc.includes('aria-label="Institución"') && aulaSrc.includes('aria-label="Grupo"'), 'selectores de cabecera con nombre');
+    assert.ok(/text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-600 flex items-center">\s*Inst\./.test(aulaSrc), '«Inst.» con contraste');
+    assert.ok(/e\.key === 'Escape'\) \{ e\.preventDefault\(\); closeDetail\(\); return; \}/.test(tabSrc), 'REVIEW-02: Escape cierra (verificado)');
+    assert.ok(/text-gray-600 dark:text-gray-400 mt-1 inline-flex items-center gap-1"><Clock/.test(tabSrc), 'Entregada con contraste');
+    assert.ok(/text-gray-600 dark:text-gray-400 mb-1">Versión/.test(tabSrc), 'Versión con contraste');
+    assert.ok(/text-gray-600 dark:text-gray-400"> · \{fmt\(h\.at\)\}/.test(tabSrc), 'historial con contraste');
+    assert.ok(/text-gray-600 dark:text-gray-400">Revisar = confirmar/.test(tabSrc), 'nota final con contraste');
+    assert.ok(!/text-xs text-gray-400/.test(tabSrc), 'sin texto de 12 px en gray-400');
+});
+
 // 14 — eventos sin PII ni contenido
 t('los payloads de eventos validan en el registry y no admiten texto/PII', () => {
     const submitted = { experienceId: 'e', experienceVersionId: 'v', runId: 'r', nodeId: 'n2', nodeType: 'PRODUCTION', evidenceId: 'evid-1', requiresReview: true };

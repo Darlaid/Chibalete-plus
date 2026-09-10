@@ -169,8 +169,8 @@ const ficha = fs.readFileSync(path.join(REPO, 'pages', 'PaginaDetalleLibro.tsx')
 }
 
 {
-    assert.match(runtime, /querySelector\('h4'\)\?\.focus\?\.\(\)/, 'el foco acompaña al scroll');
-    assert.match(runtime, /<h4 tabIndex=\{-1\}/, 'el encabezado puede recibir foco');
+    assert.match(runtime, /querySelector\('h3'\)\?\.focus\?\.\(\)/, 'el foco acompaña al scroll');
+    assert.match(runtime, /<h3 tabIndex=\{-1\}/, 'el encabezado puede recibir foco');
     ok('al volver, la tarjeta se enfoca además de desplazarse');
 }
 
@@ -196,7 +196,8 @@ const ficha = fs.readFileSync(path.join(REPO, 'pages', 'PaginaDetalleLibro.tsx')
     for (const l of lectores) {
         const src = fs.readFileSync(path.join(REPO, 'pages', `${l}.tsx`), 'utf8');
         assert.match(src, /useFichaPath\(/, `${l}: el regreso debe conservar el origen`);
-        assert.match(src, /(navigate|useNavigateTo)\(fichaPath\)/, `${l}: el control de regreso usa la ruta con origen`);
+        // CHP-WCAG-01C BIBLIOTECA-10: el regreso puede llevar estado de navegación (returnFocus).
+        assert.match(src, /(navigate|useNavigateTo)\(fichaPath(\)|, \{ state: \{ returnFocus)/, `${l}: el control de regreso usa la ruta con origen`);
     }
     ok('los cinco lectores vuelven a la ficha conservando el origen');
 }

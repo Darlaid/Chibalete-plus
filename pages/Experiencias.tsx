@@ -243,9 +243,9 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
 
     return (
         <div className="rounded-2xl border-2 border-indigo-300 dark:border-indigo-700 bg-white dark:bg-gray-800 p-5 shadow-md">
-            <p className="text-xs text-gray-400 mb-1">{experienceTitle} · {moduleTitle}</p>
+            <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">{experienceTitle} · {moduleTitle}</p>
             <div className="flex items-center justify-between">
-                <h4 tabIndex={-1} className="font-bold text-lg text-gray-800 dark:text-gray-100 flex items-center gap-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">{NODE_ICON[node.type]} {node.title}</h4>
+                <h3 tabIndex={-1} className="font-bold text-lg text-gray-800 dark:text-gray-100 flex items-center gap-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">{NODE_ICON[node.type]} {node.title}</h3>
                 {revisiting
                     // Revisar no es estar: mientras se mira hacia atrás, la tarjeta
                     // NO puede decir «Estás aquí» — el punto del recorrido no se movió.
@@ -349,7 +349,7 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                     <textarea id={`prod-${node.id}`} value={text} onChange={e => setText(e.target.value)} rows={8}
                         className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" placeholder="Escribe aquí tu texto…" />
                     <div className="flex items-center justify-between">
-                        <span className={`text-xs ${wordCount(text) >= (node.config?.minPalabras ?? 150) && wordCount(text) <= (node.config?.maxPalabras ?? 300) ? 'text-emerald-600 font-bold' : 'text-gray-400'}`}>
+                        <span className={`text-xs ${wordCount(text) >= (node.config?.minPalabras ?? 150) && wordCount(text) <= (node.config?.maxPalabras ?? 300) ? 'text-emerald-700 font-bold' : 'text-gray-600 dark:text-gray-400'}`}>
                             {wordCount(text)} palabras ({node.config?.minPalabras ?? 150}–{node.config?.maxPalabras ?? 300})
                         </span>
                         <button onClick={() => send({ text })} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Enviar producción</button>
@@ -460,7 +460,7 @@ const MyProductionPanel: React.FC<{ route: any; refresh: () => void }> = ({ rout
                                     aria-describedby={msg ? `resubmit-err-${e.id}` : undefined}
                                     className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
                                 <div className="flex items-center justify-between">
-                                    <span className={`text-xs ${wordCount(text) >= min && wordCount(text) <= max ? 'text-emerald-600 font-bold' : 'text-gray-400'}`}>
+                                    <span className={`text-xs ${wordCount(text) >= min && wordCount(text) <= max ? 'text-emerald-700 font-bold' : 'text-gray-600 dark:text-gray-400'}`}>
                                         {wordCount(text)} palabras ({min}–{max})
                                     </span>
                                     <button type="button" onClick={() => resubmit(e)} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">
@@ -511,6 +511,17 @@ const Experiencias: React.FC = () => {
     const [detail, setDetail] = useState<any | null>(null);
     const [route, setRoute] = useState<any | null>(null);
     const [showRouteAfterClose, setShowRouteAfterClose] = useState(false);
+    // CHP-WCAG-01C RUNTIME-01 (4.1.3): anuncio del avance sin mover el foco ni repetir.
+    const [progressAnnounce, setProgressAnnounce] = useState('');
+    const prevCompletedRef = useRef<number | null>(null);
+    useEffect(() => {
+        const done = route?.progress?.completedRequired;
+        if (typeof done !== 'number') return;
+        if (prevCompletedRef.current !== null && done > prevCompletedRef.current) {
+            setProgressAnnounce(`Paso completado. ${done} de ${route.progress.totalRequired} pasos requeridos completados.`);
+        }
+        prevCompletedRef.current = done;
+    }, [route]);
     const currentRef = useRef<HTMLDivElement | null>(null);
     const navigate = useNavigate();
     // ESTAS-AQUI-01: bitácora privada con texto sin guardar. El texto no se
@@ -585,7 +596,7 @@ const Experiencias: React.FC = () => {
         currentRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
         // El foco acompaña al scroll: quien navega con teclado o lector de
         // pantalla tiene que aterrizar en la tarjeta, no quedarse donde estaba.
-        currentRef.current?.querySelector('h4')?.focus?.();
+        currentRef.current?.querySelector('h3')?.focus?.();
     }, [route?.progress?.completedRequired, visibleNodeId]);
 
     const start = async () => { if (detail) setRoute(await dataService.startExperienceRun(detail.id)); };
@@ -596,7 +607,7 @@ const Experiencias: React.FC = () => {
         const production = (route.evidence || []).find((e: any) => e.requiresReview);
         return (
             <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-8 shadow-xl mb-8">
-                <h2 className="text-3xl font-bold">🎉 Experiencia completada</h2>
+                <h1 className="text-3xl font-bold">🎉 Experiencia completada</h1>
                 <ul className="mt-4 space-y-1">
                     {route.modules.map((m: any) => (
                         <li key={m.id} className="flex items-center gap-2"><CheckCircle2 size={16} aria-hidden /> {m.title} — {MODULE_STATE_LABEL[m.state]?.text}</li>
@@ -628,8 +639,8 @@ const Experiencias: React.FC = () => {
     const renderRoute = () => (
         <div>
             {unsaved
-                ? <button type="button" onClick={() => setAskExit(true)} className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</button>
-                : <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</Link>}
+                ? <button type="button" onClick={() => setAskExit(true)} className="text-sm text-indigo-600 mb-4 hover:underline inline-flex items-center min-h-6">← Biblioteca</button>
+                : <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-flex items-center min-h-6">← Biblioteca</Link>}
 
             {askExit && (
                 <div role="alertdialog" aria-modal="true" aria-labelledby="salir-sin-guardar-titulo"
@@ -648,12 +659,13 @@ const Experiencias: React.FC = () => {
                 </div>
             )}
 
+            <p role="status" aria-live="polite" className="sr-only">{progressAnnounce}</p>
             {route.status === 'completed' && renderCierre()}
             {(route.status !== 'completed' || showRouteAfterClose) && (
                 <>
                     <div className="mb-6">
                         <div className="flex items-center justify-between mb-2">
-                            <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">{detail?.title ?? 'Tu ruta'}</h2>
+                            <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100">{detail?.title ?? 'Tu ruta'}</h1>
                             <span className="text-sm font-bold text-gray-600 dark:text-gray-300">{route.progress.completedRequired}/{route.progress.totalRequired} completados</span>
                         </div>
                         <ProgressBar done={route.progress.completedRequired} total={route.progress.totalRequired} />
@@ -662,7 +674,7 @@ const Experiencias: React.FC = () => {
                         {route.modules.map((m: any) => (
                             <section key={m.id} aria-label={`Módulo ${m.title}, ${MODULE_STATE_LABEL[m.state]?.text}`}>
                                 <div className="flex items-center gap-3 mb-3">
-                                    <h3 className="text-lg font-bold text-gray-800 dark:text-gray-100">{m.title}</h3>
+                                    <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100">{m.title}</h2>
                                     <span className={`text-xs font-bold px-2 py-1 rounded-full ${MODULE_STATE_LABEL[m.state]?.cls ?? ''}`}>{MODULE_STATE_LABEL[m.state]?.text ?? m.state}</span>
                                 </div>
                                 <div className="space-y-3">
@@ -688,11 +700,11 @@ const Experiencias: React.FC = () => {
     // ── Landing (E/B2) ──
     const renderLanding = () => (
         <div>
-            <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-block">← Biblioteca</Link>
+            <Link to="/biblioteca" className="text-sm text-indigo-600 mb-4 hover:underline inline-flex items-center min-h-6">← Biblioteca</Link>
             <div className="rounded-3xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
                 <div className="bg-gradient-to-br from-indigo-600 to-purple-700 text-white p-8">
                     <span className="text-xs uppercase tracking-widest text-indigo-200">Experiencia</span>
-                    <h2 className="text-3xl font-bold mt-1">{detail.title}</h2>
+                    <h1 className="text-3xl font-bold mt-1">{detail.title}</h1>
                     <p className="text-indigo-100 mt-2 max-w-2xl">{detail.description}</p>
                 </div>
                 <div className="p-8 space-y-4">

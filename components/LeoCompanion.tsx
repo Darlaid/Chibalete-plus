@@ -288,7 +288,7 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                             
                             {suggestedActions.length > 0 && (
                                 <div className="pt-3 pb-1 flex flex-col gap-2 animate-in zoom-in-95 border-t border-gray-100 dark:border-gray-800 mt-2">
-                                    <p className="text-[10px] uppercase font-bold text-gray-400 text-center tracking-wider mb-1">Para ti</p>
+                                    <p className="text-[10px] uppercase font-bold text-gray-600 dark:text-gray-300 text-center tracking-wider mb-1">Para ti</p>
                                     {suggestedActions.map((act, i) => (
                                         <div key={i} className="flex items-center justify-between bg-gray-50 dark:bg-gray-800/40 px-3 py-2 rounded-xl">
                                             {act.reason && <span className="text-xs text-gray-500 font-medium mr-2 leading-tight">{act.reason}</span>}

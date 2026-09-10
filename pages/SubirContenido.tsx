@@ -1300,6 +1300,7 @@ const SubirContenido: React.FC = () => {
                         <button
                             type="button"
                             onClick={() => setUploadMode('new')}
+                            aria-pressed={uploadMode === 'new'}
                             className={`flex-1 p-4 rounded-lg border-2 text-left transition-all ${uploadMode === 'new' ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
                         >
                             <div className="flex items-center mb-2"><UploadCloud className="mr-2 text-indigo-500" /> <span className="font-bold">Crear Nueva Obra / Colección</span></div>
@@ -1308,6 +1309,7 @@ const SubirContenido: React.FC = () => {
                         <button
                             type="button"
                             onClick={() => setUploadMode('existing')}
+                            aria-pressed={uploadMode === 'existing'}
                             className={`flex-1 p-4 rounded-lg border-2 text-left transition-all ${uploadMode === 'existing' ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
                         >
                             <div className="flex items-center mb-2"><LinkIcon className="mr-2 text-indigo-500" /> <span className="font-bold">Añadir a Existente</span></div>
@@ -1316,6 +1318,7 @@ const SubirContenido: React.FC = () => {
                         <button
                             type="button"
                             onClick={() => setUploadMode('manage')}
+                            aria-pressed={uploadMode === 'manage'}
                             className={`flex-1 p-4 rounded-lg border-2 text-left transition-all ${uploadMode === 'manage' ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
                         >
                             <div className="flex items-center mb-2"><Trash className="mr-2 text-red-500" /> <span className="font-bold">Gestionar Biblioteca</span></div>
@@ -1324,6 +1327,7 @@ const SubirContenido: React.FC = () => {
                         <button
                             type="button"
                             onClick={() => { setUploadMode('experiencia'); setStudioOpened(true); }}
+                            aria-pressed={uploadMode === 'experiencia'}
                             className={`flex-1 p-4 rounded-lg border-2 text-left transition-all ${uploadMode === 'experiencia' ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
                         >
                             <div className="flex items-center mb-2"><Sparkles className="mr-2 text-purple-500" /> <span className="font-bold">Crear / editar Experiencia</span></div>

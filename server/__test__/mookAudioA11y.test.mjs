@@ -51,6 +51,27 @@ test('WCAG-STUDIO-01: «Crear nueva versión» usa bg-amber-700 (≥ 4.5:1 con t
         assert.ok(!b.includes('bg-amber-600'), 'sin amber-600');
     }
 });
+// ── CHP-WCAG-FIVE-SURFACES-01C — P2 de Runtime y Studio ──
+test('WCAG-RUNTIME-01..04: anuncio de avance, contraste, enlace ≥ 24 px y jerarquía h1→h2→h3', () => {
+    assert.ok(/<p role="status" aria-live="polite" className="sr-only">\{progressAnnounce\}<\/p>/.test(SRC), 'región viva del avance');
+    assert.ok(/setProgressAnnounce\(`Paso completado\. \$\{done\} de \$\{route\.progress\.totalRequired\} pasos requeridos completados\.`\)/.test(SRC), 'mensaje de paso completado');
+    assert.ok(/text-xs text-gray-600 dark:text-gray-400 mb-1">\{experienceTitle\} · \{moduleTitle\}/.test(SRC), 'migas con contraste');
+    assert.ok(!/'text-gray-400'\}`\}>/.test(SRC), 'contador de palabras sin gray-400');
+    assert.equal((SRC.match(/inline-flex items-center min-h-6">← Biblioteca/g) || []).length, 3, 'tres enlaces «← Biblioteca» con alto mínimo');
+    assert.ok(/<h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100">\{detail\?\.title \?\? 'Tu ruta'\}<\/h1>/.test(SRC), 'título de la ruta es h1');
+    assert.ok(/<h2 className="text-lg font-bold text-gray-800 dark:text-gray-100">\{m\.title\}<\/h2>/.test(SRC), 'módulo es h2');
+    assert.ok(/<h3 tabIndex=\{-1\}/.test(SRC) && /querySelector\('h3'\)\?\.focus\?\.\(\)/.test(SRC), 'nodo es h3 y sigue enfocable');
+    assert.ok(!/<h4/.test(SRC), 'sin h4 huérfanos');
+});
+test('WCAG-STUDIO-02/04/07: contrastes, «Añadir objetivo» ≥ 24 px y tablist con flechas', () => {
+    assert.ok(/text-gray-600 dark:text-gray-400">· \{NODE_TYPE_LABEL\[n\.type\]\}/.test(STUDIO), 'tipo de nodo con contraste');
+    assert.ok(/text-gray-600 dark:text-gray-400">Plantilla sugerida/.test(STUDIO), 'plantilla sugerida con contraste');
+    assert.ok(/text-gray-600 dark:text-gray-300">Sin cubierta/.test(STUDIO), 'sin cubierta con contraste');
+    assert.ok(/text-gray-700 dark:text-gray-200 rounded-md font-bold inline-fl/.test(STUDIO), 'Archivar del listado con contraste');
+    assert.ok(/min-h-6 text-sm font-bold text-indigo-600 hover:underline">\s*<Plus size=\{14\} aria-hidden \/> Añadir objetivo/.test(STUDIO), 'Añadir objetivo con alto mínimo');
+    assert.ok(/tabIndex=\{tab === k \? 0 : -1\}/.test(STUDIO), 'tabindex itinerante en las pestañas');
+    assert.ok(/e\.key === 'ArrowRight'/.test(STUDIO) && /e\.key === 'ArrowLeft'/.test(STUDIO) && /e\.key === 'Home'/.test(STUDIO) && /e\.key === 'End'/.test(STUDIO), 'flechas, Inicio y Fin');
+});
 test('WCAG-STUDIO-03: al entrar al editor el foco va al encabezado «Editar: …»', () => {
     assert.ok(/const editorHeadingRef = useRef<HTMLHeadingElement \| null>\(null\)/.test(STUDIO), 'ref del encabezado');
     assert.ok(/useEffect\(\(\) => \{ if \(view === 'editor'\) editorHeadingRef\.current\?\.focus\(\); \}, \[view\]\)/.test(STUDIO), 'efecto de foco al cambiar a editor');

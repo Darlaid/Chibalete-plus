@@ -754,7 +754,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                                                         <Eye size={14} className="mr-1" aria-hidden /> Previsualizar
                                                     </button>
                                                     {e.status !== 'archived' && (
-                                                        <button type="button" onClick={() => setConfirmArchiveId(e.id)} className="px-3 py-1.5 bg-gray-100 dark:bg-gray-700 text-gray-500 rounded-md font-bold inline-flex items-center" aria-label={`Archivar ${e.title}`}>
+                                                        <button type="button" onClick={() => setConfirmArchiveId(e.id)} className="px-3 py-1.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-md font-bold inline-flex items-center" aria-label={`Archivar ${e.title}`}>
                                                             <Archive size={14} className="mr-1" aria-hidden /> Archivar
                                                         </button>
                                                     )}
@@ -812,9 +812,24 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
             {expStatus === 'archived' && <p className="mb-4 text-sm text-gray-600 bg-gray-100 dark:bg-gray-700 rounded-lg p-3">Experiencia archivada: ya no se descubre ni admite ediciones. Los participantes con rutas en curso pueden terminarlas.</p>}
 
             {/* Tabs C3 */}
-            <div role="tablist" aria-label="Secciones del editor" className="flex gap-2 mb-6 flex-wrap">
+            {/* CHP-WCAG-01C STUDIO-07: patrón tablist — un solo tab-stop (tabindex itinerante) y
+                flechas / Inicio / Fin mueven foco y selección. */}
+            <div role="tablist" aria-label="Secciones del editor" className="flex gap-2 mb-6 flex-wrap"
+                onKeyDown={(e) => {
+                    const keys = ['info', 'ruta', 'preview', 'publicacion'] as const;
+                    const i = keys.indexOf(tab as typeof keys[number]);
+                    let next: number | null = null;
+                    if (e.key === 'ArrowRight') next = (i + 1) % keys.length;
+                    else if (e.key === 'ArrowLeft') next = (i - 1 + keys.length) % keys.length;
+                    else if (e.key === 'Home') next = 0;
+                    else if (e.key === 'End') next = keys.length - 1;
+                    if (next === null) return;
+                    e.preventDefault();
+                    setTab(keys[next]);
+                    (e.currentTarget.querySelectorAll('[role="tab"]')[next] as HTMLElement | undefined)?.focus();
+                }}>
                 {([['info', 'Información'], ['ruta', 'Ruta'], ['preview', 'Vista previa'], ['publicacion', 'Publicación']] as const).map(([k, label]) => (
-                    <button key={k} type="button" role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+                    <button key={k} type="button" role="tab" aria-selected={tab === k} tabIndex={tab === k ? 0 : -1} onClick={() => setTab(k)}
                         className={`px-4 py-2 rounded-full text-sm font-medium ${tab === k ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`}>
                         {label}
                     </button>
@@ -872,7 +887,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                         </ul>
                         <button type="button"
                             onClick={() => { setObjetivos(list => [...list, '']); markDirty(); }}
-                            className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-indigo-600 hover:underline">
+                            className="mt-2 inline-flex items-center gap-1 min-h-6 text-sm font-bold text-indigo-600 hover:underline">
                             <Plus size={14} aria-hidden /> Añadir objetivo
                         </button>
                     </fieldset>
@@ -888,7 +903,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                             {info.imageUrl
                                 ? <img src={info.imageUrl} alt="Vista previa de la cubierta"
                                     className="w-full h-full" style={{ objectFit: 'cover', objectPosition: 'center' }} />
-                                : <div className="w-full h-full grid place-items-center text-xs text-gray-500">Sin cubierta</div>}
+                                : <div className="w-full h-full grid place-items-center text-xs text-gray-600 dark:text-gray-300">Sin cubierta</div>}
                         </div>
 
                         <input ref={coverInputRef} type="file" accept="image/jpeg,image/png,image/webp"
@@ -995,7 +1010,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                                         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2">
                                             <span className="text-sm font-medium text-gray-700 dark:text-gray-200 inline-flex items-center gap-2 flex-1 min-w-40">
                                                 {NODE_ICON[n.type]} {n.title || <span className="text-gray-400 italic">sin título</span>}
-                                                <span className="text-xs text-gray-400">· {NODE_TYPE_LABEL[n.type]}</span>
+                                                <span className="text-xs text-gray-600 dark:text-gray-400">· {NODE_TYPE_LABEL[n.type]}</span>
                                             </span>
                                             <span className="text-xs text-gray-500">{n.required ? 'Requerido' : 'Opcional'}</span>
                                             {!readOnlyRoute && expStatus !== 'archived' && (
@@ -1045,7 +1060,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                             <Plus size={16} aria-hidden /> Añadir módulo
                         </button>
                     )}
-                    <p className="text-xs text-gray-400">Plantilla sugerida por el contrato: Leer → Conversar → Producir (una guía de autoría, no un requisito técnico).</p>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Plantilla sugerida por el contrato: Leer → Conversar → Producir (una guía de autoría, no un requisito técnico).</p>
                 </div>
             )}
 

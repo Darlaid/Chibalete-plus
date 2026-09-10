@@ -213,7 +213,7 @@ export const ProduccionesTab: React.FC = () => {
                                     <div className="flex-1 min-w-52">
                                         <p className="font-bold text-gray-800 dark:text-gray-100">{i.participantName ?? 'Participante'}</p>
                                         <p className="text-sm text-gray-500">{i.experience} · v{i.version}{i.moduleTitle ? ` · ${i.moduleTitle}` : ''} · {i.nodeTitle}</p>
-                                        <p className="text-xs text-gray-400 mt-1 inline-flex items-center gap-1"><Clock size={12} aria-hidden /> Entregada {fmt(i.submittedAt)}{i.versionsCount > 1 ? ` · ${i.versionsCount} versiones` : ''}</p>
+                                        <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 inline-flex items-center gap-1"><Clock size={12} aria-hidden /> Entregada {fmt(i.submittedAt)}{i.versionsCount > 1 ? ` · ${i.versionsCount} versiones` : ''}</p>
                                     </div>
                                     <span className={`text-xs font-bold px-3 py-1 rounded-full ${ESTADO[i.status]?.cls ?? 'bg-gray-100 text-gray-600'}`}>{ESTADO[i.status]?.text ?? i.status}</span>
                                     <button type="button" onClick={(e) => openDetail(i.id, e.currentTarget)} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold">Revisar</button>
@@ -253,7 +253,7 @@ export const ProduccionesTab: React.FC = () => {
                                     <div className="space-y-3">
                                         {detail.versions.map((vv: any, i: number) => (
                                             <blockquote key={i} className={`border-l-4 pl-3 py-1 text-sm whitespace-pre-wrap ${i === detail.versions.length - 1 ? 'border-indigo-400' : 'border-gray-300 opacity-75'}`}>
-                                                <p className="text-xs text-gray-400 mb-1">Versión {i + 1} · {fmt(vv.submittedAt)}{i === detail.versions.length - 1 ? ' · vigente' : ''}</p>
+                                                <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Versión {i + 1} · {fmt(vv.submittedAt)}{i === detail.versions.length - 1 ? ' · vigente' : ''}</p>
                                                 {vv.text}
                                             </blockquote>
                                         ))}
@@ -280,7 +280,7 @@ export const ProduccionesTab: React.FC = () => {
                                         {detail.history.map((h: any, i: number) => (
                                             <li key={i} className="text-gray-600 dark:text-gray-300">
                                                 <span className="font-medium">{HISTORY_LABEL[h.type] ?? h.type}</span>
-                                                <span className="text-xs text-gray-400"> · {fmt(h.at)}</span>
+                                                <span className="text-xs text-gray-600 dark:text-gray-400"> · {fmt(h.at)}</span>
                                                 {h.comment && <span className="block text-xs italic pl-3">“{h.comment}”</span>}
                                             </li>
                                         ))}
@@ -314,7 +314,7 @@ export const ProduccionesTab: React.FC = () => {
                                                 <button type="button" onClick={() => setConfirmReview(true)} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Marcar como revisada…</button>
                                             )}
                                         </div>
-                                        <p className="text-xs text-gray-400">Revisar = confirmar la mediación humana. No es una calificación ni una evaluación del aprendizaje.</p>
+                                        <p className="text-xs text-gray-600 dark:text-gray-400">Revisar = confirmar la mediación humana. No es una calificación ni una evaluación del aprendizaje.</p>
                                     </section>
                                 ) : (
                                     <p className="text-sm text-emerald-700 border-t border-gray-200 dark:border-gray-700 pt-4">

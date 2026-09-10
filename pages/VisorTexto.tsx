@@ -973,7 +973,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     : 'bg-white/95 dark:bg-gray-800/95 border-gray-200 dark:border-gray-700'
             }`}>
                 <div className="flex items-center">
-                    <button onClick={() => useNavigateTo(fichaPath)} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 mr-1 min-w-[44px] min-h-[44px] flex items-center justify-center" aria-label="Volver a la ficha del contenido">
+                    <button onClick={() => useNavigateTo(fichaPath, { state: { returnFocus: (location.state as { returnFocus?: string } | null)?.returnFocus ?? 'guiado' } })} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 mr-1 min-w-[44px] min-h-[44px] flex items-center justify-center" aria-label="Volver a la ficha del contenido">
                         <ChevronLeft size={24} />
                     </button>
                     <MookReturnButton compact className="inline-flex items-center gap-1 px-3 py-2 rounded-full border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 mr-1" />
@@ -991,6 +991,8 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                             manifest && language === 'es' ? 'Leer en voz alta (libro completo)' :
                             'Leer en voz alta (vista previa — primeros 300 caracteres)'
                         }
+                        aria-label={audioLoading ? 'Generando audio' : isPlaying ? 'Pausar lectura' : 'Leer en voz alta'}
+                        aria-pressed={isPlaying}
                     >
                         {audioLoading ? <Loader2 size={24} className="animate-spin" /> : (isPlaying ? <VolumeX size={24} /> : <Volume2 size={24} />)}
                     </button>
@@ -1001,6 +1003,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                         onClick={() => setShowOralityModal(true)}
                         className="relative p-2 rounded-full transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900 dark:text-indigo-300"
                         title="Laboratorio de oralidad (Beta — requiere micrófono e internet)"
+                        aria-label="Laboratorio de oralidad (beta)"
                     >
                         <Mic size={24} />
                         <span className="absolute -top-1 -right-1 bg-amber-400 text-amber-900 text-[8px] font-black leading-none px-1 py-0.5 rounded-full select-none">

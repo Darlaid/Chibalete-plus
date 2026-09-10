@@ -22,7 +22,18 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
     // El origen llega por la URL, así que sobrevive a recargar la ficha.
     const mookCtx = readMookContext(location.search);
     // Ir a un modo de lectura conservando el origen, si lo hay.
-    const goRead = (path: string) => navigate(withMookContext(path, mookCtx));
+    // CHP-WCAG-01C BIBLIOTECA-10: cada control que abre un visor viaja en el estado de
+    // navegación; los visores lo devuelven al volver y la ficha enfoca ese control.
+    const goRead = (path: string, returnFocus?: string) =>
+        navigate(withMookContext(path, mookCtx), returnFocus ? { state: { returnFocus } } : undefined);
+    const returnFocusKey = (location.state as { returnFocus?: string } | null)?.returnFocus;
+    const returnFocusDone = React.useRef(false);
+    useEffect(() => {
+        if (returnFocusDone.current || !returnFocusKey || !content) return;
+        const target = document.querySelector<HTMLElement>(`[data-return-focus="${returnFocusKey}"]`);
+        if (target) { returnFocusDone.current = true; target.focus(); }
+    });
+
     const { user } = useAuth();
     const [relatedContent, setRelatedContent] = useState<Content[]>([]);
     const [reviewText, setReviewText] = useState('');
@@ -196,7 +207,7 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
     );
 
     return (
-        <div className="relative min-h-screen bg-gray-900 text-white overflow-hidden">
+        <main className="relative min-h-screen bg-gray-900 text-white overflow-hidden">
             {/* Immersive Background Layer */}
             <div className="absolute inset-0 z-0">
                 <img 
@@ -359,9 +370,10 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                         {(content.url_recurso || content.texto_plano_url) ? (
                                           <button 
                                             onClick={() => {
-                                                if (content.texto_plano_url) goRead(`/leer/inmersivo/${content.id}`);
-                                                else goRead(`/leer/pdf/${content.id}`);
+                                                if (content.texto_plano_url) goRead(`/leer/inmersivo/${content.id}`, 'leer-ahora');
+                                                else goRead(`/leer/pdf/${content.id}`, 'leer-ahora');
                                             }}
+                                            data-return-focus="leer-ahora"
                                             className="flex items-center px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-bold text-lg shadow-[0_0_30px_rgba(79,70,229,0.4)] hover:shadow-[0_0_40px_rgba(79,70,229,0.6)] hover:-translate-y-1 transition-all duration-300"
                                           >
                                             <Play size={24} className="fill-current mr-3" /> 
@@ -383,17 +395,17 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                 {content.tipo !== 'libro_album' && (
                                     <>
                                       {content.texto_plano_url && (
-                                        <button onClick={() => goRead(`/leer/inmersivo/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                        <button onClick={() => goRead(`/leer/inmersivo/${content.id}`, 'inmersivo')} data-return-focus="inmersivo" className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
                                             <Zap size={20} className="mr-2 text-yellow-400"/> Inmersivo
                                         </button>
                                       )}
                                       {content.texto_plano_url && (
-                                        <button onClick={() => goRead(`/leer/texto/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                        <button onClick={() => goRead(`/leer/texto/${content.id}`, 'guiado')} data-return-focus="guiado" className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
                                             <FileText size={20} className="mr-2 text-green-400"/> Guiado
                                         </button>
                                       )}
                                       {content.texto_plano_url && (
-                                        <button onClick={() => goRead(`/leer/accesible/${content.id}`)} className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
+                                        <button onClick={() => goRead(`/leer/accesible/${content.id}`, 'accesible')} data-return-focus="accesible" className="flex items-center px-6 py-4 bg-white/10 hover:bg-white/20 border border-white/10 backdrop-blur text-white rounded-full font-semibold transition-all">
                                             <Glasses size={20} className="mr-2 text-blue-400"/> Accesible
                                         </button>
                                       )}
@@ -459,6 +471,7 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                         ) : (
                             <form onSubmit={handleCommunityReviewSubmit}>
                                 <textarea
+                                    aria-label="Tu reseña"
                                     value={reviewText}
                                     onChange={(e) => setReviewText(e.target.value)}
                                     placeholder="¿Qué sentiste al leer este libro? ¿Qué aprendiste? Escribe tu reseña aquí..."
@@ -503,7 +516,7 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                     </div>
                 </div>
             )}
-        </div>
+        </main>
     );
 };
 

@@ -150,7 +150,7 @@ ok('Biblioteca: chips con anillo focus-visible indigo-700', /focus-visible:ring-
 
 // BIBLIOTECA-02 — portada fuera del orden de tabulación y del árbol accesible
 ok('ContentCard: enlace de portada con tabIndex={-1} y aria-hidden', /tabIndex=\{-1\}\s*aria-hidden="true"\s*>/.test(cardSrc.replace(/\/\/[^\n]*\n/g, '')));
-ok('ContentCard: el título conserva su enlace con nombre',  /<Link to=\{`\/contenido\/\$\{content\.id\}`\} className="hover:text-indigo-600/.test(cardSrc));
+ok('ContentCard: el título conserva su enlace con nombre',  /<Link to=\{`\/contenido\/\$\{content\.id\}`\} className="[^"]*hover:text-indigo-600/.test(cardSrc));
 
 // BIBLIOTECA-06 — cinco botones del inmersivo con nombre
 for (const label of ['Ajustes de lectura', 'Frase anterior', 'Frase siguiente', 'Aumentar velocidad', 'Reducir velocidad']) {
@@ -195,6 +195,55 @@ ok('LeoCompanion: Escape cierra y Tab cicla',               /e\.key === 'Escape'
     ok('contraste: gray-600 (#4b5563) sobre blanco ≥ 4.5:1',           ratio('#4b5563', '#ffffff') >= 4.5);
     ok('contraste: enlace de salto blanco sobre indigo-700 ≥ 4.5:1',    ratio('#ffffff', '#4338ca') >= 4.5);
 }
+
+// ── §12: CHP-WCAG-FIVE-SURFACES-01C — lock-in de los P2 corregidos ─────────
+section('[12] CHP-WCAG-01C — P2 (Biblioteca, visores, Leo, Subir, Aula Viva operacional)');
+const fichaSrc = readSrc('pages', 'PaginaDetalleLibro.tsx');
+const opSrc    = readSrc('pages', 'AulaVivaOperacional.tsx');
+const bibSrc2  = readSrc('pages', 'Biblioteca.tsx');
+const inmSrc2  = readSrc('pages', 'VisorInmersivo.tsx');
+const txtSrc2  = readSrc('pages', 'VisorTexto.tsx');
+const leoSrc2  = readSrc('components', 'LeoCompanion.tsx');
+const cardSrc2 = readSrc('components', 'ContentCard.tsx');
+const subirSrc2 = readSrc('pages', 'SubirContenido.tsx');
+
+// BIBLIOTECA-03 / 04 — campos con nombre
+ok('Biblioteca: buscador con aria-label',                     /aria-label="Buscar título, autor o tema"/.test(bibSrc2));
+ok('Ficha: textarea de reseña con aria-label',                /<textarea\s+aria-label="Tu reseña"/.test(fichaSrc));
+// BIBLIOTECA-05 — landmarks / encabezado
+ok('Ficha: contenedor raíz es <main>',                        /return \(\s*<main className="relative min-h-screen/.test(fichaSrc) && /<\/main>\s*\);\s*};/.test(fichaSrc));
+ok('Inmersivo: role="main" con nombre y h1 accesible',        /role="main" aria-label=\{content\?\.titulo \?\? 'Lectura inmersiva'\}/.test(inmSrc2) && /<h1 className="sr-only">\{content\?\.titulo\}<\/h1>/.test(inmSrc2));
+// BIBLIOTECA-07 — nombres explícitos en el guiado
+ok('Guiado: botón de voz con aria-label y aria-pressed',      /aria-label=\{audioLoading \? 'Generando audio' : isPlaying \? 'Pausar lectura' : 'Leer en voz alta'\}/.test(txtSrc2) && /aria-pressed=\{isPlaying\}/.test(txtSrc2));
+ok('Guiado: oralidad con aria-label',                         /aria-label="Laboratorio de oralidad \(beta\)"/.test(txtSrc2));
+// BIBLIOTECA-10 — retorno de foco desde los visores al control de origen
+ok('Ficha: goRead envía returnFocus en el estado de navegación', /const goRead = \(path: string, returnFocus\?: string\) =>/.test(fichaSrc) && /\{ state: \{ returnFocus \} \}/.test(fichaSrc));
+for (const key of ['leer-ahora', 'inmersivo', 'guiado', 'accesible']) {
+    ok(`Ficha: control data-return-focus="${key}"`, fichaSrc.includes(`data-return-focus="${key}"`));
+}
+ok('Ficha: al montar enfoca el control de origen (una vez)',  /returnFocusDone\.current = true; target\.focus\(\);/.test(fichaSrc) && /\[data-return-focus="\$\{returnFocusKey\}"\]/.test(fichaSrc));
+ok('Inmersivo: «Volver» devuelve returnFocus (fallback inmersivo)', /const goBackToFicha = \(\) => navigate\(fichaPath, \{ state: \{ returnFocus: [^\n]*\?\? 'inmersivo' \} \}\)/.test(inmSrc2) && /onClick=\{goBackToFicha\}/.test(inmSrc2));
+ok('Guiado: «Volver» devuelve returnFocus (fallback guiado)', /useNavigateTo\(fichaPath, \{ state: \{ returnFocus: [^\n]*\?\? 'guiado' \} \}\)/.test(txtSrc2));
+// BIBLIOTECA-11 / 12
+ok('Leo: «Para ti» con text-gray-600',                        /text-gray-600 dark:text-gray-300 text-center tracking-wider mb-1">Para ti/.test(leoSrc2));
+ok('ContentCard: enlace del título con min-h-6',              /className="block truncate min-h-6 leading-6 hover:text-indigo-600/.test(cardSrc2));
+// STUDIO-05 — tarjetas de modo con estado
+ok('Subir: 4 tarjetas de modo con aria-pressed',              (subirSrc2.match(/aria-pressed=\{uploadMode === '(new|existing|manage|experiencia)'\}/g) || []).length === 4);
+// AULAVIVA-01 / 02 / 03
+ok('Operacional: lector seleccionado con aria-pressed',       /aria-pressed=\{selectedStudent === item\.user_id\}/.test(opSrc));
+ok('Operacional: anuncio role="status" al cargar el timeline', /<p role="status" aria-live="polite" className="sr-only">\{selectionAnnounce\}<\/p>/.test(opSrc) && /setSelectionAnnounce\(`Lector \$\{userId\} seleccionado\. Recomendaciones y timeline cargados\.`\)/.test(opSrc));
+ok('Operacional: pie con text-gray-600 y estado emerald-700', /<footer className="mt-6 text-xs text-gray-600 text-center">/.test(opSrc) && /<span className="text-emerald-700">operacional<\/span>/.test(opSrc));
+// contraste de los colores nuevos (Tailwind v3)
+{
+    const lum = (hex) => { const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+    const ratio = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+    ok('contraste: gray-600 (#4b5563) sobre gray-50 (#f9fafb) ≥ 4.5:1',     ratio('#4b5563', '#f9fafb') >= 4.5);
+    ok('contraste: gray-700 (#374151) sobre gray-100 (#f3f4f6) ≥ 4.5:1',    ratio('#374151', '#f3f4f6') >= 4.5);
+    ok('contraste: emerald-700 (#047857) sobre gray-50 ≥ 4.5:1',            ratio('#047857', '#f9fafb') >= 4.5);
+    ok('contraste: gray-600 sobre indigo-50 (#eef2ff) ≥ 4.5:1',              ratio('#4b5563', '#eef2ff') >= 4.5);
+}
+// Permanencia P1 (01B): salto, título, FAB, ring, diálogos — ya cubiertos en §11; aquí se fija que siguen presentes
+ok('P1 permanece: skip link + RouteTitle + FAB + ring + diálogos', /Saltar al contenido principal/.test(layoutSrc) && /const RouteTitle/.test(appSrc) && /aria-label="Abrir chat con Leo"/.test(chatbotSrc) && /focus-visible:ring-indigo-700/.test(bibSrc2) && /role="dialog" aria-label="Ajustes de lectura"/.test(txtSrc2) && /aria-labelledby="leo-companion-title"/.test(leoSrc2));
 
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);
