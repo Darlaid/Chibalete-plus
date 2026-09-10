@@ -2345,7 +2345,8 @@ def test_id_inventory_path():
     # de la base no debe tumbar el backup de los otros 24 stores.
     assert store.required is False, store
 
-    assert len(S.SQLITE_STORES) == 5, sqlite_paths
+    # 6 = los 5 previos + data-critical/events.archive.db (EA01, opcional).
+    assert len(S.SQLITE_STORES) == 6, sqlite_paths
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
 
 
@@ -3252,6 +3253,387 @@ def test_topology_resolver_rejects_undeclared():
         "docker-compose.override.yml",
     ]
     assert all(item.required for item in stores_mod.TOPOLOGY_FILES)
+
+
+# --------------------------------------------------------------------------
+# Casos EA01-EA10 — events.archive.db (CHP-BACKUP-EVENTS-ARCHIVE-COVERAGE-01E)
+# --------------------------------------------------------------------------
+#
+# Archivo frio del log canonico de eventos (archiveRotation.mjs: >90 dias →
+# archivo, >12 meses → expirado). Solo existe con la rotacion activa (hoy OFF),
+# asi que es un store SQLite OPCIONAL con nombre exacto. Presente, su respaldo
+# es obligatorio y su restore se verifica de forma LOGICA y completa: la Online
+# Backup API materializa una copia coherente cuya representacion fisica puede
+# diferir (WAL integrado), por lo que no se exige igualdad byte a byte.
+
+ARCHIVE_LOGICAL_PATH = "data-critical/events.archive.db"
+
+# Schema clonado de server/aulaViva/archiveRotation.mjs (ensureArchiveSchema).
+ARCHIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+    id                 INTEGER PRIMARY KEY,
+    event_id           TEXT    UNIQUE NOT NULL,
+    schema_version     INTEGER NOT NULL DEFAULT 1,
+    event              TEXT    NOT NULL,
+    mode               TEXT    NOT NULL,
+    user_id            TEXT    NOT NULL,
+    content_id         TEXT,
+    session_id         TEXT    NOT NULL,
+    client_ts          INTEGER NOT NULL,
+    server_ts          INTEGER NOT NULL,
+    elapsed_ms         INTEGER,
+    progress_fraction  REAL,
+    payload_json       TEXT,
+    created_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_arch_user_content ON events(user_id, content_id, server_ts);
+CREATE INDEX IF NOT EXISTS idx_arch_event_ts     ON events(event, server_ts);
+"""
+
+# Marcador SANEADO de un payload invalido (analyticsShadow.invalidPayloadMarker).
+ARCHIVE_INVALID_PAYLOAD = '{"__validation_failed":"EVENT_PAYLOAD_INVALID","__reason":"invalid_payload"}'
+
+# Filas sinteticas: identificadores y payloads ficticios, timestamps repartidos
+# entre 91 dias y 11 meses (lo que un archivo real contiene).
+_T0 = 1_757_000_000_000  # epoch ms ficticio
+ARCHIVE_ROWS = (
+    # id, event_id, schema_version, event, mode, user_id, content_id, session_id, client_ts, server_ts, elapsed_ms, progress_fraction, payload_json, created_at
+    (11, "01EA-VALID-0001", 1, "experience_started", "experience", "u-fx-1", None, "s-fx-1",
+     _T0 - 91 * 86_400_000, _T0 - 91 * 86_400_000, None, None,
+     '{"experienceId":"exp-fx","experienceVersionId":"ver-fx","runId":"run-fx-1"}', _T0 - 91 * 86_400_000),
+    (12, "01EA-INVALID-0002", 0, "evidence_reviewed", "experience", "u-fx-1", None, "",
+     _T0 - 150 * 86_400_000, _T0 - 150 * 86_400_000, None, None, ARCHIVE_INVALID_PAYLOAD, _T0 - 150 * 86_400_000),
+    (13, "01EA-VALID-0003", 1, "node_completed", "experience", "u-fx-2", "c-fx", "s-fx-2",
+     _T0 - 200 * 86_400_000, _T0 - 200 * 86_400_000, 1234, 0.5,
+     '{"experienceId":"exp-fx","experienceVersionId":"ver-fx","runId":"run-fx-2","nodeId":"n1","nodeType":"READING","required":true}',
+     _T0 - 200 * 86_400_000),
+    (14, "01EA-VALID-0004", 1, "experience_completed", "experience", "u-fx-2", None, "s-fx-2",
+     _T0 - 330 * 86_400_000, _T0 - 330 * 86_400_000, None, None,
+     '{"experienceId":"exp-fx","experienceVersionId":"ver-fx","runId":"run-fx-2","requiredNodes":3}', _T0 - 330 * 86_400_000),
+)
+
+
+def _build_events_archive(base_dir: str, rel: str = ARCHIVE_LOGICAL_PATH, rows=ARCHIVE_ROWS, wal: bool = True) -> str:
+    """Crea un events.archive.db sintetico con el schema real del archivo."""
+    path = os.path.join(base_dir, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=" + ("WAL" if wal else "DELETE"))
+    conn.executescript(ARCHIVE_SCHEMA)
+    conn.executemany(
+        "INSERT INTO events (id, event_id, schema_version, event, mode, user_id, content_id, session_id,"
+        " client_ts, server_ts, elapsed_ms, progress_fraction, payload_json, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _archive_logical_digest(path: str) -> dict:
+    """Huella LOGICA completa de la base: integridad, schema, filas y todas las columnas."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        schema = [r[0] for r in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")]
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(events)")]
+        rows = conn.execute("SELECT * FROM events ORDER BY event_id").fetchall()
+        digest = hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        invalid = conn.execute(
+            "SELECT payload_json FROM events WHERE event_id = ?", ("01EA-INVALID-0002",)).fetchone()
+        return {
+            "integrity": integrity,
+            "schema": schema,
+            "columns": columns,
+            "count": len(rows),
+            "event_ids": [r[columns.index("event_id")] for r in rows],
+            "digest": digest,
+            "invalid_payload": invalid[0] if invalid else None,
+        }
+    finally:
+        conn.close()
+
+
+def _archive_entry(manifest, key="stores"):
+    for entry in manifest.get(key, []):
+        if entry["logical_path"] == ARCHIVE_LOGICAL_PATH:
+            return entry
+    return None
+
+
+def _restore_staging(env: "Env") -> str:
+    """Restaura el snapshot estructurado en un directorio aislado y devuelve el staging."""
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    return [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+            if os.path.isdir(p)][0]
+
+
+@case("EA01", "events.archive.db declarado una sola vez: SQLite CANON opcional, nombre exacto")
+def test_ea_inventory():
+    from chibalete_backup import stores as S
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+
+    assert sqlite_paths.count(ARCHIVE_LOGICAL_PATH) == 1, sqlite_paths
+    assert ARCHIVE_LOGICAL_PATH not in json_paths, "events.archive.db no es JSON"
+    declaradas = [p for p in sqlite_paths + json_paths if os.path.basename(p) == "events.archive.db"]
+    assert declaradas == [ARCHIVE_LOGICAL_PATH], declaradas
+
+    store = next(s for s in S.SQLITE_STORES if s.logical_path == ARCHIVE_LOGICAL_PATH)
+    assert store.category == "CANON", store
+    assert store.reconstructible is False, store
+    # Opcional: solo existe con la rotacion activa.
+    assert store.required is False, store
+
+    # Nombre exacto bajo data-critical/, sin glob ni ruta absoluta.
+    assert not any(ch in ARCHIVE_LOGICAL_PATH for ch in "*?["), ARCHIVE_LOGICAL_PATH
+    assert ARCHIVE_LOGICAL_PATH.startswith("data-critical/"), ARCHIVE_LOGICAL_PATH
+    assert not os.path.isabs(ARCHIVE_LOGICAL_PATH)
+    # El resto del inventario SQLite no cambia: 4 obligatorios + identity.db + este.
+    assert len(S.SQLITE_STORES) == 6, sqlite_paths
+    assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
+    assert "data-critical/events.db" in sqlite_paths, sqlite_paths
+
+
+@case("EA02", "events.archive.db ausente: backup ok, ausencia anotada y archivo NO creado")
+def test_ea_absent_tolerated():
+    env = Env("ea02")
+    assert not os.path.exists(os.path.join(env.base, ARCHIVE_LOGICAL_PATH))
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    # Sin archivo el backup sigue siendo el de 24 stores: la ausencia no resta.
+    assert len(manifest["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    assert _archive_entry(manifest) is None, "un store ausente no puede figurar como respaldado"
+    ausente = _archive_entry(manifest, "stores_absent")
+    assert ausente is not None, manifest["stores_absent"]
+    assert ausente["status"] == "absent_optional", ausente
+    assert ausente["kind"] == "sqlite", ausente
+    assert "sha256" not in ausente and "bytes" not in ausente, ausente
+    # El backup no lo crea: ni en la base ni en ninguna parte del arbol fuente.
+    assert not os.path.exists(os.path.join(env.base, ARCHIVE_LOGICAL_PATH))
+    assert not any(n == "events.archive.db" for _d, _s, fs in os.walk(env.base) for n in fs)
+
+
+@case("EA03", "events.archive.db presente: una sola entrada sqlite, fuente intacta, resto sin cambios")
+def test_ea_present_included():
+    env = Env("ea03")
+    origen = _build_events_archive(env.base)
+    before = fixtures.snapshot_tree(env.base)
+    digest_before = _archive_logical_digest(origen)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    # 24 historicos + events.archive.db; identity.db sigue ausente en este fixture.
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert paths.count(ARCHIVE_LOGICAL_PATH) == 1, paths
+    kinds = {}
+    for s in manifest["stores"]:
+        kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
+    assert kinds == {"sqlite": 5, "json": 20, "topology": TOPOLOGY_STORE_COUNT}, kinds
+
+    entry = _archive_entry(manifest)
+    assert entry["kind"] == "sqlite", entry
+    assert entry["category"] == "CANON", entry
+    assert entry["status"] == "included", entry
+    assert entry["integrity_result"] == "ok", entry
+    assert entry["capture_method"] == "sqlite_online_backup_api", entry
+    assert entry["reconstructible"] is False, entry
+    assert entry["bytes"] > 0 and len(entry["sha256"]) == 64, entry
+    # Solo metadata tecnica: ningun conteo de eventos viaja al manifiesto.
+    assert "aggregate_count" not in entry, entry
+    assert _archive_entry(manifest, "stores_absent") is None, manifest["stores_absent"]
+
+    # Los 24 stores previos siguen ahi: se suma, no sustituye.
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+
+    # La fuente no se modifica (los sidecars WAL pueden aparecer; los datos no).
+    assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "EA03")
+    assert _archive_logical_digest(origen) == digest_before, "la fuente cambio logicamente"
+
+
+@case("EA04", "restore aislado de events.archive.db: integridad, schema, filas y payload saneado identicos")
+def test_ea_restore_logical():
+    env = Env("ea04")
+    origen = _build_events_archive(env.base)
+    esperado = _archive_logical_digest(origen)
+    assert esperado["integrity"] == "ok" and esperado["count"] == len(ARCHIVE_ROWS), esperado
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+
+    staged = _restore_staging(env)
+    restaurada = os.path.join(staged, "sqlite", "events.archive.db")
+    assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "sqlite")))
+    # La copia es autocontenida: si el integrity_check de la captura dejo un
+    # sidecar junto a ella, esta VACIO; jamas se copia el -wal de la fuente.
+    for name in os.listdir(os.path.join(staged, "sqlite")):
+        if name.startswith("events.archive.db") and name.endswith(("-wal", "-shm")):
+            assert name.endswith("-shm") or os.path.getsize(os.path.join(staged, "sqlite", name)) == 0, name
+
+    obtenido = _archive_logical_digest(restaurada)
+    assert obtenido["integrity"] == "ok", obtenido["integrity"]
+    assert obtenido["schema"] == esperado["schema"], obtenido["schema"]
+    assert "events" in " ".join(obtenido["schema"]) and obtenido["columns"] == esperado["columns"]
+    assert obtenido["count"] == esperado["count"] == len(ARCHIVE_ROWS), obtenido["count"]
+    assert obtenido["event_ids"] == esperado["event_ids"] == sorted(r[1] for r in ARCHIVE_ROWS)
+    assert obtenido["digest"] == esperado["digest"], "las columnas restauradas difieren de la fuente"
+    assert obtenido["invalid_payload"] == ARCHIVE_INVALID_PAYLOAD, obtenido["invalid_payload"]
+    # El manifiesto restaurado describe exactamente lo que viajo.
+    man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
+    assert _archive_entry(man)["sha256"] == sha256_file(restaurada)
+    # La fuente sigue igual despues de backup + restore.
+    assert _archive_logical_digest(origen) == esperado
+
+
+@case("EA05", "events.archive.db como symlink: rechazado antes de invocar restic")
+def test_ea_symlink_rejected():
+    env = Env("ea05")
+    real = _build_events_archive(env.base, rel="data-critical/events.archive.real.db", wal=False)
+    os.symlink(real, os.path.join(env.base, ARCHIVE_LOGICAL_PATH))
+    env.provision_repository()
+    proc = env.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "symlink" in proc.stderr, proc.stderr[-400:]
+    assert env.snapshots(tag="structured") == [], "no debe quedar snapshot"
+    assert env.staging_dirs() == [], env.staging_dirs()
+
+
+@case("EA06", "events.archive.db corrupto o ilegible: el backup falla de forma visible")
+def test_ea_corrupt_rejected():
+    env = Env("ea06")
+    corrupt = os.path.join(env.base, ARCHIVE_LOGICAL_PATH)
+    os.makedirs(os.path.dirname(corrupt), exist_ok=True)
+    with open(corrupt, "wb") as handle:
+        handle.write(b"NO-SOY-UN-ARCHIVO-DE-EVENTOS" * 100)
+    env.provision_repository()
+    proc = env.run("structured_backup.py", expect=errors.SqliteCaptureError.exit_code)
+    assert "events.archive.db" in proc.stderr, proc.stderr[-400:]
+    assert env.snapshots(tag="structured") == [], "no debe quedar snapshot de una captura fallida"
+    assert env.staging_dirs() == [], env.staging_dirs()
+
+    # No regular (directorio): fail-closed en el preflight.
+    env2 = Env("ea06b")
+    os.makedirs(os.path.join(env2.base, ARCHIVE_LOGICAL_PATH), exist_ok=True)
+    env2.provision_repository()
+    proc2 = env2.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "no es un archivo regular" in proc2.stderr, proc2.stderr[-400:]
+    assert env2.snapshots(tag="structured") == []
+
+
+@case("EA07", "sidecars, copias y vecinos no entran; el directorio padre no se recorre")
+def test_ea_no_collateral():
+    env = Env("ea07")
+    _build_events_archive(env.base)
+    senuelos = {
+        "data-critical/events.archive.db.bak.1": b"senuelo",
+        "data-critical/events.archive.db.pre-rotate": b"senuelo",
+        "data-critical/events.archive.old.db": b"senuelo",
+        "data-critical/events-archive.db": b"senuelo",
+        "data-critical/events.archive.db.copy": b"senuelo",
+        "data/events.archive.db": b"senuelo",
+    }
+    for rel, raw in senuelos.items():
+        path = os.path.join(env.base, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(raw)
+    # Sidecars WAL vivos durante la copia: un escritor mantiene la conexion abierta.
+    writer = sqlite3.connect(os.path.join(env.base, ARCHIVE_LOGICAL_PATH))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute(
+        "INSERT INTO events (id, event_id, schema_version, event, mode, user_id, session_id, client_ts, server_ts, created_at)"
+        " VALUES (15, '01EA-VALID-0005', 1, 'node_started', 'experience', 'u-fx-3', 's-fx-3', 1, 1, 1)")
+    writer.commit()
+    assert os.path.exists(os.path.join(env.base, ARCHIVE_LOGICAL_PATH + "-wal"))
+    try:
+        env.provision_repository()
+        env.run("structured_backup.py", expect=0)
+    finally:
+        writer.close()
+    manifest = env.manifests()[-1]
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert paths.count(ARCHIVE_LOGICAL_PATH) == 1, paths
+    for rel in senuelos:
+        assert rel not in paths, f"senuelo respaldado: {rel}"
+    assert not any(p.endswith(("-wal", "-shm")) for p in paths), paths
+    # En el staging restaurado solo estan las bases declaradas, por basename exacto.
+    staged = _restore_staging(env)
+    listado = sorted(os.listdir(os.path.join(staged, "sqlite")))
+    bases = [n for n in listado if n.endswith(".db")]
+    assert bases == ["events.archive.db", "events.db", "insights.db", "offline_assignments.db", "progress.db"], listado
+    # Ningun senuelo, y el -wal VIVO de la fuente (con datos) no se copio: si
+    # el integrity_check de la copia dejo un sidecar, esta vacio.
+    assert not any("senuelo" in n or n.endswith((".bak.1", ".pre-rotate", ".copy", ".old.db")) or n == "events-archive.db" for n in listado), listado
+    for n in listado:
+        if n.endswith("-wal"):
+            assert os.path.getsize(os.path.join(staged, "sqlite", n)) == 0, n
+    # La copia integra el WAL: la fila escrita antes de la copia esta en el restore.
+    restaurada = _archive_logical_digest(os.path.join(staged, "sqlite", "events.archive.db"))
+    assert restaurada["integrity"] == "ok" and "01EA-VALID-0005" in restaurada["event_ids"], restaurada["event_ids"]
+
+
+@case("EA08", "los stores SQLite obligatorios conservan su comportamiento con el archivo presente")
+def test_ea_required_unchanged():
+    env = Env("ea08")
+    _build_events_archive(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    entries = {s["logical_path"]: s for s in manifest["stores"] if s["kind"] == "sqlite"}
+    assert set(entries) == {
+        "data-critical/events.db", "data/progress.db", "data/offline_assignments.db",
+        "data-critical/insights.db", ARCHIVE_LOGICAL_PATH,
+    }, sorted(entries)
+    for lp, entry in entries.items():
+        assert entry["integrity_result"] == "ok", (lp, entry)
+        assert entry["capture_method"] == "sqlite_online_backup_api", (lp, entry)
+        assert sha256_file(os.path.join(env.base, lp)) or True  # la fuente sigue legible
+    assert entries["data-critical/insights.db"]["reconstructible"] is True
+    assert entries[ARCHIVE_LOGICAL_PATH]["reconstructible"] is False
+
+
+@case("EA09", "identity.db y events.archive.db opcionales coexisten: 26 stores, ninguno pisa a otro")
+def test_ea_both_optional_present():
+    env = Env("ea09")
+    fixtures.build_identity_db(env.base)
+    _build_events_archive(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    assert len(manifest["stores"]) == 26 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    kinds = {}
+    for s in manifest["stores"]:
+        kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
+    assert kinds == {"sqlite": 6, "json": 20, "topology": TOPOLOGY_STORE_COUNT}, kinds
+    assert manifest["stores_absent"] == [
+        a for a in manifest["stores_absent"] if a["logical_path"] not in (ARCHIVE_LOGICAL_PATH, IDENTITY_LOGICAL_PATH)
+    ], manifest["stores_absent"]
+
+
+@case("EA10", "un archivo vacio pero valido (rotacion recien activada) se respalda igual")
+def test_ea_empty_valid():
+    env = Env("ea10")
+    origen = _build_events_archive(env.base, rows=())
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    entry = _archive_entry(manifest)
+    assert entry is not None and entry["status"] == "included" and entry["integrity_result"] == "ok", entry
+    assert _archive_entry(manifest, "stores_absent") is None
+    assert _archive_logical_digest(origen)["count"] == 0
 
 
 def main() -> int:

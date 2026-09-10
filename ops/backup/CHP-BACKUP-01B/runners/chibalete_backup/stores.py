@@ -63,6 +63,20 @@ SQLITE_STORES: tuple[SqliteStore, ...] = (
     # (`identity/`), no bajo data-critical. La ruta la fija el contrato de
     # CHP-IDDB-02B-PATH-01 y la declara IDENTITY_DB en el compose.
     SqliteStore("identity/identity.db", "CANON", reconstructible=False, required=False),
+    # --- CHP-BACKUP-EVENTS-ARCHIVE-COVERAGE-01E ------------------------------
+    # Archivo frio del log canonico de eventos: `archiveRotation.mjs` mueve a
+    # este archivo los eventos con mas de 90 dias y los expira al superar 12
+    # meses calendario (politica CHP_MOOK_EVENTS_EVIDENCE_RETENTION_POLICY_01).
+    # Es la UNICA copia de esos eventos una vez salen de events.db, asi que es
+    # CANON y no reconstructible.
+    #
+    # `required=False`: el archivo solo existe cuando la rotacion esta activa
+    # (`ARCHIVE_ROTATION_ENABLED=1`, hoy OFF). Su ausencia se anota en
+    # `stores_absent`; cuando existe, su respaldo es obligatorio y pasa por la
+    # misma Online Backup API (§6): un symlink, un no-regular o una base
+    # corrupta abortan antes de invocar restic. Nombre EXACTO, sin glob: los
+    # sidecars `-wal`/`-shm` y cualquier vecino (`*.bak.*`, copias) no entran.
+    SqliteStore("data-critical/events.archive.db", "CANON", reconstructible=False, required=False),
 )
 
 # --- JSON canonicos (inventario §2.2) ----------------------------------------

@@ -158,7 +158,7 @@ La Application Key **sí** tiene permiso de borrado (restic lo necesita para sus
 
 **Fallback `VACUUM INTO`** — solo si el principal falla, y exige: **preflight de espacio** (§7) · **lock controlado** · **integridad posterior** · **justificación registrada** en el log.
 
-Cubre `events.db`, `progress.db`, `offline_assignments.db`, `insights.db` (PROJ, marcado reconstruible) e `identity.db` (§17; ruta `identity/identity.db`).
+Cubre `events.db`, `progress.db`, `offline_assignments.db`, `insights.db` (PROJ, marcado reconstruible), `identity.db` (§17; ruta `identity/identity.db`) y `events.archive.db` (§18; opcional hasta activar la rotación).
 
 ## 7. Espacio y caché — cálculo dinámico (Corrección 5)
 
@@ -272,3 +272,16 @@ Ruta lógica canónica: **`identity/identity.db`** (host `/var/www/chibalete/ide
 Ya existe en producción, inerte, y **entra en §6 (Online Backup API) desde ahora**, no cuando `identity_sqlite` → `enabled`: una base creada y no respaldada es peor que una base ausente. Es CANON no reconstruible de máxima criticidad, contemplada en manifest y en el orden de restore de 01C.
 
 Se declara `required=False` mientras el flag siga en `off`. Esa tolerancia hace que una ruta equivocada la omita **en silencio**, así que la ruta está fijada por los casos ID01-ID04 de la suite (ver README §4-quater).
+
+## 18. `events.archive.db` (CHP-BACKUP-EVENTS-ARCHIVE-COVERAGE-01E)
+
+```text
+store:      data-critical/events.archive.db
+tipo:       SQLite (CANON, no reconstruible)
+presencia:  opcional hasta activar la rotación (`ARCHIVE_ROTATION_ENABLED`, hoy OFF)
+backup:     obligatorio cuando existe (§6, Online Backup API; symlink, no-regular o corrupto = fallo explícito)
+restore:    aislado y verificado lógicamente (integrity_check, schema, conteo, event_id ordenados, digest de todas las columnas)
+retención:  gobernada por la política publicada (CHP_MOOK_EVENTS_EVIDENCE_RETENTION_POLICY_01)
+```
+
+Es el archivo frío del log canónico de eventos: `archiveRotation.mjs` mueve allí los eventos con más de 90 días y los expira al superar 12 meses calendario. Una vez un evento sale de `events.db`, este archivo es su única copia. Se declara con nombre exacto, sin glob ni recorrido del directorio: los sidecars `-wal`/`-shm` y cualquier vecino (`*.bak.*`, copias, `data/events.archive.db`) no entran. La ausencia se anota en `stores_absent` para distinguir «la rotación aún no ha creado el archivo» de «se perdió». La ruta y el contrato quedan fijados por los casos EA01-EA10 de la suite.
