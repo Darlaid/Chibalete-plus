@@ -37,9 +37,9 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "x-user-id: <id_lector_real>" "https
    ssh root@72.60.158.97
    # NO imprimir hashes/PII a stdout compartido. Trabajar en el host.
    node -e "const u=require('/var/www/chibalete/data-critical/usuarios_colegios_oro.json'); \
-     console.log(u.filter(x=>['monicauribe22@gmail.com','mediador@chibaleteeditores.com','mariaortiz@chibalete.com'].includes(x.email)).map(x=>({email:x.email,roles:x.roles||x.rol})))"
+     console.log(u.filter(x=>['[cuenta-administradora]','[cuenta-mediadora-1]','[cuenta-mediadora-2]'].includes(x.email)).map(x=>({email:x.email,roles:x.roles||x.rol})))"
    ```
-2. **Forzar reset de contraseña** de cada cuenta listada en history (mínimo: la admin `monicauribe22@gmail.com`, el mediador, las demo `admin@demo.com`/`lector@demo.com` si existen en prod). Vía el flujo de reset existente o, si no hay email, seteando un hash bcrypt nuevo directamente en el archivo de producción **dentro de una ventana de mantenimiento** (recordar: 2 procesos comparten el archivo — coordinar con el lock; o hacerlo con la app detenida).
+2. **Forzar reset de contraseña** de cada cuenta listada en history (mínimo: la admin `[cuenta-administradora]`, el mediador, las demo `[cuenta-demo-1]`/`[cuenta-demo-2]` si existen en prod). Vía el flujo de reset existente o, si no hay email, seteando un hash bcrypt nuevo directamente en el archivo de producción **dentro de una ventana de mantenimiento** (recordar: 2 procesos comparten el archivo — coordinar con el lock; o hacerlo con la app detenida).
 3. **Invalidar sesiones activas** de esas cuentas (si hay tokens persistidos).
 4. **Confirmar** que ninguna de esas contraseñas se reusa en otras cuentas reales del colegio.
 

@@ -293,7 +293,7 @@ Lo que un operador VERÁ en su terminal mientras `deploy-backend.sh` corre:
 [2026-05-08T10:00:01Z] [INFO]  watchdog activo — timeout global 1800s (PID=12345)
 [2026-05-08T10:00:01Z] [INFO]  Chibalete+ deploy-backend.sh — inicio
 [2026-05-08T10:00:01Z] [INFO]    RELEASE_TAG = rel-2026-05-08-smoke-001
-[2026-05-08T10:00:01Z] [INFO]    ACTOR       = nicolas.jimenez.a@gmail.com
+[2026-05-08T10:00:01Z] [INFO]    ACTOR       = [responsable-de-despliegue]
 [2026-05-08T10:00:01Z] [INFO]    VPS_HOST    = root@72.60.158.97
 [2026-05-08T10:00:01Z] [INFO]    DRY_RUN     = 0
 [2026-05-08T10:00:01Z] [INFO]    TIMEOUT     = 1800s
@@ -329,7 +329,7 @@ Lo que un operador VERÁ en su terminal mientras `deploy-backend.sh` corre:
 ╠═════════════════════════════════════════════════════════════════╣
 ║ release_tag: rel-2026-05-08-smoke-001                          ║
 ║ git_sha:     a1b2c3d                                            ║
-║ actor:       nicolas.jimenez.a@gmail.com                        ║
+║ actor:       [responsable-de-despliegue]                        ║
 ║ backup_ts:   2026-05-08T10-00-30Z                               ║
 ║ state:       done                                               ║
 ║ exit_code:   0                                                  ║
