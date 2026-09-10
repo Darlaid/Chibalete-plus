@@ -73,6 +73,24 @@ export const ProduccionesTab: React.FC = () => {
         setDetailId(null); setDetail(null);
         openerRef.current?.focus?.();
     };
+    // CHP-WCAG-01B REVIEW-01: el foco no debe abandonar el diálogo mientras está
+    // abierto (Tab/Shift+Tab ciclan dentro) y Escape lo cierra devolviendo el foco
+    // a «Revisar». Mínimo local; sin gestor global de modales.
+    const handleDialogKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === 'Escape') { e.preventDefault(); closeDetail(); return; }
+        if (e.key !== 'Tab' || !dialogRef.current) return;
+        const items: HTMLElement[] = [];
+        dialogRef.current.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])').forEach((node) => {
+            const el = node as HTMLElement;
+            if (el.offsetParent !== null) items.push(el);
+        });
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || active === dialogRef.current)) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    };
 
     const refreshAfterAction = async (msg: string) => {
         setActionDone(msg);
@@ -208,7 +226,7 @@ export const ProduccionesTab: React.FC = () => {
 
             {/* ── Detalle (D3) ── */}
             {detailId && (
-                <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 overflow-y-auto" role="dialog" aria-modal="true" aria-label="Detalle de la producción">
+                <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pb-28 sm:pb-4 overflow-y-auto" role="dialog" aria-modal="true" aria-label="Detalle de la producción" onKeyDown={handleDialogKeyDown}>
                     <div ref={dialogRef} tabIndex={-1} className="bg-white dark:bg-gray-800 rounded-2xl max-w-2xl w-full my-6 p-6 shadow-2xl outline-none">
                         <div className="flex items-start justify-between gap-3 mb-4">
                             <h3 className="text-xl font-bold text-gray-800 dark:text-gray-100">Revisión de producción</h3>

@@ -244,6 +244,17 @@ t('estructural: la bandeja distingue fallo de vacío y jamás muestra un 0 falso
     assert.ok(tabSrc.includes('Ninguna producción coincide con el filtro'), 'vacío filtrado ≠ vacío real');
 });
 
+// 13b — CHP-WCAG-FIVE-SURFACES-01B REVIEW-01: el modal contiene el foco y cierra con Escape
+t('estructural: el modal de revisión contiene Tab/Shift+Tab, cierra con Escape y devuelve el foco a «Revisar»', () => {
+    assert.ok(tabSrc.includes('onKeyDown={handleDialogKeyDown}'), 'el diálogo escucha el teclado');
+    assert.ok(/if \(e\.key === 'Escape'\) \{ e\.preventDefault\(\); closeDetail\(\); return; \}/.test(tabSrc), 'Escape cierra');
+    assert.ok(/if \(e\.shiftKey && \(active === first \|\| active === dialogRef\.current\)\) \{ e\.preventDefault\(\); last\.focus\(\); \}/.test(tabSrc), 'Shift+Tab desde el primero va al último');
+    assert.ok(/else if \(!e\.shiftKey && active === last\) \{ e\.preventDefault\(\); first\.focus\(\); \}/.test(tabSrc), 'Tab desde el último va al primero');
+    assert.ok(/openerRef\.current\?\.focus\?\.\(\)/.test(tabSrc), 'closeDetail devuelve el foco al disparador');
+    assert.ok(tabSrc.includes('role="dialog" aria-modal="true" aria-label="Detalle de la producción"'), 'semántica de diálogo intacta');
+    assert.ok(tabSrc.includes('p-4 pb-28 sm:pb-4 overflow-y-auto'), 'espacio inferior para que el FAB de Leo no tape los controles a 320 px');
+});
+
 // 14 — eventos sin PII ni contenido
 t('los payloads de eventos validan en el registry y no admiten texto/PII', () => {
     const submitted = { experienceId: 'e', experienceVersionId: 'v', runId: 'r', nodeId: 'n2', nodeType: 'PRODUCTION', evidenceId: 'evid-1', requiresReview: true };

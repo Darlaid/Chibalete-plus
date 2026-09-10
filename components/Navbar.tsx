@@ -274,7 +274,7 @@ const Navbar: React.FC = () => {
                     </div>
 
                     <div className="mt-6 mb-2">
-                        <p className="px-4 text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Gestión</p>
+                        <p className="px-4 text-xs font-bold text-gray-600 dark:text-gray-300 uppercase tracking-wider mb-2">Gestión</p>
                         <div className="flex flex-col space-y-1">
                             {secondaryItemsDesktop.map(item => (
                                 <NavItem key={item.to} to={item.to} icon={item.icon} label={item.label} />

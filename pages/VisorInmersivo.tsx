@@ -2776,7 +2776,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 <button onClick={() => navigate(fichaPath)} aria-label="Volver a la ficha del contenido" className="p-2 bg-white/10 rounded-full hover:bg-white/20"><ChevronLeft /></button>
                 <MookReturnButton compact />
                 <div className="flex items-center gap-4">
-                    <button onClick={() => setIsMenuOpen(!isMenuOpen)} className={`p-2 rounded-full transition-colors ${isMenuOpen ? 'bg-indigo-600' : 'bg-white/10 hover:bg-white/20'}`}>
+                    <button onClick={() => setIsMenuOpen(!isMenuOpen)} aria-label="Ajustes de lectura" aria-expanded={isMenuOpen} className={`p-2 rounded-full transition-colors ${isMenuOpen ? 'bg-indigo-600' : 'bg-white/10 hover:bg-white/20'}`}>
                         <Settings size={20} />
                     </button>
                     <div className="flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-white/10">
@@ -2958,7 +2958,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 style={{ opacity: 1 - tranceIntensity * 0.80, transition: 'opacity 1.5s ease' }}
             >
                 <div className="flex items-center gap-6 bg-neutral-900/80 backdrop-blur-xl border border-white/10 px-8 py-4 rounded-2xl shadow-2xl">
-                    <button onClick={goToPreviousSentence} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ChevronLeft size={24} /></button>
+                    <button onClick={goToPreviousSentence} aria-label="Frase anterior" className="p-2 hover:bg-white/10 rounded-full transition-colors"><ChevronLeft size={24} /></button>
                     <button
                         // HF4A — en 'error' el botón es un REINTENTO controlado:
                         // pb.retryAudio() limpia el fallo recuperable de la frase
@@ -2993,12 +2993,12 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                                         : <Play size={32} className="ml-1 fill-current" />
                         }
                     </button>
-                    <button onClick={goToNextSentence} className="p-2 hover:bg-white/10 rounded-full transition-colors"><SkipForward size={24} /></button>
+                    <button onClick={goToNextSentence} aria-label="Frase siguiente" className="p-2 hover:bg-white/10 rounded-full transition-colors"><SkipForward size={24} /></button>
                     <div className="w-px h-8 bg-white/20 mx-2" />
                     <div className="flex flex-col items-center gap-1">
-                        <button onClick={() => { const i = SPEEDS.indexOf(playbackSpeed); if (i < SPEEDS.length - 1) setPlaybackSpeed(SPEEDS[i + 1]); }} className="p-1 hover:bg-white/10 rounded-full"><Plus size={16} /></button>
+                        <button onClick={() => { const i = SPEEDS.indexOf(playbackSpeed); if (i < SPEEDS.length - 1) setPlaybackSpeed(SPEEDS[i + 1]); }} aria-label="Aumentar velocidad" className="p-1 hover:bg-white/10 rounded-full"><Plus size={16} /></button>
                         <span className="text-xs font-mono font-bold">{playbackSpeed}x</span>
-                        <button onClick={() => { const i = SPEEDS.indexOf(playbackSpeed); if (i > 0) setPlaybackSpeed(SPEEDS[i - 1]); }} className="p-1 hover:bg-white/10 rounded-full"><Minus size={16} /></button>
+                        <button onClick={() => { const i = SPEEDS.indexOf(playbackSpeed); if (i > 0) setPlaybackSpeed(SPEEDS[i - 1]); }} aria-label="Reducir velocidad" className="p-1 hover:bg-white/10 rounded-full"><Minus size={16} /></button>
                     </div>
                 </div>
                 {/* HF4A — leyenda honesta de estado de audio. Evita silencio:

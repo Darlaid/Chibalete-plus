@@ -102,5 +102,99 @@ ok('ContentCard usa motion-reduce:transition-none',
 ok('ContentCard usa motion-reduce:group-hover:scale-100',
    /motion-reduce:group-hover:scale-100/.test(cardSrc));
 
+// ── §11: CHP-WCAG-FIVE-SURFACES-01B — lock-in de los P1 corregidos ─────────
+section('[11] CHP-WCAG-01B — P1 transversales y de Biblioteca (estructural)');
+const readSrc = (...segs) => fs.readFileSync(path.join(__dirname, '..', '..', ...segs), 'utf8');
+const layoutSrc   = readSrc('components', 'Layout.tsx');
+const appSrc      = readSrc('App.tsx');
+const chatbotSrc  = readSrc('components', 'Chatbot.tsx');
+const navbarSrc   = readSrc('components', 'Navbar.tsx');
+const bibSrc      = readSrc('pages', 'Biblioteca.tsx');
+const inmSrc      = readSrc('pages', 'VisorInmersivo.tsx');
+const txtSrc      = readSrc('pages', 'VisorTexto.tsx');
+const leoSrc      = readSrc('components', 'LeoCompanion.tsx');
+const subirSrc    = readSrc('pages', 'SubirContenido.tsx');
+
+// LAYOUT-01 — enlace de salto: primer control, oculto fuera de foco, destino en <main>
+ok('Layout: enlace "Saltar al contenido principal"',      /Saltar al contenido principal/.test(layoutSrc));
+ok('Layout: el enlace de salto precede a la Navbar',       layoutSrc.indexOf('href="#contenido-principal"') < layoutSrc.indexOf('<Navbar'));
+ok('Layout: oculto fuera de foco (sr-only focus:not-sr-only)', /sr-only focus:not-sr-only/.test(layoutSrc));
+ok('Layout: <main id="contenido-principal" tabIndex={-1}>', /<main id="contenido-principal" ref=\{mainRef\} tabIndex=\{-1\}/.test(layoutSrc));
+ok('Layout: el click enfoca el main (HashRouter no navega)', /main\.focus\(\)/.test(layoutSrc) && /e\.preventDefault\(\)/.test(layoutSrc));
+// LAYOUT-04 — espacio reservado bajo el FAB de Leo
+ok('Layout: main reserva espacio inferior (pb-40 md:pb-24)', /pb-40 md:pb-24/.test(layoutSrc));
+
+// LAYOUT-02 — títulos por ruta, distintos en las cinco rutas auditadas
+ok('App: RouteTitle escribe document.title con useLocation', /const RouteTitle/.test(appSrc) && /document\.title = /.test(appSrc) && /useLocation\(\)/.test(appSrc));
+ok('App: <RouteTitle /> montado dentro del HashRouter',    /<HashRouter>\s*<RouteTitle \/>/.test(appSrc));
+{
+    const tbl = appSrc.slice(appSrc.indexOf('const ROUTE_TITLES'), appSrc.indexOf('const RouteTitle'));
+    const entries = [...tbl.matchAll(/\[(\/[^\n]*?\/), '([^']+)'\]/g)].map(m => [new RegExp(m[1].slice(1, -1)), m[2]]);
+    const titleFor = (p) => (entries.find(([re]) => re.test(p)) || [null, 'Chibalete+'])[1];
+    const routes = ['/biblioteca', '/experiencias/exp-1', '/subir-contenido', '/aula-viva', '/aula-viva/operacional'];
+    const titles = routes.map(titleFor);
+    ok(`App: cinco rutas auditadas → cinco títulos distintos (${titles.join(' | ')})`,
+       new Set(titles).size === 5 && titles.every(t => t && t !== 'Chibalete+'));
+}
+
+// LAYOUT-03 — FAB de Leo con nombre accesible
+ok('Chatbot: FAB con aria-label="Abrir chat con Leo"',     /aria-label="Abrir chat con Leo"/.test(chatbotSrc));
+ok('Chatbot: sin aria-label="crab" (nombre erróneo)',      !/aria-label="crab"/.test(chatbotSrc));
+
+// LAYOUT-05 (incidental) — rótulo "Gestión" ya no en gray-400
+ok('Navbar: "Gestión" con text-gray-600',                   /text-gray-600 dark:text-gray-300 uppercase tracking-wider mb-2">Gestión/.test(navbarSrc));
+
+// LAYOUT-06 + BIBLIOTECA-01 — chips: foco visible con contraste y estado aria-pressed
+ok('Biblioteca: chips con aria-pressed={activeTab === tab}', /aria-pressed=\{activeTab === tab\}/.test(bibSrc));
+ok('Biblioteca: chips con anillo focus-visible indigo-700', /focus-visible:ring-2 focus-visible:ring-indigo-700 focus-visible:ring-offset-2/.test(bibSrc));
+
+// BIBLIOTECA-02 — portada fuera del orden de tabulación y del árbol accesible
+ok('ContentCard: enlace de portada con tabIndex={-1} y aria-hidden', /tabIndex=\{-1\}\s*aria-hidden="true"\s*>/.test(cardSrc.replace(/\/\/[^\n]*\n/g, '')));
+ok('ContentCard: el título conserva su enlace con nombre',  /<Link to=\{`\/contenido\/\$\{content\.id\}`\} className="hover:text-indigo-600/.test(cardSrc));
+
+// BIBLIOTECA-06 — cinco botones del inmersivo con nombre
+for (const label of ['Ajustes de lectura', 'Frase anterior', 'Frase siguiente', 'Aumentar velocidad', 'Reducir velocidad']) {
+    ok(`VisorInmersivo: aria-label="${label}"`, inmSrc.includes(`aria-label="${label}"`));
+}
+
+// BIBLIOTECA-08 — panel de ajustes del guiado como diálogo con teclado
+ok('VisorTexto: panel role="dialog" aria-label="Ajustes de lectura"', /id="vt-ajustes-lectura" role="dialog" aria-label="Ajustes de lectura"/.test(txtSrc));
+ok('VisorTexto: disparador con aria-expanded y aria-controls', /aria-expanded=\{isDisplayMenuOpen\}/.test(txtSrc) && /aria-controls="vt-ajustes-lectura"/.test(txtSrc));
+ok('VisorTexto: foco al abrir + Escape cierra + restaura foco al disparador',
+   /if \(isDisplayMenuOpen\) displayMenuRef\.current\?\.focus\(\)/.test(txtSrc) && /e\.key === 'Escape'[^\n]*closeDisplayMenu\(\)/.test(txtSrc) && /displayMenuTriggerRef\.current\?\.focus\(\)/.test(txtSrc));
+ok('VisorTexto: ciclo Tab/Shift+Tab dentro del panel',      /e\.shiftKey && \(active === first/.test(txtSrc) && /active === last\) \{ e\.preventDefault\(\); first\.focus\(\); \}/.test(txtSrc));
+for (const label of ['Reducir tamaño de fuente', 'Aumentar tamaño de fuente', 'Reducir velocidad de voz', 'Aumentar velocidad de voz']) {
+    ok(`VisorTexto: aria-label="${label}"`, txtSrc.includes(`aria-label="${label}"`));
+}
+
+// BIBLIOTECA-09 — modal de Leo como diálogo
+ok('LeoCompanion: role="dialog" aria-modal aria-labelledby', /role="dialog" aria-modal="true" aria-labelledby="leo-companion-title"/.test(leoSrc));
+ok('LeoCompanion: h2 con id del título',                    /<h2 id="leo-companion-title"/.test(leoSrc));
+ok('LeoCompanion: botón cerrar con nombre',                 /onClick=\{onClose\} aria-label="Cerrar"/.test(leoSrc));
+ok('LeoCompanion: foco inicial + restauración al elemento previo',
+   /dialogRef\.current\?\.focus\(\)/.test(leoSrc) && /const openerRef = useRef<HTMLElement \| null>\(typeof document !== 'undefined' \? \(document\.activeElement as HTMLElement \| null\) : null\)/.test(leoSrc) && /opener\.focus\(\)/.test(leoSrc) && /window\.setTimeout\(\(\) => \{ document\.querySelector<HTMLElement>\(selector\)\?\.focus\(\); \}, 0\)/.test(leoSrc));
+ok('LeoCompanion: Escape cierra y Tab cicla',               /e\.key === 'Escape'[^\n]*onClose\(\)/.test(leoSrc) && /e\.shiftKey && \(active === first/.test(leoSrc));
+
+// STUDIO-06 — formulario de Subir: cada htmlFor tiene su id
+{
+    const fors = [...subirSrc.matchAll(/htmlFor="(sc-[a-z-]+)"/g)].map(m => m[1]);
+    const ids  = new Set([...subirSrc.matchAll(/\bid="(sc-[a-z-]+)"/g)].map(m => m[1]));
+    ok(`SubirContenido: ${fors.length} labels sc-* asociados (≥ 12)`, fors.length >= 12);
+    ok('SubirContenido: todo htmlFor="sc-*" tiene su id="sc-*"', fors.every(f => ids.has(f)) && new Set(fors).size === fors.length);
+    for (const f of ['sc-tipo', 'sc-titulo', 'sc-autor', 'sc-descripcion', 'sc-etiquetas', 'sc-biografia', 'sc-portada', 'sc-recurso', 'sc-texto-es', 'sc-texto-en', 'sc-texto-pt', 'sc-ilustraciones']) {
+        ok(`SubirContenido: campo ${f} etiquetado`, fors.includes(f) && ids.has(f));
+    }
+}
+
+// Contraste de los colores introducidos (Tailwind v3 por defecto) — WCAG 1.4.3 / 1.4.11
+{
+    const lum = (hex) => { const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+    const ratio = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+    ok('contraste: anillo de foco indigo-700 (#4338ca) sobre blanco ≥ 3:1', ratio('#4338ca', '#ffffff') >= 3);
+    ok('contraste: texto blanco sobre amber-700 (#b45309) ≥ 4.5:1',    ratio('#ffffff', '#b45309') >= 4.5);
+    ok('contraste: gray-600 (#4b5563) sobre blanco ≥ 4.5:1',           ratio('#4b5563', '#ffffff') >= 4.5);
+    ok('contraste: enlace de salto blanco sobre indigo-700 ≥ 4.5:1',    ratio('#ffffff', '#4338ca') >= 4.5);
+}
+
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

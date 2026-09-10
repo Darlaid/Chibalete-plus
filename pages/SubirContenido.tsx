@@ -1422,10 +1422,10 @@ const SubirContenido: React.FC = () => {
 
                         <div className="grid md:grid-cols-2 gap-6 mb-6">
                             <div>
-                                <label className="block text-sm font-medium mb-1">Tipo de Contenido</label>
+                                <label htmlFor="sc-tipo" className="block text-sm font-medium mb-1">Tipo de Contenido</label>
                                 <div className="relative">
                                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">{getIcon(mainContent.tipo)}</div>
-                                    <select name="tipo" value={mainContent.tipo} onChange={handleMainChange} className="w-full pl-10 p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
+                                    <select id="sc-tipo" name="tipo" value={mainContent.tipo} onChange={handleMainChange} className="w-full pl-10 p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
                                         <option value="libro">Libro (PDF)</option>
                                         <option value="libro_album">Libro Álbum (Interactivo)</option>
                                         <option value="articulo_pedagogico">Artículo Pedagógico</option>
@@ -1459,28 +1459,29 @@ const SubirContenido: React.FC = () => {
 
                         <div className="grid md:grid-cols-2 gap-6 mb-6">
                             <div>
-                                <label className="block text-sm font-medium mb-1">{mainContent.tipo === 'memoria_club' ? 'Nombre del Club' : 'Título de la Obra'}</label>
-                                <input type="text" name="titulo" value={mainContent.titulo} onChange={handleMainChange} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg" placeholder={mainContent.tipo === 'memoria_club' ? "Ej. Club Los Exploradores" : "Ej. El Principito"} />
+                                <label htmlFor="sc-titulo" className="block text-sm font-medium mb-1">{mainContent.tipo === 'memoria_club' ? 'Nombre del Club' : 'Título de la Obra'}</label>
+                                <input id="sc-titulo" type="text" name="titulo" value={mainContent.titulo} onChange={handleMainChange} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg" placeholder={mainContent.tipo === 'memoria_club' ? "Ej. Club Los Exploradores" : "Ej. El Principito"} />
                             </div>
                             {mainContent.tipo !== 'memoria_club' && (
                                 <div>
-                                    <label className="block text-sm font-medium mb-1">Autor / Creador</label>
-                                    <input type="text" name="autor" value={mainContent.autor} onChange={handleMainChange} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg" placeholder="Ej. Antoine de Saint-Exupéry" />
+                                    <label htmlFor="sc-autor" className="block text-sm font-medium mb-1">Autor / Creador</label>
+                                    <input id="sc-autor" type="text" name="autor" value={mainContent.autor} onChange={handleMainChange} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg" placeholder="Ej. Antoine de Saint-Exupéry" />
                                 </div>
                             )}
                         </div>
 
                         <div className="mb-6">
-                            <label className="block text-sm font-medium mb-1">{mainContent.tipo === 'memoria_club' ? 'Contenido de la Memoria' : 'Descripción Corta'}</label>
-                            <textarea name="descripcion" value={mainContent.descripcion} onChange={handleMainChange} rows={mainContent.tipo === 'memoria_club' ? 6 : 2} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg resize-none" placeholder={mainContent.tipo === 'memoria_club' ? "Describe las actividades, conclusiones y aprendizajes del club..." : "Breve sinopsis..."}></textarea>
+                            <label htmlFor="sc-descripcion" className="block text-sm font-medium mb-1">{mainContent.tipo === 'memoria_club' ? 'Contenido de la Memoria' : 'Descripción Corta'}</label>
+                            <textarea id="sc-descripcion" name="descripcion" value={mainContent.descripcion} onChange={handleMainChange} rows={mainContent.tipo === 'memoria_club' ? 6 : 2} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg resize-none" placeholder={mainContent.tipo === 'memoria_club' ? "Describe las actividades, conclusiones y aprendizajes del club..." : "Breve sinopsis..."}></textarea>
                         </div>
 
                         {mainContent.tipo !== 'memoria_club' && (
                             <div className="mb-6">
-                                <label className="block text-sm font-medium mb-1">Etiquetas (Temas/Categorías)</label>
+                                <label htmlFor="sc-etiquetas" className="block text-sm font-medium mb-1">Etiquetas (Temas/Categorías)</label>
                                 <div className="flex gap-2">
                                     <input
                                         type="text"
+                                        id="sc-etiquetas"
                                         name="etiquetasString"
                                         value={mainContent.etiquetasString}
                                         onChange={handleMainChange}
@@ -1508,8 +1509,8 @@ const SubirContenido: React.FC = () => {
 
                         {mainContent.tipo !== 'memoria_club' && (
                             <div className="mb-6">
-                                <label className="block text-sm font-medium mb-1">Biografía del Autor (Opcional)</label>
-                                <textarea name="biografia_autor" value={mainContent.biografia_autor} onChange={handleMainChange} rows={3} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg resize-none" placeholder="Escribe aquí una breve biografía del autor..."></textarea>
+                                <label htmlFor="sc-biografia" className="block text-sm font-medium mb-1">Biografía del Autor (Opcional)</label>
+                                <textarea id="sc-biografia" name="biografia_autor" value={mainContent.biografia_autor} onChange={handleMainChange} rows={3} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg resize-none" placeholder="Escribe aquí una breve biografía del autor..."></textarea>
                             </div>
                         )}
 
@@ -1548,8 +1549,8 @@ const SubirContenido: React.FC = () => {
                         {mainContent.tipo !== 'memoria_club' && (
                             <div className="grid md:grid-cols-2 gap-6 pb-6 border-b border-gray-200 dark:border-gray-700">
                                 <div>
-                                    <label className="block text-sm font-bold mb-2">1. Imagen de Portada</label>
-                                    <input type="file" accept="image/*" onChange={(e) => handleMainFileChange(e, 'coverFile')} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required={!editingId && !['video', 'podcast'].includes(mainContent.tipo)} />
+                                    <label htmlFor="sc-portada" className="block text-sm font-bold mb-2">1. Imagen de Portada</label>
+                                    <input id="sc-portada" type="file" accept="image/*" onChange={(e) => handleMainFileChange(e, 'coverFile')} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required={!editingId && !['video', 'podcast'].includes(mainContent.tipo)} />
                                     {mainContent.coverFile && (
                                         <div className="mt-4 relative w-32 rounded-lg overflow-hidden shadow-md group">
                                             <img
@@ -1595,8 +1596,8 @@ const SubirContenido: React.FC = () => {
                                             </div>
                                         )}
 
-                                        <label className="block text-xs text-gray-400 mb-1">{mainContent.tipo === 'video' ? 'Opción B: Subir Archivo Local' : 'Subir Archivo'}</label>
-                                        <input type="file" onChange={(e) => handleMainFileChange(e, 'resourceFile')} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required={!editingId && !mainContent.resourceURL} />
+                                        <label htmlFor="sc-recurso" className="block text-xs text-gray-400 mb-1">{mainContent.tipo === 'video' ? 'Opción B: Subir Archivo Local' : 'Subir Archivo'}</label>
+                                        <input id="sc-recurso" type="file" onChange={(e) => handleMainFileChange(e, 'resourceFile')} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required={!editingId && !mainContent.resourceURL} />
                                         {editingId && !mainContent.resourceFile && existingParents.find(p => p.id === editingId)?.url_recurso && (
                                             <p className="mt-1 text-xs text-green-600">✓ Archivo actual existente (Sube otro para cambiarlo)</p>
                                         )}
@@ -2820,24 +2821,24 @@ const SubirContenido: React.FC = () => {
 
                                 <div className="grid md:grid-cols-3 gap-4">
                                     <div>
-                                        <label className="block text-xs font-medium mb-1">Texto Plano (Español)</label>
-                                        <input type="file" accept=".txt,.md" onChange={(e) => handleMainFileChange(e, 'textoPlanoFile')} className="w-full text-xs text-gray-500" />
+                                        <label htmlFor="sc-texto-es" className="block text-xs font-medium mb-1">Texto Plano (Español)</label>
+                                        <input id="sc-texto-es" type="file" accept=".txt,.md" onChange={(e) => handleMainFileChange(e, 'textoPlanoFile')} className="w-full text-xs text-gray-500" />
                                         <p className="text-[10px] text-gray-500 mt-1">Requerido para voz y adaptación.</p>
                                         {editingId && !mainContent.textoPlanoFile && existingParents.find(p => p.id === editingId)?.texto_plano_url && (
                                             <p className="mt-1 text-[10px] text-green-600">✓ Archivo actual existe</p>
                                         )}
                                     </div>
                                     <div>
-                                        <label className="block text-xs font-medium mb-1">Texto Plano (Inglés)</label>
-                                        <input type="file" accept=".txt" onChange={(e) => handleMainFileChange(e, 'textoInglesFile')} className="w-full text-xs text-gray-500" />
+                                        <label htmlFor="sc-texto-en" className="block text-xs font-medium mb-1">Texto Plano (Inglés)</label>
+                                        <input id="sc-texto-en" type="file" accept=".txt" onChange={(e) => handleMainFileChange(e, 'textoInglesFile')} className="w-full text-xs text-gray-500" />
                                     </div>
                                     <div>
-                                        <label className="block text-xs font-medium mb-1">Texto Plano (Portugués)</label>
-                                        <input type="file" accept=".txt" onChange={(e) => handleMainFileChange(e, 'textoPortuguesFile')} className="w-full text-xs text-gray-500" />
+                                        <label htmlFor="sc-texto-pt" className="block text-xs font-medium mb-1">Texto Plano (Portugués)</label>
+                                        <input id="sc-texto-pt" type="file" accept=".txt" onChange={(e) => handleMainFileChange(e, 'textoPortuguesFile')} className="w-full text-xs text-gray-500" />
                                     </div>
                                     <div className="md:col-span-3 mt-2">
-                                        <label className="block text-xs font-medium mb-1">Galería de Ilustraciones (Selección múltiple)</label>
-                                        <input type="file" accept="image/*" multiple onChange={handleIllustrationsChange} className="w-full text-xs text-gray-500" />
+                                        <label htmlFor="sc-ilustraciones" className="block text-xs font-medium mb-1">Galería de Ilustraciones (Selección múltiple)</label>
+                                        <input id="sc-ilustraciones" type="file" accept="image/*" multiple onChange={handleIllustrationsChange} className="w-full text-xs text-gray-500" />
                                     </div>
                                 </div>
                             </div>

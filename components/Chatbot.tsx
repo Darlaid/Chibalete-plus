@@ -594,9 +594,11 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
           onClick={() => toggleChat(true)}
           className={`bg-indigo-600 hover:bg-indigo-700 text-white w-16 h-16 rounded-full shadow-xl transition-transform transform hover:scale-110 flex items-center justify-center border-2 border-white dark:border-gray-800 ${isPulsing ? 'animate-leo-invite' : ''}`}
           title="Abrir Chat con Leo"
+          aria-label="Abrir chat con Leo"
         >
-          <span className="text-3xl" role="img" aria-label="crab">
-            <img src="/leo_character.png" alt="Leo" className="w-12 h-12 object-contain drop-shadow-md" />
+          {/* CHP-WCAG-01B LAYOUT-03: el nombre lo da aria-label; la imagen es decorativa. */}
+          <span className="text-3xl" aria-hidden="true">
+            <img src="/leo_character.png" alt="" className="w-12 h-12 object-contain drop-shadow-md" />
           </span>
         </button>
       )}

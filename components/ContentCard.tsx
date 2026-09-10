@@ -98,7 +98,14 @@ const ContentCard: React.FC<ContentCardProps> = ({ content, progress, onUpdatePr
           </div>
         </div>
       ) : (
-        <Link to={`/contenido/${content.id}`} className="block group relative">
+        <Link
+          to={`/contenido/${content.id}`}
+          className="block group relative"
+          // CHP-WCAG-01B BIBLIOTECA-02: la portada duplica el enlace del título; sale del
+          // orden de tabulación y del árbol accesible (el título conserva el nombre).
+          tabIndex={-1}
+          aria-hidden="true"
+        >
           <div className="relative w-full h-auto rounded-xl overflow-hidden shadow-md transition-all duration-300 motion-reduce:transition-none group-hover:shadow-xl group-hover:scale-[1.02] motion-reduce:group-hover:scale-100 bg-gray-200 dark:bg-gray-800">
             {useEditorial ? (
               <EditorialCover

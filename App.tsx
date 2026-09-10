@@ -1,6 +1,6 @@
 
-import React, { Suspense } from 'react';
-import { HashRouter, Routes, Route, Navigate, useParams, useNavigate } from 'react-router-dom';
+import React, { Suspense, useEffect } from 'react';
+import { HashRouter, Routes, Route, Navigate, useParams, useNavigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { OfflineProvider, useOffline } from './context/OfflineContext';
 import Layout from './components/Layout';
@@ -483,12 +483,38 @@ const AppContent: React.FC = () => {
     );
 };
 
+// CHP-WCAG-01B LAYOUT-02 (WCAG 2.4.2): título de documento específico y estable
+// por ruta, derivado del enrutamiento existente. Sin librería de metadata.
+const ROUTE_TITLES: ReadonlyArray<[RegExp, string]> = [
+    [/^\/$/, 'Inicio'],
+    [/^\/biblioteca/, 'Biblioteca'],
+    [/^\/experiencias\/[^/]+/, 'Experiencia'],
+    [/^\/experiencias/, 'Experiencias'],
+    [/^\/contenido\//, 'Ficha de contenido'],
+    [/^\/(leer|ver)\//, 'Lectura'],
+    [/^\/subir-contenido/, 'Gestor de contenido'],
+    [/^\/aula-viva\/operacional/, 'Aula Viva — Centro operativo'],
+    [/^\/aula-viva/, 'Aula Viva'],
+    [/^\/admin\/experiencias/, 'Paquetes (legacy)'],
+    [/^\/bienvenida/, 'Bienvenida'],
+    [/^\/auth/, 'Acceso'],
+];
+const RouteTitle: React.FC = () => {
+    const { pathname } = useLocation();
+    useEffect(() => {
+        const match = ROUTE_TITLES.find(([pattern]) => pattern.test(pathname));
+        document.title = match ? `${match[1]} — Chibalete+` : 'Chibalete+';
+    }, [pathname]);
+    return null;
+};
+
 const App: React.FC = () => {
     return (
         <AuthProvider>
             <OfflineProvider>
                 <ErrorBoundary>
                     <HashRouter>
+                        <RouteTitle />
                         <AppContent />
                     </HashRouter>
                 </ErrorBoundary>

@@ -60,6 +60,46 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
     const [mode, setMode] = useState<'menu' | 'vocab' | 'question' | 'loading' | 'result'>('menu');
     const [inputValue, setInputValue] = useState('');
     const [answer, setAnswer] = useState('');
+    // CHP-WCAG-01B BIBLIOTECA-09: diálogo con nombre, foco inicial, contención de
+    // Tab/Shift+Tab, cierre con Escape y restauración del foco al elemento activo
+    // previo. Mínimo local, sin gestor global de modales.
+    const dialogRef = useRef<HTMLDivElement | null>(null);
+    // El disparador se captura en el PRIMER render: en el commit que monta este
+    // diálogo el visor desmonta su botón flotante y document.activeElement ya es body.
+    const openerRef = useRef<HTMLElement | null>(typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null);
+    useEffect(() => {
+        const opener = openerRef.current;
+        // El botón flotante que abre este diálogo se desmonta mientras está abierto y
+        // vuelve a montarse al cerrarlo: si el disparador original ya no está en el
+        // documento, se localiza su equivalente por title / aria-label.
+        const openerTitle = opener?.getAttribute('title') || '';
+        const openerLabel = opener?.getAttribute('aria-label') || '';
+        dialogRef.current?.focus();
+        return () => {
+            if (!opener || typeof opener.focus !== 'function') return;
+            if (document.contains(opener)) { opener.focus(); return; }
+            const selector = openerTitle ? `[title="${openerTitle}"]` : openerLabel ? `[aria-label="${openerLabel}"]` : '';
+            if (!selector) return;
+            // El disparador se vuelve a montar en el mismo commit que desmonta este
+            // diálogo: se busca tras el commit (macrotarea) para enfocarlo ya montado.
+            window.setTimeout(() => { document.querySelector<HTMLElement>(selector)?.focus(); }, 0);
+        };
+    }, []);
+    const handleDialogKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); return; }
+        if (e.key !== 'Tab' || !dialogRef.current) return;
+        const items: HTMLElement[] = [];
+        dialogRef.current.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])').forEach((node) => {
+            const el = node as HTMLElement;
+            if (el.offsetParent !== null) items.push(el);
+        });
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || active === dialogRef.current)) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    };
     
     const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -219,15 +259,15 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
     };
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
-            <div className="bg-white dark:bg-gray-900 w-full max-w-sm rounded-[2rem] shadow-2xl overflow-hidden border border-gray-200 dark:border-gray-700 animate-in slide-in-from-bottom-8">
+        <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in" role="dialog" aria-modal="true" aria-labelledby="leo-companion-title">
+            <div ref={dialogRef} tabIndex={-1} onKeyDown={handleDialogKeyDown} className="bg-white dark:bg-gray-900 w-full max-w-sm rounded-[2rem] shadow-2xl overflow-hidden border border-gray-200 dark:border-gray-700 animate-in slide-in-from-bottom-8 outline-none">
                 {/* Header */}
                 <div className="bg-indigo-600 p-4 flex justify-between items-center text-white">
                     <div className="flex items-center gap-2">
                         <img src="/leo_character.png" alt="Leo" className="w-10 h-10 object-contain drop-shadow-sm bg-indigo-500 rounded-full" onError={(e) => { e.currentTarget.style.display='none'; }} />
-                        <h2 className="text-lg font-bold">Leo</h2>
+                        <h2 id="leo-companion-title" className="text-lg font-bold">Leo</h2>
                     </div>
-                    <button onClick={onClose} className="p-1 hover:bg-white/20 rounded-full transition-colors">
+                    <button onClick={onClose} aria-label="Cerrar" className="p-1 hover:bg-white/20 rounded-full transition-colors">
                         <X size={24} />
                     </button>
                 </div>

@@ -101,6 +101,33 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
 
     // Display Menu State
     const [isDisplayMenuOpen, setIsDisplayMenuOpen] = useState(false);
+    // CHP-WCAG-01B BIBLIOTECA-08: el panel de ajustes es un diálogo con nombre,
+    // recibe el foco al abrirse, contiene Tab/Shift+Tab, cierra con Escape y
+    // devuelve el foco al botón que lo abrió. Mínimo local, sin gestor global.
+    const displayMenuRef = useRef<HTMLDivElement | null>(null);
+    const displayMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+    useEffect(() => {
+        if (isDisplayMenuOpen) displayMenuRef.current?.focus();
+    }, [isDisplayMenuOpen]);
+    const closeDisplayMenu = () => {
+        setIsDisplayMenuOpen(false);
+        displayMenuTriggerRef.current?.focus();
+    };
+    const handleDisplayMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDisplayMenu(); return; }
+        if (e.key !== 'Tab' || !displayMenuRef.current) return;
+        const items: HTMLElement[] = [];
+        displayMenuRef.current.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])').forEach((node) => {
+            const el = node as HTMLElement;
+            if (el.offsetParent !== null) items.push(el);
+        });
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || active === displayMenuRef.current)) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    };
 
     // Accessibility State
     const [isDyslexicFont, setIsDyslexicFont] = useState<boolean>(() => {
@@ -982,9 +1009,13 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     </button>
 
                     <button
+                        ref={displayMenuTriggerRef}
                         onClick={() => setIsDisplayMenuOpen(!isDisplayMenuOpen)}
                         className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 min-w-[44px] min-h-[44px] flex items-center justify-center"
                         title="Ajustes de Lectura"
+                        aria-label="Ajustes de lectura"
+                        aria-expanded={isDisplayMenuOpen}
+                        aria-controls="vt-ajustes-lectura"
                     >
                         <Settings size={24} />
                     </button>
@@ -1061,14 +1092,14 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             )}
 
             {isDisplayMenuOpen && (
-                <div className={`fixed top-[60px] right-2 z-[70] rounded-xl shadow-2xl p-4 w-64 animate-in fade-in zoom-in-95 border ${isHighContrast ? 'bg-black border-white/40 text-white' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'}`}>
+                <div id="vt-ajustes-lectura" role="dialog" aria-label="Ajustes de lectura" ref={displayMenuRef} tabIndex={-1} onKeyDown={handleDisplayMenuKeyDown} className={`fixed top-[60px] right-2 z-[70] rounded-xl shadow-2xl p-4 w-64 animate-in fade-in zoom-in-95 border outline-none ${isHighContrast ? 'bg-black border-white/40 text-white' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'}`}>
                     <div className="space-y-4">
                         <div>
                             <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Tamaño de Fuente</p>
                             <div className="flex justify-between items-center bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-                                <button onClick={() => setFontSize(s => Math.max(14, s - 2))} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded flex-1 text-center"><Type size={16} /></button>
+                                <button onClick={() => setFontSize(s => Math.max(14, s - 2))} aria-label="Reducir tamaño de fuente" className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded flex-1 text-center"><Type size={16} /></button>
                                 <span className="text-sm font-mono">{fontSize}px</span>
-                                <button onClick={() => setFontSize(s => Math.min(32, s + 2))} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded flex-1 text-center"><Type size={24} /></button>
+                                <button onClick={() => setFontSize(s => Math.min(32, s + 2))} aria-label="Aumentar tamaño de fuente" className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded flex-1 text-center"><Type size={24} /></button>
                             </div>
                         </div>
 
@@ -1149,9 +1180,9 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     <div className="border-t border-gray-200 dark:border-gray-700 pt-2">
                         <p className={`text-xs font-bold uppercase mb-2 ${isHighContrast ? 'text-gray-300' : 'text-gray-500'}`}>Velocidad de Voz</p>
                         <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-lg">
-                            <button onClick={() => setPlaybackSpeed(s => Math.max(0.75, s - 0.25))} className="p-1 hover:bg-white dark:hover:bg-gray-600 rounded"><Minus size={16} /></button>
+                            <button onClick={() => setPlaybackSpeed(s => Math.max(0.75, s - 0.25))} aria-label="Reducir velocidad de voz" className="p-1 hover:bg-white dark:hover:bg-gray-600 rounded"><Minus size={16} /></button>
                             <span className="flex-1 text-center text-xs font-bold">{playbackSpeed}x</span>
-                            <button onClick={() => setPlaybackSpeed(s => Math.min(2.0, s + 0.25))} className="p-1 hover:bg-white dark:hover:bg-gray-600 rounded"><Plus size={16} /></button>
+                            <button onClick={() => setPlaybackSpeed(s => Math.min(2.0, s + 0.25))} aria-label="Aumentar velocidad de voz" className="p-1 hover:bg-white dark:hover:bg-gray-600 rounded"><Plus size={16} /></button>
                         </div>
                     </div>
 

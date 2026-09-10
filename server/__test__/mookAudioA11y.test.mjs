@@ -42,6 +42,21 @@ const downloadTranscriptSrc = extraer('downloadTranscript');
 const tests = [];
 const test = (n, f) => tests.push([n, f]);
 
+// ── CHP-WCAG-FIVE-SURFACES-01B — Studio: contraste de la acción y foco tras Editar ──
+test('WCAG-STUDIO-01: «Crear nueva versión» usa bg-amber-700 (≥ 4.5:1 con texto blanco), nunca amber-600', () => {
+    const btns = [...STUDIO.matchAll(/<button[^>]*>Crear nueva versión[^<]*<\/button>/g)].map(m => m[0]);
+    assert.ok(btns.length >= 2, 'ambos botones de nueva versión presentes');
+    for (const b of btns) {
+        assert.ok(b.includes('bg-amber-700'), 'fondo amber-700');
+        assert.ok(!b.includes('bg-amber-600'), 'sin amber-600');
+    }
+});
+test('WCAG-STUDIO-03: al entrar al editor el foco va al encabezado «Editar: …»', () => {
+    assert.ok(/const editorHeadingRef = useRef<HTMLHeadingElement \| null>\(null\)/.test(STUDIO), 'ref del encabezado');
+    assert.ok(/useEffect\(\(\) => \{ if \(view === 'editor'\) editorHeadingRef\.current\?\.focus\(\); \}, \[view\]\)/.test(STUDIO), 'efecto de foco al cambiar a editor');
+    assert.ok(/<h2 ref=\{editorHeadingRef\} tabIndex=\{-1\}/.test(STUDIO), 'h2 enfocable programáticamente');
+});
+
 // ── Doble del elemento de audio: mismo cableado que NodeMediaPlayer ─────────
 class FakeAudio {
     constructor() {

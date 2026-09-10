@@ -390,6 +390,10 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
     // necesita el actor de sesión para el preflight canónico de acceso al medio.
     const { user } = useAuth();
     const [view, setView] = useState<'list' | 'editor'>('list');
+    // CHP-WCAG-01B: al pasar al editor (Editar / Nueva) el listado se desmonta y el foco
+    // caía a body; se ubica en el encabezado del editor.
+    const editorHeadingRef = useRef<HTMLHeadingElement | null>(null);
+    useEffect(() => { if (view === 'editor') editorHeadingRef.current?.focus(); }, [view]);
     const [list, setList] = useState<any[]>([]);
     const [listState, setListState] = useState<'loading' | 'ready' | 'error' | 'forbidden'>('loading');
     const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
@@ -776,7 +780,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
         <div className="bg-white dark:bg-gray-800 p-6 md:p-8 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 dark:border-gray-700 pb-4 mb-4">
                 <div>
-                    <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200">{experienceId ? `Editar: ${info.title || 'Experiencia'}` : 'Nueva Experiencia'}</h2>
+                    <h2 ref={editorHeadingRef} tabIndex={-1} className="text-xl font-bold text-gray-800 dark:text-gray-200 outline-none">{experienceId ? `Editar: ${info.title || 'Experiencia'}` : 'Nueva Experiencia'}</h2>
                     <p className="text-xs text-gray-500 mt-1">
                         <span className={`font-bold px-2 py-0.5 rounded-full ${ESTADO_EXP[expStatus]?.cls ?? ''}`}>{ESTADO_EXP[expStatus]?.text}</span>
                         {publishedVersion && <span className="ml-2">v{publishedVersion} publicada</span>}
@@ -953,7 +957,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                         <div className="rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 p-4 text-sm text-amber-800 dark:text-amber-200 flex flex-wrap items-center gap-3">
                             <span>Versión v{publishedVersion} publicada — <b>inmutable</b>. Para editar la ruta crea una nueva versión (copia editable).</span>
                             {expStatus !== 'archived' && (
-                                <button type="button" onClick={newVersionFromPublished} className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold">Crear nueva versión</button>
+                                <button type="button" onClick={newVersionFromPublished} className="px-3 py-1.5 rounded-lg bg-amber-700 text-white text-xs font-bold">Crear nueva versión</button>
                             )}
                         </div>
                     )}
@@ -1120,7 +1124,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                         )
                     )}
                     {expStatus === 'published' && !draftVersionId && (
-                        <button type="button" onClick={newVersionFromPublished} className="px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-bold">Crear nueva versión (copia editable v{(publishedVersion ?? 0) + 1})</button>
+                        <button type="button" onClick={newVersionFromPublished} className="px-4 py-2 rounded-xl bg-amber-700 text-white text-sm font-bold">Crear nueva versión (copia editable v{(publishedVersion ?? 0) + 1})</button>
                     )}
                     {expStatus !== 'archived' && experienceId && (
                         confirmArchiveId === experienceId ? (

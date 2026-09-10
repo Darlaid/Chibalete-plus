@@ -109,8 +109,10 @@ const Biblioteca: React.FC = () => {
 
     const TabButton: React.FC<{ tab: string, label: string, highlight?: boolean }> = ({ tab, label, highlight }) => (
         <button
+            type="button"
+            aria-pressed={activeTab === tab}
             onClick={() => handleTabChange(tab)}
-            className={`px-5 py-2 font-medium rounded-full text-sm transition-all duration-200 whitespace-nowrap ${activeTab === tab
+            className={`px-5 py-2 font-medium rounded-full text-sm transition-all duration-200 whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-700 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${activeTab === tab
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 scale-105'
                 : (highlight ? 'bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-200' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700')
                 }`}
