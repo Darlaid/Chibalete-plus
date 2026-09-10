@@ -1,5 +1,6 @@
 /**
  * insightMaterializer.test.js — PASO 2: 15 checks de §26.
+ * [I] CHP-INSIGHTS-SIGNAL-SNAPSHOT-RETENTION-01F: retención 90 d (solo temporal).
  *
  * ISOLATION: usa events.db + insights.db TEMPORALES vía env override
  * (EVENTS_SQLITE_PATH + INSIGHTS_SQLITE_PATH). NUNCA toca prod ni
@@ -10,6 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 
 // Aislar ANTES de cargar módulos (singletons leen env al primer getDb).
@@ -22,6 +24,7 @@ const ext            = await import('../db/insightsDbExt.mjs');
 const reader         = await import('../services/insightReader.mjs');
 const materializer   = await import('../services/insightMaterializer.mjs');
 const insightsStore  = await import('../insightsStore.js');
+const { SIGNAL_IDS } = await import('../analytics/signals.js');
 
 let pass = 0, fail = 0;
 const ok = (l,c,h='') => c ? (console.log('  ✓',l),pass++) : (console.error('  ✗',l,h),fail++);
@@ -253,6 +256,133 @@ try {
         const inst = rdb.prepare("SELECT COUNT(*) AS n FROM cohort_rollups WHERE scope_type IN ('group','school','org')").get().n;
         const scopes = rdb.prepare("SELECT COUNT(*) AS n FROM signal_snapshots WHERE scope_type <> 'user'").get().n;
         ok('14) cero rollups por institución/grupo y cero snapshots fuera del scope user', inst === 0 && scopes === 0);
+    }
+
+    console.log('\n[I] CHP-INSIGHTS-SIGNAL-SNAPSHOT-RETENTION-01F — retención 90 d de signal_snapshots (temporal)');
+    {
+        const idb = ext.getInsightsExtDb();
+        const DAY = 86400_000;
+        const RET = 90 * DAY;
+        // Guardas de aislamiento: el handle apunta al temporal; stores reales intactos.
+        const realInsights = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'data-critical', 'insights.db');
+        const statOf = (f) => { try { const st = fs.statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return 'absent'; } };
+        const listDc = () => { try { return fs.readdirSync(path.dirname(realInsights)).sort().join(','); } catch { return 'absent'; } };
+        const realBefore = statOf(realInsights);
+        const dcBefore = listDc();
+        ok('0) handle de insights apunta al temporal del test', idb.name === process.env.INSIGHTS_SQLITE_PATH);
+
+        const sigOf = (uid, id) => reader.getScopeSignals('user', uid).find(r => r.signal_id === id)?.metric_value ?? null;
+        const MOOK = ['experiencias_iniciadas', 'nodos_requeridos_completados', 'experiencias_completadas', 'evidencias_enviadas', 'revisiones_realizadas'];
+        const mookNow = () => JSON.stringify({ u10: MOOK.map(s => sigOf('u10', s)), adm1: sigOf('adm1', 'revisiones_realizadas') });
+        const mookBefore = mookNow();
+        const otherTables = () => JSON.stringify({
+            profiles: idb.prepare('SELECT * FROM user_reading_profiles ORDER BY user_id').all(),
+            cohorts:  idb.prepare('SELECT * FROM cohort_rollups ORDER BY scope_type, scope_id, metric_key').all(),
+            state:    idb.prepare('SELECT * FROM materializer_state ORDER BY materializer_name').all(),
+            notifs:   insightsStore.listNotifications({ status: 'pending', limit: 50 }).length,
+        });
+        const snapCount = () => idb.prepare('SELECT COUNT(*) AS n FROM signal_snapshots').get().n;
+        const has = (scope, id, sid = 'continuidad_semanal', period = '28d') => !!idb.prepare(
+            'SELECT 1 FROM signal_snapshots WHERE scope_type=? AND scope_id=? AND signal_id=? AND period=?').get(scope, id, sid, period);
+        const insRaw = idb.prepare(`INSERT OR REPLACE INTO signal_snapshots
+            (scope_type,scope_id,signal_id,period,metric_value,confidence,trend,source_watermark,metadata_json,updated_at)
+            VALUES (?,?,?,?,1,'high',NULL,0,?,?)`);
+        const put = (scope, id, updatedAt, sid = 'continuidad_semanal', period = '28d', meta = null) =>
+            insRaw.run(scope, id, sid, period, meta, updatedAt);
+
+        // Fixtures: frontera exacta vs. 89 d, >90 d, creada hace 200 d pero actualizada ayer,
+        // ts inválidos, tres scopes, todas las señales/versiones/periodos.
+        put('user', 'r-89d',  NOW - 89 * DAY);
+        put('user', 'r-90d',  NOW - RET);
+        put('user', 'r-91d',  NOW - 91 * DAY);
+        put('user', 'r-old-but-fresh', NOW - 200 * DAY);
+        put('user', 'r-old-but-fresh', NOW - 1 * DAY);              // "actualización" reciente (upsert por clave única)
+        put('user', 'r-ts-text', 'not-a-timestamp');                 // INTEGER affinity conserva texto no numérico
+        put('user', 'r-ts-zero', 0);
+        put('user', 'r-ts-neg',  -5);
+        put('user', 'r-ts-empty', '');
+        let nullRejected = false;
+        try { put('user', 'r-ts-null', null); } catch { nullRejected = true; }
+        for (const scope of ['user', 'group', 'institution']) {
+            put(scope, `${scope}-expired`, NOW - 120 * DAY);
+            put(scope, `${scope}-fresh`,   NOW - 10 * DAY);
+        }
+        for (const sid of SIGNAL_IDS) {
+            put('user', 'r-all-signals', NOW - 100 * DAY, sid, '28d', JSON.stringify({ by_version: { v1: 1, v2: 2 } }));
+        }
+        for (const period of ['7d', '14d', '28d', 'all']) put('user', 'r-all-periods', NOW - 100 * DAY, 'engagement', period);
+        for (const v of ['v1', 'v2', 'v3']) put('user', `r-ver-${v}`, NOW - 95 * DAY, 'experiencias_iniciadas', '28d', JSON.stringify({ by_version: { [v]: 1 } }));
+        const totalBefore = snapCount();
+
+        // 14) importar/iniciar el materializador o correrlo NO ejecuta retención.
+        const rNormal = materializer.runOnce({ nowTs: NOW });
+        ok('14) runOnce normal no expira nada (retención desconectada del caller)',
+           rNormal.ok && snapCount() === totalBefore && has('user', 'r-91d') && has('institution', 'institution-expired'));
+        // Base de comparación DESPUÉS de runOnce (que reescribe materializer_state.updated_at con reloj real).
+        const othersBefore = otherTables();
+        ok('    módulo expone solo la función explícita; sin flag de entorno de retención',
+           typeof materializer.pruneSignalSnapshots === 'function'
+           && !Object.keys(process.env).some(k => /SNAPSHOT_RETENTION|SIGNAL_RETENTION/i.test(k)));
+
+        // 1) desactivada por defecto → skipped + cero escrituras.
+        const changesBefore = idb.prepare('SELECT total_changes() AS n').get().n;
+        const rOff = materializer.pruneSignalSnapshots({ nowTs: NOW });
+        const rOff2 = materializer.pruneSignalSnapshots({ nowTs: NOW, enabled: false });
+        ok('1) retención desactivada por defecto → skipped, cero escrituras',
+           rOff.ok && rOff.skipped && rOff.enabled === false && rOff.expired === 0 && rOff.candidates === 0
+           && rOff2.skipped && idb.prepare('SELECT total_changes() AS n').get().n === changesBefore
+           && snapCount() === totalBefore);
+
+        // 11) fallo durante el DELETE → rollback completo (trigger solo en la base temporal).
+        idb.exec(`CREATE TRIGGER trg_prune_poison BEFORE DELETE ON signal_snapshots
+                  WHEN OLD.scope_id = 'r-91d' BEGIN SELECT RAISE(ABORT, 'poison-row'); END;`);
+        const rFail = materializer.pruneSignalSnapshots({ nowTs: NOW, enabled: true });
+        ok('11) fallo en DELETE → ok:false con error, rollback completo (ninguna expirada borrada)',
+           rFail.ok === false && /poison-row/.test(rFail.error || '') && rFail.expired === 0
+           && snapCount() === totalBefore && has('user', 'r-90d') && has('group', 'group-expired') && has('user', 'r-all-periods', 'engagement', 'all'));
+        ok('    tras el fallo, ninguna otra tabla cambió', otherTables() === othersBefore);
+        idb.exec('DROP TRIGGER trg_prune_poison');
+
+        // 2-8) ejecución activada sobre el temporal.
+        const rOn = materializer.pruneSignalSnapshots({ nowTs: NOW, enabled: true });
+        const nSignals = SIGNAL_IDS.length;
+        const expectedExpired = 1 /*90d*/ + 1 /*91d*/ + 3 /*scopes expired*/ + nSignals + 4 /*periods*/ + 3 /*versions*/;
+        ok('2) 89 días permanece',                       rOn.ok && has('user', 'r-89d'));
+        ok('3) exactamente 90 días expira',              !has('user', 'r-90d'));
+        ok('4) más de 90 días expira',                   !has('user', 'r-91d'));
+        ok('5) creada hace 200 d pero actualizada ayer permanece', has('user', 'r-old-but-fresh'));
+        ok('6) timestamps inválidos (texto, 0, negativo, vacío) permanecen y cuentan como no evaluables',
+           has('user', 'r-ts-text') && has('user', 'r-ts-zero') && has('user', 'r-ts-neg') && has('user', 'r-ts-empty') && rOn.unevaluable === 4);
+        ok('   NULL es imposible por schema (NOT NULL); el predicado lo trataría como no evaluable', nullRejected === true);
+        ok('7) scopes user/group/institution: misma regla',
+           !has('user', 'user-expired') && !has('group', 'group-expired') && !has('institution', 'institution-expired')
+           && has('user', 'user-fresh') && has('group', 'group-fresh') && has('institution', 'institution-fresh'));
+        ok(`8) todas las señales (${nSignals}), periodos y versiones se evalúan sin excepción`,
+           idb.prepare("SELECT COUNT(*) AS n FROM signal_snapshots WHERE scope_id IN ('r-all-signals','r-all-periods','r-ver-v1','r-ver-v2','r-ver-v3')").get().n === 0);
+        ok(`   conteos agregados coherentes (scanned=${rOn.scanned}, candidates=${rOn.candidates}, expired=${rOn.expired}, retained=${rOn.retained}, unevaluable=${rOn.unevaluable})`,
+           rOn.scanned === totalBefore && rOn.candidates === totalBefore - rOn.unevaluable
+           && rOn.expired === expectedExpired && rOn.retained === rOn.candidates - rOn.expired
+           && rOn.cutoffTs === NOW - RET && rOn.retentionDays === 90 && snapCount() === totalBefore - expectedExpired);
+        ok('   snapshots reales del materializador (updated_at = NOW) intactas',
+           has('user', 'u1') && has('user', 'u10', 'experiencias_iniciadas') && has('user', 'adm1', 'revisiones_realizadas'));
+
+        // 9) ninguna tabla distinta de signal_snapshots cambia.
+        ok('9) ninguna otra tabla cambió (profiles, cohorts, materializer_state, notifications)', otherTables() === othersBefore);
+
+        // 10) idempotencia.
+        const rAgain = materializer.pruneSignalSnapshots({ nowTs: NOW, enabled: true });
+        ok('10) segunda ejecución idempotente (0 expiradas, mismo conteo)',
+           rAgain.ok && rAgain.expired === 0 && rAgain.scanned === rOn.scanned - rOn.expired && snapCount() === totalBefore - expectedExpired);
+
+        // 12-13) el materializador sigue funcionando y las 5 proyecciones MOOK conservan sus conteos.
+        const rPost = materializer.runOnce({ nowTs: NOW });
+        ok('12) ejecución normal del materializador conserva sus resultados', rPost.ok && rPost.processed === 0 && !rPost.error);
+        ok('13) las cinco proyecciones MOOK mantienen sus conteos', mookNow() === mookBefore);
+
+        // 15) ningún store fuera del temporal se crea o modifica.
+        ok('15) data-critical/insights.db real no se creó ni modificó; sin archivos nuevos en data-critical',
+           statOf(realInsights) === realBefore && listDc() === dcBefore
+           && idb.pragma('journal_mode', { simple: true }) === 'wal');
     }
 } finally {
     materializer.closeMaterializerEventsDb();

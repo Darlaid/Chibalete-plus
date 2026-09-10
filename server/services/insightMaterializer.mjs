@@ -15,6 +15,11 @@
  *
  * Tablas escritas: signal_snapshots, user_reading_profiles, cohort_rollups,
  * materializer_state (watermark). Notificaciones vía insightsStore (P1 API).
+ *
+ * RETENCIÓN (CHP-INSIGHTS-SIGNAL-SNAPSHOT-RETENTION-01F): pruneSignalSnapshots()
+ * expira signal_snapshots con updated_at + 90 días <= now. DESACTIVADA por
+ * defecto (enabled=false → skipped, cero escrituras). Ningún caller productivo
+ * la invoca todavía; no está conectada al scheduler.
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +95,9 @@ import { snapshotHistoryTotal } from '../observability/metrics.js';
 const MATERIALIZER_NAME = 'aula_viva_pedagogical_v1';
 const DEFAULT_BATCH = 5000;
 const PERIOD_DAYS = 28;
+// Retención local de signal_snapshots: una snapshot permanece mientras tenga
+// menos de 90 días desde su última generación/actualización (updated_at).
+const SIGNAL_SNAPSHOT_RETENTION_DAYS = 90;
 
 function now() { return Date.now(); }
 
@@ -399,6 +407,73 @@ export function rebuildInsights(opts) {
     }
     out.durationMs = Date.now() - t0;
     return out;
+}
+
+/**
+ * Retención local de signal_snapshots (CHP-INSIGHTS-SIGNAL-SNAPSHOT-RETENTION-01F).
+ *
+ * Timestamp autoritativo: `signal_snapshots.updated_at` (epoch ms UTC), que
+ * upsertSignalSnap reescribe en cada generación/actualización. Una fila queda
+ * elegible cuando `updated_at + 90 días <= nowTs` (frontera inclusiva: al
+ * alcanzar exactamente 90 días expira; a los 89 permanece). No se usa la
+ * antigüedad del usuario, del evento fuente, del archivo ni el `period`.
+ *
+ * DESACTIVADA por defecto: `enabled` debe ser `true` explícito. Si no, devuelve
+ * `skipped` sin abrir ni escribir la base. Ningún caller productivo la invoca.
+ *
+ * Filas con updated_at no evaluable (NULL, texto, <= 0) se conservan y se
+ * cuentan en `unevaluable`. Conteo + DELETE corren en UNA transacción SQLite;
+ * cualquier fallo hace rollback completo y se reporta (no se propaga). Solo
+ * toca signal_snapshots; sin VACUUM/ANALYZE/checkpoint.
+ *
+ * @param {{ enabled?:boolean, nowTs?:number, log?:(m:string)=>void }} [opts]
+ * @returns {{ ok:boolean, skipped:boolean, enabled:boolean, retentionDays:number,
+ *             cutoffTs:number|null, scanned:number, candidates:number, expired:number,
+ *             retained:number, unevaluable:number, durationMs:number, error?:string }}
+ */
+export function pruneSignalSnapshots(opts = {}) {
+    const t0 = Date.now();
+    const log = opts.log || (() => {});
+    const enabled = opts.enabled === true;
+    const result = {
+        ok: false, skipped: false, enabled, retentionDays: SIGNAL_SNAPSHOT_RETENTION_DAYS,
+        cutoffTs: null, scanned: 0, candidates: 0, expired: 0, retained: 0, unevaluable: 0,
+        durationMs: 0,
+    };
+    if (!enabled) {
+        result.ok = true; result.skipped = true;
+        result.durationMs = Date.now() - t0;
+        return result;
+    }
+    try {
+        const nowTs = opts.nowTs ?? now();
+        const cutoffTs = nowTs - SIGNAL_SNAPSHOT_RETENTION_DAYS * 86400_000;
+        result.cutoffTs = cutoffTs;
+        const db = getInsightsExtDb();
+        // Evaluable = entero estrictamente positivo (epoch ms). Todo lo demás se conserva.
+        const EVALUABLE = `(typeof(updated_at) = 'integer' AND updated_at > 0)`;
+        const stScanned     = db.prepare(`SELECT COUNT(*) AS n FROM signal_snapshots`);
+        const stUnevaluable = db.prepare(`SELECT COUNT(*) AS n FROM signal_snapshots WHERE NOT ${EVALUABLE}`);
+        const stDelete      = db.prepare(`DELETE FROM signal_snapshots WHERE ${EVALUABLE} AND updated_at <= ?`);
+        const tx = db.transaction(() => {
+            const scanned = stScanned.get().n;
+            const unevaluable = stUnevaluable.get().n;
+            const expired = stDelete.run(cutoffTs).changes;
+            return { scanned, unevaluable, expired };
+        });
+        const r = tx();
+        result.scanned = r.scanned;
+        result.unevaluable = r.unevaluable;
+        result.candidates = r.scanned - r.unevaluable;
+        result.expired = r.expired;
+        result.retained = result.candidates - r.expired;
+        result.ok = true;
+    } catch (e) {
+        result.error = String(e?.message || e);
+        log(`[materializer] pruneSignalSnapshots error: ${result.error}`);
+    }
+    result.durationMs = Date.now() - t0;
+    return result;
 }
 
 /** Status para /api/health/analytics. */
