@@ -60,7 +60,11 @@ export function canAccessScope(callerId, scope_type, scope_id) {
  * con el status de la taxonomía y NO continúa.
  */
 export function requireScopeAccess(scope_type, scope_id, req, res) {
-    const callerId = req.headers['x-user-id']; // claim legacy_asserted (CHP-ADR-01 §G.13)
+    // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el principal es la identidad que
+    // requireUserAuth ya estableció (sesión firmada → req.auth / req.user);
+    // el header x-user-id queda solo como claim legacy_asserted de respaldo
+    // (CHP-ADR-01 §G.13). Ningún dato del cliente amplía el alcance.
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     const d = evaluateScopeAccess(callerId, scope_type, scope_id);
     if (d.decision === 'allow') return true;
     if (d.decision === 'unavailable') {

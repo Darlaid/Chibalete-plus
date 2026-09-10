@@ -58,6 +58,14 @@ export interface TimelineRecommendation {
     expires_at?: number | null;
 }
 
+// CHP-AULA-VIVA-MOOK-INTEGRATION-01A — proyección canónica de Experiencias.
+// Viene lista del servidor (signal_snapshots); null = sin fila → "Sin datos".
+export interface ExperienceInsight {
+    total: number | null;
+    by_version: Record<string, number> | null;
+    updated_at?: number | null;
+}
+
 export interface LongitudinalTimelinePayload {
     user_id: string;
     profile_current: Record<string, unknown> | null;
@@ -65,6 +73,7 @@ export interface LongitudinalTimelinePayload {
     risks: TimelineRisk[];
     recommendations: TimelineRecommendation[];
     summaries?: TimelineSummary[];
+    experience_insights?: Record<string, ExperienceInsight | null>;
     stale?: boolean;
     reason?: string;
 }
@@ -178,6 +187,54 @@ const RecommendationCardMini: React.FC<{ rec: TimelineRecommendation }> = ({ rec
 
 // ── Componente principal ───────────────────────────────────────────────────
 
+// ── CHP-AULA-VIVA-MOOK-INTEGRATION-01A — Experiencias (conteos canónicos) ──
+// Solo presenta lo que el servidor ya proyectó. Sin cálculos derivados.
+const EXPERIENCE_SIGNALS: ReadonlyArray<{ id: string; label: string }> = [
+    { id: 'experiencias_iniciadas',        label: 'Experiencias iniciadas' },
+    { id: 'nodos_requeridos_completados',  label: 'Nodos requeridos completados' },
+    { id: 'experiencias_completadas',      label: 'Experiencias completadas' },
+    { id: 'evidencias_enviadas',           label: 'Evidencias enviadas' },
+    { id: 'revisiones_realizadas',         label: 'Revisiones realizadas' },
+];
+
+const ExperienceInsightsList: React.FC<{
+    insights: Record<string, ExperienceInsight | null>;
+}> = ({ insights }) => (
+    <ul className="space-y-1.5" data-component="ExperienceInsightsList">
+        {EXPERIENCE_SIGNALS.map(({ id, label }) => {
+            const row = insights[id];
+            const total = row && typeof row.total === 'number' ? row.total : null;
+            const versions = row && row.by_version && typeof row.by_version === 'object'
+                ? Object.entries(row.by_version)
+                : [];
+            return (
+                <li
+                    key={id}
+                    data-signal={id}
+                    className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs sm:text-sm"
+                >
+                    <div className="flex items-baseline justify-between gap-3">
+                        <span className="text-gray-700">{label}</span>
+                        <span className="font-semibold tabular-nums text-gray-900">
+                            {total === null ? 'Sin datos' : total}
+                        </span>
+                    </div>
+                    {versions.length > 0 && (
+                        <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] sm:text-xs text-gray-500"
+                            aria-label={`${label} por versión`}>
+                            {versions.map(([version, n]) => (
+                                <li key={version} className="tabular-nums">
+                                    {version}: {n}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </li>
+            );
+        })}
+    </ul>
+);
+
 export const LongitudinalStudentTimeline: React.FC<{
     data: LongitudinalTimelinePayload | null;
     loading?: boolean;
@@ -246,6 +303,15 @@ export const LongitudinalStudentTimeline: React.FC<{
                     {recentRecs.map(r => (
                         <RecommendationCardMini key={r.recommendation_id} rec={r} />
                     ))}
+                </section>
+            )}
+
+            {data.experience_insights && typeof data.experience_insights === 'object' && (
+                <section aria-label="Experiencias del lector" className="space-y-2">
+                    <h3 className="text-xs sm:text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                        Experiencias
+                    </h3>
+                    <ExperienceInsightsList insights={data.experience_insights} />
                 </section>
             )}
 

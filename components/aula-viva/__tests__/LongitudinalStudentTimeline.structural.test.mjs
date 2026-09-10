@@ -109,5 +109,33 @@ ok('chequea loading',                         /loading\s*\?/.test(src) || /if\s*
 ok('chequea Array.isArray para arrays',       /Array\.isArray\(/.test(src));
 ok('chequea profile_current === null',        /profile_current\s*===\s*null/.test(src));
 
+section('[11] CHP-AULA-VIVA-MOOK-INTEGRATION-01A — Experiencias (cinco rótulos, sin inferencias)');
+const EXPERIENCE_LABELS = [
+    'Experiencias iniciadas',
+    'Nodos requeridos completados',
+    'Experiencias completadas',
+    'Evidencias enviadas',
+    'Revisiones realizadas',
+];
+for (const label of EXPERIENCE_LABELS) {
+    ok(`rótulo "${label}" presente`, src.includes(label));
+}
+ok('señal ausente se muestra como "Sin datos"',      /'Sin datos'/.test(src));
+ok('sección Experiencias con aria-label',            /aria-label=['"]Experiencias del lector['"]/.test(src));
+ok('desglose por versión conservado (by_version)',   /by_version/.test(src));
+ok('payload tipado con experience_insights opcional', /experience_insights\?:/.test(src));
+// El bloque de Experiencias no calcula ni interpreta: sin porcentajes, ranking,
+// score, diagnóstico, competencia, recomendación, comparación ni estados de
+// evidencia ("pendiente", "aprobada").
+const expStart = src.indexOf('const EXPERIENCE_SIGNALS');
+const expEnd   = src.indexOf('export const LongitudinalStudentTimeline');
+ok('bloque de Experiencias localizable', expStart > 0 && expEnd > expStart);
+const expBlock = src.slice(expStart, expEnd).toLowerCase();
+const forbiddenConcepts = ['%', 'porcentaje', 'ranking', 'score', 'diagn', 'competencia',
+    'recomend', 'comparaci', 'pendiente', 'aprobad', 'rechaz', 'promedio', 'math.'];
+for (const c of forbiddenConcepts) {
+    ok(`bloque Experiencias NO contiene "${c}"`, !expBlock.includes(c));
+}
+
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

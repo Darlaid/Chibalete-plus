@@ -179,12 +179,21 @@ export interface CohortComparison {
     global_baseline: Array<{ metric_key: string; metric_value: number | null }>;
 }
 
+// CHP-AULA-VIVA-MOOK-INTEGRATION-01A — proyección canónica de Experiencias
+// (server-side, desde signal_snapshots). null = sin fila ("Sin datos").
+export interface ExperienceInsight {
+    total: number | null;
+    by_version: Record<string, number> | null;
+    updated_at?: number | null;
+}
+
 export interface ProfileTimeline {
     user_id: string;
     profile_current: any | null;
     signals_current: Array<any>;
     risks: Array<any>;
     recommendations: Array<Recommendation>;
+    experience_insights?: Record<string, ExperienceInsight | null>;
     // Fase 3A — summaries determinísticos del backend (vacío si flag OFF).
     summaries?: Array<{
         id: string;

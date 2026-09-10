@@ -17,6 +17,7 @@
  * más validación adicional dentro):
  *
  *   GET    /students/:userId/timeline                 → reader.getProfileTimeline
+ *          (scope CIS 'user' + experience_insights — CHP-AULA-VIVA-MOOK-INTEGRATION-01A)
  *   GET    /students/:userId/feature-vector           → reader.getLatestFeatureVector
  *   GET    /students/:userId/risk-history             → reader.getRiskHistory
  *   GET    /students/:userId/signals/:signalId/timeline (history append-only)
@@ -37,6 +38,8 @@ import * as reader from '../services/insightReader.mjs';
 import * as intervention from '../services/interventionEngine.mjs';
 import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
+// CHP-AULA-VIVA-MOOK-INTEGRATION-01A — autorización de scope vigente (CIS).
+import { requireScopeAccess } from './scopeAccess.mjs';
 import {
     dashboardViewsTotal, recommendationAcceptTotal, recommendationDismissTotal,
     interventionClosedTotal, uiDegradedModeTotal, emptyStateRenderTotal,
@@ -54,6 +57,46 @@ import {
     emitTeacherCreatedIntervention,
     emitMediatorReviewedCohort,
 } from '../services/aulaVivaAuditEmitter.mjs';
+
+// ── CHP-AULA-VIVA-MOOK-INTEGRATION-01A ──────────────────────────────────────
+// Las cinco proyecciones canónicas de Experiencias ya viven en signal_snapshots
+// (scope_type='user') y llegan en `signals_current`. Aquí solo se PRESENTAN con
+// un contrato explícito: `total` = metric_value vigente de la ventana,
+// `by_version` = metadata_json.by_version tal cual (sin mezclar versiones).
+// Sin fila → null ("Sin datos"). metadata_json inválido → by_version null,
+// nunca un desglose inventado. Cero lecturas adicionales, cero escrituras.
+const EXPERIENCE_SIGNAL_IDS = Object.freeze([
+    'experiencias_iniciadas',
+    'nodos_requeridos_completados',
+    'experiencias_completadas',
+    'evidencias_enviadas',
+    'revisiones_realizadas',
+]);
+
+function projectExperienceInsights(signalsCurrent) {
+    const byId = new Map();
+    for (const s of Array.isArray(signalsCurrent) ? signalsCurrent : []) {
+        if (s && typeof s.signal_id === 'string') byId.set(s.signal_id, s);
+    }
+    const out = {};
+    for (const sid of EXPERIENCE_SIGNAL_IDS) {
+        const s = byId.get(sid);
+        if (!s) { out[sid] = null; continue; }
+        const total = (typeof s.metric_value === 'number' && Number.isFinite(s.metric_value))
+            ? s.metric_value : null;
+        const meta = (s.meta && typeof s.meta === 'object' && !Array.isArray(s.meta)) ? s.meta : null;
+        const raw = meta ? meta.by_version : undefined;
+        let by_version = null;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            by_version = {};
+            for (const [version, n] of Object.entries(raw)) {
+                if (typeof n === 'number' && Number.isFinite(n)) by_version[version] = n;
+            }
+        }
+        out[sid] = { total, by_version, updated_at: s.updated_at ?? null };
+    }
+    return out;
+}
 
 function safeJson(res, fn, fallbackBody = null) {
     try {
@@ -74,6 +117,11 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     // ── STUDENT scope ────────────────────────────────────────────────────
     router.get('/students/:userId/timeline', requireUserAuth, (req, res) => {
+        // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el servidor decide los sujetos
+        // visibles con la autorización vigente de Aula Viva (CIS): admin global,
+        // mediador solo sobre miembros de sus grupos activos, lector solo sí
+        // mismo. 401/403/503 según la taxonomía fail-closed existente.
+        if (!requireScopeAccess('user', req.params.userId, req, res)) return;
         instrument('aulaViva.student_timeline', () => {
             const data = reader.getProfileTimeline(req.params.userId);
             try { studentTimelineRenderMs.observe(0); } catch {}
@@ -87,6 +135,12 @@ export function createOperationalRouter({ requireUserAuth }) {
                 payload.summaries = generateLongitudinalSummaries(payload);
             } catch {
                 payload.summaries = [];
+            }
+            // CHP-AULA-VIVA-MOOK-INTEGRATION-01A — aditivo; campos previos intactos.
+            try {
+                payload.experience_insights = projectExperienceInsights(payload.signals_current);
+            } catch {
+                payload.experience_insights = projectExperienceInsights([]);
             }
             // Fase 3B — audit emit (flag OFF default → no-op). Fire-and-forget.
             try {
