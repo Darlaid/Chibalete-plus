@@ -32,6 +32,19 @@ import {
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const ANALYTICS_DB  = path.resolve(__dirname, '..', '..', 'data', 'analytics_db.json');
 
+// CHP-MOOK-EVENTS-INVALID-PAYLOAD-MINIMIZATION-01C — recovery-first SANEADO.
+// Un evento que no valida sigue registrándose (no se pierde el hecho), pero
+// el campo de payload solo lleva este marcador mínimo: JAMÁS el payload crudo,
+// claves desconocidas, valores rechazados ni mensajes de validación (que
+// pueden reproducir texto, correos o tokens). `__reason` es el código estable
+// del registry (invalid_payload | unknown_event | unsupported_version), nunca
+// un valor del payload. Tampoco se devuelven `issues` al caller ni se loguean.
+export const INVALID_PAYLOAD_CODE = 'EVENT_PAYLOAD_INVALID';
+const invalidPayloadMarker = (v) => ({
+    __validation_failed: INVALID_PAYLOAD_CODE,
+    __reason: String(v?.code || 'invalid_payload'),
+});
+
 /**
  * Inserta un evento CANÓNICO en events.db. NUNCA pierde el evento.
  * @param {object} env  envelope { eventId, event, mode, userId, contentId?,
@@ -48,12 +61,13 @@ export function recordCanonicalEvent(env, log = () => {}) {
     const v = validateEvent(env.event, env.payload, env.version);
     out.validated = v.ok;
     out.code = v.ok ? undefined : v.code;
-    out.issues = v.ok ? undefined : v.issues;
+    // `issues` NO se devuelve: sus mensajes pueden reproducir valores rechazados.
 
-    // Recovery-first: si la validación falla NO descartamos. Insertamos con
-    // marca de auditoría → el evento queda en el log canónico, la métrica
-    // `event_validation_failures_total` lo cuenta para reparación posterior.
-    const payloadOut = v.ok ? v.payload : { ...env.payload, __validation_failed: v.code, __issues: v.issues };
+    // Recovery-first: si la validación falla NO descartamos. Insertamos el
+    // envelope con el marcador SANEADO → el hecho queda en el log canónico, la
+    // métrica `event_validation_failures_total` lo cuenta para reparación
+    // posterior, y ningún dato crudo del payload toca el disco.
+    const payloadOut = v.ok ? v.payload : invalidPayloadMarker(v);
     // FIX PASO 2 — alinear con la firma de eventsService.insertEvent (camelCase).
     // Previo (snake_case) generaba inserts silenciosos vacíos por UNIQUE NOT NULL
     // sobre event_id=null. Recovery-first se mantiene: el payload con marker
@@ -166,8 +180,7 @@ export function divergenceReport() {
  */
 export function __buildRowForTest(env) {
     const v = validateEvent(env.event, env.payload, env.version);
-    const payloadOut = v.ok ? v.payload
-        : { ...env.payload, __validation_failed: v.code, __issues: v.issues };
+    const payloadOut = v.ok ? v.payload : invalidPayloadMarker(v);
     // Mismo shape camelCase que se entrega a eventsService.insertEvent.
     return {
         validated: v.ok, code: v.ok ? null : v.code,

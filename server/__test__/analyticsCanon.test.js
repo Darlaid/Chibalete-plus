@@ -13,7 +13,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { validateEvent, describeEvent, listRegistry, EVENT_NAMES, EVENT_CATEGORIES, REGISTRY_VERSION, getMeta } from '../analytics/eventRegistry.js';
-import { __buildRowForTest, recordCanonicalEvent, setInserterForTest } from '../services/analyticsShadow.mjs';
+import { __buildRowForTest, recordCanonicalEvent, setInserterForTest, INVALID_PAYLOAD_CODE } from '../services/analyticsShadow.mjs';
+import { getEventsSince } from '../eventsService.js';
 import { SIGNALS, SIGNAL_IDS } from '../analytics/signals.js';
 import { OBJECTIVES, OBJECTIVE_IDS } from '../analytics/objectives.js';
 
@@ -160,14 +161,88 @@ console.log('\n[2] analyticsShadow — recovery-first row build (jamás pierde e
     ok('inválido → validated false PERO se construye fila igual (recovery-first)',
        r2.validated === false && typeof r2.row.payload_json === 'string');
     const pj = JSON.parse(r2.row.payload_json);
-    ok('marker __validation_failed presente para auditoría',
-       pj.__validation_failed === 'invalid_payload' && Array.isArray(pj.__issues));
+    // INVALID-PAYLOAD-MINIMIZATION-01C: marcador SANEADO — código estable +
+    // razón del registry; sin payload crudo, sin claves rechazadas, sin issues.
+    ok('marker __validation_failed presente para auditoría (código estable, sin crudo)',
+       pj.__validation_failed === INVALID_PAYLOAD_CODE && pj.__reason === 'invalid_payload'
+       && !('foo' in pj) && !('__issues' in pj) && Object.keys(pj).length === 2);
+    ok('el resultado no devuelve issues (podrían reproducir valores)', r2.issues === undefined);
 
     const unknownEnv = { eventId:'e3', event:'never_was', mode:'guided',
         userId:'u1', sessionId:'s1', payload: { x: 1 } };
     const r3 = __buildRowForTest(unknownEnv);
-    ok('unknown_event → row con marker, NO se pierde',
-       r3.validated === false && JSON.parse(r3.row.payload_json).__validation_failed === 'unknown_event');
+    const pj3 = JSON.parse(r3.row.payload_json);
+    ok('unknown_event → row con marker, NO se pierde, sin crudo',
+       r3.validated === false && pj3.__validation_failed === INVALID_PAYLOAD_CODE && pj3.__reason === 'unknown_event' && !('x' in pj3));
+}
+
+console.log('\n[2b] INVALID-PAYLOAD-MINIMIZATION-01C — SQLite temporal real: un payload inválido nunca toca el disco');
+{
+    setInserterForTest(null); // inserter REAL → events.db temporal (helpers/testMode.mjs)
+    const EMAIL = 'sentinel.correo@fixture.invalid';
+    const TOKEN = 'SENTINEL_TOKEN_9f3c2a7e';
+    const TEXT  = 'SENTINEL texto pedagógico de una producción ficticia';
+    const SENTINELS = [EMAIL, TOKEN, TEXT, 'sentinel', 'SENTINEL'];
+    const logged = [];
+    const log = (m) => { logged.push(String(m)); };
+    const dbPath = process.env.EVENTS_SQLITE_PATH;
+    const rowOf = (id) => { const d = new Database(dbPath, { readonly: true, fileMustExist: true }); try { return d.prepare('SELECT * FROM events WHERE event_id = ?').get(id); } finally { d.close(); } };
+    const dumpAll = () => { const d = new Database(dbPath, { readonly: true, fileMustExist: true }); try { return JSON.stringify(d.prepare('SELECT * FROM events').all()); } finally { d.close(); } };
+    const noSentinel = (s) => SENTINELS.every(x => !String(s).includes(x));
+
+    // 1. válido conserva su payload canónico
+    const okRes = recordCanonicalEvent({ eventId:'min-ok-1', event:'experience_started', mode:'experience', userId:'u-min', sessionId:'s-min',
+        clientTs: 100, version: 1, payload: { experienceId:'exp-1', experienceVersionId:'ver-1', runId:'run-1' } }, log);
+    const okRow = rowOf('min-ok-1');
+    ok('1. evento válido: persistido con su payload canónico y schema_version=1',
+       okRes.ok === true && okRes.validated === true && !!okRow && okRow.schema_version === 1
+       && JSON.parse(okRow.payload_json).runId === 'run-1' && JSON.parse(okRow.payload_json).__validation_failed === undefined);
+
+    // 2. claves extra de un payload válido siguen eliminándose
+    recordCanonicalEvent({ eventId:'min-ok-2', event:'experience_started', mode:'experience', userId:'u-min', sessionId:'s-min', version: 1,
+        payload: { experienceId:'exp-1', experienceVersionId:'ver-1', runId:'run-2', injected: TEXT, email: EMAIL } }, log);
+    const okRow2 = rowOf('min-ok-2');
+    ok('2. válido con extras: .strip() los elimina antes de persistir', !!okRow2 && !('injected' in JSON.parse(okRow2.payload_json)) && noSentinel(okRow2.payload_json));
+
+    // 3-8. inválido con sentinelas (correo, token, texto) → fila marcada, sin crudo
+    const bad = recordCanonicalEvent({ eventId:'min-bad-1', event:'evidence_reviewed', mode:'experience', userId:'u-min', sessionId:'s-min', clientTs: 200, version: 1,
+        payload: { experienceId:'exp-1', decision:'INVALIDA', email: EMAIL, token: TOKEN, text: TEXT, nested: { deep: TEXT } } }, log);
+    const badRow = rowOf('min-bad-1');
+    const badPj = badRow ? JSON.parse(badRow.payload_json) : null;
+    ok('3. payload inválido → fila registrada y marcada (recovery-first)',
+       bad.ok === true && bad.inserted === true && bad.validated === false && !!badRow && badPj?.__validation_failed === INVALID_PAYLOAD_CODE);
+    ok('4. la fila conserva el envelope mínimo (evento, mode, user, session, timestamps)',
+       badRow?.event === 'evidence_reviewed' && badRow?.mode === 'experience' && badRow?.user_id === 'u-min' && badRow?.session_id === 's-min'
+       && badRow?.client_ts === 200 && badRow?.server_ts > 0 && badRow?.created_at > 0);
+    ok('5. payload_json solo lleva el marcador: ni valores rechazados ni claves desconocidas ni issues',
+       !!badPj && Object.keys(badPj).sort().join() === '__reason,__validation_failed' && badPj.__reason === 'invalid_payload');
+    ok('6. el correo ficticio no persiste', !!badRow && !JSON.stringify(badRow).includes(EMAIL));
+    ok('7. el token ficticio no persiste',  !!badRow && !JSON.stringify(badRow).includes(TOKEN));
+    ok('8. el texto pedagógico ficticio no persiste', !!badRow && !JSON.stringify(badRow).includes(TEXT));
+    // 9. ni en logs ni en el resultado
+    ok('9. los sentinelas no aparecen en logs ni en el resultado del sink',
+       noSentinel(JSON.stringify(logged)) && noSentinel(JSON.stringify(bad)) && bad.issues === undefined && bad.code === 'invalid_payload');
+    // 10. el sink no lanza con evento desconocido + sentinelas
+    let threw = false, unk = null;
+    try { unk = recordCanonicalEvent({ eventId:'min-bad-2', event:'evento_inexistente', mode:'experience', userId:'u-min', sessionId:'s-min', payload: { email: EMAIL, token: TOKEN } }, log); }
+    catch { threw = true; }
+    const unkRow = rowOf('min-bad-2');
+    ok('10. evento desconocido con sentinelas: no lanza, se registra saneado con __reason=unknown_event',
+       !threw && unk?.ok === true && !!unkRow && JSON.parse(unkRow.payload_json).__reason === 'unknown_event' && noSentinel(JSON.stringify(unkRow)));
+    // 11. duplicados: semántica previa intacta (INSERT OR IGNORE → una sola fila; el resultado no cambia)
+    const d1 = recordCanonicalEvent({ eventId:'min-dup-1', event:'experience_completed', mode:'experience', userId:'u-min', sessionId:'s-min', version: 1,
+        payload: { experienceId:'exp-1', experienceVersionId:'ver-1', runId:'run-1', requiredNodes: 3 } }, log);
+    const d2 = recordCanonicalEvent({ eventId:'min-dup-1', event:'experience_completed', mode:'experience', userId:'u-min', sessionId:'s-min', version: 1,
+        payload: { experienceId:'exp-1', experienceVersionId:'ver-1', runId:'run-1', requiredNodes: 3 } }, log);
+    const dupCount = (() => { const d = new Database(dbPath, { readonly: true }); try { return d.prepare("SELECT COUNT(*) AS n FROM events WHERE event_id = 'min-dup-1'").get().n; } finally { d.close(); } })();
+    ok('11. duplicado por event_id: una sola fila y el mismo resultado que antes (ok:true, inserted:true, sin duplicate)',
+       dupCount === 1 && d1.ok === true && d1.inserted === true && d2.ok === true && d2.inserted === true && d2.duplicate === undefined);
+    // 12. los válidos MOOK siguen siendo legibles por la vía que consume el materializador
+    const since = getEventsSince({ sinceTs: 0, limit: 1000 }) || [];
+    const ids = new Set(since.map(r => r.event_id ?? r.eventId));
+    ok('12. eventos válidos MOOK visibles vía getEventsSince (entrada del materializador)', ids.has('min-ok-1') && ids.has('min-dup-1'));
+    // Barrido final: ningún sentinela en toda la base temporal
+    ok('barrido: ningún sentinela en el SQLite temporal completo', noSentinel(dumpAll()));
 }
 
 console.log('\n[3] events-archive.mjs — dry-run + apply + idempotencia');
