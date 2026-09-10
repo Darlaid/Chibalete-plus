@@ -216,6 +216,8 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 // Import estático (no dinámico) porque `createShadowExecutor` se invoca en
 // scope de módulo al registrar las rutas.
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
+// CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
+import { evaluateScopeAccess } from './aulaViva/scopeAccess.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 
@@ -7856,13 +7858,33 @@ app.post('/api/leo/recap', requireUserAuth, async (req, res) => {
 });
 
 // --- LEO MEDIATOR VIEW (D6) ---
-// Note: requireAuth lets GET through without the admin secret (existing pattern).
-// D7 should introduce a requireMediatorAuth middleware scoped to mediador/administrador roles.
+// CHP-LEO-MEDIATOR-CIS-SCOPE-01A: tras requireAuth (identidad), el alcance lo decide el
+// CIS (server/identity/cis.mjs vía scopeAccess): admin global por política, mediador
+// solo sobre miembros de sus grupos ACTIVE_REAL de su organización, lector jamás
+// (salvo `allowSelf` para su propia activación). Nada del cliente amplía el alcance.
+// La autoridad de máquina (admin-secret file-only) conserva su gate canónico existente.
+async function requireLeoMediatorScope(req, res, studentId, { allowSelf = false } = {}) {
+    if (await isAdminRequest(req)) return true;
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    const d = evaluateScopeAccess(callerId, 'user', String(studentId));
+    if (d.decision === 'allow') {
+        if (d.via === 'self' && !allowSelf) {
+            res.status(403).json({ success: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(studentId) });
+            return false;
+        }
+        return true;
+    }
+    if (d.decision === 'unavailable') { res.status(503).json({ success: false, error: 'identity_unavailable', cause: d.cause }); return false; }
+    if (d.decision === 'unauthenticated') { res.status(401).json({ success: false, error: 'identity_not_established' }); return false; }
+    res.status(403).json({ success: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(studentId) });
+    return false;
+}
 
-app.get('/api/leo/mediator/student/:userId', requireAuth, (req, res) => {
+app.get('/api/leo/mediator/student/:userId', requireAuth, async (req, res) => {
     try {
         const { userId } = req.params;
         if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
+        if (!(await requireLeoMediatorScope(req, res, userId))) return;
         const summary = getMediatorStudentSummary(userId);
         res.json({ success: true, summary });
     } catch (e) {
@@ -7871,12 +7893,13 @@ app.get('/api/leo/mediator/student/:userId', requireAuth, (req, res) => {
     }
 });
 
-app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, (req, res) => {
+app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         if (!userId || !contentId) {
             return res.status(400).json({ success: false, error: 'userId y contentId requeridos' });
         }
+        if (!(await requireLeoMediatorScope(req, res, userId))) return;
         const history = getMediatorContentHistory(userId, contentId);
         res.json({ success: true, history });
     } catch (e) {
@@ -7894,14 +7917,15 @@ app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, (re
  * content recommendation, and/or production prompt.
  * Each output includes a `suppressUntil` advisory TTL for the caller.
  *
- * Auth: requireAuth (admin/mediator) or requireProgressOwner pattern.
- * Here we use requireAuth so mediators can query any student under their org.
- * Students calling for themselves must send x-user-id matching :userId.
+ * Auth: requireAuth (identidad) + CHP-LEO-MEDIATOR-CIS-SCOPE-01A: alcance CIS —
+ * admin global, mediador solo sobre miembros de sus grupos activos, y el propio
+ * estudiante sobre sí mismo (`allowSelf`, contrato previo conservado).
  */
-app.get('/api/leo/activation/:userId', requireAuth, (req, res) => {
+app.get('/api/leo/activation/:userId', requireAuth, async (req, res) => {
     try {
         const { userId } = req.params;
         if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
+        if (!(await requireLeoMediatorScope(req, res, userId, { allowSelf: true }))) return;
         const outputs = getActivationOutputsForUser(userId);
         res.json({ success: true, outputs });
     } catch (e) {
