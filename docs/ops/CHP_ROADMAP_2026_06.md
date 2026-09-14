@@ -80,7 +80,10 @@ RELEASE_AUTHORIZATION: NOT_EXECUTED
 - `ACCESS_FALLBACK_MODE`: abierto según la última evidencia productiva.
 - Backbone canónico de eventos: apagado.
 - Rotación y retención: apagadas o sin activación productiva demostrada.
-- Biblioteca Institucional y Personal: no activadas.
+- Biblioteca Institucional y Personal: **no activadas y no implementadas** — el modelo
+  (`libraryStore.LAYERS`) y el contrato (`docs/adr/CHP_ADR_BIBLIOTECA.md`) las contemplan,
+  pero no existen rutas: `server.js:1515` las declara `IMPLEMENTATION-BLOCKED` y la única
+  superficie expuesta es `/api/library/editorial*`.
 - M1: drain técnico sin evidencia LU.
 
 ### 2.3 Dependencia de campo
@@ -173,7 +176,7 @@ arquitectura.
 | M1 | Completa para rollout | Probada | Enforcement y acceso pendientes | AMBER |
 | M2 | Completa | Completa | Sin activar | AMBER operativo |
 | M3 | Completa | Completa | Sin desplegar | AMBER operativo |
-| M4 | Completa | Completa | Capas y gate integral pendientes | AMBER operativo |
+| M4 | Completa **salvo Biblioteca Institucional/Personal (sin implementación operativa)** | Completa en lo implementado | Capas y gate integral pendientes | AMBER operativo |
 | M5 | Completa en alcance aprobado | Evidence pack reproducible | Cambios no desplegados | AMBER release |
 
 No queda arquitectura general pendiente.
@@ -198,7 +201,7 @@ una aceptación humana explícita prevista por este plan.
 | 8 | Activación de eventos | Eventos canónicos persistiendo |
 | 9 | Activación del materializador | Proyecciones reconstruidas y reconciliadas |
 | 10 | Activación de retención | Rotación y expiración gobernadas |
-| 11 | Activación de Biblioteca | Capas Institucional y Personal operativas |
+| 11 | Completar implementación mínima y activar Biblioteca | Capas Institucional y Personal operativas |
 | 12 | Gate integrado M4 | Cinco superficies y autoridades verificadas |
 | 13 | Evidence pack productivo | Release final reproducible y publicado |
 
@@ -239,9 +242,28 @@ invocador, se autorizará después únicamente su conexión mínima al scheduler
 ```text
 RELEASE_SCOPE: FROZEN
 BACKUP_AND_ROLLBACK: VERIFIED
-ACTIVATION_PATHS: VERIFIED
-PRODUCTION_PREFLIGHT: GREEN
+ACTIVATION_PATHS: PARTIAL_WITH_EXPLICIT_STAGE_10_11_PENDING
+PRODUCTION_PREFLIGHT: GREEN_FOR_STAGE_2_ONLY
 ```
+
+El gate distingue **preparación del despliegue base** de **activabilidad del producto
+completo**. `GREEN_FOR_STAGE_2_ONLY` exige demostrar que los pendientes permanecen
+inactivos y no afectan al despliegue del candidato. No se declara
+`ACTIVATION_PATHS: VERIFIED` mientras falten implementaciones, y el cierre de V6 sigue
+exigiendo **todos** sus gates productivos originales.
+
+Pendientes explícitos, con etapa asignada:
+
+- **Etapa 10** — `pruneSignalSnapshots` sigue sin invocador (no figura entre los jobs del
+  scheduler): conserva su wiring mínimo al scheduler existente. Además, el runner de backup
+  **instalado en producción** aún no cubre `events.archive.db`, de modo que esa cobertura
+  productiva debe demostrarse **antes** de habilitar la rotación.
+- **Etapa 11** — implementación mínima de las capas Institucional y Personal (ver abajo).
+
+Trazabilidad del release: el SHA `b8350ab` permanece **congelado** para el despliegue base.
+Los cambios mínimos posteriores que estas etapas autoricen tendrán **su propio SHA,
+validación y despliegue**; la Etapa 13 reflejará las imágenes realmente ejecutadas y no
+atribuirá todo al candidato inicial.
 
 ### Etapa 2 — Despliegue acumulado con flags intactos
 
@@ -380,9 +402,28 @@ SNAPSHOT_RETENTION: ACTIVE
 ARCHIVE_BACKUP: VERIFIED
 ```
 
-### Etapa 11 — Biblioteca Institucional y Personal
+### Etapa 11 — Completar implementación mínima y activar Biblioteca Institucional y Personal
 
-Activar los contratos existentes después del cierre de acceso.
+**Rectificación (preflight de Etapa 1).** Estas dos capas están modeladas pero **no
+implementadas**: no hay rutas y `server.js:1515` las marca `IMPLEMENTATION-BLOCKED`. Por
+tanto la etapa no es una activación por configuración: exige antes una implementación
+mínima. Las afirmaciones de completitud local de M2–M5 **no cubren rutas inexistentes**.
+
+Alcance limitado a las operaciones indispensables del modelo y los contratos ya aprobados,
+**reutilizando** `server/lib/libraryStore.js`, el catálogo canónico, la identidad, el CIS,
+memberships, roles y entitlements existentes, y la superficie Biblioteca actual. No se crea
+store, catálogo, servicio ni autoridad de acceso: Biblioteca **jamás fabrica entitlement**
+(ADR §18). Los nombres de endpoints, operaciones y reglas de negocio **no se fijan aquí**:
+se derivarán del ADR al llegar la etapa.
+
+Referencias aprobadas: `docs/adr/CHP_ADR_BIBLIOTECA.md` (fórmula congelada y contrato de
+capas) · `docs/ops/CHP_LIB_01.md` · `docs/ops/CHP_LIB_01_RELEASE.md` ·
+`docs/ops/CHP_LIB_MIG_00.md`.
+
+La implementación se realiza **únicamente al llegar a la Etapa 11**, con sus predecesoras
+cerradas, y en unidades separadas por clase de mutación: implementación y pruebas locales →
+despliegue controlado → activación. Ese trabajo tendrá su propio SHA, validación y
+despliegue; no se ejecuta ahora ni se anticipa.
 
 Verificar:
 
