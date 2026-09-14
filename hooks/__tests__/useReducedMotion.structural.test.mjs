@@ -367,5 +367,137 @@ section('[13] CHP-LEO-AI-NOTICE-01A — aviso de IA en chat flotante y compañer
        && /tu mediador humano/.test(NOTICE));
 }
 
+// ── §14: CHP-LEO-MINOR-PRIVACY-NOTICE-01A — aviso de privacidad para menores ──
+section('[14] CHP-LEO-PRIVACY-01A — aviso de privacidad en las 3 superficies de Leo');
+{
+    const chatSrc4 = readSrc('components', 'Chatbot.tsx');
+    const leoSrc4  = readSrc('components', 'LeoCompanion.tsx');
+    const expSrc4  = readSrc('pages', 'Experiencias.tsx');
+    const surfaces4 = [['Chatbot', chatSrc4], ['LeoCompanion', leoSrc4], ['Experiencias', expSrc4]];
+
+    const BOLD = 'Cuida tu información.';
+    const BODY = ' Cuando usas Leo, lo que escribes se procesa para generar una respuesta y Chibalete+ registra señales generales para acompañar tu lectura. No compartas nombres completos, direcciones, teléfonos, contraseñas ni otra información privada. Tu mediador puede consultar indicadores de acompañamiento, no la conversación completa. Si algo te incomoda, cierra Leo y habla con una persona adulta o con tu mediador.';
+    const MAIL = 'contacto@chibaleteeditores.com';
+    const privTag = (src) => src.slice(src.lastIndexOf('<p ', src.indexOf(BOLD)), src.indexOf(BOLD));
+
+    // (1)(2) las tres superficies activas llevan el texto aprobado completo
+    for (const [name, src] of surfaces4) {
+        ok(`${name}: lleva el encabezado en negrita del aviso`,
+           src.includes(`<strong className="font-bold">${BOLD}</strong>`));
+        ok(`${name}: lleva el cuerpo del texto aprobado, íntegro y sin alterar`, src.includes(BODY));
+    }
+
+    // (3) expresiones que el texto aprobado exige conservar
+    for (const [name, src] of surfaces4) {
+        ok(`${name}: conserva «Cuida tu información»`, src.includes('Cuida tu información'));
+        ok(`${name}: conserva «no la conversación completa»`, src.includes('no la conversación completa'));
+        ok(`${name}: advierte sobre datos privados`,
+           /No compartas nombres completos, direcciones, teléfonos, contraseñas/.test(src));
+        ok(`${name}: ofrece la salida a una persona adulta o al mediador`,
+           /cierra Leo y habla con una persona adulta o con tu mediador/.test(src));
+    }
+
+    // (4) el aviso precede al control que inicia la interacción
+    ok('Chatbot: el aviso de privacidad precede al campo y al envío',
+       chatSrc4.indexOf(BOLD) < chatSrc4.indexOf('onKeyDown={handleKeyDown}')
+       && chatSrc4.indexOf(BOLD) < chatSrc4.indexOf('onClick={handleSend}'));
+    ok('LeoCompanion: el aviso precede a vocabulario, pregunta y envío',
+       leoSrc4.indexOf(BOLD) < leoSrc4.indexOf("onClick={() => setMode('vocab')}")
+       && leoSrc4.indexOf(BOLD) < leoSrc4.indexOf("onClick={() => setMode('question')}")
+       && leoSrc4.indexOf(BOLD) < leoSrc4.indexOf('onClick={handleAction}'));
+    ok('Experiencias: el aviso precede al botón de validación del nodo LEO',
+       expSrc4.indexOf(BOLD) < expSrc4.indexOf('Ya conversé — validar'));
+
+    // (5)(6) canal institucional como mailto, y ninguna dirección personal
+    for (const [name, src] of surfaces4) {
+        ok(`${name}: enlace mailto al buzón institucional`,
+           src.includes(`<a href="mailto:${MAIL}"`));
+        const correos = [...src.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)].map(m => m[0]);
+        const ajenos = correos.filter(c => c !== MAIL);
+        ok(`${name}: no aparece ninguna otra dirección de correo (${correos.length} total)`,
+           ajenos.length === 0, ajenos.join(','));
+    }
+
+    // (7) informativo: sin consentimiento, checkbox ni modal nuevo
+    const stripComments4 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const [name, src] of surfaces4) {
+        const code = stripComments4(src);
+        ok(`${name}: sin checkbox ni texto de aceptación`,
+           !/type="checkbox"/.test(code) && !/consentimiento|Acepto|He leído|Entendido/i.test(code));
+    }
+    ok('Chatbot y LeoCompanion: el aviso no es live region',
+       [chatSrc4, leoSrc4, expSrc4].every(src => !/aria-live|role="status"|role="alert"/.test(privTag(src))));
+
+    // (8) fuera de los ciclos de mensajes y de resultados, y exactamente una vez
+    for (const [name, src] of surfaces4) {
+        const n = src.split(BODY).length - 1;
+        ok(`${name}: el aviso aparece exactamente 1 vez (${n})`, n === 1);
+    }
+    ok('Chatbot: el aviso está fuera del map de mensajes',
+       chatSrc4.indexOf(BOLD) < chatSrc4.indexOf('messages.map((msg)'));
+    ok('LeoCompanion: el aviso está fuera del bloque de respuesta',
+       leoSrc4.indexOf(BOLD) < leoSrc4.indexOf("mode === 'result'"));
+
+    // (9) el aviso de IA anterior sigue en pie en las tres superficies
+    ok('Chatbot y LeoCompanion conservan el aviso de IA con falibilidad',
+       /Leo es un asistente de inteligencia artificial y puede equivocarse/.test(chatSrc4)
+       && /Leo es un asistente de inteligencia artificial y puede equivocarse/.test(leoSrc4));
+    ok('Experiencias conserva el aviso de IA del nodo LEO',
+       /Leo es un asistente de inteligencia artificial: conversarás con una IA/.test(expSrc4));
+    ok('en las tres, el aviso de IA precede al de privacidad',
+       surfaces4.every(([, src]) => src.indexOf('Leo es un asistente de inteligencia artificial') < src.indexOf(BOLD)));
+
+    // (10) contratos de red intactos
+    ok('LeoCompanion: endpoint, método y payload de /api/leo/ask intactos',
+       /fetch\('\/api\/leo\/ask', \{/.test(leoSrc4)
+       && /method: 'POST'/.test(leoSrc4)
+       && /contentId, chunkIndex: currentIndex, interactionType: type, payload, exactSentence,/.test(leoSrc4));
+    ok('Chatbot: sigue usando chatConBibliotecario del servicio existente',
+       /chatConBibliotecario/.test(chatSrc4) && /from '\.\.\/services\/geminiService'/.test(chatSrc4));
+    ok('el texto del aviso NO se envía al modelo ni entra en ningún payload',
+       surfaces4.every(([, src]) => {
+           const code = stripComments4(src);
+           const i = code.indexOf(BOLD);
+           if (i < 0) return false;
+           // el aviso vive dentro de un <p>, nunca dentro de un JSON.stringify / body
+           const ctx = code.slice(Math.max(0, i - 400), i);
+           return !/JSON\.stringify\(\s*\{[^}]*$/.test(ctx) && !/body:\s*$/.test(ctx);
+       }));
+
+    // (11) sin estado, efecto ni import nuevos
+    for (const [name, src] of surfaces4) {
+        const tag = privTag(src);
+        ok(`${name}: el aviso no introduce estado ni efectos`,
+           !/useState|useEffect|useRef/.test(tag));
+    }
+    ok('Chatbot: los imports no cambiaron por el aviso',
+       /^import \{ Send, Minimize2, Loader2, Volume2, Mic, StopCircle \} from 'lucide-react';$/m.test(chatSrc4));
+    ok('LeoCompanion: los imports no cambiaron por el aviso',
+       /^import \{ X, Send, UserCircle2 \} from 'lucide-react';$/m.test(leoSrc4));
+
+    // (12) WCAG: contraste del par usado, ausencia de anchos fijos, foco intacto
+    {
+        const lum = (hex) => { const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+        const ratio = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+        ok(`privacidad claro: gray-600 sobre gray-50 ≥ 4.5:1 (${ratio('#4b5563', '#f9fafb').toFixed(2)})`,
+           ratio('#4b5563', '#f9fafb') >= 4.5);
+        ok(`privacidad oscuro: gray-300 sobre gray-900 ≥ 4.5:1 (${ratio('#d1d5db', '#111827').toFixed(2)})`,
+           ratio('#d1d5db', '#111827') >= 4.5);
+    }
+    for (const [name, src] of surfaces4) {
+        const tag = privTag(src);
+        ok(`${name}: el aviso no fija ancho ni se superpone`,
+           !/\bw-\[|\babsolute\b|\bfixed\b|min-w-/.test(tag));
+    }
+    ok('LeoCompanion: diálogo, foco, Escape y ciclo Tab siguen fijados',
+       /role="dialog" aria-modal="true" aria-labelledby="leo-companion-title"/.test(leoSrc4)
+       && /dialogRef\.current\?\.focus\(\)/.test(leoSrc4)
+       && /opener\.focus\(\)/.test(leoSrc4)
+       && /e\.key === 'Escape'[^\n]*onClose\(\)/.test(leoSrc4)
+       && /e\.shiftKey && \(active === first/.test(leoSrc4));
+    ok('LeoCompanion: el ciclo Tab incluye enlaces ([href]) — el mailto es alcanzable',
+       /\[href\]/.test(leoSrc4));
+}
+
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

@@ -303,6 +303,14 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                         <MessageCircle size={12} className="mt-0.5 shrink-0" aria-hidden />
                         <span>Leo es un asistente de inteligencia artificial: conversarás con una IA que acompaña tu lectura, no con una persona. Leo no califica ni evalúa; las producciones las revisa siempre tu mediador humano.</span>
                     </p>
+                    {/* CHP-LEO-MINOR-PRIVACY-NOTICE-01A — aviso de privacidad para menores,
+                        texto aprobado por Nicolás Jiménez. Es informativo: no pide aceptar,
+                        marcar ni cerrar nada, no es live region y no se repite por respuesta.
+                        No es una política integral de privacidad. */}
+                    <p className="text-xs text-gray-600 dark:text-gray-300 my-2 rounded-lg bg-gray-50 dark:bg-gray-900 p-2">
+                        <strong className="font-bold">Cuida tu información.</strong> Cuando usas Leo, lo que escribes se procesa para generar una respuesta y Chibalete+ registra señales generales para acompañar tu lectura. No compartas nombres completos, direcciones, teléfonos, contraseñas ni otra información privada. Tu mediador puede consultar indicadores de acompañamiento, no la conversación completa. Si algo te incomoda, cierra Leo y habla con una persona adulta o con tu mediador.{' '}
+                        <a href="mailto:contacto@chibaleteeditores.com" className="underline hover:text-indigo-700 dark:hover:text-indigo-300">Consultas sobre privacidad: contacto@chibaleteeditores.com</a>
+                    </p>
                 </>
             )}
 
