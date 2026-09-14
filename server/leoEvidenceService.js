@@ -15,9 +15,13 @@
  * LeoEvidenceLogEntry shape:
  *   { id, userId, contentId, surface, interactionType, chunkIndex,
  *     pedagogicalObjective, promptType, pedagogicalStage, difficultyLevel,
- *     userInputPreview, answerPreview, evidenceType, interpretationHint,
+ *     evidenceType, interpretationHint,
  *     icdliHasData, preferredSupportType, interactionCountAtEvent,
  *     sequenceId, sequenceStep, timestamp }
+ *
+ *   CHP-LEO-EVIDENCE-DATA-MINIMIZATION-01A: userInputPreview y answerPreview
+ *   fueron retirados. El store NO guarda texto verbatim del alumno ni de Leo,
+ *   ni sustituto alguno (longitud, hash, resumen). No se reintroducen.
  *
  * PERSISTENCE:
  *   data/leo_evidence_db.json — { schemaVersion: 1, entries: [] }
@@ -39,12 +43,12 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const _EVIDENCE_DB = path.resolve(__dirname, '../data/leo_evidence_db.json');
+// Default productivo INTACTO. El override existe solo para pruebas herméticas,
+// con la misma convención que server.js (CONTENT_DB, SCHOOLS_DB, ACCESS_DB).
+const _EVIDENCE_DB = process.env.LEO_EVIDENCE_DB || path.resolve(__dirname, '../data/leo_evidence_db.json');
 
 const _MAX_ENTRIES        = 2000;
 const _TRIM_TO            = 1800;
-const _INPUT_PREVIEW_LEN  = 80;   // intentionally short — diagnostic context only, not full text
-const _ANSWER_PREVIEW_LEN = 150;
 
 // Matches chatbot action tokens embedded in AI answers
 const _TOKEN_REGEX = /\[INTERACTION_TYPE:\w+\]|\[AWARD_POINTS:\d+\]|\[SAVE_VOCAB:[^\]]+\]/g;
@@ -243,12 +247,11 @@ export function buildLeoEvidenceEntry(enrichedReq, result) {
         readerProfile,
         sessionMemory,
         icdliSnapshot,
-        payload,
-        tituloLibro,
+        // CHP-LEO-EVIDENCE-DATA-MINIMIZATION-01A: 'payload' (texto del alumno) y
+        // 'tituloLibro' ya NO se desestructuran. El texto verbatim no entra aquí.
     } = enrichedReq;
 
-    const answerRaw   = String(result?.answer ?? '');
-    const answerClean = answerRaw.replace(_TOKEN_REGEX, '').trim();
+    const answerRaw = String(result?.answer ?? '');
 
     const preferredSupportType = readerProfile?.preferredSupportType ?? null;
 
@@ -281,11 +284,6 @@ export function buildLeoEvidenceEntry(enrichedReq, result) {
         preferredSupportType,
     });
 
-    // userInputPreview: intentionally short (80 chars) to reduce exposure of sensitive content.
-    // For recap, store tituloLibro — the payload is a book snippet, not user input.
-    const rawInput         = surface === 'recap' ? (tituloLibro ?? '') : (payload ?? '');
-    const userInputPreview = String(rawInput).substring(0, _INPUT_PREVIEW_LEN);
-
     return {
         id:                      _generateId(userId),
         userId:                  userId            ?? 'anon',
@@ -297,8 +295,6 @@ export function buildLeoEvidenceEntry(enrichedReq, result) {
         promptType:              _derivePromptType(surface, interactionType),
         pedagogicalStage:        pedagogicalStage  ?? sessionMemory?.pedagogicalStage ?? null,
         difficultyLevel:         difficultyLevel   ?? 'medio',
-        userInputPreview,
-        answerPreview:           answerClean.substring(0, _ANSWER_PREVIEW_LEN),
         evidenceType,
         interpretationHint,
         icdliHasData,
@@ -354,6 +350,32 @@ export function getEvidenceEntriesForContent(userId, contentId, limit = 10) {
     }
 }
 
+// ── Contrato estructurado del store (CHP-LEO-EVIDENCE-DATA-MINIMIZATION-01A) ──
+
+/**
+ * Campos —y solo estos— que se persisten en leo_evidence_db.json.
+ *
+ * Invariante: el store guarda evidencia ESTRUCTURADA. Nunca extractos verbatim
+ * de la entrada del alumno ni de la respuesta de Leo. La proyección es explícita
+ * a propósito: impide que un campo nuevo del objeto de entrada llegue al disco
+ * por el simple hecho de existir.
+ */
+const _PERSISTED_FIELDS = Object.freeze([
+    'id', 'userId', 'contentId', 'surface', 'interactionType', 'chunkIndex',
+    'pedagogicalObjective', 'promptType', 'pedagogicalStage', 'difficultyLevel',
+    'evidenceType', 'interpretationHint', 'icdliHasData', 'preferredSupportType',
+    'interactionCountAtEvent', 'sequenceId', 'sequenceStep', 'timestamp',
+]);
+
+/** Copia SOLO los campos autorizados. Aplica a la entrada nueva, jamás al histórico. */
+function _projectEvidenceEntry(entry) {
+    const out = {};
+    for (const k of _PERSISTED_FIELDS) {
+        if (entry?.[k] !== undefined) out[k] = entry[k];
+    }
+    return out;
+}
+
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 /**
@@ -367,7 +389,9 @@ export function getEvidenceEntriesForContent(userId, contentId, limit = 10) {
 export function persistLeoEvidence(entry) {
     try {
         const db = _loadEvidenceDb();
-        db.entries.push(entry);
+        // Solo la entrada NUEVA se proyecta; las entradas históricas del array se
+        // reescriben tal cual (esta unidad no purga ni altera lo ya almacenado).
+        db.entries.push(_projectEvidenceEntry(entry));
 
         if (db.entries.length > _MAX_ENTRIES) {
             db.entries = db.entries.slice(db.entries.length - _TRIM_TO);
