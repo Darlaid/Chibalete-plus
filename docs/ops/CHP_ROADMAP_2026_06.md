@@ -481,6 +481,22 @@ No se emitirán prompts sueltos ni unidades fuera del plan.
 
 ## 11. Próximo punto de ejecución
 
+La primera y única unidad siguiente será:
+
+```text
+CHP-ROADMAP-V6-ADOPTION-01
+```
+
+Objetivo:
+
+- sustituir operativamente V5;
+- publicar V6;
+- registrar la aceptación directiva del riesgo de campo;
+- congelar la línea única de ejecución;
+- no tocar código ni producción.
+
+Solo después de su GREEN se emitirá:
+
 ```text
 CHP-V6-PRODUCTION-RELEASE-PREFLIGHT-01
 ```
