@@ -272,6 +272,15 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                     </button>
                 </div>
                 
+                {/* CHP-LEO-AI-TRANSPARENCY-NOTICE-01A — aviso de IA.
+                    Texto del nodo LEO de MOOK (pages/Experiencias.tsx) con la
+                    falibilidad explícita. Estático: se ve al abrir el diálogo y
+                    precede a todo control de interacción. No es consentimiento:
+                    no se acepta, no se cierra, no se repite por respuesta y no
+                    es live region. No añade elementos focalizables al ciclo Tab. */}
+                <p className="px-4 py-2 text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
+                    Leo es un asistente de inteligencia artificial y puede equivocarse: conversarás con una IA que acompaña tu lectura, no con una persona. Leo no califica ni evalúa; las producciones las revisa siempre tu mediador humano.
+                </p>
                 {/* Body */}
                 <div className="p-6 relative min-h-[250px] flex flex-col justify-center">
                     {mode === 'menu' && (

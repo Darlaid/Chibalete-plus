@@ -493,6 +493,14 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
             </div>
           </div>
 
+          {/* CHP-LEO-AI-TRANSPARENCY-NOTICE-01A — aviso de IA.
+              Texto del nodo LEO de MOOK (pages/Experiencias.tsx) con la
+              falibilidad explícita. Estático: se ve al abrir y precede al
+              campo de entrada en el DOM. No es consentimiento: no se acepta,
+              no se cierra, no se repite por respuesta y no es live region. */}
+          <p className="px-4 py-2 text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
+            Leo es un asistente de inteligencia artificial y puede equivocarse: conversarás con una IA que acompaña tu lectura, no con una persona. Leo no califica ni evalúa; las producciones las revisa siempre tu mediador humano.
+          </p>
           {/* Messages Area */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-gray-800/50">
             {messages.length === 0 && (

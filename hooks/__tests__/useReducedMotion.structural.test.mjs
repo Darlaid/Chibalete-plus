@@ -245,5 +245,127 @@ ok('Operacional: pie con text-gray-600 y estado emerald-700', /<footer className
 // Permanencia P1 (01B): salto, título, FAB, ring, diálogos — ya cubiertos en §11; aquí se fija que siguen presentes
 ok('P1 permanece: skip link + RouteTitle + FAB + ring + diálogos', /Saltar al contenido principal/.test(layoutSrc) && /const RouteTitle/.test(appSrc) && /aria-label="Abrir chat con Leo"/.test(chatbotSrc) && /focus-visible:ring-indigo-700/.test(bibSrc2) && /role="dialog" aria-label="Ajustes de lectura"/.test(txtSrc2) && /aria-labelledby="leo-companion-title"/.test(leoSrc2));
 
+// ── §13: CHP-LEO-AI-TRANSPARENCY-NOTICE-01A — aviso de IA en las dos superficies ─
+section('[13] CHP-LEO-AI-NOTICE-01A — aviso de IA en chat flotante y compañero');
+{
+    const chatSrc3 = readSrc('components', 'Chatbot.tsx');
+    const leoSrc3  = readSrc('components', 'LeoCompanion.tsx');
+    const mookSrc3 = readSrc('pages', 'Experiencias.tsx');
+    const NOTICE   = 'Leo es un asistente de inteligencia artificial y puede equivocarse: conversarás con una IA que acompaña tu lectura, no con una persona. Leo no califica ni evalúa; las producciones las revisa siempre tu mediador humano.';
+    const surfaces = [['Chatbot', chatSrc3], ['LeoCompanion', leoSrc3]];
+    // etiqueta de apertura del <p> que contiene el aviso, en cada superficie
+    const noticeTag = (src) => src.slice(src.lastIndexOf('<p ', src.indexOf(NOTICE)), src.indexOf(NOTICE));
+
+    // (1)(2) el aviso está, literal, en ambas superficies activas de Leo
+    for (const [name, src] of surfaces) {
+        ok(`${name}: contiene el aviso de IA literal`, src.includes(NOTICE));
+    }
+    // trazabilidad: el texto deriva del nodo LEO de MOOK (cola verbatim compartida)
+    ok('MOOK sigue siendo la fuente: cola del aviso idéntica',
+       mookSrc3.includes('Leo no califica ni evalúa; las producciones las revisa siempre tu mediador humano.'));
+
+    for (const [name, src] of surfaces) {
+        // (3) identifica expresamente la inteligencia artificial
+        ok(`${name}: identifica expresamente la inteligencia artificial`,
+           /Leo es un asistente de inteligencia artificial/.test(src));
+        // (4) declara falibilidad
+        ok(`${name}: declara que puede equivocarse`, /puede equivocarse/.test(src));
+        // (6) es texto visible de nodo, no atributo ARIA, title ni placeholder
+        ok(`${name}: el aviso es texto de nodo, no title/aria-label/placeholder`,
+           /<p [^>]*>\s*$/.test(noticeTag(src))
+           && !/(title|aria-label|aria-description|placeholder)="[^"]*inteligencia artificial/.test(src));
+        // (6b) ni oculto a la vista ni al árbol accesible
+        ok(`${name}: el aviso NO está en sr-only/hidden/aria-hidden/opacity-0`,
+           !/sr-only|\bhidden\b|aria-hidden|invisible|opacity-0/.test(noticeTag(src)));
+        // (8) no es live region: no se anuncia durante el streaming
+        ok(`${name}: el aviso NO es live region`,
+           !/aria-live|role="status"|role="alert"/.test(noticeTag(src)));
+    }
+
+    // (5) el aviso precede en el DOM al control que inicia la interacción
+    ok('Chatbot: el aviso precede al campo de pregunta',
+       chatSrc3.indexOf(NOTICE) < chatSrc3.indexOf('onKeyDown={handleKeyDown}'));
+    ok('Chatbot: el aviso precede al botón de envío',
+       chatSrc3.indexOf(NOTICE) < chatSrc3.indexOf('onClick={handleSend}'));
+    ok('Chatbot: el aviso va tras el encabezado del panel abierto',
+       chatSrc3.indexOf('Leo - Asistente') < chatSrc3.indexOf(NOTICE));
+    ok('LeoCompanion: el aviso precede a vocabulario y pregunta',
+       leoSrc3.indexOf(NOTICE) < leoSrc3.indexOf("onClick={() => setMode('vocab')}")
+       && leoSrc3.indexOf(NOTICE) < leoSrc3.indexOf("onClick={() => setMode('question')}"));
+    ok('LeoCompanion: el aviso precede al campo y al envío',
+       leoSrc3.indexOf(NOTICE) < leoSrc3.indexOf('onClick={handleAction}'));
+    ok('LeoCompanion: el aviso va dentro del diálogo, tras el h2 y antes del cuerpo',
+       leoSrc3.indexOf('id="leo-companion-title"') < leoSrc3.indexOf(NOTICE)
+       && leoSrc3.indexOf(NOTICE) < leoSrc3.indexOf('{/* Body */}'));
+
+    // (7) no introduce consentimiento, aceptación ni bloqueo
+    // los comentarios del propio parche nombran la palabra «consentimiento»:
+    // la aserción tiene que mirar el JSX renderizado, no los comentarios.
+    const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const [name, src] of surfaces) {
+        const code = stripComments(src);
+        ok(`${name}: sin checkbox ni aceptación nuevos`,
+           !/type="checkbox"/.test(code) && !/consentimiento|Acepto|He leído|Entendido/i.test(code));
+    }
+
+    // (8) aparece exactamente una vez: no se repite por mensaje ni por respuesta
+    for (const [name, src] of surfaces) {
+        const n = src.split(NOTICE).length - 1;
+        ok(`${name}: el aviso aparece exactamente 1 vez (${n})`, n === 1);
+    }
+    ok('Chatbot: el aviso está fuera del map de mensajes',
+       chatSrc3.indexOf(NOTICE) < chatSrc3.indexOf('messages.map((msg)'));
+    ok('LeoCompanion: el aviso está fuera del bloque de respuesta',
+       leoSrc3.indexOf(NOTICE) < leoSrc3.indexOf("mode === 'result'"));
+
+    // (9)(10) diálogo, foco inicial, restauración, Escape y ciclo Tab intactos
+    ok('LeoCompanion: diálogo/foco/Escape/Tab siguen intactos tras el aviso',
+       /role="dialog" aria-modal="true" aria-labelledby="leo-companion-title"/.test(leoSrc3)
+       && /dialogRef\.current\?\.focus\(\)/.test(leoSrc3)
+       && /opener\.focus\(\)/.test(leoSrc3)
+       && /e\.key === 'Escape'[^\n]*onClose\(\)/.test(leoSrc3)
+       && /e\.shiftKey && \(active === first/.test(leoSrc3));
+    ok('Chatbot: FAB accesible y minimizar intactos tras el aviso',
+       /aria-label="Abrir chat con Leo"/.test(chatSrc3) && /toggleChat\(false\)/.test(chatSrc3));
+    ok('el aviso no introduce elementos focalizables nuevos',
+       surfaces.every(([, src]) => {
+           const i = src.indexOf(NOTICE);
+           const block = src.slice(src.lastIndexOf('<p ', i), src.indexOf('</p>', i));
+           return !/<(a|button|input|select|textarea)\b|tabIndex/.test(block);
+       }));
+
+    // (11) reflow 320/479: banda de ancho natural, sin anchos fijos ni superposición
+    for (const [name, src] of surfaces) {
+        const tag = noticeTag(src);
+        ok(`${name}: el aviso no fija ancho ni se superpone`,
+           !/\bw-\[|\babsolute\b|\bfixed\b|min-w-/.test(tag));
+        ok(`${name}: el aviso usa la banda discreta text-xs px-4 py-2`,
+           /text-xs/.test(tag) && /px-4 py-2/.test(tag));
+    }
+
+    // (12) contraste del par usado por el aviso (Tailwind v3), claro y oscuro
+    {
+        const lum = (hex) => { const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+        const ratio = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+        const rLight = ratio('#4b5563', '#f9fafb'), rDark = ratio('#d1d5db', '#111827');
+        ok(`aviso claro: gray-600 sobre gray-50 ≥ 4.5:1 (${rLight.toFixed(2)})`, rLight >= 4.5);
+        ok(`aviso oscuro: gray-300 sobre gray-900 ≥ 4.5:1 (${rDark.toFixed(2)})`, rDark >= 4.5);
+    }
+
+    // (13) el aviso no toca el contrato funcional de Leo
+    ok('LeoCompanion: endpoint, método y payload de /api/leo/ask intactos',
+       /fetch\('\/api\/leo\/ask', \{/.test(leoSrc3)
+       && /method: 'POST'/.test(leoSrc3)
+       && /contentId, chunkIndex: currentIndex, interactionType: type, payload, exactSentence,/.test(leoSrc3));
+    ok('Chatbot: sigue usando chatConBibliotecario del servicio existente',
+       /chatConBibliotecario/.test(chatSrc3) && /from '\.\.\/services\/geminiService'/.test(chatSrc3));
+
+    // (15) el texto no promete exactitud, evaluación automática ni sustitución docente
+    ok('el texto no promete exactitud ni evaluación ni sustituye al docente',
+       !/siempre correcto|siempre acierta|nunca se equivoca|100%|infalible|te calificar|reemplaza a tu/i.test(NOTICE)
+       && /no califica ni evalúa/.test(NOTICE)
+       && /tu mediador humano/.test(NOTICE));
+}
+
 console.log(`\nResultados: ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);
