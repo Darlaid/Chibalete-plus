@@ -224,23 +224,67 @@ y después de esta unidad**. No se modificó — está fuera del alcance.
 - `data-critical/identity.db`, `insights.db` y `usuarios_colegios_oro.json`
   intactos.
 
-### 9.1 Desviación registrada — telemetría sintética en `data-critical/events.db`
+### 9.1 Desviación registrada y resuelta — telemetría sintética en `data-critical/events.db`
 
 Durante la revalidación visual el backend hermético se arrancó **sin**
 `EVENTS_SQLITE_PATH`, que la receta de `CHP_WCAG_FIVE_SURFACES_01A` §2.1 sí
 enumera. `server/eventsService.js:46` cae entonces al default
 `../data-critical/events.db`, de modo que el navegador escribió **9 filas
-sintéticas** en la base de eventos real (WAL; el archivo `events.db` no cambió
-de mtime).
+sintéticas** en la base de eventos real (quedaron en el WAL; el archivo
+`events.db` no cambió de mtime en ese momento).
 
-- Contenido: `text.session_start`, `text.session_end`, `text.leo_interaction`
-  del usuario ficticio `ADM` sobre el contenido ficticio `fx-libro-01`.
+- Contenido: `text.session_start` ×6, `text.session_end` ×2,
+  `text.leo_interaction` ×1, del usuario ficticio `ADM` sobre el contenido
+  ficticio `fx-libro-01`, en 7 sesiones sintéticas.
 - Sin datos personales, sin usuarios reales, sin contenido real.
-- Ventana: `2026-09-14T16:48Z` – `16:57Z`; `events.id` 2351–2359.
-- **No se borraron** (las barandas prohíben acciones destructivas y el borrado
-  de eventos no está autorizado: ver `CHP_MOOK_EVENTS_RETENTION_POLICY_01B`).
-- Decisión pendiente de Nicolás: dejarlas o purgarlas en una unidad aparte.
-  Si se purgan, la marca es `user_id='ADM' AND content_id='fx-libro-01'`.
+- `events.id` **2351–2359** (cola contigua de la tabla).
+- **Ventana exacta:** `2026-09-14T16:54:07.892Z` – `2026-09-14T16:56:33.385Z`
+  (`created_at` = `server_ts`). La primera redacción de este documento dio
+  `16:48Z – 16:57Z`, que era un superconjunto estimado, no la ventana medida.
+
+**Preflight en solo lectura** (`CHP-EVENTS-SYNTHETIC-CONTAMINATION-PREFLIGHT-01`,
+2026-09-14): los cuatro marcadores —rango de ids, `user_id`, `content_id` y
+ventana temporal— seleccionaban **independientemente el mismo conjunto de 9**;
+ninguna fila legítima compartía marcador alguno. Impacto clasificado como
+`HOT_STORE_ONLY`: `events.archive.db` no existe, y todo `insights.db` estaba
+vacío (`materializer_state` sin filas y las 21 tablas de proyección en cero), de
+modo que **ningún evento sintético alcanzó proyección, watermark ni archivo**.
+
+**Purga ejecutada** el 2026-09-14 con autorización expresa de Nicolás Jiménez,
+limitada a esas nueve filas:
+
+- Copia recuperable previa mediante **SQLite Online Backup API** —no copia de
+  archivo, porque las filas vivían en el WAL y solo el Backup API produce una
+  instantánea consistente de db+WAL— fuera del repositorio, verificada con
+  `integrity_check = ok` y 2359 filas.
+- Predicado con **todos** los marcadores verificados: `id BETWEEN 2351 AND 2359`
+  + `user_id='ADM'` + `content_id='fx-libro-01'` + `mode='text'` +
+  `schema_version=1` + `event IN (…)` + `created_at BETWEEN …`.
+- Transacción única: conteo previo 9 → `DELETE` → `changes() = 9` → `COMMIT`
+  (cualquier desviación habría disparado `ROLLBACK`).
+- Posterior: `integrity_check = ok`; segunda ejecución del predicado con **0
+  candidatos**; 2359 → **2350** filas; `max(id) = 2350`; cero residuo por
+  `user_id`, por `content_id` y por ventana temporal.
+- **Cero daño colateral demostrado:** el digest SHA-256 de las 2350 filas
+  legítimas es idéntico antes y después
+  (`a8c05a93f16ba5a32877eda6b0bd156937017cc128be5ff46040495067ef780c`).
+- `sqlite_sequence.events` se dejó intacto en 2359 (la tabla es `AUTOINCREMENT`),
+  así que ningún evento futuro reutiliza los ids purgados.
+- Copia temporal eliminada después de la purga, previa reverificación de su
+  SHA-256.
+
+**Checkpoint automático (efecto no anunciado de antemano).** Al cerrar la última
+conexión, SQLite ejecutó su **checkpoint de cierre** propio del modo WAL y plegó
+el WAL en el archivo principal: `events.db` pasó de 1 056 768 B (SHA-256
+`e97f1cd6…1cbcc`, mtime 2026-08-19) a 1 064 960 B (SHA-256 `2483cf7f…0933`) y el
+`-wal` quedó en 0 B. No se emitió ningún `wal_checkpoint`, `VACUUM` ni
+compactación: es comportamiento intrínseco de escribir en una base WAL y
+cerrarla, inseparable del borrado autorizado. El WAL contenía además escrituras
+legítimas previas sin checkpointear; ninguna se perdió, como acredita el digest
+de control de las 2350 filas.
+
+No se modificaron proyecciones, `identity.db`, `usuarios_colegios_oro.json` ni
+producción, y `events.archive.db` sigue sin existir.
 
 ---
 
