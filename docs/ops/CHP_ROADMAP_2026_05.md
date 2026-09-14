@@ -1,3 +1,9 @@
+> **SUPERADO OPERATIVAMENTE.** Desde el 2026-09-14 la única autoridad de ejecución es
+> `CHP-ROADMAP-2026-06` (`docs/ops/CHP_ROADMAP_2026_06.md`), adoptado sobre el HEAD
+> `b8350ab`. Este documento se conserva como registro histórico: sus gates y decisiones
+> siguen siendo la referencia de cómo se cerró la arquitectura de M2–M5, pero **no rige**
+> la línea de trabajo actual. No abrir unidades contra V5.
+
 # PLAN MAESTRO DE EJECUCIÓN — CHIBALETE+ V5
 
 **Código:** `CHP-ROADMAP-2026-05`
