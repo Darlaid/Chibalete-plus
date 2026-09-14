@@ -115,6 +115,13 @@ function safeJson(res, fn, fallbackBody = null) {
 export function createOperationalRouter({ requireUserAuth }) {
     const router = express.Router();
 
+    // CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A: en los 5 sitios de este router el
+    // principal sale de la identidad que requireUserAuth ya estableció
+    // (req.auth?.userId ?? req.user?.id), con el header x-user-id solo como claim
+    // legacy_asserted de respaldo (CHP-ADR-01 §G.13). Ninguna decisión de identidad
+    // se toma leyendo una cabecera directamente, y body/query/params no amplían el
+    // alcance. Misma precedencia que scopeAccess.requireScopeAccess y reqUserId.
+
     // ── STUDENT scope ────────────────────────────────────────────────────
     router.get('/students/:userId/timeline', requireUserAuth, (req, res) => {
         // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el servidor decide los sujetos
@@ -145,7 +152,7 @@ export function createOperationalRouter({ requireUserAuth }) {
             // Fase 3B — audit emit (flag OFF default → no-op). Fire-and-forget.
             try {
                 emitTeacherViewedStudent({
-                    callerId:  req.headers['x-user-id'],
+                    callerId:  req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'],
                     studentId: req.params.userId,
                 });
             } catch { /* nunca bloquea el response */ }
@@ -187,7 +194,7 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     router.post('/recommendations/:recId/ack', requireUserAuth, express.json(), (req, res) => {
         try {
-            const userId = req.headers['x-user-id'];
+            const userId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const r = intervention.acknowledgeRecommendation({
                 recommendationId: req.params.recId,
                 by: userId, applied: !!req.body?.applied,
@@ -211,7 +218,7 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     router.post('/recommendations/:recId/dismiss', requireUserAuth, express.json(), (req, res) => {
         try {
-            const userId = req.headers['x-user-id'];
+            const userId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const r = intervention.acknowledgeRecommendation({
                 recommendationId: req.params.recId,
                 by: userId, applied: false,
@@ -236,7 +243,7 @@ export function createOperationalRouter({ requireUserAuth }) {
     // ── INTERVENTIONS ────────────────────────────────────────────────────
     router.post('/interventions', requireUserAuth, express.json(), (req, res) => {
         try {
-            const teacherId = req.headers['x-user-id'];
+            const teacherId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const { studentId, interventionType, notes, recommendationOrigin } = req.body || {};
             if (!studentId || !interventionType) {
                 return res.status(400).json({ ok: false, error: 'studentId+interventionType required' });
@@ -289,7 +296,7 @@ export function createOperationalRouter({ requireUserAuth }) {
             // Fase 3B — audit cohort review. Fire-and-forget.
             try {
                 emitMediatorReviewedCohort({
-                    callerId:  req.headers['x-user-id'],
+                    callerId:  req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'],
                     scopeType: req.params.scope_type,
                     scopeId:   req.params.scope_id,
                 });

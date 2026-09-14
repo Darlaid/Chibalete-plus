@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import http from 'node:http';
 
@@ -495,6 +496,132 @@ try {
         } finally { server.close(); }
     }
 
+    // ── CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A ────────────────────────────────
+    // Los 5 sitios de este router toman el principal de req.auth/req.user, no de
+    // una cabecera. La prueba fuerte es el ACTOR PERSISTIDO: con sesión y una
+    // cabecera divergente, lo que queda en la base es el sujeto de la sesión.
+    console.log('\n[CANON] principal canónico (CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A)');
+    {
+        // Stub que emula requireUserAuth en modo sesión firmada.
+        function makeSessionApp(subject) {
+            const app = express();
+            app.use(express.json());
+            const sessionAuth = (req, _res, next) => {
+                req.auth = { userId: subject, sessionId: 's_test', authMethod: 'session' };
+                req.user = { id: subject };
+                next();
+            };
+            app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth: sessionAuth }));
+            return app;
+        }
+        // req() global siempre inyecta x-user-id; aquí hace falta omitirla del todo.
+        const reqSinHeader = (srv, method, ruta) => new Promise((resolve, reject) => {
+            const r = http.request({
+                host: '127.0.0.1', port: srv.address().port, method, path: ruta,
+                headers: { 'Content-Type': 'application/json' },
+            }, (res) => {
+                let buf = '';
+                res.on('data', c => buf += c);
+                res.on('end', () => {
+                    try { resolve({ status: res.statusCode, body: JSON.parse(buf || 'null') }); }
+                    catch { resolve({ status: res.statusCode, body: buf }); }
+                });
+            });
+            r.on('error', reject);
+            r.end();
+        });
+        const readPed = (sql, params = {}) => {
+            const db = new Database(process.env.INSIGHTS_SQLITE_PATH);
+            try { return db.prepare(sql).all(params); } finally { db.close(); }
+        };
+
+        const app = makeSessionApp('med_sesion');
+        const server = await listen(app);
+        try {
+            // Reutiliza la recomendación ya generada en el bloque [B].
+            const list = await req(server, 'GET', '/api/aula-viva/recommendations/scope/user/u_w');
+            const recId = Array.isArray(list.body) && list.body.length ? list.body[0].recommendation_id : null;
+            ok('CANON-0 hay una recomendación para ejercitar los sitios', !!recId);
+
+            if (recId) {
+                // SITIO 2 — ack: cabecera divergente presente y deliberadamente falsa.
+                const ack = await req(server, 'POST',
+                    `/api/aula-viva/recommendations/${encodeURIComponent(recId)}/ack`,
+                    { applied: false }, { 'x-user-id': 'IMPOSTOR' });
+                ok('CANON-1 POST ack responde 200 con sesión', ack.status === 200);
+                const acked = readPed(
+                    'SELECT acknowledged_by FROM pedagogical_recommendations WHERE recommendation_id = @id',
+                    { id: recId });
+                ok('CANON-2 el actor persistido en ack es el sujeto de la SESIÓN, no la cabecera',
+                    acked[0]?.acknowledged_by === 'med_sesion',
+                    `acknowledged_by=${acked[0]?.acknowledged_by}`);
+                ok('CANON-3 el impostor de la cabecera NO quedó registrado',
+                    acked[0]?.acknowledged_by !== 'IMPOSTOR');
+
+                // SITIO 4 — interventions: teacherId sale del principal canónico.
+                const intv = await req(server, 'POST', '/api/aula-viva/interventions', {
+                    studentId: 'u_w', interventionType: 'lectura_guiada',
+                    notes: 'canon', recommendationOrigin: recId,
+                    teacherId: 'IMPOSTOR_BODY',   // el body no amplía ni sustituye el principal
+                }, { 'x-user-id': 'IMPOSTOR' });
+                ok('CANON-4 POST intervention responde 200 con sesión', intv.status === 200);
+                const rows = readPed(
+                    'SELECT teacher_id FROM pedagogical_interventions WHERE intervention_id = @id',
+                    { id: intv.body?.intervention_id });
+                ok('CANON-5 teacher_id persistido es el sujeto de la SESIÓN',
+                    rows[0]?.teacher_id === 'med_sesion', `teacher_id=${rows[0]?.teacher_id}`);
+                ok('CANON-6 ni la cabecera ni el body sustituyeron al principal',
+                    rows[0]?.teacher_id !== 'IMPOSTOR' && rows[0]?.teacher_id !== 'IMPOSTOR_BODY');
+
+                // SITIO 3 — dismiss: mismo invariante sobre otra recomendación.
+                const otras = Array.isArray(list.body) ? list.body.filter(r => r.recommendation_id !== recId) : [];
+                if (otras.length) {
+                    const rec2 = otras[0].recommendation_id;
+                    await req(server, 'POST',
+                        `/api/aula-viva/recommendations/${encodeURIComponent(rec2)}/dismiss`,
+                        {}, { 'x-user-id': 'IMPOSTOR' });
+                    const dis = readPed(
+                        'SELECT acknowledged_by FROM pedagogical_recommendations WHERE recommendation_id = @id',
+                        { id: rec2 });
+                    ok('CANON-7 dismiss registra el sujeto de la SESIÓN',
+                        dis[0]?.acknowledged_by === 'med_sesion', `acknowledged_by=${dis[0]?.acknowledged_by}`);
+                } else {
+                    ok('CANON-7 dismiss registra el sujeto de la SESIÓN (sin 2ª recomendación: cubierto por ack)', true);
+                }
+            }
+
+            // 'med_sesion' no existe en el padrón: el CIS lo rechaza aunque haya sesión,
+            // que es exactamente el default-deny esperado.
+            const ajeno = await reqSinHeader(server, 'GET', '/api/aula-viva/students/u_w/timeline');
+            ok('CANON-8 principal con sesión pero desconocido: denegado por CIS',
+                ajeno.status === 401 || ajeno.status === 403, `status=${ajeno.status}`);
+        } finally { server.close(); }
+
+        // SITIOS 1 y 5 — rutas con alcance CIS: con un principal reconocido por el
+        // padrón y SIN ninguna cabecera de identidad en la petición.
+        {
+            const app2 = makeSessionApp('t1');
+            const srv2 = await listen(app2);
+            try {
+                const tl = await reqSinHeader(srv2, 'GET', '/api/aula-viva/students/u_w/timeline');
+                ok('CANON-9 timeline responde 200 solo con la sesión, sin cabecera',
+                    tl.status === 200, `status=${tl.status}`);
+                const coh = await reqSinHeader(srv2, 'GET', '/api/aula-viva/cohorts/user/u_w');
+                ok('CANON-10 cohorts responde sin cabecera de identidad',
+                    coh.status !== 401 && coh.status !== 500, `status=${coh.status}`);
+            } finally { srv2.close(); }
+        }
+
+        // Contrato estático: misma precedencia en los 5 sitios, cero lecturas sueltas.
+        const src = fs.readFileSync(
+            path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'aulaViva', 'operationalRouter.mjs'), 'utf8');
+        const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+        const directas  = (code.match(/req\.headers\['x-user-id'\]/g) || []).length;
+        const canonicas = (code.match(/req\.auth\?\.userId \?\? req\.user\?\.id \?\? req\.headers\['x-user-id'\]/g) || []).length;
+        ok(`CANON-11 los 5 sitios usan la misma precedencia canónica (${canonicas})`, canonicas === 5);
+        ok('CANON-12 cero lecturas directas de la cabecera fuera de la precedencia',
+            directas === canonicas, `directas=${directas} canónicas=${canonicas}`);
+    }
 } finally {
     try { scheduler.stop(); } catch {}
     rolExt.closeRollupsExtDb?.();

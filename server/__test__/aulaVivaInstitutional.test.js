@@ -26,6 +26,7 @@ import path from 'node:path';
 import http from 'node:http';
 import express from 'express';
 import Database from 'better-sqlite3';
+import { fileURLToPath } from 'node:url';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'av7_'));
 process.env.EVENTS_SQLITE_PATH   = path.join(tmpDir, 'events.db');
@@ -533,6 +534,113 @@ try {
             scopeAccess.canAccessScope(undefined, 'user', 'u_student') === false);
     }
 
+// ── CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A ────────────────────────────────────
+// El router ya no lee la identidad de una cabecera: la toma del principal que
+// requireUserAuth estableció. Aquí el stub emula ese middleware en modo sesión.
+console.log('\n[CANON] principal canónico (CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A)');
+{
+    // Stub que emula requireUserAuth con sesión firmada: 'x-test-session' nombra
+    // al sujeto autenticado. Si además llega x-user-id divergente, se rechaza con
+    // subject_mismatch exactamente como sessionAuth.authenticate en producción.
+    function makeSessionApp() {
+        const app = express();
+        app.use(express.json());
+        const sessionAuth = (req, res, next) => {
+            const sub = req.headers['x-test-session'];
+            if (sub) {
+                const claimed = req.headers['x-user-id'];
+                if (claimed && claimed !== sub) {
+                    return res.status(401).json({ ok: false, error: 'subject_mismatch' });
+                }
+                req.auth = { userId: sub, sessionId: 's_test', authMethod: 'session' };
+                req.user = { id: sub };
+                return next();
+            }
+            const uid = req.headers['x-user-id'];
+            if (!uid) return res.status(401).json({ error: 'missing x-user-id' });
+            req.user = { id: uid };            // compat legacy ya validada por el middleware
+            next();
+        };
+        app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth: sessionAuth }));
+        return app;
+    }
+
+    installFixture(
+        [
+            { id: 'adm_c', nombre_completo: 'Admin C', email: 'adm_c@fx.test', roles: ['administrador'], rol: 'administrador', accountStatus: 'active' },
+            { id: 'med_c', nombre_completo: 'Med C',   email: 'med_c@fx.test', roles: ['profesor'],      rol: 'profesor',      accountStatus: 'active', colegio: 'school_uno' },
+            { id: 'med_x', nombre_completo: 'Med X',   email: 'med_x@fx.test', roles: ['profesor'],      rol: 'profesor',      accountStatus: 'active', colegio: 'school_otro' },
+            { id: 'lec_c', nombre_completo: 'Lec C',   email: 'lec_c@fx.test', roles: ['lector'],        rol: 'lector',        accountStatus: 'active', colegio: 'school_uno' },
+        ],
+        [{ id: 'g_c', nombre: 'Grupo C', organizationId: 'school_uno', mediatorIds: ['med_c'], memberIds: ['lec_c'] }],
+    );
+    scopeAccess.invalidateScopeCache?.();
+
+    const app = makeSessionApp();
+    const server = await listen(app);
+    const PATH = '/api/aula-viva/institutional/outcomes/scope/group/g_c';
+    try {
+        // (1) cookie/sesión firmada SIN x-user-id: el alcance se resuelve igual.
+        const soloSesion = await req(server, 'GET', PATH, { headers: { 'x-test-session': 'med_c' } });
+        ok('CANON-1 sesión firmada sin x-user-id: el router resuelve el alcance',
+            soloSesion.status !== 401, `status=${soloSesion.status}`);
+
+        // (2) sesión + cabecera coincidente: mismo resultado, byte a byte.
+        const coincide = await req(server, 'GET', PATH, {
+            headers: { 'x-test-session': 'med_c', 'x-user-id': 'med_c' },
+        });
+        ok('CANON-2 sesión + cabecera coincidente: mismo status',
+            coincide.status === soloSesion.status);
+        ok('CANON-2b respuesta idéntica',
+            JSON.stringify(coincide.body) === JSON.stringify(soloSesion.body));
+
+        // (3) sesión + cabecera divergente: subject_mismatch, la cabecera no sustituye.
+        const divergente = await req(server, 'GET', PATH, {
+            headers: { 'x-test-session': 'med_c', 'x-user-id': 'adm_c' },
+        });
+        ok('CANON-3 sesión + cabecera divergente: 401 subject_mismatch',
+            divergente.status === 401 && divergente.body?.error === 'subject_mismatch');
+
+        // (4) mediador de otra institución: denegado por CIS, no por la cabecera.
+        const otraInst = await req(server, 'GET', PATH, { headers: { 'x-test-session': 'med_x' } });
+        ok('CANON-4 mediador de otra institución: denegado',
+            otraInst.status === 403 || otraInst.status === 401, `status=${otraInst.status}`);
+
+        // (5) administrador: alcance global vigente, sin cabecera.
+        const admin = await req(server, 'GET', PATH, { headers: { 'x-test-session': 'adm_c' } });
+        ok('CANON-5 administrador con sesión: alcance global vigente',
+            admin.status === 200, `status=${admin.status}`);
+
+        // (6) usuario inexistente: el CIS no lo reconoce.
+        const fantasma = await req(server, 'GET', PATH, { headers: { 'x-test-session': 'no_existe' } });
+        ok('CANON-6 principal desconocido: no concede acceso',
+            fantasma.status === 401 || fantasma.status === 403, `status=${fantasma.status}`);
+
+        // (7) query/params falsificados no alteran el principal.
+        const falsificado = await req(server, 'GET', `${PATH}?callerId=adm_c&userId=adm_c`, {
+            headers: { 'x-test-session': 'med_x' },
+        });
+        ok('CANON-7 query falsificada no amplía el alcance',
+            falsificado.status === otraInst.status);
+
+        // (8) compat legacy: sin sesión, la cabecera validada por el middleware sigue sirviendo.
+        const legacy = await req(server, 'GET', PATH, { userId: 'med_c' });
+        ok('CANON-8 compat legacy preservada (sin sesión)',
+            legacy.status === soloSesion.status);
+    } finally { server.close(); }
+
+    // (9) contrato estático: ningún router de Aula Viva lee la cabecera directamente.
+    const CANON_RE = /req\.auth\?\.userId \?\? req\.user\?\.id \?\? req\.headers\['x-user-id'\]/g;
+    const routerDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'aulaViva');
+    for (const file of ['institutionalRouter.mjs', 'operationalRouter.mjs']) {
+        const src = fs.readFileSync(path.join(routerDir, file), 'utf8');
+        const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+        const directas = (code.match(/req\.headers\['x-user-id'\]/g) || []).length;
+        const canonicas = (code.match(CANON_RE) || []).length;
+        ok(`CANON-9 ${file}: toda lectura del header va dentro de la precedencia canónica`,
+            directas === canonicas && canonicas > 0, `directas=${directas} canónicas=${canonicas}`);
+    }
+}
 } finally {
     outExt.closeOutcomesExtDb?.();
     rolExt.closeRollupsExtDb?.();
