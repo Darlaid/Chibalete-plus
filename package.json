@@ -22,6 +22,7 @@
     "verify:deploy-config": "node scripts/verify-deploy-config.mjs",
     "test:image-integrity": "node scripts/verify-image-integrity.mjs",
     "test:mediator-repair": "node scripts/migrations/chp-mem-mediator-647/__test__/migrate.test.mjs",
+    "test:explicit-access": "node scripts/migrations/chp-v6-explicit-access/__test__/migrate.test.mjs",
     "test:metric-contract": "node engines/metrics/__tests__/referenceEngine.test.mjs && node server/__test__/metricsApiV2.test.js && node server/__test__/metricsShadowBoundary.test.js && npm run test:legacy-perf",
     "test:content-rmw": "node server/__test__/contentStoreRmwSuiteIntegrity.test.mjs && node server/__test__/contentStoreRmwConcurrency.test.mjs && node server/__test__/ttsProgressRace.test.mjs",
     "test:library": "node server/__test__/libraryStore.test.mjs",
