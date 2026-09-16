@@ -189,6 +189,15 @@ JSON_STORES: tuple[JsonStore, ...] = (
         retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
         required=False,
     ),
+    # --- CHP-LANDING-BANNER-02 ------------------------------------------------
+    # Slides del banner de /bienvenida gestionados desde Administrador → Subir.
+    # Estado editorial administrado: debe poder recuperarse. Solo guarda URLs;
+    # las imagenes ya las cubre la fuente `public/uploads`.
+    #
+    # `required=False`: el servidor NO lo crea al arrancar; nace con la primera
+    # escritura administrativa. Mismo tratamiento que `mook_db.json`: ausente se
+    # anota en `stores_absent`, presente su respaldo es obligatorio.
+    JsonStore("data/landing_banner.json", "CFG", count_adapter="root_len", required=False),
 )
 
 # --- Uploads (inventario §1 mounts; §2.3) ------------------------------------

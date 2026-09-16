@@ -678,6 +678,7 @@ const PROGRESS_DB = path.join(DATA_DIR, 'progress_db.json');
 const DB_FILE = process.env.CONTENT_DB || path.join(DATA_DIR, 'content.json');
 const SECTIONS_DB = path.join(DATA_DIR, 'sections.json'); // Added likely missing definition based on context
 const SCHOOL_CONFIGS_DB = path.join(DATA_DIR, 'school_configs.json');
+const LANDING_BANNER_DB = path.join(DATA_DIR, 'landing_banner.json'); // CHP-LANDING-BANNER-02: slides de /bienvenida (no se crea al arrancar)
 const SCHOOLS_DB = process.env.SCHOOLS_DB || path.join(DATA_DIR, 'schools_db.json');
 const ACCESS_DB = process.env.ACCESS_DB || path.join(DATA_DIR, 'access_db.json'); // FASE E6: Motor de Accesos por Scopes
 const LEO_MEMORY_DB = path.join(DATA_DIR, 'leo_memory_db.json'); // LEO SESSION PERSISTENCE
@@ -7223,6 +7224,125 @@ app.delete('/api/sections/:id', requireAuth, async (req, res) => {
     });
     if (conflict) return res.status(404).json({ error: 'Section not found' });
     res.json({ success: true });
+});
+
+// --- LANDING BANNER ROUTES (CHP-LANDING-BANNER-02) ---
+// Slides del banner de /bienvenida en data/landing_banner.json. Sin archivo se
+// lee [] (readJSON) y la primera escritura administrativa lo crea (writeJSON).
+// Las imágenes llegan por /api/upload; aquí solo se guarda su URL. Retirar un
+// slide NUNCA borra el archivo: la URL pudo venir deduplicada y estar en uso.
+
+const LANDING_BANNER_TEXT_FIELDS = ['title', 'text', 'linkLabel'];
+
+const projectLandingSlide = (s) => {
+    const out = { id: s.id, imageUrl: s.imageUrl };
+    for (const k of [...LANDING_BANNER_TEXT_FIELDS, 'linkUrl']) {
+        if (typeof s[k] === 'string' && s[k]) out[k] = s[k];
+    }
+    out.order = s.order;
+    out.active = s.active === true;
+    return out;
+};
+
+const isHttpsUrl = (value) => {
+    try {
+        const u = new URL(value);
+        return u.protocol === 'https:' && !!u.hostname;
+    } catch {
+        return false;
+    }
+};
+
+// Valida y normaliza el array completo. Devuelve { slides } o { error }.
+function normalizeLandingBannerSlides(input, contentList) {
+    if (!Array.isArray(input)) return { error: 'Se esperaba el array completo de slides.' };
+    const seen = new Set();
+    const slides = [];
+    for (let i = 0; i < input.length; i++) {
+        const raw = input[i];
+        const n = i + 1;
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `Slide ${n}: formato inválido.` };
+
+        const imageUrl = typeof raw.imageUrl === 'string' ? raw.imageUrl.trim() : '';
+        if (!imageUrl.startsWith('/uploads/')) {
+            return { error: `Slide ${n}: la imagen debe ser un archivo subido (/uploads/…).` };
+        }
+        const normalized = normalizeUploadRequestPath(imageUrl);
+        if (!normalized.ok) return { error: `Slide ${n}: la ruta de la imagen no es válida.` };
+        // Misma clasificación que /internal/uploads-authz: la landing es anónima,
+        // así que un asset de pedagogía protegida jamás puede ir en el banner.
+        if (classifyUploadPath(normalized.path, contentList) === 'PEDAGOGY_RESTRICTED') {
+            return { error: `Slide ${n}: la imagen pertenece a contenido protegido y no puede mostrarse en la landing pública. Sube otra imagen.` };
+        }
+
+        const linkUrl = typeof raw.linkUrl === 'string' ? raw.linkUrl.trim() : '';
+        if (linkUrl && !isHttpsUrl(linkUrl)) {
+            return { error: `Slide ${n}: el enlace debe ser una URL https:// válida.` };
+        }
+
+        let id = typeof raw.id === 'string' ? raw.id.trim() : '';
+        if (!id) id = `banner-${Date.now()}-${i}`;
+        if (seen.has(id)) return { error: `Slide ${n}: id duplicado.` };
+        seen.add(id);
+
+        const slide = { id, imageUrl };
+        for (const k of LANDING_BANNER_TEXT_FIELDS) {
+            const v = typeof raw[k] === 'string' ? raw[k].trim() : '';
+            if (v) slide[k] = v;
+        }
+        if (linkUrl) slide.linkUrl = linkUrl;
+        slide.order = i;
+        slide.active = raw.active === true;
+        slides.push(slide);
+    }
+    return { slides };
+}
+
+const readLandingBanner = () => {
+    const data = readJSON(LANDING_BANNER_DB);
+    return (Array.isArray(data) ? data : [])
+        .filter(s => s && typeof s === 'object' && typeof s.imageUrl === 'string')
+        .map(projectLandingSlide)
+        .sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
+};
+
+app.get('/api/landing-banner', (req, res) => {
+    try {
+        res.json(readLandingBanner().filter(s => s.active));
+    } catch (e) {
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// requireAdminRole deja pasar cualquier GET autenticado; esta lectura incluye
+// slides inactivos, así que exige rol administrador con la misma resolución de
+// principal que el autorizador de assets.
+app.get('/api/admin/landing-banner', async (req, res) => {
+    try {
+        const viewer = await resolveViewerPrincipal(req);
+        if (!viewer.machine && !viewer.user) return res.status(401).json({ error: 'Auth requerida' });
+        if (!viewer.machine && !viewer.roles.includes('administrador')) {
+            return res.status(403).json({ error: 'Acceso denegado: se requiere rol administrador' });
+        }
+        res.json(readLandingBanner());
+    } catch (e) {
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.put('/api/admin/landing-banner', requireAdminRole, async (req, res) => {
+    try {
+        const result = normalizeLandingBannerSlides(req.body, readJSON(DB_FILE));
+        if (result.error) return res.status(400).json({ error: result.error });
+        await withFileLock(LANDING_BANNER_DB, () => {
+            writeJSON(LANDING_BANNER_DB, result.slides);
+        }, 'landingBannerLock');
+        log(`[LANDING_BANNER_SAVE] actor=${req.user?.id ?? 'unknown'} slides=${result.slides.length}`, 'INFO');
+        res.json(result.slides);
+    } catch (e) {
+        log(`[LANDING_BANNER_SAVE_FAIL] error=${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'No se pudo guardar el banner.' });
+    }
 });
 
 // --- SCHOOL CONFIG ROUTES (Filtering) ---

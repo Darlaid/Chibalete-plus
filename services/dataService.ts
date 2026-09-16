@@ -72,6 +72,18 @@ interface FailedSyncEntry {
     addedAt: string;  // ISO timestamp — used for 24h TTL pruning
 }
 
+// CHP-LANDING-BANNER-02: slide del banner de /bienvenida (el backend normaliza).
+export interface LandingBannerSlide {
+    id: string;
+    imageUrl: string;
+    title?: string;
+    text?: string;
+    linkUrl?: string;
+    linkLabel?: string;
+    order: number;
+    active: boolean;
+}
+
 class DataService {
     private users: User[] = [];
     private content: Content[] = [];
@@ -5101,6 +5113,38 @@ class DataService {
             method: 'DELETE',
             headers: { ...this.adminWriteHeaders }
         });
+    }
+
+    // --- LANDING BANNER (CHP-LANDING-BANNER-02) ---
+    // Público: solo slides activos y ordenados. Nunca lanza: sin banner → [].
+    async getLandingBanner(): Promise<LandingBannerSlide[]> {
+        try {
+            const res = await fetch(`${this.apiUrl}/landing-banner`);
+            return res.ok ? res.json() : [];
+        } catch {
+            return [];
+        }
+    }
+
+    // Administrador: todos los slides, incluidos los inactivos.
+    async getLandingBannerAdmin(): Promise<LandingBannerSlide[]> {
+        const res = await fetch(`${this.apiUrl}/admin/landing-banner`, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`No se pudo cargar el banner (HTTP ${res.status}).`);
+        return res.json();
+    }
+
+    // Reemplaza el array completo. Devuelve lo persistido tras normalizar.
+    async saveLandingBanner(slides: LandingBannerSlide[]): Promise<LandingBannerSlide[]> {
+        const res = await fetch(`${this.apiUrl}/admin/landing-banner`, {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(slides),
+        });
+        let data: any = null;
+        try { data = await res.json(); } catch { /* cuerpo no JSON (p. ej. 502 del edge) */ }
+        if (!res.ok) throw new Error(data?.error || `No se pudo guardar el banner (HTTP ${res.status}).`);
+        return data;
     }
 
     async getSchoolConfig(schoolName: string): Promise<SchoolConfig> {

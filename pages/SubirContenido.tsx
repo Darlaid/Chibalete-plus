@@ -9,6 +9,7 @@ import { analizarIlustracionAlbum, sugerirEtiquetasThema } from '../services/gem
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ExperienceStudio from '../components/studio/ExperienceStudio';
+import LandingBannerManager from '../components/LandingBannerManager';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -364,7 +365,7 @@ const SubirContenido: React.FC = () => {
     const { user } = useAuth();
     // Mode: "new" = Creating a new parent + materials. "existing" = Adding materials to existing parent. "manage" = Managing existing content.
     // "experiencia" (CHP-MOOK-STUDIO-01) = Studio de Experiencias (cuarta acción de primer nivel, UX C1).
-    const [uploadMode, setUploadMode] = useState<'new' | 'existing' | 'manage' | 'experiencia'>('new');
+    const [uploadMode, setUploadMode] = useState<'new' | 'existing' | 'manage' | 'experiencia' | 'banner'>('new');
     // El Studio se mantiene montado (oculto) tras abrirse por primera vez para
     // que el borrador en edición sobreviva al salto «Crear contenido» (UX C8).
     const [studioOpened, setStudioOpened] = useState(false);
@@ -1332,6 +1333,15 @@ const SubirContenido: React.FC = () => {
                         >
                             <div className="flex items-center mb-2"><Sparkles className="mr-2 text-purple-500" /> <span className="font-bold">Crear / editar Experiencia</span></div>
                             <p className="text-sm text-gray-500">Studio de Experiencias: rutas de lectura, conversación y producción.</p>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setUploadMode('banner')}
+                            aria-pressed={uploadMode === 'banner'}
+                            className={`flex-1 p-4 rounded-lg border-2 text-left transition-all ${uploadMode === 'banner' ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
+                        >
+                            <div className="flex items-center mb-2"><FileImage className="mr-2 text-indigo-500" /> <span className="font-bold">Banner de bienvenida</span></div>
+                            <p className="text-sm text-gray-500">Imágenes del carrusel de la página de bienvenida.</p>
                         </button>
                     </div>
                 </div>
@@ -2872,7 +2882,7 @@ const SubirContenido: React.FC = () => {
 
                 {/* 4. Materiales del Ecosistema (Hijos) */}
                 {
-                    mainContent.tipo !== 'memoria_club' && uploadMode !== 'experiencia' && (
+                    mainContent.tipo !== 'memoria_club' && uploadMode !== 'experiencia' && uploadMode !== 'banner' && (
                         <div className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-xl border border-dashed border-gray-300 dark:border-gray-700">
                             <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200 flex items-center">
@@ -2992,7 +3002,7 @@ const SubirContenido: React.FC = () => {
                     )
                 }
 
-                {uploadMode !== 'experiencia' && (
+                {uploadMode !== 'experiencia' && uploadMode !== 'banner' && (
                 <div className="pt-4">
                     {/* Inline error — shown instead of alert() so the form stays accessible for retry */}
                     {uploadError && (
@@ -3058,6 +3068,13 @@ const SubirContenido: React.FC = () => {
             {studioOpened && (
                 <div className={uploadMode === 'experiencia' ? 'mt-8' : 'hidden'}>
                     <ExperienceStudio onCreateContent={() => setUploadMode('new')} />
+                </div>
+            )}
+
+            {/* CHP-LANDING-BANNER-02 — fuera del <form> por la misma razón que el Studio. */}
+            {uploadMode === 'banner' && (
+                <div className="mt-8">
+                    <LandingBannerManager />
                 </div>
             )}
 

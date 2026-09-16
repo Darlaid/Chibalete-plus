@@ -1872,17 +1872,18 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-@case("D01", "inventario: 4 SQLite + 21 JSON declarados; 24 stores respaldados")
+@case("D01", "inventario: 4 SQLite + 22 JSON declarados; 24 stores respaldados")
 def test_d_inventario():
     from chibalete_backup import stores as S
     json_paths = [s.logical_path for s in S.JSON_STORES]
     sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
-    # 21 = los 20 historicos + data/mook_db.json
-    # (CHP-BACKUP-MOOK-STORE-COVERAGE-01). El manifiesto sigue trayendo 24
-    # stores porque mook_db.json es opcional y los fixtures no lo crean: se
-    # anota en `stores_absent`, no en `stores`.
-    assert len(json_paths) == 21, f"se esperaban 21 JSON declarados, hay {len(json_paths)}"
-    assert len(set(json_paths)) == 21, "hay logical_path duplicados"
+    # 22 = los 20 historicos + data/mook_db.json
+    # (CHP-BACKUP-MOOK-STORE-COVERAGE-01) + data/landing_banner.json
+    # (CHP-LANDING-BANNER-02). El manifiesto sigue trayendo 24 stores porque
+    # ambos son opcionales y los fixtures no los crean: se anotan en
+    # `stores_absent`, no en `stores`.
+    assert len(json_paths) == 22, f"se esperaban 22 JSON declarados, hay {len(json_paths)}"
+    assert len(set(json_paths)) == 22, "hay logical_path duplicados"
     required_sqlite = [s for s in S.SQLITE_STORES if s.required]
     assert len(required_sqlite) == 4, required_sqlite
     for lp in NUEVOS_STORES:
@@ -2063,10 +2064,11 @@ def test_d_duplicate_basename():
             assert "mismo nombre de archivo" in str(exc) or "pisarian" in str(exc), str(exc)
     finally:
         preflight.JSON_STORES = original
-    # El inventario real esta sano: 21 basenames unicos (20 historicos +
-    # mook_db.json, CHP-BACKUP-MOOK-STORE-COVERAGE-01).
+    # El inventario real esta sano: 22 basenames unicos (20 historicos +
+    # mook_db.json, CHP-BACKUP-MOOK-STORE-COVERAGE-01 + landing_banner.json,
+    # CHP-LANDING-BANNER-02).
     nombres = [os.path.basename(s.logical_path) for s in S.JSON_STORES]
-    assert len(set(nombres)) == len(nombres) == 21, nombres
+    assert len(set(nombres)) == len(nombres) == 22, nombres
 
 
 @case("D10", "privacidad: sin contenido, correos ni conteos individualizables")
