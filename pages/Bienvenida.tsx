@@ -1,6 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { User, BookUser, ShieldCheck } from 'lucide-react';
+import LandingCarousel from '../components/LandingCarousel';
 
 const Bienvenida: React.FC = () => {
     const navigate = useNavigate();
@@ -23,7 +24,8 @@ const Bienvenida: React.FC = () => {
     );
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-[#8ecae4] text-slate-800 p-4 text-center">
+        <div className="flex flex-col lg:flex-row min-h-screen bg-[#8ecae4] text-slate-800">
+            <div className="lg:w-[38%] flex flex-col items-center justify-center p-6 md:p-8 text-center">
             <img
                 src="/chibalete_logo.png"
                 alt="Logo Chibalete"
@@ -50,20 +52,32 @@ const Bienvenida: React.FC = () => {
 
             <div className="mt-12 text-sm text-slate-700 space-y-3">
                 <p>
-                    ¿No tienes cuenta? Contacta a tu institución educativa.
-                </p>
-                <p>
-                    Si quieres inscribirte a Chibalete+, escríbenos a:<br />
+                    ¿No tienes cuenta? consulta nuestros planes en:<br />
                     <a
-                        href="mailto:contacto@chibaleteeditores.com"
-                        className="font-bold underline hover:text-slate-900 transition-colors"
+                        href="https://chibaleteeditores.com/tienda/suscripciones/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-bold underline break-all hover:text-slate-900 transition-colors"
                     >
-                        contacto@chibaleteeditores.com
+                        https://chibaleteeditores.com/tienda/suscripciones/
                     </a>
                 </p>
                 <p>
-                    Descubre más en <a href="https://tiendachibalete.com/" target="_blank" rel="noopener noreferrer" className="font-bold underline hover:text-slate-900 transition-colors">https://tiendachibalete.com/</a>
+                    Descubre más en<br />
+                    <a
+                        href="https://chibaleteeditores.com/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-bold underline break-all hover:text-slate-900 transition-colors"
+                    >
+                        https://chibaleteeditores.com/
+                    </a>
                 </p>
+            </div>
+            </div>
+
+            <div className="lg:w-[62%] flex p-4 pt-0 md:p-8 md:pt-0 lg:pt-8">
+                <LandingCarousel />
             </div>
         </div>
     );
