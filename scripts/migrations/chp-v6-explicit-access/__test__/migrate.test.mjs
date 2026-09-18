@@ -145,23 +145,135 @@ const cls = computePlan(classificationState(), { now: Date.UTC(2026, 8, 15) });
     ok('dos instituciones posibles ⇒ STOP_AMBIGUOUS_ORGANIZATION',
         reasonOf('g-ambiguous') === 'STOP_AMBIGUOUS_ORGANIZATION'
         && p.conflicts.some(c => c.kind === 'STOP_AMBIGUOUS_ORGANIZATION' && c.groupId === 'g-ambiguous'));
-    ok('institución inválida SIN evidencia no se infiere',
-        reasonOf('g-badorg-noev') === 'INVALID_ORGANIZATION_REFERENCE_NO_EVIDENCE'
-        && !cls.operations.some(o => o.recordId === 'g-badorg-noev' && o.field === 'organizationId'));
-    ok('grupo vacío queda sin resolver', reasonOf('g-empty') === 'EMPTY_GROUP_NO_EVIDENCE');
+    // B3: un grupo cuya única referencia apunta a una cuenta inexistente no
+    // tiene membresías vivas ⇒ es inerte y NO se le infiere organización.
+    ok('institución inválida SIN evidencia y sin principals vivos ⇒ inerte',
+        reasonOf('g-badorg-noev') === undefined
+        && p.orphanGroups.inertEmptyLegacy.includes('g-badorg-noev')
+        && !cls.operations.some(o => o.recordId === 'g-badorg-noev'));
+    ok('grupo vacío ⇒ inerte, sin escrituras',
+        p.orphanGroups.inertEmptyLegacy.includes('g-empty')
+        && !cls.operations.some(o => o.recordId === 'g-empty'));
     ok('no existe política canónica de archivo ⇒ no se propone archivar nada',
         GROUP_ARCHIVE_POLICY.available === false
         && p.groups.emptyProposedForArchive === 0
         && p.orphanGroups.archivableByExistingPolicy.length === 0);
-    ok('los huérfanos no resolubles caen en decisión humana',
-        p.orphanGroups.humanDecisionRequired.includes('g-empty')
-        && p.orphanGroups.humanDecisionRequired.includes('g-badorg-noev')
-        && p.orphanGroups.humanDecisionRequired.includes('g-ambiguous'));
+    ok('el huérfano ambiguo con principals VIVOS sigue en decisión humana',
+        p.orphanGroups.humanDecisionRequired.includes('g-ambiguous')
+        && !p.orphanGroups.inertEmptyLegacy.includes('g-ambiguous'));
     ok('los resolubles se listan aparte',
         p.orphanGroups.deterministicallyResolvable.includes('g-infer')
         && p.orphanGroups.deterministicallyResolvable.includes('g-badorg'));
     ok('el plan no imprime datos personales',
         !JSON.stringify(p).includes('@example.invalid') && !JSON.stringify(p).includes('Lector u-'));
+}
+
+// ── §2bis Estado operativo del grupo (B3) ───────────────────────────────────
+// La regla es GENERAL: depende de señales del modelo (principals vivos, regla
+// activa, mediador vivo, catálogo explícito), nunca de la identidad del grupo.
+
+section('§2bis — GROUP_OPERATIONAL_STATUS');
+{
+    const disabled = (id, org) => ({ ...lector(id, org, 'Colegio Alfa'), accountStatus: 'disabled' });
+    const base = (groups, users, accessRules = []) => computePlan({
+        groups, users, content: CONTENT(), schools: SCHOOLS(), schoolConfigs: [], accessRules,
+    }, { now: Date.UTC(2026, 8, 15) });
+    const writesFor = (r, gid) => r.operations.filter(o =>
+        o.recordId === gid || (o.store === 'access' && o.value?.scopeId === gid)).length;
+
+    // A — cuentas activas ⇒ operativo, plan intacto.
+    {
+        const r = base([{ id: 'g-live', type: 'course', organizationId: ORG_A, memberIds: ['u-a1'], studentIds: ['u-a1'] }], USERS());
+        ok('A · grupo con cuentas activas sigue operativo',
+            r.plan.groups.inertEmptyLegacy === 0 && r.plan.groups.operational === 1);
+        ok('A · y conserva su regla y su catálogo',
+            r.operations.some(o => o.store === 'access' && o.recordId === ruleIdForGroup('g-live'))
+            && r.operations.some(o => o.recordId === 'g-live' && o.field === 'availableContentIds'));
+    }
+    // B — referencias a principals inexistentes ⇒ inerte, 0 writes.
+    {
+        const r = base([{ id: 'g-dead', type: 'course', memberIds: ['u-noexiste'], studentIds: ['u-noexiste'] }], USERS());
+        ok('B · referencias muertas ⇒ INERT_EMPTY_LEGACY_GROUP',
+            r.plan.orphanGroups.inertEmptyLegacy.includes('g-dead'));
+        ok('B · y cero escrituras para ese grupo', writesFor(r, 'g-dead') === 0 && r.plan.writesRequired === 0);
+    }
+    // C — cohorte deshabilitada + regla expirada ⇒ inerte, 0 writes.
+    {
+        const cohort = Array.from({ length: 400 }, (_, i) => disabled(`u-lt-${i}`, ORG_A));
+        const ids = cohort.map(u => u.id);
+        const expiredRule = { id: 'rule-historica', scope: 'group', scopeId: 'g-synthetic', titleIds: ['c-open-1'], collectionIds: [], expiresAt: 1 };
+        const r = base([{ id: 'g-synthetic', type: 'course', memberIds: ids, studentIds: ids }], cohort, [expiredRule]);
+        ok('C · 400 cuentas disabled + regla expirada ⇒ INERT_EMPTY_LEGACY_GROUP',
+            r.plan.orphanGroups.inertEmptyLegacy.includes('g-synthetic'));
+        ok('C · cero reglas, cero catálogo, cero memberships, cero organización',
+            writesFor(r, 'g-synthetic') === 0 && r.plan.writesRequired === 0
+            && r.plan.rules.toCreateOrReplace === 0 && r.plan.content.catalogsToMaterialize === 0
+            && r.plan.memberships.toCreate === 0);
+        ok('C · la regla expirada se preserva intacta como evidencia',
+            r.plan.rules.untouchedPreexisting === 1
+            && !r.operations.some(o => o.recordId === 'rule-historica'));
+        ok('C · F · idempotencia: un grupo inerte sigue no-op en la segunda pasada',
+            base([{ id: 'g-synthetic', type: 'course', memberIds: ids, studentIds: ids }], cohort, [expiredRule]).plan.writesRequired === 0);
+    }
+    // D — sin membresías vivas pero con regla ACTIVA ⇒ NO se excluye.
+    {
+        const activeRule = { id: 'rule-viva', scope: 'group', scopeId: 'g-ruled', titleIds: ['c-open-1'], collectionIds: [], expiresAt: null };
+        const r = base([{ id: 'g-ruled', type: 'course', organizationId: ORG_A, memberIds: ['u-noexiste'], studentIds: ['u-noexiste'] }], USERS(), [activeRule]);
+        ok('D · regla activa impide clasificar como inerte',
+            !r.plan.orphanGroups.inertEmptyLegacy.includes('g-ruled')
+            && r.plan.groups.operational === 1);
+        ok('D · y la regla ajena viva se preserva sin duplicar',
+            r.plan.groups.alreadyExplicit === 1 && !r.operations.some(o => o.store === 'access'));
+    }
+    // E — sin membresías vivas pero con otra referencia operativa ⇒ NO se excluye.
+    {
+        const mediador = { ...lector('u-med', ORG_A, 'Colegio Alfa'), roles: ['mediador'] };
+        const r = base([{ id: 'g-med', type: 'course', organizationId: ORG_A, memberIds: [], studentIds: [], mediatorIds: ['u-med'] }], [...USERS(), mediador]);
+        ok('E · un mediador vivo mantiene el grupo operativo',
+            !r.plan.orphanGroups.inertEmptyLegacy.includes('g-med'));
+        const rc = base([{ id: 'g-cat', type: 'course', organizationId: ORG_A, memberIds: [], studentIds: [], availableContentIds: ['c-open-1'] }], USERS());
+        ok('E · un catálogo explícito declarado mantiene el grupo operativo',
+            !rc.plan.orphanGroups.inertEmptyLegacy.includes('g-cat'));
+    }
+    // §6 — INVARIANTE: añadir grupos inertes no altera el plan de los
+    // operativos. Se prueba por igualdad de planes, no por cifras fijas.
+    {
+        const operativos = () => [
+            { id: 'g-live', type: 'course', organizationId: ORG_A, memberIds: ['u-a1'], studentIds: ['u-a1'] },
+            { id: 'g-live-2', type: 'course', organizationId: ORG_B, memberIds: ['u-b1'], studentIds: ['u-b1'] },
+        ];
+        const cohort = Array.from({ length: 400 }, (_, i) => ({ ...lector(`u-lt-${i}`, ORG_A, 'Colegio Alfa'), accountStatus: 'disabled' }));
+        const ids = cohort.map(u => u.id);
+        const inertes = [
+            { id: 'g-synthetic', type: 'course', memberIds: ids, studentIds: ids },
+            { id: 'g-dead', type: 'course', memberIds: ['u-noexiste'], studentIds: ['u-noexiste'] },
+            { id: 'g-empty2', type: 'course', memberIds: [], studentIds: [] },
+        ];
+        const expired = { id: 'rule-vieja', scope: 'group', scopeId: 'g-synthetic', titleIds: ['c-open-1'], collectionIds: [], expiresAt: 1 };
+        const solo = base(operativos(), USERS(), []);
+        const mixto = base([...operativos(), ...inertes], [...USERS(), ...cohort], [expired]);
+        ok('§6 · los grupos inertes no cambian el plan de los operativos',
+            canon(mixto.operations) === canon(solo.operations));
+        ok('§6 · y el total de escrituras es exactamente el de los operativos',
+            mixto.plan.writesRequired === solo.plan.writesRequired
+            && mixto.plan.groups.inertEmptyLegacy === 3
+            && mixto.plan.groups.operational === 2);
+        ok('§6 · el catálogo se materializa sólo para los operativos',
+            mixto.plan.content.catalogsToMaterialize === solo.plan.content.catalogsToMaterialize
+            && [...mixto.materializedCatalogs.keys()].every(g => !g.startsWith('g-synthetic') && g !== 'g-dead' && g !== 'g-empty2'));
+    }
+
+    // G — sin regresión: el guard cross-tenant sigue actuando sobre operativos.
+    {
+        const r = base([{ id: 'g-xt', type: 'course', school: 'Colegio Delta', organizationId: ORG_A, memberIds: [], studentIds: [] }], USERS());
+        ok('G · el guard cross-tenant sigue rechazando con la clasificación activa',
+            r.plan.memberships.crossTenantRejected === 1
+            && r.plan.conflicts.some(c => c.kind === 'CROSS_TENANT_MEMBERSHIP_REJECTED')
+            && !r.operations.some(o => o.store === 'users'));
+        ok('G · los grupos inertes no aparecen como unresolved',
+            cls.plan.orphanGroups.inertEmptyLegacy.length > 0
+            && cls.plan.unresolved.every(u => !cls.plan.orphanGroups.inertEmptyLegacy.includes(u.groupId)));
+    }
 }
 
 // ── §3 Membresías ───────────────────────────────────────────────────────────

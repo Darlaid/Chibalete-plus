@@ -42,6 +42,17 @@
  * `IDENTITY_DUAL_WRITE` encendido el apply se BLOQUEA con el mismo guard
  * canónico que usa `groupMembershipService.writeJsonAtomic`.
  *
+ * ESTADO OPERATIVO DEL GRUPO (B3)
+ * -------------------------------
+ * El plan decide primero `GROUP_OPERATIONAL_STATUS` y sólo después produce
+ * escrituras. Un grupo sin membresías VIVAS, sin regla activa, sin mediador
+ * vivo y sin catálogo explícito es `INERT_EMPTY_LEGACY_GROUP`: su acceso
+ * efectivo legítimo es ∅, así que materializarle regla o catálogo sería
+ * CONCEDER, no preservar — justo lo que el invariante prohíbe. Una referencia
+ * persistida hacia una cuenta inexistente o deshabilitada no es una membresía
+ * viva (`isUserActive` del runtime revalida el estado en CADA request). La
+ * regla es general y no conoce cohortes, nombres ni ids.
+ *
  * GARANTÍAS
  *   - dry-run por defecto; `--apply` exige además `--manifest-out` (sin
  *     manifiesto de preimagen no hay rollback, y sin rollback no se escribe);
@@ -208,6 +219,112 @@ function orgEffectiveSetFor(user, schoolConfigs, content, now) {
     return union.length > 0 ? union : null;
 }
 
+// ── Estado operativo del grupo ──────────────────────────────────────────────
+
+/** Estados posibles de `GROUP_OPERATIONAL_STATUS`. */
+export const GROUP_OPERATIONAL = 'OPERATIONAL';
+export const GROUP_INERT_EMPTY_LEGACY = 'INERT_EMPTY_LEGACY_GROUP';
+
+/**
+ * Réplica fiel de `isUserActive` (server/server.js §USER HELPERS). No se puede
+ * importar: es un `const` del módulo que arranca el Express app, igual que
+ * `resolveCollectionContentIds`. Una cuenta sin `accountStatus` es legacy y
+ * cuenta como activa — misma semántica que el runtime.
+ */
+export function isUserActiveRecord(user) {
+    const status = user?.accountStatus;
+    return !status || status === 'active';
+}
+
+/**
+ * PRINCIPAL VIVO — existe en el padrón canónico Y puede ejercer acceso hoy.
+ * Compone el contrato de `accountStatus` con el de borrado lógico que ya usa
+ * `isOperationallyEligibleLector` (utils/groupMembership.mjs). Una cuenta
+ * deshabilitada no autentica ni sostiene sesión (el runtime revalida el estado
+ * en CADA request), así que no puede conceder contenido.
+ */
+export function isLivePrincipal(user) {
+    if (!user || typeof user !== 'object') return false;
+    if (typeof user.id !== 'string' || !user.id) return false;
+    if (user.deleted === true) return false;
+    if (typeof user.deletedAt === 'string' && user.deletedAt.length > 0) return false;
+    return isUserActiveRecord(user);
+}
+
+/**
+ * Membresías VIVAS del grupo: las que el resolver del runtime reconoce hoy
+ * —canales explícitos Y fallback `colegio`, que `getGroupMembers` ya aplica—
+ * restringidas a principals vivos. Una referencia persistida hacia una cuenta
+ * inexistente o deshabilitada NO es una membresía viva.
+ */
+export function liveMembershipIds(group, users, groups) {
+    const usersById = new Map(arr(users).map(u => [u?.id, u]));
+    const candidates = new Set(getExplicitGroupMembers(group, users));
+    if (candidates.size === 0) {
+        // El fallback es autoridad vigente del resolver: un grupo que hoy
+        // resuelve miembros por `colegio` está operativo aunque no tenga aún
+        // canales explícitos.
+        const fallback = applyLegacyColegioFallback(group, users, groups);
+        if (fallback.used) for (const id of fallback.matched) candidates.add(id);
+    }
+    const live = [];
+    for (const id of candidates) {
+        if (isLivePrincipal(usersById.get(id))) live.push(id);
+    }
+    return sortedUnique(live);
+}
+
+/** Mediadores del grupo que existen y están vivos. */
+function liveMediatorIds(group, usersById) {
+    const ids = new Set(arr(group?.mediatorIds));
+    if (typeof group?.teacherId === 'string' && group.teacherId) ids.add(group.teacherId);
+    return [...ids].filter(id => isLivePrincipal(usersById.get(id)));
+}
+
+/** Catálogo explícito ya declarado en el propio grupo. */
+function hasExplicitCatalog(group) {
+    return group?.availableContentIds !== undefined
+        || (Array.isArray(group?.collectionIds) && group.collectionIds.length > 0);
+}
+
+/**
+ * GROUP_OPERATIONAL_STATUS — se decide ANTES de producir ninguna escritura.
+ *
+ * Un grupo es `INERT_EMPTY_LEGACY_GROUP` sólo si se cumplen TODAS:
+ *   1. membresías vivas = 0;
+ *   2. reglas de acceso ACTIVAS = 0 (una regla expirada es evidencia, no
+ *      autoridad: no reactiva el grupo — y tampoco se toca);
+ *   3. referencias operativas = 0 (ningún mediador vivo lo gestiona);
+ *   4. contenido explícito = 0;
+ *   5. ninguna relación activa lo usa como autoridad de acceso — implicado
+ *      por 1–4: sin miembros vivos, sin regla activa, sin mediador vivo y sin
+ *      catálogo, no hay decisión de acceso que dependa de este grupo.
+ *
+ * La regla es GENERAL: no conoce cohortes, nombres ni ids. Un grupo deja de
+ * ser inerte en cuanto recupera cualquiera de las cuatro señales.
+ */
+export function classifyGroupOperationalStatus(group, { users, groups, activeRulesByScopeId }) {
+    const usersById = new Map(arr(users).map(u => [u?.id, u]));
+    if (liveMembershipIds(group, users, groups).length > 0) return GROUP_OPERATIONAL;
+    if ((activeRulesByScopeId.get(group?.id) ?? []).length > 0) return GROUP_OPERATIONAL;
+    if (liveMediatorIds(group, usersById).length > 0) return GROUP_OPERATIONAL;
+    if (hasExplicitCatalog(group)) return GROUP_OPERATIONAL;
+    return GROUP_INERT_EMPTY_LEGACY;
+}
+
+/** Índice de reglas de scope `group` ACTIVAS (las expiradas no cuentan). */
+export function activeGroupRulesByScopeId(accessRules, now) {
+    const byScope = new Map();
+    for (const r of arr(accessRules)) {
+        if (r?.scope !== 'group' || typeof r.scopeId !== 'string') continue;
+        const expired = typeof r.expiresAt === 'number' && Number.isFinite(r.expiresAt) && now > r.expiresAt;
+        if (expired) continue;
+        if (!byScope.has(r.scopeId)) byScope.set(r.scopeId, []);
+        byScope.get(r.scopeId).push(r);
+    }
+    return byScope;
+}
+
 // ── Cálculo del plan ────────────────────────────────────────────────────────
 
 /**
@@ -254,6 +371,7 @@ export function computePlan(state, opts = {}) {
         organizationUnresolvedNoEvidence: 0,
         groupsEmptyUnresolved: 0,
         groupsEmptyProposedForArchive: 0,
+        groupsInert: 0,
         groupsInactive: 0,
         rulesToCreate: 0,
         groupsAlreadyExplicit: 0,
@@ -268,7 +386,25 @@ export function computePlan(state, opts = {}) {
         deterministicallyResolvable: [],
         archivableByExistingPolicy: [],
         humanDecisionRequired: [],
+        inertEmptyLegacy: [],
     };
+
+    // ── 0. ESTADO OPERATIVO ─────────────────────────────────────────────────
+    // Se decide ANTES que cualquier escritura. Un grupo inerte no recibe
+    // membresías, ni organización inferida, ni regla, ni catálogo: su acceso
+    // efectivo legítimo es ∅ y materializarlo sería CONCEDER, no preservar.
+    const activeRulesByScopeId = activeGroupRulesByScopeId(accessRules, now);
+    const inertGroupIds = new Set();
+    for (const group of projectedGroups) {
+        if (typeof group?.id !== 'string' || !group.id) continue;
+        const status = classifyGroupOperationalStatus(group, {
+            users: projectedUsers, groups: projectedGroups, activeRulesByScopeId,
+        });
+        if (status !== GROUP_INERT_EMPTY_LEGACY) continue;
+        inertGroupIds.add(group.id);
+        counts.groupsInert++;
+        orphanGroups.inertEmptyLegacy.push(group.id);
+    }
 
     // ── 1. MEMBRESÍAS ───────────────────────────────────────────────────────
     // Se materializan SOLO las que una fuente autoritativa existente ya
@@ -283,6 +419,7 @@ export function computePlan(state, opts = {}) {
             conflicts.push({ kind: 'GROUP_WITHOUT_ID' });
             continue;
         }
+        if (inertGroupIds.has(group.id)) continue;
         const explicit = getExplicitGroupMembers(group, projectedUsers);
         counts.membershipsPreserved += explicit.size;
         if (explicit.size > 0) continue;
@@ -343,6 +480,7 @@ export function computePlan(state, opts = {}) {
     // heurísticas.
     for (const group of projectedGroups) {
         if (typeof group?.id !== 'string' || !group.id) continue;
+        if (inertGroupIds.has(group.id)) continue;
         const declared = typeof group.organizationId === 'string' && group.organizationId ? group.organizationId : null;
         if (declared && validOrgIds.has(declared)) { counts.organizationPreserved++; continue; }
 
@@ -399,19 +537,13 @@ export function computePlan(state, opts = {}) {
     const unresolvedOrgIds = new Set(unresolved.map(u => u.groupId));
 
     // ── 3. CONTENIDO ────────────────────────────────────────────────────────
-    const rulesByScopeId = new Map();
-    for (const r of accessRules) {
-        if (r?.scope !== 'group' || typeof r.scopeId !== 'string') continue;
-        const expired = typeof r.expiresAt === 'number' && Number.isFinite(r.expiresAt) && now > r.expiresAt;
-        if (expired) continue;
-        if (!rulesByScopeId.has(r.scopeId)) rulesByScopeId.set(r.scopeId, []);
-        rulesByScopeId.get(r.scopeId).push(r);
-    }
+    const rulesByScopeId = activeRulesByScopeId;
 
     const materializedCatalogs = new Map();   // groupId → string[]
 
     for (const group of projectedGroups) {
         if (typeof group?.id !== 'string' || !group.id) continue;
+        if (inertGroupIds.has(group.id)) continue;
 
         // Un grupo fuera de vigencia no aporta nada al resolver hoy (§7 lo
         // salta con `continue`): materializarle catálogo sería CONCEDER.
@@ -532,6 +664,8 @@ export function computePlan(state, opts = {}) {
             organizationUnresolvedNoEvidence: counts.organizationUnresolvedNoEvidence,
             emptyUnresolved: counts.groupsEmptyUnresolved,
             emptyProposedForArchive: counts.groupsEmptyProposedForArchive,
+            inertEmptyLegacy: counts.groupsInert,
+            operational: counts.groupsTotal - counts.groupsInert,
             inactive: counts.groupsInactive,
             alreadyExplicit: counts.groupsAlreadyExplicit,
         },
@@ -904,7 +1038,9 @@ if (invokedDirectly) {
             console.log(`${UNIT} — modo ${out.mode} — ${out.status}`);
             console.log(`  catálogo: ${p.catalog.canonical} registros → ${p.catalog.openCatalog} abiertos`
                 + ` (−${p.catalog.droppedByPublication} sin publicar, −${p.catalog.droppedByPedagogy} pedagogía)`);
-            console.log(`  grupos: ${p.groups.total} · org preservada=${p.groups.organizationPreserved}`
+            console.log(`  grupos: ${p.groups.total} · operativos=${p.groups.operational}`
+                + ` inertes=${p.groups.inertEmptyLegacy}`);
+            console.log(`  operativos: org preservada=${p.groups.organizationPreserved}`
                 + ` inferida=${p.groups.organizationInferred} ambigua=${p.groups.organizationAmbiguous}`
                 + ` sin evidencia=${p.groups.organizationUnresolvedNoEvidence} vacíos=${p.groups.emptyUnresolved}`
                 + ` inactivos=${p.groups.inactive} ya explícitos=${p.groups.alreadyExplicit}`);
