@@ -718,13 +718,33 @@ export function assertNoCrossTenant(groups, users, schools) {
     const validOrgIds = new Set(arr(schools).map(s => s?.id).filter(Boolean));
     const usersById = new Map(arr(users).map(u => [u?.id, u]));
     const violations = [];
+    // Canales de principal de un grupo. `mediatorIds`/`teacherId` se incluyen
+    // desde CHP-V6-ACCESS-ISOLATION-MEDIATOR-01: un mediador es un principal
+    // del grupo igual que un miembro, y su regla de scope `group` le aplica
+    // por `resolveUserContentAccess`. Omitirlos dejaba una vía por la que una
+    // relación cross-organización atravesaba todas las comprobaciones.
+    const channels = (g) => [
+        ['memberIds', arr(g.memberIds)],
+        ['studentIds', arr(g.studentIds)],
+        ['mediatorIds', arr(g.mediatorIds)],
+        ['teacherId', typeof g?.teacherId === 'string' && g.teacherId ? [g.teacherId] : []],
+    ];
     for (const g of arr(groups)) {
         const groupOrg = typeof g?.organizationId === 'string' && validOrgIds.has(g.organizationId) ? g.organizationId : null;
         if (!groupOrg) continue;
-        for (const uid of new Set([...arr(g.memberIds), ...arr(g.studentIds)])) {
-            const u = usersById.get(uid);
-            const userOrg = typeof u?.organizationId === 'string' && u.organizationId ? u.organizationId : null;
-            if (userOrg && userOrg !== groupOrg) violations.push({ groupId: g.id });
+        // Dedup por PRINCIPAL, no por canal: un mismo usuario listado en
+        // `memberIds` y `studentIds` era —y sigue siendo— una sola violación.
+        const seen = new Set();
+        for (const [via, ids] of channels(g)) {
+            for (const uid of ids) {
+                if (seen.has(uid)) continue;
+                seen.add(uid);
+                const u = usersById.get(uid);
+                // Tenant no resoluble (principal inexistente o sin organización)
+                // NO es violación: misma política que ya regía para los miembros.
+                const userOrg = typeof u?.organizationId === 'string' && u.organizationId ? u.organizationId : null;
+                if (userOrg && userOrg !== groupOrg) violations.push({ groupId: g.id, via });
+            }
         }
     }
     return violations;

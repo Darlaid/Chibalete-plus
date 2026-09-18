@@ -276,6 +276,79 @@ section('§2bis — GROUP_OPERATIONAL_STATUS');
     }
 }
 
+// ── §2ter Cross-tenant sobre mediatorIds (ISOLATION-MEDIATOR-01) ────────────
+// Un mediador es un principal del grupo igual que un miembro: su regla de
+// scope `group` le aplica. El guard debe tratarlo con la misma semántica.
+
+section('§2ter — cross-tenant en mediatorIds');
+{
+    const mediador = (id, org) => ({ ...lector(id, org, 'Colegio Alfa'), roles: ['mediador'] });
+    const usersXT = () => [...USERS(), mediador('u-med-a', ORG_A), mediador('u-med-a2', ORG_A), mediador('u-med-b', ORG_B)];
+    const viasOf = (v) => [...new Set(v.map(x => x.via))].sort();
+
+    // A — mediador de la misma organización ⇒ permitido.
+    {
+        const g = [{ id: 'g-a', type: 'course', organizationId: ORG_A, mediatorIds: ['u-med-a'], memberIds: [], studentIds: [] }];
+        ok('A · mediador de la MISMA organización no es violación',
+            assertNoCrossTenant(g, usersXT(), SCHOOLS()).length === 0);
+    }
+    // B — mediador de otra organización ⇒ violación.
+    {
+        const g = [{ id: 'g-b', type: 'course', organizationId: ORG_A, mediatorIds: ['u-med-b'], memberIds: [], studentIds: [] }];
+        const v = assertNoCrossTenant(g, usersXT(), SCHOOLS());
+        ok('B · mediador de OTRA organización ⇒ CROSS_TENANT_VIOLATION',
+            v.length === 1 && v[0].groupId === 'g-b' && v[0].via === 'mediatorIds');
+    }
+    // C — dos válidos + uno cross-tenant ⇒ el grupo falla.
+    {
+        const g = [{ id: 'g-c', type: 'course', organizationId: ORG_A, mediatorIds: ['u-med-a', 'u-med-a2', 'u-med-b'], memberIds: [], studentIds: [] }];
+        const v = assertNoCrossTenant(g, usersXT(), SCHOOLS());
+        ok('C · un solo mediador ajeno basta para que el grupo falle',
+            v.length === 1 && v[0].groupId === 'g-c');
+    }
+    // D — memberIds/studentIds conservan su comportamiento exacto.
+    {
+        const gMember = [{ id: 'g-d', type: 'course', organizationId: ORG_A, memberIds: ['u-b1'], studentIds: ['u-b1'] }];
+        const v = assertNoCrossTenant(gMember, usersXT(), SCHOOLS());
+        ok('D · miembro ajeno en memberIds+studentIds sigue contando UNA vez',
+            v.length === 1 && v[0].groupId === 'g-d');
+        const gOk = [{ id: 'g-d2', type: 'course', organizationId: ORG_A, memberIds: ['u-a1'], studentIds: ['u-a1'] }];
+        ok('D · miembro de la misma organización sigue sin ser violación',
+            assertNoCrossTenant(gOk, usersXT(), SCHOOLS()).length === 0);
+        // el canal se reporta, y para miembros sigue siendo memberIds
+        ok('D · el canal reportado distingue la vía', viasOf(v).join() === 'memberIds');
+    }
+    // E — referencia muerta: tenant no resoluble ⇒ NO es violación (política previa).
+    {
+        const g = [{ id: 'g-e', type: 'course', organizationId: ORG_A, mediatorIds: ['u-inexistente'], teacherId: 'u-inexistente', memberIds: [], studentIds: [] }];
+        ok('E · mediatorId muerto no se convierte en principal vivo',
+            assertNoCrossTenant(g, usersXT(), SCHOOLS()).length === 0);
+        const gNoOrg = [{ id: 'g-e2', type: 'course', organizationId: ORG_A, mediatorIds: ['u-sin-org'], memberIds: [], studentIds: [] }];
+        ok('E · principal sin organizationId no es violación (misma política)',
+            assertNoCrossTenant(gNoOrg, [...usersXT(), { id: 'u-sin-org', roles: ['mediador'] }], SCHOOLS()).length === 0);
+    }
+    // F — accountStatus: el guard no lo evalúa, ni antes ni ahora.
+    {
+        const disabled = { ...mediador('u-med-b-off', ORG_B), accountStatus: 'disabled' };
+        const g = [{ id: 'g-f', type: 'course', organizationId: ORG_A, mediatorIds: ['u-med-b-off'], memberIds: [], studentIds: [] }];
+        ok('F · el guard mantiene su contrato: no introduce elegibilidad por accountStatus',
+            assertNoCrossTenant(g, [...usersXT(), disabled], SCHOOLS()).length === 1);
+    }
+    // teacherId colgante cross-org también se cubre.
+    {
+        const g = [{ id: 'g-t', type: 'course', organizationId: ORG_A, teacherId: 'u-med-b', mediatorIds: [], memberIds: [], studentIds: [] }];
+        const v = assertNoCrossTenant(g, usersXT(), SCHOOLS());
+        ok('teacherId de otra organización también se detecta',
+            v.length === 1 && v[0].via === 'teacherId');
+    }
+    // grupo sin organización válida: se sigue saltando entero.
+    {
+        const g = [{ id: 'g-noorg', type: 'course', mediatorIds: ['u-med-b'], memberIds: ['u-b1'], studentIds: [] }];
+        ok('grupo sin organización válida se sigue omitiendo',
+            assertNoCrossTenant(g, usersXT(), SCHOOLS()).length === 0);
+    }
+}
+
 // ── §3 Membresías ───────────────────────────────────────────────────────────
 
 section('§3 — membresías');
