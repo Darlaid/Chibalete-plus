@@ -13,6 +13,15 @@
  *   - Recovery-first: el shadow recordCanonicalEvent inserta inválidos con
  *     marker (no se pierde memoria pedagógica).
  *   - `.strip()` en todos los schemas → anti param-pollution.
+ *   - PRIVACIDAD POR SCHEMA (CHP-V6-EVENTS-PRODUCTION-01 / Continuación A1):
+ *     NINGÚN schema canónico declara un campo de TEXTO LIBRE. Todo campo
+ *     string es un identificador (min(1)) o un valor estructural acotado
+ *     (max ≤ 120: kind, feature, code, reason, stepId, name…). Los eventos
+ *     registran QUE ocurrió un hecho, nunca la prosa que lo acompaña: la
+ *     producción y las notas viven en su store operativo, no en telemetría.
+ *     Prohibido reintroducir note/notes/message/summary/description/excerpt/
+ *     text/comment/body/content/answer/prompt/response/feedback (ni variantes
+ *     truncadas o hasheadas). Guard: analyticsCanon.test.js §[1b].
  *
  * privacy_level     : 'public' | 'institutional' | 'pedagogical' | 'sensitive'
  * retention_class   : 'hot_90d' | 'warm_1y' | 'cold_archive' | 'transient_30d'
@@ -55,7 +64,7 @@ const SCHEMAS = {
     immersive_sync_drift_detected: z.object({ sessionId: z.string().min(1), runtime: RUNTIME, deltaMs: z.number().int() }).strip(),
     immersive_sync_recovered:      z.object({ sessionId: z.string().min(1), runtime: RUNTIME, kind: z.enum(['hold_release','drift_resync','autoplay_recovery','other']) }).strip(),
     immersive_visibility_stall:    z.object({ sessionId: z.string().min(1), runtime: RUNTIME, stallMs: z.number().int().nonnegative() }).strip(),
-    immersive_runtime_error:       z.object({ sessionId: z.string().min(1), runtime: RUNTIME, code: z.string().max(60), message: z.string().max(200).optional() }).strip(),
+    immersive_runtime_error:       z.object({ sessionId: z.string().min(1), runtime: RUNTIME, code: z.string().max(60) }).strip(),
 
     // AUDIO (6)
     audio_started:           z.object({ sessionId: z.string().min(1), runtime: RUNTIME }).strip(),
@@ -96,7 +105,7 @@ const SCHEMAS = {
     teacher_viewed_group:            z.object({ groupId: z.string().min(1), at: ts }).strip(),
     teacher_viewed_student:          z.object({ groupId: z.string().min(1), studentId: z.string().min(1), at: ts }).strip(),
     teacher_detected_risk:           z.object({ scopeLevel: SCOPE_LEVEL, scopeId: z.string().min(1), kind: z.string().max(60), severity: SEVERITY }).strip(),
-    teacher_created_intervention:    z.object({ scopeLevel: SCOPE_LEVEL, scopeId: z.string().min(1), kind: z.string().max(60), note: z.string().max(500).optional() }).strip(),
+    teacher_created_intervention:    z.object({ scopeLevel: SCOPE_LEVEL, scopeId: z.string().min(1), kind: z.string().max(60) }).strip(),
     teacher_reviewed_recommendation: z.object({ recommendationId: z.string().min(1), accepted: z.boolean() }).strip(),
     mediator_reviewed_cohort:        z.object({ scopeLevel: SCOPE_LEVEL, scopeId: z.string().min(1), cohortKey: z.string().max(80).optional() }).strip(),
     intervention_detected:           z.object({ scopeLevel: SCOPE_LEVEL, scopeId: z.string().min(1), kind: z.string().max(60), severity: SEVERITY }).strip(),

@@ -79,7 +79,7 @@ const SAMPLES = {
     teacher_viewed_group: { groupId:'g1', at: Date.now() },
     teacher_viewed_student: { groupId:'g1', studentId:'u1', at: Date.now() },
     teacher_detected_risk: { scopeLevel:'group', scopeId:'g1', kind:'abandonment', severity:'warn' },
-    teacher_created_intervention: { scopeLevel:'user', scopeId:'u1', kind:'call_home', note:'sin lecturas 14d' },
+    teacher_created_intervention: { scopeLevel:'user', scopeId:'u1', kind:'call_home' },
     teacher_reviewed_recommendation: { recommendationId:'r1', accepted: true },
     mediator_reviewed_cohort: { scopeLevel:'school', scopeId:'s1', cohortKey:'1A_2026' },
     intervention_detected: { scopeLevel:'group', scopeId:'g1', kind:'abandonment_risk', severity:'warn' },
@@ -144,6 +144,77 @@ const stripped = validateEvent('reading_paused',
     { contentId:'c1', sessionId:'s1', injected:'evil', __proto__:null });
 ok('payload con extras: .strip() los descarta sin fallar',
    stripped.ok === true && !('injected' in stripped.payload));
+
+console.log('\n[1b] CHP-V6-EVENTS-PRODUCTION-01 A1 — privacidad por schema: CERO texto libre');
+{
+    // Invariante: el registry canónico registra QUE ocurrió un hecho, nunca la
+    // prosa que lo acompaña. La garantía es el SCHEMA (.strip()), no la
+    // disciplina del emisor — un productor nuevo o un cliente HTTP malicioso
+    // no pueden filtrar texto libre a events.db.
+
+    // A. teacher_created_intervention: `note` ya no existe en el schema.
+    const SECRETO = 'texto sensible: el estudiante contó que en casa ...';
+    const intervencion = validateEvent('teacher_created_intervention', {
+        scopeLevel: 'user', scopeId: 'u1', kind: 'call_home', note: SECRETO,
+    });
+    ok('A. teacher_created_intervention con note: valida (no rompe el productor)',
+       intervencion.ok === true);
+    ok('A. teacher_created_intervention: `note` NO sobrevive a la persistencia',
+       intervencion.ok === true && !('note' in intervencion.payload));
+    ok('A. el texto sensible no aparece en ninguna parte del payload persistible',
+       !JSON.stringify(intervencion.payload ?? {}).includes('sensible'));
+
+    // B. las demás claves válidas permanecen intactas.
+    ok('B. scopeLevel/scopeId/kind se conservan tal cual',
+       intervencion.payload?.scopeLevel === 'user' && intervencion.payload?.scopeId === 'u1'
+       && intervencion.payload?.kind === 'call_home'
+       && Object.keys(intervencion.payload).sort().join() === 'kind,scopeId,scopeLevel');
+
+    // C. claves desconocidas siguen siendo stripped (contrato previo intacto).
+    const conExtras = validateEvent('teacher_created_intervention', {
+        scopeLevel: 'user', scopeId: 'u1', kind: 'call_home',
+        injected: 'evil', studentEmail: 'nadie@fixture.invalid',
+    });
+    ok('C. claves desconocidas siguen siendo stripped, no rechazadas',
+       conExtras.ok === true && !('injected' in conExtras.payload)
+       && !('studentEmail' in conExtras.payload));
+
+    // D. NINGÚN schema del registry acepta un campo de texto libre.
+    //    Prueba conductual (no introspección de zod): inyectamos en CADA evento
+    //    canónico, sobre su sample válido, todos los nombres de campo de prosa
+    //    —incluidos los sustitutos prohibidos por §4 del contrato— y exigimos
+    //    que ninguno sobreviva al parse.
+    const PROSE_KEYS = [
+        'note', 'notes', 'nota', 'notas', 'truncatedNote', 'hashedNote',
+        'message', 'summary', 'description', 'excerpt', 'text', 'comment',
+        'comments', 'body', 'content', 'answer', 'prompt', 'response',
+        'feedback', 'observacion', 'observaciones', 'transcript',
+    ];
+    const SENTINEL = 'SENTINEL_PROSA_NO_DEBE_PERSISTIR';
+    const probes = Object.fromEntries(PROSE_KEYS.map(k => [k, SENTINEL]));
+    const leaks = [];
+    for (const n of EVENT_NAMES) {
+        const r = validateEvent(n, { ...SAMPLES[n], ...probes });
+        if (!r.ok) { leaks.push(`${n}:no_valida`); continue; }
+        for (const k of PROSE_KEYS) if (k in r.payload) leaks.push(`${n}.${k}`);
+        if (JSON.stringify(r.payload).includes(SENTINEL)) leaks.push(`${n}:sentinel`);
+    }
+    ok(`D. ninguno de los ${EVENT_NAMES.length} schemas canónicos acepta un campo de texto libre`,
+       leaks.length === 0, leaks.slice(0, 10).join(' '));
+
+    // D-bis: el sink real tampoco lo persiste (schema → fila).
+    const capturadas = [];
+    setInserterForTest((row) => { capturadas.push(row); });
+    recordCanonicalEvent({
+        eventId: 'a1-priv-1', event: 'teacher_created_intervention', mode: 'aula_viva',
+        userId: 'teacher1', sessionId: 's-priv', version: 1,
+        payload: { scopeLevel: 'user', scopeId: 'u1', kind: 'call_home', note: SECRETO },
+    });
+    setInserterForTest(null);
+    ok('D-bis. la fila construida por el sink no contiene la nota libre',
+       capturadas.length === 1 && !JSON.stringify(capturadas[0]).includes('sensible')
+       && !('note' in JSON.parse(capturadas[0].payload_json ?? JSON.stringify(capturadas[0].payload ?? {}))));
+}
 
 console.log('\n[2] analyticsShadow — recovery-first row build (jamás pierde evento)');
 {
