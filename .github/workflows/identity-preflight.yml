@@ -119,6 +119,13 @@ jobs:
       - name: Sesión — flujos de navegador cookie-only (server real)
         run: npm run test:session-browser
 
+      # CHP-SEC-PASSWORD-RESET-02: contrato de seguridad del reset público.
+      # Bloquea la regresión que exponía el token de recuperación en la respuesta
+      # HTTP y revelaba si una cuenta existía. Store-hermético (fixtures en temp),
+      # igual que el paso anterior.
+      - name: Seguridad — el reset público no expone token ni existencia
+        run: npm run test:auth-reset
+
       - name: Contrato de grupos y memberships (creación + edición)
         run: npm run test:memberships
 

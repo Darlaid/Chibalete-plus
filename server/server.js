@@ -4167,45 +4167,28 @@ const handleResetRequest = async (req, res) => {
         return res.status(400).json({ error: 'email es obligatorio' });
     }
 
-    const normalizedEmail = normalizeEmail(email);
-    // Pre-generate outside lock (pure sync computation)
-    const resetToken     = crypto.randomBytes(32).toString('hex');
-    const resetExpiresAt = Date.now() + 3600000; // +1 hora
+    // CHP-SEC-PASSWORD-RESET-01 — contrato seguro del endpoint público.
+    //
+    // Este endpoint NO genera ningún token de recuperación. La aplicación no tiene
+    // canal de correo saliente, así que un token creado aquí no podría entregarse a
+    // su destinatario y no debe devolverse en la respuesta: sería un secreto sin
+    // destino que solo amplía la superficie de ataque. Antes se devolvía en el
+    // cuerpo HTTP, lo que permitía tomar cualquier cuenta activa conociendo su correo.
+    //
+    // La respuesta es IDÉNTICA exista o no la cuenta, sea admin o lector (anti-oracle):
+    // mismo status, mismo cuerpo, sin token, sin identificadores, sin revelar existencia.
+    // Tampoco se consulta el almacén de usuarios, de modo que no hay diferencia
+    // observable de tiempo entre un correo registrado y uno que no lo está.
+    //
+    // La recuperación la gestiona un administrador mediante el flujo de invitación
+    // (POST /api/invite-user -> POST /api/accept-invite), que NO se ve afectado.
+    //
+    // Sin PII en el registro: no se escribe el correo recibido.
+    log('Password reset solicitado: no se emite token (sin canal de entrega seguro)', 'ACCESS');
 
-    // Lock: re-read -> find active user -> update token -> write (atomic across containers)
-    let targetUserId = null;
-    const conflict = await mutateUsers((users) => {
-        const index = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
-        if (index === -1 || !isUserActive(users[index])) return { conflict: 'no_active_user' };
-        targetUserId = users[index].id;
-        users[index] = { ...users[index], resetToken, resetExpiresAt };
-        writeJSON(USERS_DB, users);
-        return null;
-    });
-
-    if (!conflict) {
-        log(`Password reset requested: ${normalizedEmail} expires=${new Date(resetExpiresAt).toISOString()}`, 'ACCESS');
-        writeAuditLog({
-            action:       'reset_password_request',
-            targetUserId,
-            actor:        null, // auto-servicio
-            details:      { email: normalizedEmail, expiresAt: new Date(resetExpiresAt).toISOString() },
-        });
-        // En producción este token se enviaría por email, nunca en la respuesta.
-        // Para entorno actual sin servicio de email, se devuelve para pruebas.
-        return res.status(200).json({
-            success:  true,
-            message:  'Si el email está registrado, recibirás instrucciones.',
-            resetToken,
-            resetExpiresAt,
-            resetUrl: `/#/reset-password?token=${resetToken}`,
-        });
-    }
-
-    // Email no existe, invited o disabled — respuesta idéntica (anti-oracle).
-    return res.status(200).json({
+    return res.status(202).json({
         success: true,
-        message: 'Si el email está registrado, recibirás instrucciones.',
+        message: 'Si existe una cuenta asociada, la recuperación se gestionará de forma segura con el equipo de Chibalete+.',
     });
 };
 app.post('/api/request-password-reset', resetRequestLimiter, validate({ body: resetRequestSchema }), handleResetRequest);

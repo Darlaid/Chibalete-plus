@@ -54,10 +54,10 @@ const RequestResetForm: React.FC = () => {
                 <div className="w-full max-w-md p-8 bg-white dark:bg-gray-800 rounded-2xl shadow-lg text-center space-y-4">
                     <CheckCircle className="w-12 h-12 text-green-500 mx-auto" />
                     <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-                        Revisa tu correo
+                        Solicitud recibida
                     </h1>
                     <p className="text-gray-600 dark:text-gray-400 text-sm">
-                        Si el correo está registrado, recibirás un enlace para restablecer tu contraseña.
+                        Si existe una cuenta asociada, la recuperación la gestiona el equipo de Chibalete+. Escribe a contacto@chibaleteeditores.com si necesitas ayuda.
                     </p>
                     <Link
                         to="/auth"
@@ -88,7 +88,7 @@ const RequestResetForm: React.FC = () => {
                         ¿Olvidaste tu contraseña?
                     </h1>
                     <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-                        Ingresa tu correo y te enviaremos instrucciones para restablecerla.
+                        Ingresa tu correo y el equipo de Chibalete+ gestionará la recuperación.
                     </p>
                 </div>
 
