@@ -13,6 +13,10 @@
  */
 import { SIGNAL_IDS } from '../analytics/signals.js';
 import { flags } from '../lib/flags.js';
+// CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — las filas legacy de events.db guardan el
+// nombre `<modo>.<acción>`. El normalizador traduce SOLO ese nombre lógico a su
+// equivalente canónico (tabla explícita, sin heurísticas); la fila no se toca.
+import { normalizeEventForSignals } from '../analytics/legacyEventNormalizer.mjs';
 
 const DAY = 86_400_000;
 
@@ -36,12 +40,15 @@ export function computeUserSignals(events, ctx) {
     const w = ctx.windowDays * DAY;
     const since = ctx.nowTs - w;
     const inWin = events.filter(e => e.server_ts >= since);
-    const byEvent = (name) => inWin.filter(e => e.event === name);
+    // Nombre lógico de la fila: canónico → identidad; legacy con equivalencia
+    // demostrada → su canónico; resto → sin cambio (y por tanto no consumido).
+    const nameOf  = (e) => normalizeEventForSignals(e.event);
+    const byEvent = (name) => inWin.filter(e => nameOf(e) === name);
 
     // ── 1. continuidad_semanal — distinct(days_with_session)/7 sobre 28d ─────
     {
         const days = new Set(inWin
-            .filter(e => e.event === 'session_started' || e.event === 'reading_started')
+            .filter(e => nameOf(e) === 'session_started' || nameOf(e) === 'reading_started')
             .map(e => new Date(e.server_ts).toISOString().slice(0, 10)));
         const recentDays = Math.min(28, ctx.windowDays);
         const value = Math.min(1, days.size / 7);
@@ -53,15 +60,30 @@ export function computeUserSignals(events, ctx) {
     {
         let ms = 0;
         for (const e of inWin) {
-            if (e.event === 'session_heartbeat' || e.event === 'session_ended') {
+            const n = nameOf(e);
+            if (n === 'session_heartbeat' || n === 'session_ended') {
+                let fromPayload = 0;
                 try {
                     const p = JSON.parse(e.payload_json || '{}');
-                    if (typeof p.elapsedMs === 'number' && p.elapsedMs > 0) ms += p.elapsedMs;
-                    else if (typeof p.totalMs === 'number' && p.totalMs > 0) ms += p.totalMs;
+                    if (typeof p.elapsedMs === 'number' && p.elapsedMs > 0) fromPayload = p.elapsedMs;
+                    else if (typeof p.totalMs === 'number' && p.totalMs > 0) fromPayload = p.totalMs;
                 } catch {}
-            } else if (typeof e.elapsed_ms === 'number' && e.elapsed_ms > 0) {
-                ms += e.elapsed_ms;
+                // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — si el payload no trae el
+                // tiempo, usar la columna. El dual-write legacy mueve
+                // `sessionDuration`/`elapsedMs` del payload a `elapsed_ms`, así
+                // que sin este fallback el tiempo de TODA la historia legacy se
+                // perdería al normalizar el nombre. El payload sigue teniendo
+                // prioridad: un evento canónico no cambia de valor ni suma dos veces.
+                ms += fromPayload > 0 ? fromPayload
+                    : (typeof e.elapsed_ms === 'number' && e.elapsed_ms > 0 ? e.elapsed_ms : 0);
             }
+            // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — aquí había un `else if` que
+            // sumaba `elapsed_ms` de CUALQUIER otro evento de la ventana. Sobre
+            // el corpus legacy eso contaba como tiempo de lectura la telemetría
+            // del reproductor (chunk_audio_*, sentence_time, pb_*): medido en el
+            // sandbox histórico daba ~3.499 horas de lectura para 8 lectores en
+            // una ventana de 672 horas, un imposible físico. La señal vuelve a
+            // ser lo que su propio contrato dice: tiempo de heartbeats/ended.
         }
         out.tiempo_efectivo_lectura = { value: Math.round(ms / 60_000),  // minutos
             confidence: ms > 0 ? 'high' : 'low',

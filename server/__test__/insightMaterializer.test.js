@@ -8,6 +8,10 @@
  *
  *   node server/__test__/insightMaterializer.test.js
  */
+// PRIMERO: fija NODE_ENV=test antes de que config.js aplique la regla canónica.
+// El materializer resuelve grupos/padrón vía server/config.js desde
+// CHP-V6-INSIGHTS-PRODUCTION-01 / A1 (cohorte lectora por grupo).
+import './helpers/testMode.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +22,12 @@ import Database from 'better-sqlite3';
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mat_'));
 process.env.EVENTS_SQLITE_PATH   = path.join(tmpDir, 'events.db');
 process.env.INSIGHTS_SQLITE_PATH = path.join(tmpDir, 'insights.db');
+// A1: el materializer resuelve la cohorte lectora por grupo. Sin fixture propio
+// leería el `data/groups_db.json` del repo — prohibido en un test aislado.
+process.env.GROUPS_DB = path.join(tmpDir, 'groups_db.json');
+process.env.USERS_DB  = path.join(tmpDir, 'usuarios_colegios_oro.json');
+fs.writeFileSync(process.env.GROUPS_DB, '[]');
+fs.writeFileSync(process.env.USERS_DB, '[]');
 
 const eventsService = await import('../eventsService.js');
 const ext            = await import('../db/insightsDbExt.mjs');
@@ -255,7 +265,10 @@ try {
         const rdb = ext.getInsightsExtDb();
         const inst = rdb.prepare("SELECT COUNT(*) AS n FROM cohort_rollups WHERE scope_type IN ('group','school','org')").get().n;
         const scopes = rdb.prepare("SELECT COUNT(*) AS n FROM signal_snapshots WHERE scope_type <> 'user'").get().n;
-        ok('14) cero rollups por institución/grupo y cero snapshots fuera del scope user', inst === 0 && scopes === 0);
+        // A1: los rollups por grupo salen de la cohorte lectora; con el fixture
+        // de grupos vacío no hay ninguno. La invariante de scope de las
+        // snapshots (solo 'user') se mantiene intacta.
+        ok('14) sin grupos en el fixture: cero rollups group/school/org y cero snapshots fuera del scope user', inst === 0 && scopes === 0);
     }
 
     console.log('\n[I] CHP-INSIGHTS-SIGNAL-SNAPSHOT-RETENTION-01F — retención 90 d de signal_snapshots (temporal)');

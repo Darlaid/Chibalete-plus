@@ -16,6 +16,9 @@
  *
  *   node server/__test__/scalability.test.js
  */
+// PRIMERO: fija NODE_ENV=test antes de que config.js aplique la regla canónica
+// (el materializer lo importa desde CHP-V6-INSIGHTS-PRODUCTION-01 / A1).
+import './helpers/testMode.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +28,11 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sca_'));
 process.env.EVENTS_SQLITE_PATH   = path.join(tmpDir, 'events.db');
 process.env.INSIGHTS_SQLITE_PATH = path.join(tmpDir, 'insights.db');
 process.env.PRAGMA_TUNING_ENABLED = '1';
+// Cohorte lectora del materializer: fixtures temporales, nunca los del repo.
+process.env.GROUPS_DB = path.join(tmpDir, 'groups_db.json');
+process.env.USERS_DB  = path.join(tmpDir, 'usuarios_colegios_oro.json');
+fs.writeFileSync(process.env.GROUPS_DB, '[]');
+fs.writeFileSync(process.env.USERS_DB, '[]');
 
 const eventsService = await import('../eventsService.js');
 const insExt   = await import('../db/insightsDbExt.mjs');

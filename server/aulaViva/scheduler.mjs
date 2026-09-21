@@ -10,6 +10,16 @@
  * GATING global: `AULA_VIVA_SCHEDULER_ENABLED=1`. Sin esto, `start()` no hace
  * nada. Cada engine sigue gated por su propio flag (delegación).
  *
+ * GATING del materializer (CHP-V6-INSIGHTS-PRODUCTION-01 / A1):
+ * `INSIGHTS_MATERIALIZER_ENABLED=1`. Los otros nueve engines se auto-gatean
+ * devolviendo `skipped` desde su propio `runOnce`; `insightMaterializer.runOnce`
+ * no lo hace (se usa también desde tests y replays), así que el gate vive aquí:
+ * su loop NO se registra si el flag no está en '1'.
+ *
+ *   scheduler=0                    → nada corre.
+ *   scheduler=1, materializer=0    → scheduler vivo, materializer NO registrado.
+ *   scheduler=1, materializer=1    → loop del materializer registrado.
+ *
  * Cadencias por defecto (configurable via env):
  *   MATERIALIZER_INTERVAL_MS   = 60_000        (60s)
  *   INTERVENTION_INTERVAL_MS   = 300_000       (5min)
@@ -45,6 +55,14 @@ const DEFAULTS = {
 };
 
 const MAX_CONSECUTIVE_ERRORS = 5;  // degraded mode trigger
+
+/**
+ * CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — gate REAL del materializer.
+ * Lectura per-call (no constante de módulo) para que los tests puedan alternar
+ * el entorno sin reimportar, igual que hacen `archiveRotation.ENABLED` y los
+ * demás engines.
+ */
+export const MATERIALIZER_ENABLED = () => process.env.INSIGHTS_MATERIALIZER_ENABLED === '1';
 
 function recordRun(key, ok, durationMs, error = null) {
     _status.last_runs[key] = { ts: Date.now(), ok, durationMs, error };
@@ -98,8 +116,16 @@ export async function start(opts = {}) {
     const patterns     = await import('../services/predictivePatterns.mjs');
 
     const loops = [
-        { key: 'materializer',     lock: 'materializer',     interval: intervals.materializer,
-          fn: () => materializer.runOnce({ log }) },
+        // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — hasta ahora INSIGHTS_MATERIALIZER_ENABLED
+        // solo pintaba `getStatus().enabled`: no gateaba nada, y el materializer era el
+        // ÚNICO de los diez engines sin interruptor propio (sus nueve hermanos ya
+        // devuelven `skipped` por su flag). Encender el scheduler lo encendía a él.
+        // Ahora su loop se registra solo con el flag en '1'; el resto del scheduler
+        // (leader-election, intervalos, ledger) queda igual.
+        ...(MATERIALIZER_ENABLED() ? [
+            { key: 'materializer',     lock: 'materializer',     interval: intervals.materializer,
+              fn: () => materializer.runOnce({ log }) },
+        ] : []),
         { key: 'intervention',     lock: 'intervention',     interval: intervals.intervention,
           fn: () => intervention.runOnce({ log }) },
         { key: 'rollups',          lock: 'rollup',           interval: intervals.rollups,
@@ -151,6 +177,7 @@ export function getStatus() {
     return {
         running: _running,
         enabled: process.env.AULA_VIVA_SCHEDULER_ENABLED === '1',
+        materializer_enabled: MATERIALIZER_ENABLED(),
         started_at: _status.started_at,
         timers: _timers.length,
         last_runs: { ..._status.last_runs },

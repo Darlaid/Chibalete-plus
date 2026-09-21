@@ -5,16 +5,23 @@
  * insights.db (read model). Idempotente, replayable, GATED, recovery-first.
  *
  * GATING:
- *   INSIGHTS_MATERIALIZER_ENABLED=1 para activar runOnce(). Default OFF =
- *   cero impacto en prod. rebuildInsights() siempre disponible (manual).
+ *   INSIGHTS_MATERIALIZER_ENABLED=1 para activar el loop de runOnce() en el
+ *   scheduler (`aulaViva/scheduler.mjs`, gate real desde
+ *   CHP-V6-INSIGHTS-PRODUCTION-01 / A1; antes el flag no controlaba nada).
+ *   Default OFF = cero impacto en prod. `runOnce()` en sí NO consulta el flag:
+ *   sigue siendo invocable desde tests y replays aislados. rebuildInsights()
+ *   siempre disponible (manual).
  *
  * NUNCA bloquea producción: corre off-hours/cron/admin; los errores se
  * registran (last_error en materializer_state + métrica) pero NO se
  * propagan. Recovery-first: un evento corrupto se skipea con counter, no
  * tumba el batch.
  *
- * Tablas escritas: signal_snapshots, user_reading_profiles, cohort_rollups,
+ * Tablas escritas: signal_snapshots, user_reading_profiles, cohort_rollups
+ * (scope 'all'/'global' + una fila por grupo con la cohorte lectora canónica),
  * materializer_state (watermark). Notificaciones vía insightsStore (P1 API).
+ * events.db se abre `readonly` — el materializer nunca escribe fuera de
+ * insights.db.
  *
  * RETENCIÓN (CHP-INSIGHTS-SIGNAL-SNAPSHOT-RETENTION-01F): pruneSignalSnapshots()
  * expira signal_snapshots con updated_at + 90 días <= now. DESACTIVADA por
@@ -91,6 +98,13 @@ import * as insightsStore from '../insightsStore.js';
 // preservando los contratos PASO 2 / PASO 3.
 import * as rollupsExt from '../db/rollupsDbExt.mjs';
 import { snapshotHistoryTotal } from '../observability/metrics.js';
+// CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — cohorte LECTORA por grupo. La autoridad
+// es `utils/groupMembership.mjs` (la misma que ya usan endpoints y diagnosis) y
+// el padrón canónico `USERS_DB`, nunca el padrón legacy de `data/`
+// (`USERS_DB_LEGACY_NON_CANONICAL`, prohibido en runtime por CHP-ID-CANON-01A).
+import fsNode from 'node:fs';
+import { GROUPS_DB, USERS_DB } from '../config.js';
+import { resolveGroupReaderCohort } from '../analytics/readerCohort.mjs';
 
 const MATERIALIZER_NAME = 'aula_viva_pedagogical_v1';
 const DEFAULT_BATCH = 5000;
@@ -100,6 +114,62 @@ const PERIOD_DAYS = 28;
 const SIGNAL_SNAPSHOT_RETENTION_DAYS = 90;
 
 function now() { return Date.now(); }
+
+/**
+ * Lee grupos + padrón canónico para resolver cohortes lectoras. Defensivo: si
+ * algo falla devuelve listas vacías y el materializer omite los rollups por
+ * grupo sin afectar perfiles, señales ni watermark.
+ * @returns {{groups: object[], users: object[]}}
+ */
+function readCohortSources() {
+    const parse = (p) => {
+        try {
+            const raw = fsNode.readFileSync(p, 'utf8');
+            const j = JSON.parse(raw);
+            return Array.isArray(j) ? j : (Array.isArray(j?.users) ? j.users : []);
+        } catch { return []; }
+    };
+    return { groups: parse(GROUPS_DB), users: parse(USERS_DB) };
+}
+
+/**
+ * Rollups de cohorte por GRUPO. Escribe dos métricas por grupo y periodo:
+ *   - `reader_cohort`  denominador: lectores del grupo (mediadores excluidos).
+ *   - `active_users`   numerador: de esos lectores, cuántos tienen perfil con
+ *                      `last_active_at` dentro de la ventana del periodo.
+ *
+ * Se ejecuta DENTRO de la transacción del materializer (mismo handle) y es
+ * idempotente: `upsertCohort` tiene PK (scope_type, scope_id, period, metric_key).
+ *
+ * @returns {number} filas upserted
+ */
+function upsertGroupCohortRollups(stmts, sources, { periodKey, nowTs, maxId, windowStartTs }) {
+    let upserted = 0;
+    for (const group of sources.groups) {
+        if (!group || typeof group.id !== 'string' || !group.id) continue;
+        const { readerIds } = resolveGroupReaderCohort(group, sources.users, {
+            allGroups: sources.groups,
+        });
+        if (readerIds.length === 0) continue;
+        let active = 0;
+        for (const uid of readerIds) {
+            const p = stmts.getProfile.get(String(uid));
+            if (p && typeof p.last_active_at === 'number' && p.last_active_at >= windowStartTs) active++;
+        }
+        for (const [metric_key, metric_value] of [
+            ['reader_cohort', readerIds.length],
+            ['active_users',  active],
+        ]) {
+            stmts.upsertCohort.run({
+                scope_type: 'group', scope_id: group.id, period: periodKey,
+                metric_key, metric_value,
+                trend: null, updated_at: nowTs, source_watermark: maxId,
+            });
+            upserted++;
+        }
+    }
+    return upserted;
+}
 
 /** Lee watermark actual. Si no existe, devuelve 0 (procesa todo desde inicio). */
 function getWatermark() {
@@ -176,6 +246,8 @@ export function runOnce(opts = {}) {
         }
 
         const periodKey = `${PERIOD_DAYS}d`;
+        // Fuera de la transacción: I/O de disco no debe correr con el write-lock.
+        const cohortSources = readCohortSources();
         // Notificaciones se ACUMULAN durante la tx y se EMITEN POST-COMMIT.
         // SQLite WAL: 1 solo writer concurrente por archivo; abrir un 2do
         // handle (insightsStore) DENTRO de nuestra tx → SQLITE_BUSY silente.
@@ -263,7 +335,8 @@ export function runOnce(opts = {}) {
                 }
             }
 
-            // Cohort rollup global mínimo (group/school joins quedan para PASO 3).
+            // Cohort rollup global: scope 'all'/'global' = todo el sistema, así
+            // que aquí COUNT(*) de perfiles sí es la población correcta.
             const profilesCount = stmts.countByTable.profiles.get().n;
             stmts.upsertCohort.run({
                 scope_type: 'all', scope_id: 'global', period: periodKey,
@@ -271,6 +344,19 @@ export function runOnce(opts = {}) {
                 trend: null, updated_at: nowTs, source_watermark: maxId,
             });
             result.cohortsUpserted++;
+
+            // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — rollups por GRUPO con la
+            // cohorte lectora canónica. Sin esto la única fila de cohorte era la
+            // global, y ninguna vista podía separar lectores de mediadores.
+            try {
+                result.cohortsUpserted += upsertGroupCohortRollups(stmts, cohortSources, {
+                    periodKey, nowTs, maxId,
+                    windowStartTs: nowTs - PERIOD_DAYS * 86400_000,
+                });
+            } catch (e) {
+                // Nunca compromete perfiles/señales/watermark del batch.
+                log(`[materializer] group cohort rollups skipped: ${e.message}`);
+            }
 
             // Watermark final dentro de la misma transacción.
             const lastTs = batch[batch.length - 1]?.server_ts || 0;
