@@ -8,6 +8,13 @@ import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, CommunityPost } from '../types';
 import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter, Lock } from 'lucide-react';
 import { useAccessCheck } from '../hooks/useAccessCheck';
+// CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-1 — derivaciones de PRESENTACIÓN sobre
+// el conjunto que autoriza el servidor. Ninguna decide entitlement.
+import {
+    deriveAlbumFromVisible,
+    deriveRecommendedFromVisible,
+    gateProgressByVisible,
+} from '../utils/libraryCatalogSelection.mjs';
 
 // CHP-LIB-01 — card de la capa Editorial. El candado refleja el resultado del
 // preflight canónico /api/content/:id/access (Biblioteca no decide acceso);
@@ -84,17 +91,27 @@ const Biblioteca: React.FC = () => {
             // Parallel loading for optimization
             Promise.all([
                 dataService.getContenidosEnProgreso(user.id, user.roles),
-                dataService.getContenidos(user.roles, user.id),
-                dataService.getLibrosAlbum(user.roles, user.id),
-                dataService.getRecomendadosComunidad(user.roles, user.id),
+                // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-1 — el conjunto visible de
+                // Biblioteca lo decide el servidor (GET /api/content/my-catalog),
+                // no el navegador. Antes: getContenidos(user.roles, user.id), que
+                // filtraba el entitlement en cliente y exceptuaba a admin y
+                // mediador. Ese bypass ya no existe en esta ruta.
+                dataService.getMyCatalog(),
                 dataService.getCommunityPosts('aprobado'),
                 dataService.getSections(),
                 user.colegio ? dataService.getSchoolConfig(user.colegio) : Promise.resolve({ hiddenContentIds: [] })
-            ]).then(([prog, lib, albums, rec, posts, secs, conf]) => {
-                setEnProgreso(prog);
-                setMiBiblioteca(lib);
-                setLibrosAlbum(albums);
-                setRecomendados(rec);
+            ]).then(([prog, visible, posts, secs, conf]) => {
+                // Fail-closed: si no hay autoridad (sesión inválida, red caída,
+                // respuesta ilegible) no se muestra catálogo. Nunca se degrada al
+                // filtro de cliente.
+                const authorized = visible ?? [];
+                // Las tres pestañas derivadas del catálogo se calculan sobre el
+                // MISMO conjunto autorizado. Son filtros de PRESENTACIÓN (tipo,
+                // orden, tope): no deciden acceso.
+                setEnProgreso(gateProgressByVisible(prog, authorized) as typeof prog);
+                setMiBiblioteca(authorized);
+                setLibrosAlbum(deriveAlbumFromVisible(authorized) as Content[]);
+                setRecomendados(deriveRecommendedFromVisible(authorized) as Content[]);
                 setCommunityPosts(posts);
                 setSections(secs.sort((a: any, b: any) => a.order - b.order));
                 setSchoolConfig(conf);

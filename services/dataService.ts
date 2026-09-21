@@ -57,6 +57,13 @@ import {
     unionGroupMemberIds,
     diffIds,
 } from '../utils/groupMembership.mjs';
+// CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-1 — selección del conjunto visible de
+// /biblioteca a partir de my-catalog (autoridad server-side).
+import {
+    MY_CATALOG_PATH,
+    parseMyCatalogResponse,
+    hydrateVisibleContent,
+} from '../utils/libraryCatalogSelection.mjs';
 // Sprint visibilidad — capa narrativa: shape de la respuesta del endpoint
 // GET /api/groups/:id/diagnosis. Lo importamos solo para que el método del
 // dataService devuelva un tipo público al consumidor (UI).
@@ -1885,6 +1892,40 @@ class DataService {
         }
 
         return baseContent;
+    }
+
+    /**
+     * CHP-V6-LIBRARY-INSTITUTIONAL-01 / Etapa 11B-1 — fuente ÚNICA del conjunto
+     * visible de /biblioteca.
+     *
+     * Contrasta con `getContenidos` de arriba, que sigue existiendo intacta para
+     * las superficies de administración, Studio, Aula Viva, Home, Multimedia y
+     * Leo: aquella decide el entitlement en el cliente (con bypass de rol),
+     * esta NO decide nada — pregunta al servidor.
+     *
+     *   - No acepta `userId`: la identidad la deriva el servidor de la sesión
+     *     firmada (`requireUserAuth`).
+     *   - No acepta `roles`: el privilegio lo decide el servidor. Un rol
+     *     manipulado en el cliente no puede ampliar el catálogo.
+     *   - No envía `organizationId` ni `groupId`: los resuelve `accessService`.
+     *
+     * Fail-closed: `null` significa «no se pudo determinar el conjunto
+     * autorizado» (sesión inválida, red caída, respuesta ilegible). El llamador
+     * no debe degradar al filtro de cliente — degradar reintroduciría la
+     * política que esta etapa elimina.
+     */
+    async getMyCatalog(): Promise<Content[] | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}${MY_CATALOG_PATH}`, { credentials: 'include' });
+            if (!res.ok) return null;
+            const ids = parseMyCatalogResponse(await res.json());
+            // La autoridad es la lista de ids; la metadata para dibujar sale del
+            // catálogo canónico ya cacheado (ver libraryCatalogSelection.mjs).
+            return hydrateVisibleContent(ids, this.content) as Content[] | null;
+        } catch (e) {
+            console.error('Error fetching my-catalog:', e);
+            return null;
+        }
     }
 
     // --- FASE 5: CATÁLOGO RESTRINGIDO ---
