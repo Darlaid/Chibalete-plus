@@ -269,6 +269,22 @@ try {
 
         process.env.ARCHIVE_ROTATION_ENABLED = '1';
 
+        // CHP-V6-EVENTS-RETENTION-01 / 10B — la rotacion exige ahora una
+        // frontera por el watermark del materializador. Sin watermark valido
+        // hace SAFE_SKIP en vez de degradar a solo-edad.
+        const rNoWm = archive.rotateOnce({ nowTs: NOW, retentionDays: 90 });
+        ok('13b) sin watermark: SAFE_SKIP, cero candidatos, nada movido',
+            rNoWm.ok && rNoWm.skipped === true && rNoWm.candidates === 0 && rNoWm.moved === 0
+            && String(rNoWm.reason || '').startsWith('safe_skip_no_watermark:'));
+
+        // Watermark por encima de todos los eventos sembrados: la rotacion
+        // vuelve a comportarse como antes de 10B.
+        insExt.getStatements().upsertMatState.run({
+            name: 'aula_viva_pedagogical_v1', last_event_id: 1_000_000,
+            last_ts: NOW, updated_at: NOW, lag_events: 0, lag_seconds: 0,
+            degraded: 0, last_error: null,
+        });
+
         // dryRun: candidates>=2 sin mover
         const rDry = archive.rotateOnce({ nowTs: NOW, retentionDays: 90, dryRun: true });
         ok('14) dryRun: candidates>=2, moved=0',

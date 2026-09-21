@@ -105,6 +105,10 @@ import { snapshotHistoryTotal } from '../observability/metrics.js';
 import fsNode from 'node:fs';
 import { GROUPS_DB, USERS_DB } from '../config.js';
 import { resolveGroupReaderCohort } from '../analytics/readerCohort.mjs';
+// CHP-V6-EVENTS-RETENTION-01 / 10B — la reconstrucción histórica lee la
+// historia lógica completa (hot ∪ archive). El camino INCREMENTAL no cambia:
+// `runOnce` sigue leyendo solo events.db por `id > watermark`.
+import { readHistoricalEvents } from '../analytics/historicalEvents.mjs';
 
 const MATERIALIZER_NAME = 'aula_viva_pedagogical_v1';
 const DEFAULT_BATCH = 5000;
@@ -435,15 +439,19 @@ export function rebuildInsights(opts) {
     try {
         getInsightsExtDb();
         const stmts = getStatements();
-        // RAW para replay: necesitamos id + payload_json + snake_case naturales.
-        getRawEventsDb();
-        const all = _eventsRawDb.prepare(
-            `SELECT * FROM events WHERE server_ts >= ? AND server_ts <= ? ORDER BY id ASC LIMIT 100000`
-        ).all(fromTs, toTs);
-        const inRange = userIds
-            ? all.filter(e => userIds.includes(e.user_id))
-            : all;
+        // 10B: historia lógica = events.db ∪ events.archive.db. El reader es
+        // read-only y NUNCA crea el archivo; si no existe, la historia es la
+        // caliente y el resultado es idéntico al contrato previo.
+        const hist = readHistoricalEvents({
+            fromTs, toTs,
+            userIds: Array.isArray(userIds) && userIds.length > 0 ? userIds : undefined,
+            eventsPath: EVENTS_PATH,
+        });
+        const inRange = hist.rows;
         out.scanned = inRange.length;
+        out.sources = hist.sources;
+        out.archive_present = hist.archivePresent;
+        out.duplicates_deduped = hist.duplicates;
         const byUser = new Map();
         for (const e of inRange) {
             if (!e.user_id) continue;
