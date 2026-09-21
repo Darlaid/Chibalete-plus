@@ -114,13 +114,15 @@ const row = (id, event, ts, extra = {}) => ({
     server_ts: ts, client_ts: ts, elapsed_ms: null, progress_fraction: null,
     payload_json: '{"k":"v"}', ...extra,
 });
+// Una sesión real: los tres eventos comparten contentId (si no, serían tres
+// sesiones distintas y el tiempo no sería comparable).
 const rows = [
-    row(1, 'immersive.session_start', day(1)),
-    row(2, 'immersive.session_heartbeat', day(1), { elapsed_ms: 600_000 }),
-    row(3, 'immersive.session_end', day(1), { elapsed_ms: 900_000 }),
-    row(4, 'text.session_start', day(3)),
-    row(5, 'immersive.session_completed', day(3)),
-    row(6, 'immersive.chunk_audio_reuse', day(3)),
+    row(1, 'immersive.session_start', day(1), { content_id: 'c-A' }),
+    row(2, 'immersive.session_heartbeat', day(1), { content_id: 'c-A', elapsed_ms: 600_000 }),
+    row(3, 'immersive.session_end', day(1), { content_id: 'c-A', elapsed_ms: 900_000 }),
+    row(4, 'text.session_start', day(3), { content_id: 'c-B' }),
+    row(5, 'immersive.session_completed', day(3), { content_id: 'c-B' }),
+    row(6, 'immersive.chunk_audio_reuse', day(3), { content_id: 'c-B' }),
 ];
 const before = JSON.stringify(rows);
 const sig = computeUserSignals(rows, { nowTs, windowDays: 28, userId: 'U1' });
@@ -131,8 +133,10 @@ section('[6b] las señales ya consumen legacy');
 ok('continuidad_semanal cuenta 2 días distintos',
     sig.continuidad_semanal?.meta?.distinct_days === 2,
     JSON.stringify(sig.continuidad_semanal?.meta));
-ok('tiempo_efectivo_lectura suma elapsed_ms de heartbeat+end (25 min)',
-    sig.tiempo_efectivo_lectura?.value === 25, JSON.stringify(sig.tiempo_efectivo_lectura));
+// A2: el tiempo es el MÁXIMO acumulado de la sesión (15 min del session_end),
+// no la suma del heartbeat (10) más el cierre (15).
+ok('tiempo_efectivo_lectura = 15 min (máximo de la sesión, no 25)',
+    sig.tiempo_efectivo_lectura?.value === 15, JSON.stringify(sig.tiempo_efectivo_lectura));
 ok('abandono_temprano ve 2 starts', sig.abandono_temprano?.meta?.starts === 2,
     JSON.stringify(sig.abandono_temprano?.meta));
 ok('persistencia ve 1 completed', sig.persistencia?.meta?.completed === 1,
@@ -141,12 +145,12 @@ ok('persistencia ve 1 completed', sig.persistencia?.meta?.completed === 1,
 // ── §[7] los canónicos conservan su comportamiento ──────────────────────────
 section('[7] canónicos: comportamiento previo intacto');
 const canonRows = [
-    row(11, 'reading_started', day(1)),
-    row(12, 'session_heartbeat', day(1), { elapsed_ms: 600_000 }),
-    row(13, 'session_ended', day(1), { elapsed_ms: 900_000 }),
-    row(14, 'reading_started', day(3)),
-    row(15, 'reading_completed', day(3)),
-    row(16, 'immersive.chunk_audio_reuse', day(3)),
+    row(11, 'reading_started', day(1), { content_id: 'c-A' }),
+    row(12, 'session_heartbeat', day(1), { content_id: 'c-A', elapsed_ms: 600_000 }),
+    row(13, 'session_ended', day(1), { content_id: 'c-A', elapsed_ms: 900_000 }),
+    row(14, 'reading_started', day(3), { content_id: 'c-B' }),
+    row(15, 'reading_completed', day(3), { content_id: 'c-B' }),
+    row(16, 'immersive.chunk_audio_reuse', day(3), { content_id: 'c-B' }),
 ];
 const canonSig = computeUserSignals(canonRows, { nowTs, windowDays: 28, userId: 'U1' });
 for (const k of ['continuidad_semanal', 'tiempo_efectivo_lectura', 'abandono_temprano',

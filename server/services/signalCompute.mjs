@@ -17,6 +17,9 @@ import { flags } from '../lib/flags.js';
 // nombre `<modo>.<acción>`. El normalizador traduce SOLO ese nombre lógico a su
 // equivalente canónico (tabla explícita, sin heurísticas); la fila no se toca.
 import { normalizeEventForSignals } from '../analytics/legacyEventNormalizer.mjs';
+// A2 — el tiempo efectivo se agrega por sesión lógica (máximo acumulado),
+// nunca sumando heartbeats: todos los productores emiten acumulado, no delta.
+import { computeEffectiveReadingMs } from '../analytics/effectiveReadingTime.mjs';
 
 const DAY = 86_400_000;
 
@@ -56,38 +59,18 @@ export function computeUserSignals(events, ctx) {
             meta: { distinct_days: days.size, window_days: recentDays } };
     }
 
-    // ── 2. tiempo_efectivo_lectura — suma elapsedMs en heartbeats/ended ─────
+    // ── 2. tiempo_efectivo_lectura ─ máximo acumulado por sesión, sumado ───
+    // A2: los productores emiten el ACUMULADO desde el inicio de la sesión,
+    // nunca un delta; sumarlos evento a evento crecía de forma cuadrática.
+    // La agregación vive en un helper puro y reproduce la reconstrucción de
+    // sesiones que `metricsService.buildSessions` ya usa.
     {
-        let ms = 0;
-        for (const e of inWin) {
-            const n = nameOf(e);
-            if (n === 'session_heartbeat' || n === 'session_ended') {
-                let fromPayload = 0;
-                try {
-                    const p = JSON.parse(e.payload_json || '{}');
-                    if (typeof p.elapsedMs === 'number' && p.elapsedMs > 0) fromPayload = p.elapsedMs;
-                    else if (typeof p.totalMs === 'number' && p.totalMs > 0) fromPayload = p.totalMs;
-                } catch {}
-                // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — si el payload no trae el
-                // tiempo, usar la columna. El dual-write legacy mueve
-                // `sessionDuration`/`elapsedMs` del payload a `elapsed_ms`, así
-                // que sin este fallback el tiempo de TODA la historia legacy se
-                // perdería al normalizar el nombre. El payload sigue teniendo
-                // prioridad: un evento canónico no cambia de valor ni suma dos veces.
-                ms += fromPayload > 0 ? fromPayload
-                    : (typeof e.elapsed_ms === 'number' && e.elapsed_ms > 0 ? e.elapsed_ms : 0);
-            }
-            // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — aquí había un `else if` que
-            // sumaba `elapsed_ms` de CUALQUIER otro evento de la ventana. Sobre
-            // el corpus legacy eso contaba como tiempo de lectura la telemetría
-            // del reproductor (chunk_audio_*, sentence_time, pb_*): medido en el
-            // sandbox histórico daba ~3.499 horas de lectura para 8 lectores en
-            // una ventana de 672 horas, un imposible físico. La señal vuelve a
-            // ser lo que su propio contrato dice: tiempo de heartbeats/ended.
-        }
+        const t = computeEffectiveReadingMs(inWin, nameOf);
+        const ms = t.ms;
         out.tiempo_efectivo_lectura = { value: Math.round(ms / 60_000),  // minutos
             confidence: ms > 0 ? 'high' : 'low',
-            meta: { ms, minutes: Math.round(ms / 60_000), window_days: ctx.windowDays } };
+            meta: { ms, minutes: Math.round(ms / 60_000), window_days: ctx.windowDays,
+                sessions: t.sessions, longest_session_ms: t.longest_session_ms } };
     }
 
     // ── 3. abandono_temprano — abandoned con progress<10% / total starts ────
