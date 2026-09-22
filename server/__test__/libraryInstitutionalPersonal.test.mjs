@@ -550,6 +550,89 @@ async function main() {
         ok('no queda temporal de escritura', !fs.existsSync(`${LIBRARY}.tmp`));
     }
 
+    // ── 11D: frescura HTTP de las tres vistas ───────────────────────────────
+    // CHP-V6-LIBRARY-INSTITUTIONAL-01 Etapa 11D. En 11C se observó en
+    // producción que, sin directiva de caché, una carga de documento
+    // inmediatamente posterior a una escritura mostraba el estado ANTERIOR: el
+    // navegador reutilizaba la representación almacenada por frescura
+    // heurística. Estos casos fijan la cabecera y, sobre todo, la consecuencia
+    // observable: escribir y leer acto seguido devuelve lo nuevo.
+    section('[11D] LIBRARY_VIEW_CACHE_POLICY: no-store en las tres vistas');
+    {
+        const cc = async (userId, url) => (await GET(userId, url)).headers.get('cache-control');
+
+        const ccEd = (await fetch(`${BASE}/api/library/editorial`)).headers.get('cache-control');
+        ok('editorial declara no-store', /no-store/.test(ccEd || ''), String(ccEd));
+        const ccIn = await cc('med-a', '/api/library/institutional');
+        ok('institutional declara no-store', /no-store/.test(ccIn || ''), String(ccIn));
+        const ccPe = await cc('lec-a', '/api/library/personal');
+        ok('personal declara no-store', /no-store/.test(ccPe || ''), String(ccPe));
+
+        // El alcance es EXACTAMENTE el de esta unidad: las otras rutas de
+        // catálogo NO se tocan (su endurecimiento es deuda aparte).
+        const ccCat = (await GET('lec-a', '/api/content/my-catalog')).headers.get('cache-control');
+        ok('my-catalog NO cambia su política en 11D', !/no-store/.test(ccCat || ''), String(ccCat));
+
+        // El cuerpo no cambió: sigue siendo la misma vista de siempre.
+        const view = await json(await GET('lec-a', '/api/library/personal'));
+        ok('el cuerpo de la vista sigue intacto (layer + 2 arrays)',
+            view?.layer === 'PERSONAL' && Array.isArray(view.collections) && Array.isArray(view.unassigned));
+    }
+
+    section('[11D] POST_WRITE_READ_FRESHNESS: escribir y leer acto seguido');
+    {
+        // PERSONAL — alta autorizada, lectura inmediata, baja, lectura inmediata.
+        const antes = bookIds(await json(await GET('lec-a', '/api/library/personal')));
+        ok('personal · estado previo sin c-2', !antes.includes('c-2'), antes.join(','));
+
+        const add = await POST('lec-a', '/api/library/personal/references', { bookId: 'c-2' });
+        const addBody = await json(add);
+        ok('personal · alta creada', add.status === 201 && addBody?.created === true, String(add.status));
+
+        const trasAlta = bookIds(await json(await GET('lec-a', '/api/library/personal')));
+        ok('personal · el GET INMEDIATO ya muestra la referencia', trasAlta.includes('c-2'), trasAlta.join(','));
+
+        const refId = addBody.reference.id;
+        const del = await DEL('lec-a', `/api/library/personal/references/${refId}`);
+        ok('personal · baja aceptada', del.status === 200, String(del.status));
+
+        const trasBaja = bookIds(await json(await GET('lec-a', '/api/library/personal')));
+        ok('personal · el GET INMEDIATO ya no la muestra', !trasBaja.includes('c-2'), trasBaja.join(','));
+        ok('personal · el estado vuelve al previo', trasBaja.join(',') === antes.join(','));
+
+        // INSTITUTIONAL — lo mismo para un actor con entitlement y organización.
+        const iAntes = await json(await GET('med-a', '/api/library/institutional'));
+        const iSueltasAntes = (iAntes?.unassigned ?? []).map(r => r.id).sort();
+
+        const iAdd = await POST('med-a', '/api/library/institutional/references',
+            { bookId: 'c-1', collectionId: null });
+        const iBody = await json(iAdd);
+        ok('institutional · alta creada sin colección',
+            iAdd.status === 201 && iBody?.created === true && iBody.reference.collectionId === null,
+            String(iAdd.status));
+        ok('institutional · el contexto lo puso el servidor',
+            iBody?.reference?.contextId === ORG_A, String(iBody?.reference?.contextId));
+
+        const iTrasAlta = await json(await GET('med-a', '/api/library/institutional'));
+        ok('institutional · el GET INMEDIATO ya muestra la referencia',
+            (iTrasAlta?.unassigned ?? []).some(r => r.id === iBody.reference.id));
+
+        const iDel = await DEL('med-a', `/api/library/institutional/references/${iBody.reference.id}`);
+        ok('institutional · baja aceptada', iDel.status === 200, String(iDel.status));
+
+        const iTrasBaja = await json(await GET('med-a', '/api/library/institutional'));
+        ok('institutional · el GET INMEDIATO ya no la muestra',
+            !(iTrasBaja?.unassigned ?? []).some(r => r.id === iBody.reference.id));
+        ok('institutional · el estado vuelve al previo',
+            (iTrasBaja?.unassigned ?? []).map(r => r.id).sort().join(',') === iSueltasAntes.join(','));
+
+        // Y ninguna de las cuatro escrituras tocó la autoridad de acceso.
+        ok('11D · access_db sigue byte-idéntico al fixture',
+            fs.readFileSync(P.access, 'utf8') === JSON.stringify(ACCESS, null, 2));
+        ok('11D · no queda lock ni temporal',
+            !fs.existsSync(`${LIBRARY}.lock`) && !fs.existsSync(`${LIBRARY}.tmp`));
+    }
+
     // ── M1-A: la identidad por header no basta en compat ────────────────────
     section('[M1-A] las superficies INSTITUTIONAL/PERSONAL exigen sesión firmada');
     {

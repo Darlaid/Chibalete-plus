@@ -140,6 +140,80 @@ MOOK_POBLADO = (
 ).encode("utf-8")
 
 
+# --- Biblioteca (CHP-V6-LIBRARY-INSTITUTIONAL-01 Etapa 11D) -------------------
+# Store opcional: `build_base` NO lo crea, igual que mook_db.json. Los casos que
+# lo necesitan lo materializan explicitamente.
+LIBRARY_REL = "data/library_db.json"
+
+# Forma EXACTA que tiene el store en produccion cuando nadie ha curado nada: las
+# dos claves presentes y vacias. Es JSON valido y debe respaldarse.
+LIBRARY_EMPTY = (
+    '{\n'
+    '  "collections": [],\n'
+    '  "references": []\n'
+    '}\n'
+).encode("utf-8")
+
+# Contenido 100% INVENTADO con la forma del store real, poblando las TRES capas
+# para demostrar que el restore las devuelve todas. Ningun dato procede de
+# produccion: los ids son sinteticos y no existen en ningun censo.
+LIBRARY_POBLADO = (
+    '{\n'
+    '  "collections": [\n'
+    '    {\n'
+    '      "id": "col-sintetica-0001",\n'
+    '      "layer": "EDITORIAL",\n'
+    '      "contextId": null,\n'
+    '      "name": "Coleccion Sintética Ñ",\n'
+    '      "description": "",\n'
+    '      "published": true,\n'
+    '      "position": 0\n'
+    '    }\n'
+    '  ],\n'
+    '  "references": [\n'
+    '    {\n'
+    '      "id": "ref-sintetica-0001",\n'
+    '      "bookId": "content-sintetico-0001",\n'
+    '      "layer": "EDITORIAL",\n'
+    '      "contextId": null,\n'
+    '      "collectionId": "col-sintetica-0001",\n'
+    '      "position": 0\n'
+    '    },\n'
+    '    {\n'
+    '      "id": "ref-sintetica-0002",\n'
+    '      "bookId": "content-sintetico-0002",\n'
+    '      "layer": "INSTITUTIONAL",\n'
+    '      "contextId": "school-sintetico-0001",\n'
+    '      "collectionId": null,\n'
+    '      "position": 0\n'
+    '    },\n'
+    '    {\n'
+    '      "id": "ref-sintetica-0003",\n'
+    '      "bookId": "content-sintetico-0003",\n'
+    '      "layer": "PERSONAL",\n'
+    '      "contextId": "user-sintetico-0001",\n'
+    '      "collectionId": null,\n'
+    '      "position": 0\n'
+    '    }\n'
+    '  ]\n'
+    '}\n'
+).encode("utf-8")
+
+
+def build_library_db(base_dir: str, raw: bytes = LIBRARY_POBLADO, rel: str = LIBRARY_REL) -> str:
+    """Materializa un `library_db.json` sintetico con bytes literales.
+
+    En binario a proposito, por la misma razon que `build_mook_db`: la prueba de
+    preservacion byte a byte no debe depender de como la plataforma trate los
+    finales de linea.
+    """
+    path = os.path.join(base_dir, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(raw)
+    return path
+
+
 def build_mook_db(base_dir: str, raw: bytes = MOOK_POBLADO, rel: str = MOOK_REL) -> str:
     """Materializa un `mook_db.json` sintetico con bytes literales.
 

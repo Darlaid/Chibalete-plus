@@ -1528,9 +1528,35 @@ async function mutateLibrary(fn) {
     }, 'libraryLock');
 }
 
+/**
+ * Frescura HTTP de las TRES vistas de Biblioteca — CHP-V6-LIBRARY-INSTITUTIONAL-01
+ * Etapa 11D.
+ *
+ * Las vistas emitían solo `ETag` + `Vary`, sin ninguna directiva de caché. Sin
+ * `Cache-Control` el navegador aplica frescura HEURÍSTICA y puede reutilizar la
+ * representación anterior: tras guardar o quitar una referencia, una carga de
+ * documento inmediatamente posterior mostraba el estado PREVIO aunque el
+ * servidor ya devolviera el nuevo (observado en producción en 11C, en las capas
+ * PERSONAL e INSTITUTIONAL).
+ *
+ * `no-store` y no `no-cache`: estas vistas son la proyección de la curaduría de
+ * UNA persona o UNA institución, ya intersectada con su entitlement. No deben
+ * quedar almacenadas en disco por un intermediario ni sobrevivir al cierre de
+ * sesión en un equipo compartido —un aula—, y además resuelve la frescura sin
+ * depender de que el ETag se revalide.
+ *
+ * Alcance deliberadamente mínimo: SOLO las tres vistas de Biblioteca. `/api/content`
+ * y `/api/content/my-catalog` NO se tocan en esta unidad, ni el edge, ni el CDN.
+ * No cambia cuerpo, autorización ni contrato: solo añade una cabecera.
+ */
+function libraryViewNoStore(req, res, next) {
+    res.set('Cache-Control', 'no-store');
+    next();
+}
+
 // Lectura pública de la capa editorial (misma política que GET /api/content:
 // metadata de catálogo; abrir contenido sigue gateado por el preflight).
-app.get('/api/library/editorial', (req, res) => {
+app.get('/api/library/editorial', libraryViewNoStore, (req, res) => {
     try {
         const doc = libraryStore.normalizeLibrary(readJSON(LIBRARY_DB));
         res.json(libraryStore.computeEditorialView(doc, readJSON(DB_FILE)));
@@ -1683,7 +1709,7 @@ const emptyLayerView = (layer) => ({ layer, collections: [], unassigned: [] });
 // Vista institucional del usuario autenticado. Un usuario sin organizationId
 // no recibe biblioteca institucional alguna (y la respuesta no revela que
 // existan otras organizaciones).
-app.get('/api/library/institutional', requireLibraryActor, requireUserAuth, (req, res) => {
+app.get('/api/library/institutional', libraryViewNoStore, requireLibraryActor, requireUserAuth, (req, res) => {
     try {
         const orgId = institutionalContextIdOf(req.user);
         if (!orgId) return res.json(emptyLayerView('INSTITUTIONAL'));
@@ -1805,7 +1831,7 @@ app.delete('/api/library/institutional/references/:id', requireLibraryActor, req
 // un userId ajeno, ni por parámetro ni por cuerpo. PERSONAL no tiene
 // colecciones en el MVP (ADR §3.3): `collectionId` se fuerza a null.
 
-app.get('/api/library/personal', requireLibraryActor, requireUserAuth, (req, res) => {
+app.get('/api/library/personal', libraryViewNoStore, requireLibraryActor, requireUserAuth, (req, res) => {
     try {
         const contentList = readJSON(DB_FILE);
         const doc = libraryStore.normalizeLibrary(readJSON(LIBRARY_DB));

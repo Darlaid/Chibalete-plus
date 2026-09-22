@@ -198,6 +198,37 @@ JSON_STORES: tuple[JsonStore, ...] = (
     # escritura administrativa. Mismo tratamiento que `mook_db.json`: ausente se
     # anota en `stores_absent`, presente su respaldo es obligatorio.
     JsonStore("data/landing_banner.json", "CFG", count_adapter="root_len", required=False),
+    # --- CHP-V6-LIBRARY-INSTITUTIONAL-01 Etapa 11D ----------------------------
+    # Store canonico de Biblioteca: `references` y `collections` de las TRES
+    # capas (EDITORIAL, INSTITUTIONAL, PERSONAL). Quedo fuera del inventario
+    # original porque cuando se redacto (CHP-BACKUP-01A) Biblioteca no existia;
+    # la Etapa 11 le dio escrituras reales de mediadores y lectores, asi que su
+    # ausencia del backup paso de irrelevante a deuda. No es reconstruible
+    # desde ningun otro store: los punteros los crea una persona curando.
+    #
+    # SIN adaptador de conteo a proposito, por la misma razon que `mook_db.json`:
+    # la raiz es un OBJETO de 2 claves fijas, de modo que `root_len` emitiria
+    # siempre 2 —un numero constante que se leeria como un conteo de referencias
+    # real—. `bytes` y `sha256` ya detectan truncamiento.
+    #
+    # La capa PERSONAL guarda `contextId` = id de la cuenta que guardo cada
+    # libro, y la inmensa mayoria de los lectores son menores de edad: la
+    # seleccion de lecturas de un menor se clasifica igual que los stores leo_*
+    # y `submissions_db.json` (design §8).
+    #
+    # `required=False`: el servidor NO crea el archivo al arrancar —nace con la
+    # primera escritura de Biblioteca (`mutateLibrary`), y `normalizeLibrary`
+    # tolera su ausencia—. Mismo tratamiento que `mook_db.json` y
+    # `landing_banner.json`: ausente se anota en `stores_absent`, presente su
+    # respaldo es obligatorio y un JSON invalido aborta antes de invocar restic.
+    JsonStore(
+        "data/library_db.json",
+        "CANON",
+        count_adapter=None,
+        sensitivity=SENSITIVITY_MINORS,
+        retention_status=RETENTION_NEEDS_LEGAL_REVIEW,
+        required=False,
+    ),
 )
 
 # --- Uploads (inventario §1 mounts; §2.3) ------------------------------------

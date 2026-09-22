@@ -1872,18 +1872,19 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-@case("D01", "inventario: 4 SQLite + 22 JSON declarados; 24 stores respaldados")
+@case("D01", "inventario: 4 SQLite + 23 JSON declarados; 24 stores respaldados")
 def test_d_inventario():
     from chibalete_backup import stores as S
     json_paths = [s.logical_path for s in S.JSON_STORES]
     sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
-    # 22 = los 20 historicos + data/mook_db.json
+    # 23 = los 20 historicos + data/mook_db.json
     # (CHP-BACKUP-MOOK-STORE-COVERAGE-01) + data/landing_banner.json
-    # (CHP-LANDING-BANNER-02). El manifiesto sigue trayendo 24 stores porque
-    # ambos son opcionales y los fixtures no los crean: se anotan en
-    # `stores_absent`, no en `stores`.
-    assert len(json_paths) == 22, f"se esperaban 22 JSON declarados, hay {len(json_paths)}"
-    assert len(set(json_paths)) == 22, "hay logical_path duplicados"
+    # (CHP-LANDING-BANNER-02) + data/library_db.json
+    # (CHP-V6-LIBRARY-INSTITUTIONAL-01 Etapa 11D). El manifiesto sigue trayendo
+    # 24 stores porque los tres son opcionales y los fixtures no los crean: se
+    # anotan en `stores_absent`, no en `stores`.
+    assert len(json_paths) == 23, f"se esperaban 23 JSON declarados, hay {len(json_paths)}"
+    assert len(set(json_paths)) == 23, "hay logical_path duplicados"
     required_sqlite = [s for s in S.SQLITE_STORES if s.required]
     assert len(required_sqlite) == 4, required_sqlite
     for lp in NUEVOS_STORES:
@@ -2064,11 +2065,12 @@ def test_d_duplicate_basename():
             assert "mismo nombre de archivo" in str(exc) or "pisarian" in str(exc), str(exc)
     finally:
         preflight.JSON_STORES = original
-    # El inventario real esta sano: 22 basenames unicos (20 historicos +
+    # El inventario real esta sano: 23 basenames unicos (20 historicos +
     # mook_db.json, CHP-BACKUP-MOOK-STORE-COVERAGE-01 + landing_banner.json,
-    # CHP-LANDING-BANNER-02).
+    # CHP-LANDING-BANNER-02 + library_db.json,
+    # CHP-V6-LIBRARY-INSTITUTIONAL-01 Etapa 11D).
     nombres = [os.path.basename(s.logical_path) for s in S.JSON_STORES]
-    assert len(set(nombres)) == len(nombres) == 22, nombres
+    assert len(set(nombres)) == len(nombres) == 23, nombres
 
 
 @case("D10", "privacidad: sin contenido, correos ni conteos individualizables")
@@ -2873,6 +2875,268 @@ def test_mk_no_collateral():
         assert os.path.isfile(os.path.join(env.base, rel)), f"desaparecio del origen: {rel}"
     uploads_dir = os.path.join(env.base, fixtures.UPLOADS_REL)
     assert len(os.listdir(uploads_dir)) == 6, os.listdir(uploads_dir)
+
+
+# --------------------------------------------------------------------------
+# Casos LB01-LB07 — cobertura de library_db.json
+# (CHP-V6-LIBRARY-INSTITUTIONAL-01 Etapa 11D)
+# --------------------------------------------------------------------------
+#
+# El store canonico de Biblioteca quedo fuera del inventario original porque no
+# existia cuando se redacto. La Etapa 11 le dio escrituras reales de mediadores
+# y lectores, y la 11C descubrio en produccion que el backup estructurado NO lo
+# capturaba: el rollback de datos de esa unidad se apoyaba en un snapshot que no
+# contenia el archivo. Estos casos fijan su cobertura para que una reinstalacion
+# del runner no pueda volver a dejarlo fuera en silencio.
+
+LIBRARY_LOGICAL_PATH = fixtures.LIBRARY_REL
+
+
+def _library_entry(manifest, key="stores"):
+    for entry in manifest[key]:
+        if entry["logical_path"] == LIBRARY_LOGICAL_PATH:
+            return entry
+    return None
+
+
+@case("LB01", "inventario: library_db.json declarado una sola vez, opcional y sin conteo")
+def test_lb_inventory():
+    from chibalete_backup import stores as S
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+
+    assert json_paths.count(LIBRARY_LOGICAL_PATH) == 1, json_paths
+    assert LIBRARY_LOGICAL_PATH not in sqlite_paths, "library_db.json no es una base SQLite"
+    declaradas = [p for p in json_paths + sqlite_paths
+                  if os.path.basename(p) == "library_db.json"]
+    assert declaradas == [LIBRARY_LOGICAL_PATH], declaradas
+
+    store = next(s for s in S.JSON_STORES if s.logical_path == LIBRARY_LOGICAL_PATH)
+    assert store.category == "CANON", store
+    # Sin adaptador: `root_len` sobre un objeto de 2 claves fijas emitiria
+    # siempre 2 y se leeria como un conteo de referencias real.
+    assert store.count_adapter is None, store
+    # La capa PERSONAL guarda el id de la cuenta que guardo cada libro.
+    assert store.sensitivity == S.SENSITIVITY_MINORS, store
+    assert store.retention_status == S.RETENTION_NEEDS_LEGAL_REVIEW, store
+    # Opcional: el servidor no lo crea al arrancar, nace en la primera escritura.
+    assert store.required is False, store
+
+    # No se amplio ningun directorio ni se colo un glob.
+    assert not any(ch in LIBRARY_LOGICAL_PATH for ch in "*?["), LIBRARY_LOGICAL_PATH
+    assert LIBRARY_LOGICAL_PATH.startswith("data/"), LIBRARY_LOGICAL_PATH
+    # Y NO se movio a data-critical: la ubicacion productiva no cambia.
+    assert LIBRARY_LOGICAL_PATH == "data/library_db.json", LIBRARY_LOGICAL_PATH
+
+
+@case("LB02", "library_db.json presente: se respalda, se anota y la fuente no se toca")
+def test_lb_present_included():
+    env = Env("lb02")
+    fixtures.build_library_db(env.base)
+    before = fixtures.snapshot_tree(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    # 24 historicos + library_db.json. mook/banner/identity siguen ausentes.
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+
+    entry = _library_entry(manifest)
+    assert entry is not None, [s["logical_path"] for s in manifest["stores"]]
+    assert entry["kind"] == "json", entry
+    assert entry["category"] == "CANON", entry
+    assert entry["status"] == "included", entry
+    assert entry["integrity_result"] == "ok", entry
+    assert entry["bytes"] == len(fixtures.LIBRARY_POBLADO), entry
+    assert entry["sha256"] == sha256_file(os.path.join(env.base, LIBRARY_LOGICAL_PATH)), entry
+    assert entry["sensitivity"] == "minors", entry
+    assert entry["retention_status"] == "NEEDS_LEGAL_REVIEW", entry
+    # Nunca un conteo: seria constante (siempre 2) y enganoso.
+    assert "aggregate_count" not in entry, entry
+    # Estando presente, no puede figurar tambien como ausente.
+    assert _library_entry(manifest, "stores_absent") is None, manifest["stores_absent"]
+
+    # Los stores previos siguen ahi: library_db.json se suma, no sustituye.
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+
+    assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "LB02")
+
+
+@case("LB03", "library_db.json ausente: backup ok y ausencia anotada explicitamente")
+def test_lb_absent_tolerated():
+    env = Env("lb03")
+    ruta = os.path.join(env.base, LIBRARY_LOGICAL_PATH)
+    assert not os.path.exists(ruta)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    assert manifest["result"] == "ok", manifest["result"]
+    # Sin Biblioteca el backup sigue siendo el de 24 stores: la ausencia no resta.
+    assert len(manifest["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    assert _library_entry(manifest) is None, "un store ausente no puede figurar como respaldado"
+
+    # La ausencia deja rastro y es distinguible de una perdida.
+    ausente = _library_entry(manifest, "stores_absent")
+    assert ausente is not None, manifest["stores_absent"]
+    assert ausente["status"] == "absent_optional", ausente
+    assert ausente["kind"] == "json", ausente
+    assert "sha256" not in ausente and "bytes" not in ausente, ausente
+
+    # Y el inventario NO crea el archivo por el hecho de declararlo.
+    assert not os.path.exists(ruta), "el runner no debe materializar un store ausente"
+
+
+@case("LB04", "library_db.json vacio pero valido: se respalda igual")
+def test_lb_empty_valid():
+    env = Env("lb04")
+    fixtures.build_library_db(env.base, raw=fixtures.LIBRARY_EMPTY)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    entry = _library_entry(manifest)
+    assert entry is not None, "una Biblioteca vacia valida debe respaldarse, no omitirse"
+    assert entry["status"] == "included", entry
+    assert entry["bytes"] == len(fixtures.LIBRARY_EMPTY), entry
+    assert entry["integrity_result"] == "ok", entry
+    assert _library_entry(manifest, "stores_absent") is None, manifest["stores_absent"]
+
+
+@case("LB05", "restore real de library_db.json: byte a byte y las tres capas intactas")
+def test_lb_restore_exact():
+    env = Env("lb05")
+    origen = fixtures.build_library_db(env.base)
+    bytes_origen = open(origen, "rb").read()
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+
+    staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+              if os.path.isdir(p)][0]
+    restaurada = os.path.join(staged, "json", "library_db.json")
+    assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "json")))
+
+    # Igualdad byte a byte contra la fuente.
+    bytes_restaurados = open(restaurada, "rb").read()
+    assert bytes_restaurados == bytes_origen, "el restore de library_db.json no es byte-identico"
+    assert sha256_file(restaurada) == sha256_file(origen)
+    assert os.path.getsize(restaurada) == len(bytes_origen)
+
+    # Y ademas parsea y conserva las TRES capas con su scope.
+    doc = json.loads(bytes_restaurados)
+    assert sorted(doc.keys()) == ["collections", "references"], sorted(doc.keys())
+    por_capa = {r["layer"]: r for r in doc["references"]}
+    assert sorted(por_capa) == ["EDITORIAL", "INSTITUTIONAL", "PERSONAL"], sorted(por_capa)
+    assert por_capa["EDITORIAL"]["collectionId"] == "col-sintetica-0001"
+    assert por_capa["INSTITUTIONAL"]["contextId"] == "school-sintetico-0001"
+    assert por_capa["PERSONAL"]["contextId"] == "user-sintetico-0001"
+    assert [c["id"] for c in doc["collections"]] == ["col-sintetica-0001"], doc["collections"]
+    assert doc["collections"][0]["name"] == "Coleccion Sintética Ñ"
+
+    # El manifiesto restaurado declara el store como incluido.
+    man = json.load(open(os.path.join(staged, "manifest.json"), encoding="utf-8"))
+    assert _library_entry(man)["sha256"] == sha256_file(origen)
+
+
+@case("LB06", "library_db.json ilegible o corrupto: el backup falla de forma visible")
+def test_lb_unreadable_fails_loudly():
+    # (a) JSON corrupto: aborta ANTES de invocar restic, sin snapshot.
+    env = Env("lb06a")
+    fixtures.build_library_db(env.base, raw=b'{"references": [')
+    env.provision_repository()
+    proc = env.run("structured_backup.py", expect=errors.JsonInvalidError.exit_code)
+    assert "library_db.json" in proc.stderr, proc.stderr[-400:]
+    assert env.snapshots(tag="structured") == [], "no debe quedar snapshot de una captura fallida"
+    assert env.staging_dirs() == [], env.staging_dirs()
+
+    # (b) No es un archivo regular: fail-closed en el preflight. Se usa un
+    # directorio porque la suite corre como root y chmod 000 no le impide leer.
+    env2 = Env("lb06b")
+    os.makedirs(os.path.join(env2.base, LIBRARY_LOGICAL_PATH), exist_ok=True)
+    env2.provision_repository()
+    proc2 = env2.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "no es un archivo regular" in proc2.stderr, proc2.stderr[-400:]
+    assert env2.snapshots(tag="structured") == [], "no debe quedar snapshot"
+
+    # (c) Symlink: tampoco se sigue, aunque apunte a un JSON valido.
+    env3 = Env("lb06c")
+    real = os.path.join(env3.base, "data", "library_real.json")
+    os.makedirs(os.path.dirname(real), exist_ok=True)
+    with open(real, "wb") as handle:
+        handle.write(fixtures.LIBRARY_POBLADO)
+    os.symlink(real, os.path.join(env3.base, LIBRARY_LOGICAL_PATH))
+    env3.provision_repository()
+    proc3 = env3.run("structured_backup.py", expect=errors.PreflightError.exit_code)
+    assert "symlink" in proc3.stderr, proc3.stderr[-400:]
+
+
+@case("LB07", "nada fuera de la allowlist entra, y los arboles fuente quedan intactos")
+def test_lb_no_collateral():
+    env = Env("lb07")
+    fixtures.build_library_db(env.base)
+
+    # Senuelos con nombres vecinos: ninguno esta declarado en el inventario.
+    senuelos = {
+        "data/library_db.json.bak": b'{"references": ["senuelo"]}',
+        "data/library_db.json.pre-deploy": b'{"references": ["senuelo"]}',
+        "data/library_backup.json": b'{"references": ["senuelo"]}',
+        "data/library_db_old.json": b'{"references": ["senuelo"]}',
+        "data-critical/library_db.json": b'{"references": ["senuelo"]}',
+    }
+    for rel, raw in senuelos.items():
+        path = os.path.join(env.base, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(raw)
+
+    before = fixtures.snapshot_tree(env.base)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+
+    declarados = {s["logical_path"] for s in manifest["stores"]}
+    for rel in senuelos:
+        assert rel not in declarados, f"entro un archivo no declarado: {rel}"
+    assert LIBRARY_LOGICAL_PATH in declarados, declarados
+    # Exactamente un library_db.json en el manifiesto.
+    assert sum(1 for p in declarados if os.path.basename(p) == "library_db.json") == 1, declarados
+
+    # Y tampoco entran al snapshot por otra via.
+    restore_dir = os.path.join(env.root, "restore")
+    os.makedirs(restore_dir, exist_ok=True)
+    snap = env.snapshots(tag="structured")[0]["id"]
+    proc = subprocess.run(
+        ["restic", "restore", snap, "--target", restore_dir],
+        env=load_config(env.config_dir).restic_env(),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    staged = [p for p in glob.glob(os.path.join(restore_dir, "**", "staging-*"), recursive=True)
+              if os.path.isdir(p)][0]
+    restaurados = sorted(os.listdir(os.path.join(staged, "json")))
+    assert "library_db.json" in restaurados, restaurados
+    for ruido in ("library_db.json.bak", "library_backup.json", "library_db_old.json",
+                  "library_db.json.pre-deploy"):
+        assert ruido not in restaurados, restaurados
+
+    # data/, data-critical/ y uploads: nada borrado, movido ni truncado.
+    after = fixtures.snapshot_tree(env.base)
+    assert_sources_untouched(before, after, "LB07")
+    for rel in list(senuelos) + [LIBRARY_LOGICAL_PATH]:
+        assert os.path.isfile(os.path.join(env.base, rel)), f"desaparecio del origen: {rel}"
 
 
 # --------------------------------------------------------------------------
