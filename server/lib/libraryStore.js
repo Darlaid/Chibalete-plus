@@ -137,26 +137,73 @@ export function updateCollection(doc, colId, patch) {
 }
 
 /**
- * Vista de la capa EDITORIAL para lectores.
+ * Localiza una referencia EXIGIENDO su scope (layer + contextId).
  *
- * Aplica los componentes de la fórmula que le corresponden a esta capa:
- *  - reference: solo libros referenciados aparecen;
+ * Existe para que una mutación no pueda alcanzar una referencia de otro
+ * contexto adivinando su id: el caller resuelve `contextId` en el servidor y
+ * esta función devuelve `null` si la referencia pertenece a otra capa u otro
+ * contexto (el caller responde 404, indistinguible de inexistente — ADR §6.1).
+ */
+export function findScopedReference(doc, refId, { layer, contextId }) {
+    assertLayer(layer);
+    const ref = doc.references.find(r => r.id === refId);
+    if (!ref) return null;
+    if (ref.layer !== layer) return null;
+    if ((ref.contextId ?? null) !== (contextId ?? null)) return null;
+    return ref;
+}
+
+/** Igual que findScopedReference, para colecciones. */
+export function findScopedCollection(doc, colId, { layer, contextId }) {
+    assertLayer(layer);
+    const col = doc.collections.find(c => c.id === colId);
+    if (!col) return null;
+    if (col.layer !== layer) return null;
+    if ((col.contextId ?? null) !== (contextId ?? null)) return null;
+    return col;
+}
+
+/**
+ * Vista de UNA capa para lectores. Generalización de la vista editorial
+ * (CHP-V6-LIBRARY-INSTITUTIONAL-01 §3): mismo cómputo, mismo contrato de
+ * respuesta, mismo orden; lo único que varía es el scope consultado y el
+ * conjunto visible que el caller inyecta.
+ *
+ * Aplica los componentes de la fórmula que le corresponden a la capa:
+ *  - reference: solo libros referenciados en (layer, contextId) aparecen;
  *  - publication_state: libros con status !== 'disponible' se OCULTAN
  *    (referencias dormidas, Caso G) y colecciones no publicadas se ocultan
  *    salvo includeUnpublished;
- *  - entitlement/membership: NO se calculan aquí — la apertura pasa por el
- *    preflight canónico. La vista no contiene ningún campo de autorización.
+ *  - entitlement/membership: NO se calculan aquí. `visibleBookIds` es un
+ *    conjunto YA resuelto por el caller con la autoridad canónica de acceso;
+ *    este módulo solo intersecta. `null` = sin intersección (capa EDITORIAL,
+ *    cuya apertura sigue gateada por el preflight canónico).
  *
  * `contentList` es el catálogo canónico: la vista solo PROYECTA su metadata,
  * jamás la copia a disco.
+ *
+ * @param {object} doc
+ * @param {Array}  contentList
+ * @param {{layer?:string, contextId?:string|null, includeUnpublished?:boolean,
+ *          visibleBookIds?:Set<string>|null}} [options]
+ *   `contextId` OMITIDO = cualquier contexto (comportamiento histórico de la
+ *   capa editorial, cuyo contexto es global/null).
  */
-export function computeEditorialView(doc, contentList, { includeUnpublished = false } = {}) {
+export function computeLayerView(doc, contentList, options = {}) {
+    const { layer = 'EDITORIAL', includeUnpublished = false, visibleBookIds = null } = options;
+    assertLayer(layer);
+    const matchAnyContext = !('contextId' in options);
+    const wanted = options.contextId ?? null;
+    const inScope = (e) => e.layer === layer
+        && (matchAnyContext || (e.contextId ?? null) === wanted);
+
     const byId = new Map((contentList || []).map(c => [c.id, c]));
     // V4 (CHP-MOOK-V4-REALIGN-01): `standalone === false` marca contenido
     // canónico destinado a Experiencias que NO se descubre como obra
     // independiente en Biblioteca (ausente ⇒ true; dimensión separada de
     // publication_state y de entitlement — el access engine no cambia).
     const visibleBook = (bookId) => {
+        if (visibleBookIds && !visibleBookIds.has(bookId)) return null;
         const book = byId.get(bookId);
         return book && book.status === 'disponible' && book.standalone !== false ? book : null;
     };
@@ -179,9 +226,9 @@ export function computeEditorialView(doc, contentList, { includeUnpublished = fa
             },
         };
     };
-    const editorialRefs = doc.references.filter(r => r.layer === 'EDITORIAL');
+    const layerRefs = doc.references.filter(inScope);
     const collections = doc.collections
-        .filter(c => c.layer === 'EDITORIAL' && (includeUnpublished || c.published))
+        .filter(c => inScope(c) && (includeUnpublished || c.published))
         .sort((a, b) => a.position - b.position)
         .map(c => ({
             id: c.id,
@@ -189,16 +236,26 @@ export function computeEditorialView(doc, contentList, { includeUnpublished = fa
             description: c.description,
             published: c.published,
             position: c.position,
-            references: editorialRefs
+            references: layerRefs
                 .filter(r => r.collectionId === c.id)
                 .sort((a, b) => a.position - b.position)
                 .map(projectRef)
                 .filter(Boolean),
         }));
-    const unassigned = editorialRefs
+    const unassigned = layerRefs
         .filter(r => r.collectionId == null)
         .sort((a, b) => a.position - b.position)
         .map(projectRef)
         .filter(Boolean);
-    return { layer: 'EDITORIAL', collections, unassigned };
+    return { layer, collections, unassigned };
+}
+
+/**
+ * Vista de la capa EDITORIAL para lectores. Delega en `computeLayerView` sin
+ * cambiar NADA de su contrato: mismo scope (EDITORIAL, cualquier contexto —
+ * el contexto editorial es global/null), misma respuesta, sin intersección de
+ * entitlement (la apertura la decide el preflight canónico).
+ */
+export function computeEditorialView(doc, contentList, { includeUnpublished = false } = {}) {
+    return computeLayerView(doc, contentList, { layer: 'EDITORIAL', includeUnpublished });
 }

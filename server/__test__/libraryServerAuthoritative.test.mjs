@@ -134,12 +134,22 @@ section('[0] la réplica del handler sigue coincidiendo con el fuente');
     const body = h.slice(0, h.indexOf('\n});'));
     ok('el handler existe', body.length > 0 && body.length < 4000);
     ok('usa requireUserAuth', body.includes('requireUserAuth'));
-    ok('deriva userId de req.user (sesión), no del query', body.includes('const userId = req.user.id') && !body.includes('req.query.userId'));
-    ok('usa getAccessibleContentIds', body.includes('getAccessibleContentIds(userId)'));
-    ok('mismo predicate de títulos/colecciones',
-        body.includes('titleIds.includes(item.id)') && body.includes('collectionIds.includes(item.collectionId)'));
-    ok('mismo predicate pedagógico', body.includes('seesPedagogy || !isPedagogyRestrictedItem(item)'));
+    ok('deriva el sujeto de req.user (sesión), no del query',
+        body.includes('visibleCatalogForUser(req.user') && !body.includes('req.query.userId'));
     ok('responde { success, catalog }', body.includes('success: true') && body.includes('catalog:'));
+
+    // 11B-2: el predicate se extrajo a visibleCatalogForUser para que las capas
+    // INSTITUTIONAL/PERSONAL intersecten contra EXACTAMENTE el mismo conjunto.
+    // El contrato no cambia; cambia dónde vive. Se verifica ahí.
+    const p = src.slice(src.indexOf('function visibleCatalogForUser('));
+    const pred = p.slice(0, p.indexOf('\n}'));
+    ok('visibleCatalogForUser existe y es la única definición',
+        pred.length > 0 && pred.length < 1200
+        && (src.match(/function visibleCatalogForUser\(/g) || []).length === 1);
+    ok('usa getAccessibleContentIds', pred.includes('getAccessibleContentIds(user.id)'));
+    ok('mismo predicate de títulos/colecciones',
+        pred.includes('titleIds.includes(item.id)') && pred.includes('collectionIds.includes(item.collectionId)'));
+    ok('mismo predicate pedagógico', pred.includes('seesPedagogy || !isPedagogyRestrictedItem(item)'));
 }
 
 // ── §8 CASOS OBLIGATORIOS ───────────────────────────────────────────────────

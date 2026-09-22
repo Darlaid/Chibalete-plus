@@ -22,6 +22,7 @@ import {
 } from './lib/sessionAuth.js';
 import { cleanupExpiredSessions } from './db/sessionStore.js';
 import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
+import { createLibraryActorAuth, institutionalContextIdOf, personalContextIdOf } from './lib/libraryScope.js';
 import * as libraryStore from './lib/libraryStore.js';
 import * as experienceStore from './lib/experienceStore.js';
 // CHP-MOOK-COVER-UPLOAD-01A — contrato de la cubierta, compartido con el frontend.
@@ -217,7 +218,7 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 // scope de módulo al registrar las rutas.
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 // CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
-import { evaluateScopeAccess } from './aulaViva/scopeAccess.mjs';
+import { evaluateScopeAccess, requireScopeAccess } from './aulaViva/scopeAccess.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 
@@ -1513,8 +1514,9 @@ app.delete('/api/bundles/:id', requireAuth, async (req, res) => {
 // organización + contexto; NUNCA autorización (el preflight
 // /api/content/:id/access sigue siendo la única autoridad de acceso) y NUNCA
 // copia de Book (library_db solo guarda punteros bookId al catálogo canónico).
-// Escrituras INSTITUTIONAL/PERSONAL: IMPLEMENTATION-BLOCKED hasta M1-A
-// enforce + M1-B (no existen rutas — no abrir con workarounds).
+// Escrituras INSTITUTIONAL/PERSONAL: implementadas en 11B-2 más abajo, con la
+// dependencia M1-A resuelta POR RUTA (guard de sesión firmada) y la
+// autorización institucional delegada al CIS. Siguen sin desplegarse.
 
 async function mutateLibrary(fn) {
     return withFileLock(LIBRARY_DB, () => {
@@ -1600,6 +1602,282 @@ app.delete('/api/library/editorial/references/:id', requireAdminAccess, async (r
     res.json({ ok: true });
 });
 // --- END CHP-LIB-01 --------------------------------------------------------
+
+// --- CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-2: capas INSTITUTIONAL y PERSONAL -
+// Contrato: docs/adr/CHP_ADR_BIBLIOTECA.md (fórmula de visibilidad congelada).
+//
+//   visible = reference ∩ entitlement ∩ membership/role ∩ publication_state
+//
+// Reparto de autoridades, SIN duplicarlas:
+//   reference/publication_state → libraryStore.computeLayerView (dominio puro);
+//   entitlement                 → accessService (getAccessibleContentIds), la
+//                                 MISMA fuente que /api/content/my-catalog;
+//   membership/role             → CIS (evaluateScopeAccess/requireScopeAccess),
+//                                 el mismo sistema de scopes de Aula Viva.
+//
+// Invariante dura: una referencia de Biblioteca JAMÁS concede acceso. Crear,
+// mover o conservar una referencia no escribe en access_db ni cambia lo que
+// /api/content/:id/access responde; la vista solo INTERSECTA contra lo que el
+// access engine ya autoriza, y lo no autorizado queda fuera de la vista.
+//
+// Contexto SIEMPRE del servidor: institucional = req.user.organizationId (sin
+// derivación por nombre de colegio — CHP-ID-GROUPS-RECON-01B); personal =
+// req.user.id. Ningún contextId llega por query, body, header ni ruta.
+//
+// FRONTERA DE DESPLIEGUE (ADR §7): estas rutas no deben quedar vivas en
+// producción hasta que la unidad de deploy correspondiente lo autorice. El
+// guard `requireLibraryActor` ya exige sesión firmada en compat/enforce, que
+// es la dependencia M1-A de la capa PERSONAL.
+
+const requireLibraryActor = createLibraryActorAuth({
+    sessionEnabled: () => sessionIssuanceEnabled(),
+    authenticate: (req) => sessionAuth.authenticate(req),
+    onFailure: (reason) => { try { authSessionFailure.labels(reason).inc(); } catch { /* noop */ } },
+});
+
+/**
+ * Catálogo EFECTIVO de un usuario. Única autoridad de entitlement:
+ * accessService (getAccessibleContentIds → resolveUserContentAccess) más el
+ * predicate pedagógico de CHP-ACCESS-PEDAGOGY-01D-B. No replica reglas ni las
+ * reinterpreta: es el cuerpo que /api/content/my-catalog ya usaba, extraído
+ * para que Biblioteca intersecte contra EXACTAMENTE lo mismo.
+ */
+function visibleCatalogForUser(user, contentList) {
+    const { titleIds, collectionIds } = getAccessibleContentIds(user.id);
+    const seesPedagogy = pedagogyRolesOf(user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
+    return contentList.filter(item =>
+        (titleIds.includes(item.id) ||
+            (item.collectionId && collectionIds.includes(item.collectionId))) &&
+        (seesPedagogy || !isPedagogyRestrictedItem(item))
+    );
+}
+
+/** El mismo conjunto, como Set de ids, para intersectar la vista de una capa. */
+const visibleBookIdsForUser = (user, contentList) =>
+    new Set(visibleCatalogForUser(user, contentList).map(item => item.id));
+
+/**
+ * Contexto institucional para una ESCRITURA. Devuelve el organizationId de la
+ * sesión o null habiendo respondido ya (403/401/503). El administrador NO
+ * recibe bypass de tenant: opera sobre su propia organización o sobre ninguna.
+ */
+function institutionalWriteContext(req, res) {
+    const orgId = institutionalContextIdOf(req.user);
+    if (!orgId) {
+        res.status(403).json({ ok: false, error: 'organization_required' });
+        return null;
+    }
+    // Mismo sistema de scopes institucionales que Aula Viva/Leo (CIS).
+    if (!requireScopeAccess('organization', orgId, req, res)) return null;
+    return orgId;
+}
+
+/** ¿El actor puede CURAR esta organización? (decide ver borradores, no acceso.) */
+const canCurateOrganization = (userId, orgId) =>
+    evaluateScopeAccess(userId, 'organization', orgId).decision === 'allow';
+
+const emptyLayerView = (layer) => ({ layer, collections: [], unassigned: [] });
+
+// --- INSTITUTIONAL ---------------------------------------------------------
+
+// Vista institucional del usuario autenticado. Un usuario sin organizationId
+// no recibe biblioteca institucional alguna (y la respuesta no revela que
+// existan otras organizaciones).
+app.get('/api/library/institutional', requireLibraryActor, requireUserAuth, (req, res) => {
+    try {
+        const orgId = institutionalContextIdOf(req.user);
+        if (!orgId) return res.json(emptyLayerView('INSTITUTIONAL'));
+        const contentList = readJSON(DB_FILE);
+        const doc = libraryStore.normalizeLibrary(readJSON(LIBRARY_DB));
+        return res.json(libraryStore.computeLayerView(doc, contentList, {
+            layer: 'INSTITUTIONAL',
+            contextId: orgId,
+            includeUnpublished: canCurateOrganization(req.user.id, orgId),
+            visibleBookIds: visibleBookIdsForUser(req.user, contentList),
+        }));
+    } catch (e) {
+        log(`[LIBRARY] institutional view error: ${e.message}`, 'ERROR');
+        return res.status(500).json({ error: 'No se pudo leer la biblioteca' });
+    }
+});
+
+app.post('/api/library/institutional/collections', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const orgId = institutionalWriteContext(req, res);
+    if (!orgId) return undefined;
+    try {
+        let created;
+        await mutateLibrary((doc) => {
+            created = libraryStore.addCollection(doc, {
+                layer: 'INSTITUTIONAL', contextId: orgId,
+                name: req.body?.name, description: req.body?.description,
+            });
+        });
+        log(`[LIBRARY] institutional collection created: ${created.id}`);
+        return res.status(201).json(created);
+    } catch (e) {
+        return res.status(e.code === 'INVALID_NAME' ? 400 : 500).json({ error: e.message });
+    }
+});
+
+app.put('/api/library/institutional/collections/:id', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const orgId = institutionalWriteContext(req, res);
+    if (!orgId) return undefined;
+    let updated;
+    await mutateLibrary((doc) => {
+        // Scope ANTES de tocar el store: una colección de otra organización es
+        // indistinguible de inexistente.
+        if (!libraryStore.findScopedCollection(doc, req.params.id, { layer: 'INSTITUTIONAL', contextId: orgId })) {
+            return { conflict: 'not_found' };
+        }
+        updated = libraryStore.updateCollection(doc, req.params.id, req.body ?? {});
+        return undefined;
+    });
+    if (!updated) return res.status(404).json({ error: 'Colección no encontrada' });
+    log(`[LIBRARY] institutional collection updated: ${updated.id}`);
+    return res.json(updated);
+});
+
+app.post('/api/library/institutional/references', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const orgId = institutionalWriteContext(req, res);
+    if (!orgId) return undefined;
+    try {
+        const contentList = readJSON(DB_FILE);
+        const requestedCollectionId = req.body?.collectionId ?? null;
+        let out;
+        const conflict = await mutateLibrary((doc) => {
+            if (requestedCollectionId != null
+                && !libraryStore.findScopedCollection(doc, requestedCollectionId, { layer: 'INSTITUTIONAL', contextId: orgId })) {
+                return { conflict: 'collection_not_found' };
+            }
+            out = libraryStore.addReference(
+                doc,
+                {
+                    bookId: req.body?.bookId, layer: 'INSTITUTIONAL', contextId: orgId,
+                    collectionId: requestedCollectionId, position: req.body?.position,
+                },
+                (id) => contentList.some(c => c.id === id)
+            );
+            return undefined;
+        });
+        if (conflict) return res.status(404).json({ error: 'Colección no encontrada' });
+        // La referencia NO concede acceso: no se escribe ninguna regla.
+        log(`[LIBRARY] institutional reference ${out.created ? 'created' : 'idempotent'}: ${out.reference.id}`);
+        return res.status(out.created ? 201 : 200).json(out);
+    } catch (e) {
+        const status = e.code === 'BOOK_NOT_FOUND' || e.code === 'COLLECTION_NOT_FOUND' ? 404
+            : e.code === 'INVALID_BOOK_ID' || e.code === 'INVALID_LAYER' ? 400 : 500;
+        return res.status(status).json({ error: e.message });
+    }
+});
+
+app.put('/api/library/institutional/references/:id', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const orgId = institutionalWriteContext(req, res);
+    if (!orgId) return undefined;
+    let ref;
+    await mutateLibrary((doc) => {
+        if (!libraryStore.findScopedReference(doc, req.params.id, { layer: 'INSTITUTIONAL', contextId: orgId })) {
+            return { conflict: 'not_found' };
+        }
+        ref = libraryStore.reorderReference(doc, req.params.id, req.body?.position);
+        return undefined;
+    });
+    if (!ref) return res.status(404).json({ error: 'Referencia no encontrada' });
+    return res.json(ref);
+});
+
+app.delete('/api/library/institutional/references/:id', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const orgId = institutionalWriteContext(req, res);
+    if (!orgId) return undefined;
+    const conflict = await mutateLibrary((doc) => {
+        if (!libraryStore.findScopedReference(doc, req.params.id, { layer: 'INSTITUTIONAL', contextId: orgId })) {
+            return { conflict: 'not_found' };
+        }
+        libraryStore.removeReference(doc, req.params.id);
+        return undefined;
+    });
+    if (conflict) return res.status(404).json({ error: 'Referencia no encontrada' });
+    log(`[LIBRARY] institutional reference removed: ${req.params.id}`);
+    return res.json({ ok: true });
+});
+
+// --- PERSONAL --------------------------------------------------------------
+// Contexto = sujeto de la sesión, siempre. No existe ninguna ruta que acepte
+// un userId ajeno, ni por parámetro ni por cuerpo. PERSONAL no tiene
+// colecciones en el MVP (ADR §3.3): `collectionId` se fuerza a null.
+
+app.get('/api/library/personal', requireLibraryActor, requireUserAuth, (req, res) => {
+    try {
+        const contentList = readJSON(DB_FILE);
+        const doc = libraryStore.normalizeLibrary(readJSON(LIBRARY_DB));
+        return res.json(libraryStore.computeLayerView(doc, contentList, {
+            layer: 'PERSONAL',
+            contextId: personalContextIdOf(req.user),
+            visibleBookIds: visibleBookIdsForUser(req.user, contentList),
+        }));
+    } catch (e) {
+        log(`[LIBRARY] personal view error: ${e.message}`, 'ERROR');
+        return res.status(500).json({ error: 'No se pudo leer la biblioteca' });
+    }
+});
+
+app.post('/api/library/personal/references', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const userContextId = personalContextIdOf(req.user);
+    try {
+        const contentList = readJSON(DB_FILE);
+        const bookId = req.body?.bookId;
+        // "Mi curaduría sobre contenidos a los que tengo derecho": el añadido
+        // exige entitlement VIGENTE. No lo crea ni lo prolonga — si mañana
+        // expira, la referencia queda inerte y el libro sale de la vista.
+        if (typeof bookId === 'string' && bookId
+            && contentList.some(c => c.id === bookId)
+            && !visibleBookIdsForUser(req.user, contentList).has(bookId)) {
+            return res.status(403).json({ ok: false, error: 'content_not_available' });
+        }
+        let out;
+        await mutateLibrary((doc) => {
+            out = libraryStore.addReference(
+                doc,
+                { bookId, layer: 'PERSONAL', contextId: userContextId, collectionId: null, position: req.body?.position },
+                (id) => contentList.some(c => c.id === id)
+            );
+        });
+        log(`[LIBRARY] personal reference ${out.created ? 'created' : 'idempotent'}: ${out.reference.id}`);
+        return res.status(out.created ? 201 : 200).json(out);
+    } catch (e) {
+        const status = e.code === 'BOOK_NOT_FOUND' ? 404
+            : e.code === 'INVALID_BOOK_ID' || e.code === 'INVALID_LAYER' ? 400 : 500;
+        return res.status(status).json({ error: e.message });
+    }
+});
+
+app.put('/api/library/personal/references/:id', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const userContextId = personalContextIdOf(req.user);
+    let ref;
+    await mutateLibrary((doc) => {
+        if (!libraryStore.findScopedReference(doc, req.params.id, { layer: 'PERSONAL', contextId: userContextId })) {
+            return { conflict: 'not_found' };
+        }
+        ref = libraryStore.reorderReference(doc, req.params.id, req.body?.position);
+        return undefined;
+    });
+    if (!ref) return res.status(404).json({ error: 'Referencia no encontrada' });
+    return res.json(ref);
+});
+
+app.delete('/api/library/personal/references/:id', requireLibraryActor, requireUserAuth, async (req, res) => {
+    const userContextId = personalContextIdOf(req.user);
+    const conflict = await mutateLibrary((doc) => {
+        if (!libraryStore.findScopedReference(doc, req.params.id, { layer: 'PERSONAL', contextId: userContextId })) {
+            return { conflict: 'not_found' };
+        }
+        libraryStore.removeReference(doc, req.params.id);
+        return undefined;
+    });
+    if (conflict) return res.status(404).json({ error: 'Referencia no encontrada' });
+    log(`[LIBRARY] personal reference removed: ${req.params.id}`);
+    return res.json({ ok: true });
+});
+// --- END CHP-V6-LIBRARY-INSTITUTIONAL-01 11B-2 -----------------------------
 
 // --- CHP-MOOK-01: EXPERIENCIAS (vertical slice del piloto) -----------------
 // Contrato: docs/adr/CHP_ADR_MOOK.md + docs/product/CHP_MOOK_PILOT_DESIGN_00.md.
@@ -9721,19 +9999,14 @@ app.post('/api/auth/logout-all', requireUserAuth, async (req, res) => {
 // LU no reimplementa lógica de permisos: consulta este endpoint.
 app.get('/api/content/my-catalog', requireUserAuth, (req, res) => {
     try {
-        const userId = req.user.id;
-        const { titleIds, collectionIds } = getAccessibleContentIds(userId);
-        const allContent = readJSON(DB_FILE);
-
         // CHP-ACCESS-PEDAGOGY-01D-B: mismo predicate que /api/content. Una regla
         // explícita no convierte a un lector en destinatario de material
         // pedagógico independiente; el preflight lo denegaría igualmente.
-        const seesPedagogy = pedagogyRolesOf(req.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
-        const catalog = allContent.filter(item =>
-            (titleIds.includes(item.id) ||
-                (item.collectionId && collectionIds.includes(item.collectionId))) &&
-            (seesPedagogy || !isPedagogyRestrictedItem(item))
-        );
+        // CHP-V6-LIBRARY-INSTITUTIONAL-01 (11B-2): ese predicate vive ahora en
+        // visibleCatalogForUser — UNA sola definición, compartida con las capas
+        // INSTITUTIONAL/PERSONAL de Biblioteca, que intersectan exactamente
+        // contra el mismo conjunto (sin replicar la regla de acceso).
+        const catalog = visibleCatalogForUser(req.user, readJSON(DB_FILE));
 
         res.json({
             success: true,
