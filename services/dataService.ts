@@ -64,6 +64,20 @@ import {
     parseMyCatalogResponse,
     hydrateVisibleContent,
 } from '../utils/libraryCatalogSelection.mjs';
+// CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — capas INSTITUTIONAL y PERSONAL.
+// Los payloads viven en el módulo puro: es ahí donde se demuestra que el
+// cliente no envía identidad ni contexto.
+import {
+    LIBRARY_PATHS,
+    parseLayerView,
+    presentCollection,
+    presentReference,
+    personalReferencePayload,
+    institutionalReferencePayload,
+    institutionalCollectionPayload,
+    institutionalCollectionPatch,
+    referencePositionPayload,
+} from '../utils/libraryLayers.mjs';
 // Sprint visibilidad — capa narrativa: shape de la respuesta del endpoint
 // GET /api/groups/:id/diagnosis. Lo importamos solo para que el método del
 // dataService devuelva un tipo público al consumidor (UI).
@@ -4979,6 +4993,132 @@ class DataService {
             console.error('Error fetching editorial library:', e);
             return { layer: 'EDITORIAL', collections: [], unassigned: [] };
         }
+    }
+
+    // ── CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3: capas INSTITUTIONAL y PERSONAL ──
+    //
+    // Cliente mínimo sobre las rutas de 11B-2. Tres reglas, sin excepciones:
+    //
+    //   1. Ninguna función acepta userId, contextId, organizationId, groupId ni
+    //      roles. La identidad y el contexto los deriva el servidor de la sesión
+    //      firmada; el navegador solo manda su cookie (`credentials: 'include'`).
+    //   2. Las lecturas son FAIL-CLOSED: `null` significa «no se pudo determinar
+    //      la vista». El llamador muestra ERROR, nunca EMPTY y nunca otra fuente.
+    //   3. Las escrituras devuelven el resultado REAL del servidor, incluido el
+    //      status, para que la UI no presuma éxito ante un 403.
+
+    private async readLayerView(pathname: string, layer: 'INSTITUTIONAL' | 'PERSONAL') {
+        try {
+            const res = await fetch(`${this.apiUrl}${pathname}`, { credentials: 'include' });
+            if (!res.ok) return null;
+            return parseLayerView(await res.json(), layer);
+        } catch (e) {
+            console.error(`Error fetching ${layer.toLowerCase()} library:`, e);
+            return null;
+        }
+    }
+
+    private async writeLibrary(pathname: string, method: 'POST' | 'PUT' | 'DELETE', payload?: object) {
+        try {
+            const res = await fetch(`${this.apiUrl}${pathname}`, {
+                method,
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: payload === undefined ? undefined : JSON.stringify(payload),
+            });
+            let body: any = null;
+            try { body = await res.json(); } catch { body = null; }
+            if (!res.ok) return { ok: false as const, status: res.status, body };
+            return { ok: true as const, status: res.status, body };
+        } catch (e) {
+            console.error('Library write failed:', e);
+            return { ok: false as const, status: 0, body: null };
+        }
+    }
+
+    /** Vista institucional del usuario. `null` = no determinable (fail-closed). */
+    async getInstitutionalLibrary() {
+        return this.readLayerView(LIBRARY_PATHS.institutional, 'INSTITUTIONAL');
+    }
+
+    /** Vista personal del usuario. `null` = no determinable (fail-closed). */
+    async getPersonalLibrary() {
+        return this.readLayerView(LIBRARY_PATHS.personal, 'PERSONAL');
+    }
+
+    /**
+     * Guarda un libro en Mi biblioteca. El servidor exige entitlement vigente:
+     * un 403 `content_not_available` es la respuesta correcta, no un fallo del
+     * cliente. `created:false` significa «ya estaba guardado» — no es error.
+     */
+    async addPersonalReference(bookId: string) {
+        const r = await this.writeLibrary(LIBRARY_PATHS.personalReferences, 'POST', personalReferencePayload(bookId));
+        if (!r.ok) return { ok: false as const, status: r.status, body: r.body };
+        return {
+            ok: true as const,
+            status: r.status,
+            created: r.body?.created === true,
+            reference: presentReference(r.body?.reference),
+        };
+    }
+
+    async updatePersonalReference(referenceId: string, position: number) {
+        return this.writeLibrary(
+            `${LIBRARY_PATHS.personalReferences}/${encodeURIComponent(referenceId)}`,
+            'PUT', referencePositionPayload(position));
+    }
+
+    /**
+     * Quita un libro de Mi biblioteca. NO borra el contenido, NO toca el acceso,
+     * NO borra progreso y NO afecta a Descargados: solo retira la referencia.
+     */
+    async deletePersonalReference(referenceId: string) {
+        return this.writeLibrary(
+            `${LIBRARY_PATHS.personalReferences}/${encodeURIComponent(referenceId)}`, 'DELETE');
+    }
+
+    async createInstitutionalCollection(name: string, description = '') {
+        const r = await this.writeLibrary(
+            LIBRARY_PATHS.institutionalCollections, 'POST', institutionalCollectionPayload(name, description));
+        if (!r.ok) return { ok: false as const, status: r.status, body: r.body };
+        return { ok: true as const, status: r.status, collection: presentCollection(r.body) };
+    }
+
+    async updateInstitutionalCollection(collectionId: string, patch: { name?: string; description?: string; published?: boolean }) {
+        const r = await this.writeLibrary(
+            `${LIBRARY_PATHS.institutionalCollections}/${encodeURIComponent(collectionId)}`,
+            'PUT', institutionalCollectionPatch(patch));
+        if (!r.ok) return { ok: false as const, status: r.status, body: r.body };
+        return { ok: true as const, status: r.status, collection: presentCollection(r.body) };
+    }
+
+    /**
+     * Añade un libro a la curaduría institucional. Recordatorio del contrato:
+     * esto NO concede acceso a nadie. Un lector de la misma organización solo
+     * verá el libro si su propio entitlement ya lo autoriza.
+     */
+    async addInstitutionalReference(bookId: string, collectionId: string | null = null) {
+        const r = await this.writeLibrary(
+            LIBRARY_PATHS.institutionalReferences, 'POST', institutionalReferencePayload(bookId, collectionId));
+        if (!r.ok) return { ok: false as const, status: r.status, body: r.body };
+        return {
+            ok: true as const,
+            status: r.status,
+            created: r.body?.created === true,
+            reference: presentReference(r.body?.reference),
+        };
+    }
+
+    async updateInstitutionalReference(referenceId: string, position: number) {
+        return this.writeLibrary(
+            `${LIBRARY_PATHS.institutionalReferences}/${encodeURIComponent(referenceId)}`,
+            'PUT', referencePositionPayload(position));
+    }
+
+    /** Retira la referencia institucional. No borra el libro ni su regla de acceso. */
+    async deleteInstitutionalReference(referenceId: string) {
+        return this.writeLibrary(
+            `${LIBRARY_PATHS.institutionalReferences}/${encodeURIComponent(referenceId)}`, 'DELETE');
     }
 
     // --- CHP-MOOK-01: EXPERIENCIAS (actor = sesión; MOOK no concede acceso) ---

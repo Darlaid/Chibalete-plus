@@ -6,7 +6,7 @@ import { useOffline } from '../context/OfflineContext';
 import ContentCard from '../components/ContentCard';
 import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, CommunityPost } from '../types';
-import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter, Lock } from 'lucide-react';
+import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter, Lock, BookmarkCheck, BookmarkPlus } from 'lucide-react';
 import { useAccessCheck } from '../hooks/useAccessCheck';
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-1 — derivaciones de PRESENTACIÓN sobre
 // el conjunto que autoriza el servidor. Ninguna decide entitlement.
@@ -15,6 +15,18 @@ import {
     deriveRecommendedFromVisible,
     gateProgressByVisible,
 } from '../utils/libraryCatalogSelection.mjs';
+// CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — capas INSTITUTIONAL y PERSONAL.
+// Ambas pestañas dibujan EXACTAMENTE la vista que devuelve el servidor: la
+// intersección `curaduría ∩ entitlement` ya viene resuelta (11B-2) y el
+// navegador no la vuelve a cruzar con roles, grupos ni organización.
+import PersonalLibraryTab from '../components/library/PersonalLibraryTab';
+import InstitutionalLibraryTab from '../components/library/InstitutionalLibraryTab';
+import {
+    savedReferenceIdByBookId,
+    viewWithoutReference,
+    mayPresentInstitutionalManagement,
+    libraryErrorText,
+} from '../utils/libraryLayers.mjs';
 
 // CHP-LIB-01 — card de la capa Editorial. El candado refleja el resultado del
 // preflight canónico /api/content/:id/access (Biblioteca no decide acceso);
@@ -32,6 +44,45 @@ const EditorialBookCard: React.FC<{ book: Content; userId?: string }> = ({ book,
                 >
                     <Lock size={14} />
                 </div>
+            )}
+        </div>
+    );
+};
+
+// CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 §8 — acción discreta sobre la tarjeta
+// de la pestaña Libros. `savedMap` es estado DERIVADO de la última respuesta de
+// GET /api/library/personal, no un segundo store: cuando vale `null` (la vista
+// personal no se pudo determinar) el botón NO se dibuja, en vez de adivinar si
+// el libro está guardado. Guardar tampoco concede acceso: el servidor exige
+// entitlement vigente y responde 403 si no lo hay.
+const SavableCard: React.FC<{
+    book: Content;
+    progress?: number;
+    savedMap: Map<string, string> | null;
+    onSave: (bookId: string) => void;
+    onRemove: (referenceId: string) => void;
+    busy: boolean;
+}> = ({ book, progress, savedMap, onSave, onRemove, busy }) => {
+    const savedRefId = savedMap ? savedMap.get(book.id) : undefined;
+    return (
+        <div className="relative">
+            <ContentCard content={book} progress={progress} />
+            {savedMap && (
+                <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => (savedRefId ? onRemove(savedRefId) : onSave(book.id))}
+                    title={savedRefId ? 'Quitar de Mi biblioteca' : 'Guardar en Mi biblioteca'}
+                    aria-label={savedRefId
+                        ? `Quitar ${book.titulo} de Mi biblioteca`
+                        : `Guardar ${book.titulo} en Mi biblioteca`}
+                    aria-pressed={!!savedRefId}
+                    className={`absolute top-2 right-2 rounded-full p-2 shadow-md transition-colors disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-white ${savedRefId
+                        ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                        : 'bg-gray-900/70 text-white hover:bg-gray-900'}`}
+                >
+                    {savedRefId ? <BookmarkCheck size={14} /> : <BookmarkPlus size={14} />}
+                </button>
             )}
         </div>
     );
@@ -78,6 +129,65 @@ const Biblioteca: React.FC = () => {
         }
     }, [activeTab, user, editorial]);
 
+    // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — estado de las dos capas nuevas.
+    // LOADING, EMPTY y ERROR son estados distintos (§24): `view === null` tras una
+    // lectura significa «no se pudo determinar», y se muestra ERROR, nunca EMPTY
+    // ni un catálogo alternativo (§23, fail closed).
+    type LayerState = { status: 'idle' | 'loading' | 'ready' | 'error'; view: any | null };
+    const [personal, setPersonal] = useState<LayerState>({ status: 'idle', view: null });
+    const [institutional, setInstitutional] = useState<LayerState>({ status: 'idle', view: null });
+    const [libraryNotice, setLibraryNotice] = useState<string | null>(null);
+    const [busyBookId, setBusyBookId] = useState<string | null>(null);
+
+    const loadPersonal = React.useCallback(async () => {
+        setPersonal(prev => ({ ...prev, status: 'loading' }));
+        const view = await dataService.getPersonalLibrary();
+        setPersonal({ status: view === null ? 'error' : 'ready', view });
+    }, []);
+
+    const loadInstitutional = React.useCallback(async () => {
+        setInstitutional(prev => ({ ...prev, status: 'loading' }));
+        const view = await dataService.getInstitutionalLibrary();
+        setInstitutional({ status: view === null ? 'error' : 'ready', view });
+    }, []);
+
+    // La capa personal se carga junto con la pestaña Libros porque la acción
+    // «Guardar» necesita saber qué está ya guardado. La institucional es perezosa.
+    useEffect(() => { if (user && accessReady) loadPersonal(); }, [user, accessReady, loadPersonal]);
+    useEffect(() => {
+        if (activeTab === 'institucional' && user && institutional.status === 'idle') loadInstitutional();
+    }, [activeTab, user, institutional.status, loadInstitutional]);
+
+    const savedMap = personal.status === 'ready' && personal.view
+        ? savedReferenceIdByBookId(personal.view)
+        : null;
+
+    const handleSavePersonal = async (bookId: string) => {
+        setBusyBookId(bookId);
+        setLibraryNotice(null);
+        const r = await dataService.addPersonalReference(bookId);
+        // `created:false` = ya estaba guardado. No es un error (§8, PUI4).
+        if (!r.ok) setLibraryNotice(libraryErrorText(r.status, r.body));
+        else await loadPersonal();
+        setBusyBookId(null);
+    };
+
+    const handleRemovePersonal = async (referenceId: string) => {
+        setLibraryNotice(null);
+        const r = await dataService.deletePersonalReference(referenceId);
+        if (!r.ok) { setLibraryNotice(libraryErrorText(r.status, r.body)); return; }
+        setPersonal(prev => ({ ...prev, view: viewWithoutReference(prev.view, referenceId) }));
+    };
+
+    // Gestión institucional. El control puede estar visible y el servidor decir
+    // 403: la UI muestra ese error, nunca presume éxito (§15, IUI6).
+    const institutionalAction = async (run: () => Promise<{ ok: boolean; status: number; body?: any }>) => {
+        setLibraryNotice(null);
+        const r = await run();
+        if (!r.ok) { setLibraryNotice(libraryErrorText(r.status, r.body)); return; }
+        await loadInstitutional();
+    };
+
     // CHP-MOOK-V4 — Biblioteca es la entrada de producto a Experiencias
     const [experiencias, setExperiencias] = useState<any[] | null>(null);
     useEffect(() => {
@@ -122,6 +232,9 @@ const Biblioteca: React.FC = () => {
     const handleTabChange = (tab: string) => {
         setActiveTab(tab);
         setCurrentPage(1);
+        // El aviso pertenece a la acción que lo provocó, no a la pestaña
+        // siguiente: cambiar de pestaña no debe arrastrar un error ajeno.
+        setLibraryNotice(null);
     };
 
     const TabButton: React.FC<{ tab: string, label: string, highlight?: boolean }> = ({ tab, label, highlight }) => (
@@ -136,6 +249,19 @@ const Biblioteca: React.FC = () => {
         >
             {label}
         </button>
+    );
+
+    // La acción «Guardar en Mi biblioteca» solo se ofrece en la pestaña Libros.
+    const renderSavable = (content: Content, progress?: number) => (
+        <SavableCard
+            key={content.id}
+            book={content}
+            progress={progress}
+            savedMap={savedMap}
+            onSave={handleSavePersonal}
+            onRemove={handleRemovePersonal}
+            busy={busyBookId === content.id}
+        />
     );
 
     const renderContent = () => {
@@ -226,6 +352,43 @@ const Biblioteca: React.FC = () => {
                         </div>
                     )}
                 </div>
+            );
+        }
+
+        // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — Mi biblioteca (capa PERSONAL).
+        if (activeTab === 'personal') {
+            return (
+                <PersonalLibraryTab
+                    state={personal}
+                    onRemove={handleRemovePersonal}
+                    onExplore={() => handleTabChange('biblioteca')}
+                    onRetry={loadPersonal}
+                    actionMessage={libraryNotice}
+                />
+            );
+        }
+
+        // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — Biblioteca institucional.
+        // `catalog` es el conjunto autorizado del PROPIO actor (my-catalog): el
+        // mediador no puede ni ofrecerse a curar algo fuera de su entitlement.
+        if (activeTab === 'institucional') {
+            return (
+                <InstitutionalLibraryTab
+                    state={institutional}
+                    canManage={mayPresentInstitutionalManagement(user)}
+                    catalog={miBiblioteca
+                        .filter(c => c && c.id && !schoolConfig.hiddenContentIds.includes(c.id) && (c as any).standalone !== false)
+                        .map(c => ({ id: c.id, titulo: c.titulo }))}
+                    actionMessage={libraryNotice}
+                    onRetry={loadInstitutional}
+                    onCreateCollection={(name) => institutionalAction(() => dataService.createInstitutionalCollection(name))}
+                    onTogglePublished={(collectionId, published) =>
+                        institutionalAction(() => dataService.updateInstitutionalCollection(collectionId, { published }))}
+                    onAddReference={(bookId, collectionId) =>
+                        institutionalAction(() => dataService.addInstitutionalReference(bookId, collectionId))}
+                    onRemoveReference={(referenceId) =>
+                        institutionalAction(() => dataService.deleteInstitutionalReference(referenceId))}
+                />
             );
         }
 
@@ -395,9 +558,7 @@ const Biblioteca: React.FC = () => {
                                     )}
                                 </div>
                                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
-                                    {secContent.map(content => (
-                                        <ContentCard key={content.id} content={content} />
-                                    ))}
+                                    {secContent.map(content => renderSavable(content))}
                                 </div>
                             </div>
                         );
@@ -413,9 +574,7 @@ const Biblioteca: React.FC = () => {
                             <div>
                                 <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200 mb-4">General</h3>
                                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
-                                    {others.map(content => (
-                                        <ContentCard key={content.id} content={content} />
-                                    ))}
+                                    {others.map(content => renderSavable(content))}
                                 </div>
                             </div>
                         );
@@ -431,7 +590,9 @@ const Biblioteca: React.FC = () => {
                     {displayedItems.map(item => {
                         const content = 'content' in item ? (item as any).content : item;
                         const progress = 'progress' in item ? (item as any).progress : undefined;
-                        return <ContentCard key={content.id} content={content} progress={progress?.porcentaje} />;
+                        return activeTab === 'biblioteca'
+                            ? renderSavable(content, progress?.porcentaje)
+                            : <ContentCard key={content.id} content={content} progress={progress?.porcentaje} />;
                     })}
                 </div>
 
@@ -489,6 +650,8 @@ const Biblioteca: React.FC = () => {
             <div className="flex space-x-3 overflow-x-auto pb-4 scrollbar-hide">
                 <TabButton tab="biblioteca" label="Libros" />
                 <TabButton tab="experiencias" label="Experiencias" highlight={true} />
+                <TabButton tab="personal" label="Mi biblioteca" />
+                <TabButton tab="institucional" label="Biblioteca institucional" />
                 <TabButton tab="editorial" label="Selección Chibalete" />
                 <TabButton tab="album" label="Libros Álbum" />
                 <TabButton tab="lectura" label="Continuar Leyendo" />
