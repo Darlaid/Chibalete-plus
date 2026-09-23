@@ -39,7 +39,9 @@ import * as intervention from '../services/interventionEngine.mjs';
 import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 // CHP-AULA-VIVA-MOOK-INTEGRATION-01A — autorización de scope vigente (CIS).
-import { requireScopeAccess } from './scopeAccess.mjs';
+import { requireScopeAccess, evaluateScopeAccess } from './scopeAccess.mjs';
+// CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01 — rol del principal, del CIS.
+import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import {
     dashboardViewsTotal, recommendationAcceptTotal, recommendationDismissTotal,
     interventionClosedTotal, uiDegradedModeTotal, emptyStateRenderTotal,
@@ -108,6 +110,108 @@ function safeJson(res, fn, fallbackBody = null) {
     }
 }
 
+// ── CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01 ────────────────────────────
+// Hasta esta unidad solo `/students/:userId/timeline` comprobaba alcance: el
+// resto del router exigía únicamente sesión, así que un mediador (y por código
+// también un lector) leía cohortes, vectores de rasgos o recomendaciones de
+// OTRA institución, y podía mutarlas. Contrato:
+//   - Aula Viva operacional NO es superficie de lector: solo mediador o
+//     administrador de plataforma (rol resuelto por el CIS, nunca por el cliente);
+//   - cada ruta con sujeto/grupo/scope lo autoriza el CIS (`requireScopeAccess`
+//     / `evaluateScopeAccess`) ANTES de leer o mutar;
+//   - agregados globales sin consumidor (resumen de recomendaciones, job ledger)
+//     quedan para el administrador;
+//   - identidad indisponible → 503, jamás allow ni deny silencioso.
+// Sin autoridad nueva: rol y alcance salen del mismo CIS que usa /timeline.
+
+const callerIdOf = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+
+/** Rol operacional del principal: 'admin' | 'mediator'; null si ya respondió. */
+function operationalRoleOf(req, res) {
+    let p;
+    try {
+        p = getPrincipal(String(callerIdOf(req) ?? ''));
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        res.status(503).json({ ok: false, error: 'identity_unavailable', cause: e.causeTag });
+        return null;
+    }
+    if (!p) { res.status(401).json({ ok: false, error: 'identity_not_established' }); return null; }
+    if (p.platformAdmin) return 'admin';
+    if (p.mediatorRole) return 'mediator';
+    res.status(403).json({ ok: false, error: 'operational_role_required' });
+    return null;
+}
+
+/** Middleware: mediador o administrador. Deja el rol en `req.aulaVivaRole`. */
+function requireOperationalRole(req, res, next) {
+    const role = operationalRoleOf(req, res);
+    if (!role) return undefined;
+    req.aulaVivaRole = role;
+    return next();
+}
+
+/** Middleware: solo administrador de plataforma. */
+function requireOperationalAdmin(req, res, next) {
+    const role = operationalRoleOf(req, res);
+    if (!role) return undefined;
+    if (role !== 'admin') return res.status(403).json({ ok: false, error: 'admin_required' });
+    req.aulaVivaRole = role;
+    return next();
+}
+
+/**
+ * Autoriza un scope DERIVADO del store (el de una recomendación o una
+ * intervención), no aportado por el cliente. A diferencia de
+ * `requireScopeAccess`, el 403 no devuelve el scope: sería revelar a quién
+ * pertenece un id ajeno. Un id inexistente se trata igual (sin oráculo),
+ * salvo para el administrador, que conserva el contrato previo.
+ */
+function allowDerivedScope(req, res, target) {
+    if (!target) {
+        if (req.aulaVivaRole === 'admin') return true;
+        res.status(403).json({ ok: false, error: 'scope_access_denied' });
+        return false;
+    }
+    const d = evaluateScopeAccess(callerIdOf(req), target.scope_type, target.scope_id);
+    if (d.decision === 'allow') return true;
+    if (d.decision === 'unavailable') {
+        res.status(503).json({ ok: false, error: 'identity_unavailable', cause: d.cause });
+        return false;
+    }
+    if (d.decision === 'unauthenticated') {
+        res.status(401).json({ ok: false, error: 'identity_not_established' });
+        return false;
+    }
+    res.status(403).json({ ok: false, error: 'scope_access_denied' });
+    return false;
+}
+
+/** Scope de una recomendación según el store, o null si no existe. */
+function recommendationScopeOf(recommendationId) {
+    return getPedagogyExtDb().prepare(
+        'SELECT scope_type, scope_id FROM pedagogical_recommendations WHERE recommendation_id = ?'
+    ).get(String(recommendationId)) ?? null;
+}
+
+/**
+ * Mismo conteo que `getActiveRecommendationsSummary` (acknowledged = 0 por
+ * severidad), restringido a los scopes que el CIS concede al principal.
+ */
+function scopedRecommendationsSummary(callerId) {
+    const rows = getPedagogyExtDb().prepare(
+        `SELECT scope_type, scope_id, severity, COUNT(*) AS n
+         FROM pedagogical_recommendations WHERE acknowledged = 0
+         GROUP BY scope_type, scope_id, severity`
+    ).all();
+    const summary = { critical: 0, high: 0, moderate: 0, info: 0 };
+    for (const r of rows) {
+        if (evaluateScopeAccess(callerId, r.scope_type, r.scope_id).decision !== 'allow') continue;
+        if (r.severity in summary) summary[r.severity] += r.n;
+    }
+    return summary;
+}
+
 /**
  * Crea el router. Se reciben los middleware de auth por inyección desde
  * server.js para evitar acoplamiento del módulo a los closures internos.
@@ -123,7 +227,7 @@ export function createOperationalRouter({ requireUserAuth }) {
     // alcance. Misma precedencia que scopeAccess.requireScopeAccess y reqUserId.
 
     // ── STUDENT scope ────────────────────────────────────────────────────
-    router.get('/students/:userId/timeline', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/timeline', requireUserAuth, requireOperationalRole, (req, res) => {
         // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el servidor decide los sujetos
         // visibles con la autorización vigente de Aula Viva (CIS): admin global,
         // mediador solo sobre miembros de sus grupos activos, lector solo sí
@@ -160,24 +264,28 @@ export function createOperationalRouter({ requireUserAuth }) {
         });
     });
 
-    router.get('/students/:userId/feature-vector', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/feature-vector', requireUserAuth, requireOperationalRole, (req, res) => {
+        if (!requireScopeAccess('user', req.params.userId, req, res)) return;
         safeJson(res, () => reader.getLatestFeatureVector(req.params.userId)
             ?? { user_id: req.params.userId, features: null, stale: true });
     });
 
-    router.get('/students/:userId/risk-history', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/risk-history', requireUserAuth, requireOperationalRole, (req, res) => {
+        if (!requireScopeAccess('user', req.params.userId, req, res)) return;
         const limit = Math.min(200, Number(req.query.limit) || 50);
         safeJson(res, () => reader.getRiskHistory(req.params.userId, { limit }), []);
     });
 
-    router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, (req, res) => {
+    router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, requireOperationalRole, (req, res) => {
+        if (!requireScopeAccess('user', req.params.userId, req, res)) return;
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
         safeJson(res, () => reader.getSignalTimeline('user', req.params.userId,
             req.params.signalId, sinceTs), []);
     });
 
     // ── RECOMMENDATIONS ──────────────────────────────────────────────────
-    router.get('/recommendations', requireUserAuth, (req, res) => {
+    // Resumen GLOBAL (todas las instituciones) y sin consumidor en la UI → admin.
+    router.get('/recommendations', requireUserAuth, requireOperationalAdmin, (req, res) => {
         const limit = Math.min(200, Number(req.query.limit) || 50);
         const severity = req.query.severity;  // critical|high|moderate|info
         safeJson(res, () => {
@@ -186,14 +294,17 @@ export function createOperationalRouter({ requireUserAuth }) {
         }, { summary: { critical: 0, high: 0, moderate: 0, info: 0 }, total: 0 });
     });
 
-    router.get('/recommendations/scope/:type/:id', requireUserAuth, (req, res) => {
+    router.get('/recommendations/scope/:type/:id', requireUserAuth, requireOperationalRole, (req, res) => {
+        if (!requireScopeAccess(req.params.type, req.params.id, req, res)) return;
         safeJson(res, () => reader.getRecommendations(req.params.type, req.params.id,
             { includeAcknowledged: req.query.includeAcknowledged === '1',
               limit: Math.min(200, Number(req.query.limit) || 50) }), []);
     });
 
-    router.post('/recommendations/:recId/ack', requireUserAuth, express.json(), (req, res) => {
+    router.post('/recommendations/:recId/ack', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
         try {
+            // El scope es el de la recomendación en el store, decidido ANTES de mutar.
+            if (!allowDerivedScope(req, res, recommendationScopeOf(req.params.recId))) return;
             const userId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const r = intervention.acknowledgeRecommendation({
                 recommendationId: req.params.recId,
@@ -216,8 +327,9 @@ export function createOperationalRouter({ requireUserAuth }) {
         }
     });
 
-    router.post('/recommendations/:recId/dismiss', requireUserAuth, express.json(), (req, res) => {
+    router.post('/recommendations/:recId/dismiss', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
         try {
+            if (!allowDerivedScope(req, res, recommendationScopeOf(req.params.recId))) return;
             const userId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const r = intervention.acknowledgeRecommendation({
                 recommendationId: req.params.recId,
@@ -241,13 +353,14 @@ export function createOperationalRouter({ requireUserAuth }) {
     });
 
     // ── INTERVENTIONS ────────────────────────────────────────────────────
-    router.post('/interventions', requireUserAuth, express.json(), (req, res) => {
+    router.post('/interventions', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
         try {
             const teacherId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const { studentId, interventionType, notes, recommendationOrigin } = req.body || {};
             if (!studentId || !interventionType) {
                 return res.status(400).json({ ok: false, error: 'studentId+interventionType required' });
             }
+            if (!requireScopeAccess('user', String(studentId), req, res)) return;
             const r = intervention.recordIntervention({
                 teacherId, studentId, interventionType,
                 notes: notes ?? null,
@@ -267,13 +380,18 @@ export function createOperationalRouter({ requireUserAuth }) {
         }
     });
 
-    router.patch('/interventions/:id/outcome', requireUserAuth, express.json(), (req, res) => {
+    router.patch('/interventions/:id/outcome', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
         try {
             const { outcome } = req.body || {};
             if (!['improved', 'no_change', 'worsened', 'pending'].includes(outcome)) {
                 return res.status(400).json({ ok: false, error: 'invalid_outcome' });
             }
             const db = getPedagogyExtDb();
+            // El sujeto es el alumno de la intervención, decidido ANTES de mutar.
+            const row = db.prepare(
+                'SELECT student_id FROM pedagogical_interventions WHERE intervention_id = ?'
+            ).get(req.params.id);
+            if (!allowDerivedScope(req, res, row ? { scope_type: 'user', scope_id: row.student_id } : null)) return;
             const upd = db.prepare(
                 `UPDATE pedagogical_interventions
                  SET outcome = ?, outcome_at = ?
@@ -289,7 +407,9 @@ export function createOperationalRouter({ requireUserAuth }) {
     });
 
     // ── COHORTS ──────────────────────────────────────────────────────────
-    router.get('/cohorts/:scope_type/:scope_id', requireUserAuth, (req, res) => {
+    router.get('/cohorts/:scope_type/:scope_id', requireUserAuth, requireOperationalRole, (req, res) => {
+        // Alcance ANTES del audit: una consulta denegada no deja rastro.
+        if (!requireScopeAccess(req.params.scope_type, req.params.scope_id, req, res)) return;
         instrument('aulaViva.cohort_comparison', () => {
             try { cohortRenderMs.observe(0); } catch {}
             try { dashboardViewsTotal.labels('cohort_comparison').inc(); } catch {}
@@ -308,7 +428,8 @@ export function createOperationalRouter({ requireUserAuth }) {
         });
     });
 
-    router.get('/cohorts/:scope_type/:scope_id/rollups', requireUserAuth, (req, res) => {
+    router.get('/cohorts/:scope_type/:scope_id/rollups', requireUserAuth, requireOperationalRole, (req, res) => {
+        if (!requireScopeAccess(req.params.scope_type, req.params.scope_id, req, res)) return;
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
         safeJson(res, () => ({
             daily:   reader.getDailyRollups(req.params.scope_type, req.params.scope_id, sinceTs),
@@ -318,9 +439,30 @@ export function createOperationalRouter({ requireUserAuth }) {
     });
 
     // ── ATTENTION QUEUE (corazón del panel docente §7) ───────────────────
-    router.get('/students-needing-attention', requireUserAuth, (req, res) => {
+    router.get('/students-needing-attention', requireUserAuth, requireOperationalRole, (req, res) => {
         try { dashboardViewsTotal.labels('attention_queue').inc(); } catch {}
+        // Mediador: solo sujetos que el CIS le concede (miembros de sus grupos
+        // activos). Administrador: la cola global de siempre. La deuda del
+        // filtro por riesgo (ATTENTION_ENDPOINT_RISK_ZERO) NO se toca aquí.
+        const callerId = callerIdOf(req);
+        let unavailable = null;
+        const inScope = (userId) => {
+            if (req.aulaVivaRole === 'admin') return true;
+            const d = evaluateScopeAccess(callerId, 'user', userId);
+            if (d.decision === 'unavailable') unavailable = d.cause ?? 'unavailable';
+            return d.decision === 'allow';
+        };
+        let queue = null;
+        try { queue = buildAttentionQueue(inScope); } catch { queue = null; }
+        if (unavailable) return res.status(503).json({ ok: false, error: 'identity_unavailable', cause: unavailable });
         safeJson(res, () => {
+            if (queue === null) throw new Error('engine_unavailable');
+            return queue;
+        }, []);
+    });
+
+    function buildAttentionQueue(inScope) {
+        {
             // Estrategia: profiles con abandono_risk >= 0.5 ordenados DESC,
             // luego recomendaciones críticas/altas activas (top severity).
             const insightsDb = getInsightsExtDb();
@@ -333,7 +475,7 @@ export function createOperationalRouter({ requireUserAuth }) {
             ).all();
             // Enriquecer con recomendaciones activas top
             const out = [];
-            for (const p of profiles) {
+            for (const p of profiles.filter(x => inScope(x.user_id))) {
                 const recs = reader.getRecommendations('user', p.user_id, { limit: 3 });
                 const topSev = recs[0]?.severity || null;
                 out.push({
@@ -354,19 +496,24 @@ export function createOperationalRouter({ requireUserAuth }) {
                 (sevRank[a.top_severity] ?? 4) - (sevRank[b.top_severity] ?? 4)
                 || b.abandono_risk - a.abandono_risk);
             return out.slice(0, 50);
-        }, []);
-    });
+        }
+    }
 
     // ── JOB LEDGER / OPERATIONAL STATUS ─────────────────────────────────
-    router.get('/job-ledger', requireUserAuth, (req, res) => {
+    // Ledger técnico global y sin consumidor en la UI → administrador.
+    router.get('/job-ledger', requireUserAuth, requireOperationalAdmin, (req, res) => {
         const limit = Math.min(200, Number(req.query.limit) || 50);
         safeJson(res, () => reader.getJobLedger({ limit }), []);
     });
 
-    router.get('/operational/status', requireUserAuth, (req, res) => {
+    router.get('/operational/status', requireUserAuth, requireOperationalRole, (req, res) => {
         try { dashboardViewsTotal.labels('operational_status').inc(); } catch {}
         safeJson(res, () => {
-            const recsSummary = reader.getActiveRecommendationsSummary();
+            // El resumen de recomendaciones abarca TODAS las instituciones: al
+            // mediador solo se le cuentan las de scopes que el CIS le concede.
+            const recsSummary = req.aulaVivaRole === 'admin'
+                ? reader.getActiveRecommendationsSummary()
+                : scopedRecommendationsSummary(callerIdOf(req));
             const isMatReady = reader.isReady();
             const ledger = reader.getJobLedger({ limit: 5 });
             return {
@@ -382,7 +529,7 @@ export function createOperationalRouter({ requireUserAuth }) {
     });
 
     // ── EMPTY STATE TRACKING (UI llama al render para métrica) ──────────
-    router.post('/_track/empty-state', requireUserAuth, express.json(), (req, res) => {
+    router.post('/_track/empty-state', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
         try {
             const where = String(req.body?.where || 'unknown').slice(0, 50);
             emptyStateRenderTotal.labels(where).inc();
@@ -390,7 +537,7 @@ export function createOperationalRouter({ requireUserAuth }) {
         res.json({ ok: true });
     });
 
-    router.post('/_track/degraded-mode', requireUserAuth, express.json(), (req, res) => {
+    router.post('/_track/degraded-mode', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
         try {
             const reason = String(req.body?.reason || 'unknown').slice(0, 50);
             uiDegradedModeTotal.labels(reason).inc();

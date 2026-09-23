@@ -43,12 +43,19 @@ fs.writeFileSync(process.env.USERS_DB, JSON.stringify([
     { id: 'u_mediator_otro', role: 'profesor',      name: 'Mediador 8B (otra institución)' },
     { id: 'u_student',       role: 'lector',        name: 'Estudiante A' },
     { id: 'u_stranger',      role: 'lector',        name: 'Estudiante X' },
+    // CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01: las escrituras del router ya
+    // exigen rol y alcance CIS, así que el principal de sesión de [CANON] y el
+    // sujeto sobre el que actúa existen en el padrón y comparten grupo activo.
+    { id: 'med_sesion',      role: 'profesor',      name: 'Mediadora de sesión' },
+    { id: 'u_w',             role: 'lector',        name: 'Estudiante W' },
 ]), 'utf8');
 fs.writeFileSync(process.env.GROUPS_DB, JSON.stringify([
     { id: 'g_7A',   name: '7A', type: 'course', organizationId: 'school_uno',
       mediatorIds: ['u_mediator'],      memberIds: ['u_student'] },
     { id: 'g_otro', name: '8B', type: 'course', organizationId: 'school_otro',
       mediatorIds: ['u_mediator_otro'], memberIds: ['u_stranger'] },
+    { id: 'g_w',    name: '7W', type: 'course', organizationId: 'school_uno',
+      mediatorIds: ['med_sesion'],      memberIds: ['u_w'] },
 ]), 'utf8');
 fs.writeFileSync(process.env.SCHOOLS_DB, JSON.stringify([
     { id: 'school_uno',  name: 'Colegio Uno' },
@@ -463,11 +470,13 @@ try {
                 ax.status === 200 && ax.body?.experience_insights?.experiencias_iniciadas?.total === 5
                 && JSON.stringify(ax.body.experience_insights.experiencias_iniciadas.by_version) === JSON.stringify({ v9: 5 }));
 
-            // lector: solo sí mismo (self), nunca otro
+            // CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01: Aula Viva operacional no
+            // es superficie de lector (ninguna vista de lector la consume): 403
+            // incluso sobre sí mismo, y por supuesto sobre otro lector.
             const self = await req(server, 'GET', TL('u_student'), null, { 'x-user-id': 'u_student' });
             const other = await req(server, 'GET', TL('u_stranger'), null, { 'x-user-id': 'u_student' });
-            ok('37) lector → 200 sobre sí mismo y 403 sobre otro lector (sin ampliar acceso a participantes)',
-                self.status === 200 && other.status === 403);
+            ok('37) lector → 403 sobre sí mismo y sobre otro lector (superficie de mediador)',
+                self.status === 403 && other.status === 403, `self=${self.status} other=${other.status}`);
 
             // 11) IDs falsos del cliente no alteran el scope
             const fake = await req(server, 'GET',
@@ -606,12 +615,18 @@ try {
                 }
             }
 
-            // 'med_sesion' no existe en el padrón: el CIS lo rechaza aunque haya sesión,
-            // que es exactamente el default-deny esperado.
-            const ajeno = await reqSinHeader(server, 'GET', '/api/aula-viva/students/u_w/timeline');
-            ok('CANON-8 principal con sesión pero desconocido: denegado por CIS',
-                ajeno.status === 401 || ajeno.status === 403, `status=${ajeno.status}`);
         } finally { server.close(); }
+
+        // Un principal con sesión pero AUSENTE del padrón: el CIS lo rechaza,
+        // que es exactamente el default-deny esperado.
+        {
+            const srvF = await listen(makeSessionApp('fantasma_sesion'));
+            try {
+                const ajeno = await reqSinHeader(srvF, 'GET', '/api/aula-viva/students/u_w/timeline');
+                ok('CANON-8 principal con sesión pero desconocido: denegado por CIS',
+                    ajeno.status === 401 || ajeno.status === 403, `status=${ajeno.status}`);
+            } finally { srvF.close(); }
+        }
 
         // SITIOS 1 y 5 — rutas con alcance CIS: con un principal reconocido por el
         // padrón y SIN ninguna cabecera de identidad en la petición.
@@ -634,7 +649,9 @@ try {
         const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
         const directas  = (code.match(/req\.headers\['x-user-id'\]/g) || []).length;
         const canonicas = (code.match(/req\.auth\?\.userId \?\? req\.user\?\.id \?\? req\.headers\['x-user-id'\]/g) || []).length;
-        ok(`CANON-11 los 5 sitios usan la misma precedencia canónica (${canonicas})`, canonicas === 5);
+        // 5 sitios + `callerIdOf` (CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01),
+        // que usa exactamente la misma precedencia para los guards.
+        ok(`CANON-11 los 6 usos aplican la misma precedencia canónica (${canonicas})`, canonicas === 6);
         ok('CANON-12 cero lecturas directas de la cabecera fuera de la precedencia',
             directas === canonicas, `directas=${directas} canónicas=${canonicas}`);
     }
