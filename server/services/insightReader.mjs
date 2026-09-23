@@ -127,11 +127,14 @@ export function getProfileTimeline(userId) {
  * Comparativa de cohortes — devuelve métricas clave de un scope + delta vs
  * promedio global. Permite a la UI mostrar "grupo X vs cohort institucional".
  */
-export function getCohortComparison(scope_type, scope_id, { period = '28d' } = {}) {
+export function getCohortComparison(scope_type, scope_id, { period = '28d', includeGlobal = true } = {}) {
     return safe(() => {
         getInsightsExtDb();
         const scopeRollups = getStatements().listCohort.all(String(scope_type), String(scope_id));
-        const globalRollups = getStatements().listCohort.all('all', 'global');
+        // CHP-SEC-AUTHZ-AULA-VIVA-AGGREGATE-SCOPE-02: el baseline global es un
+        // agregado de TODAS las instituciones. Con includeGlobal=false ni se lee:
+        // global_value/delta_vs_global quedan en null y global_baseline vacío.
+        const globalRollups = includeGlobal ? getStatements().listCohort.all('all', 'global') : [];
         const globalByKey = new Map(globalRollups.map(r => [r.metric_key, r.metric_value]));
         return {
             scope: { type: scope_type, id: scope_id }, period,

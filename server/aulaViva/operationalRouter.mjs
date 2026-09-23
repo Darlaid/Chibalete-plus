@@ -187,6 +187,35 @@ function allowDerivedScope(req, res, target) {
     return false;
 }
 
+/**
+ * CHP-SEC-AUTHZ-AULA-VIVA-AGGREGATE-SCOPE-02 — como `requireScopeAccess`, pero
+ * sin agregados interinstitucionales para quien no es administrador. El CIS
+ * concede al mediador los agregados anónimos (`all`, cohortes tipadas) por la
+ * política `mediator_aggregate_read`; en el Centro operativo el mediador solo
+ * ve métricas de sus scopes legítimos, así que ese permiso aquí es 403. La
+ * decisión sigue siendo del CIS: solo se lee por qué vía concedió.
+ */
+function requireTenantScope(scopeType, scopeId, req, res) {
+    const d = evaluateScopeAccess(callerIdOf(req), scopeType, scopeId);
+    if (d.decision === 'allow') {
+        if (d.via === 'policy:mediator_aggregate_read' && req.aulaVivaRole !== 'admin') {
+            res.status(403).json({ ok: false, error: 'scope_access_denied', scope_type: scopeType, scope_id: scopeId });
+            return false;
+        }
+        return true;
+    }
+    if (d.decision === 'unavailable') {
+        res.status(503).json({ ok: false, error: 'identity_unavailable', cause: d.cause });
+        return false;
+    }
+    if (d.decision === 'unauthenticated') {
+        res.status(401).json({ ok: false, error: 'identity_not_established' });
+        return false;
+    }
+    res.status(403).json({ ok: false, error: 'scope_access_denied', scope_type: scopeType, scope_id: scopeId });
+    return false;
+}
+
 /** Scope de una recomendación según el store, o null si no existe. */
 function recommendationScopeOf(recommendationId) {
     return getPedagogyExtDb().prepare(
@@ -295,7 +324,7 @@ export function createOperationalRouter({ requireUserAuth }) {
     });
 
     router.get('/recommendations/scope/:type/:id', requireUserAuth, requireOperationalRole, (req, res) => {
-        if (!requireScopeAccess(req.params.type, req.params.id, req, res)) return;
+        if (!requireTenantScope(req.params.type, req.params.id, req, res)) return;
         safeJson(res, () => reader.getRecommendations(req.params.type, req.params.id,
             { includeAcknowledged: req.query.includeAcknowledged === '1',
               limit: Math.min(200, Number(req.query.limit) || 50) }), []);
@@ -409,7 +438,7 @@ export function createOperationalRouter({ requireUserAuth }) {
     // ── COHORTS ──────────────────────────────────────────────────────────
     router.get('/cohorts/:scope_type/:scope_id', requireUserAuth, requireOperationalRole, (req, res) => {
         // Alcance ANTES del audit: una consulta denegada no deja rastro.
-        if (!requireScopeAccess(req.params.scope_type, req.params.scope_id, req, res)) return;
+        if (!requireTenantScope(req.params.scope_type, req.params.scope_id, req, res)) return;
         instrument('aulaViva.cohort_comparison', () => {
             try { cohortRenderMs.observe(0); } catch {}
             try { dashboardViewsTotal.labels('cohort_comparison').inc(); } catch {}
@@ -423,13 +452,15 @@ export function createOperationalRouter({ requireUserAuth }) {
             } catch { /* nunca bloquea */ }
             safeJson(res, () => reader.getCohortComparison(
                 req.params.scope_type, req.params.scope_id,
-                { period: req.query.period || '28d' }
+                { period: req.query.period || '28d',
+                  // Mediador: sin baseline interinstitucional (ni se lee).
+                  includeGlobal: req.aulaVivaRole === 'admin' }
             ));
         });
     });
 
     router.get('/cohorts/:scope_type/:scope_id/rollups', requireUserAuth, requireOperationalRole, (req, res) => {
-        if (!requireScopeAccess(req.params.scope_type, req.params.scope_id, req, res)) return;
+        if (!requireTenantScope(req.params.scope_type, req.params.scope_id, req, res)) return;
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
         safeJson(res, () => ({
             daily:   reader.getDailyRollups(req.params.scope_type, req.params.scope_id, sinceTs),

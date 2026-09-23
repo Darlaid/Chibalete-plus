@@ -32,6 +32,10 @@ import { InstitutionalTab } from '../components/aula-viva/InstitutionalTab';
 import { aulaVivaInstitutionalService } from '../services/aulaVivaInstitutionalService';
 // Fase 3B — cableo del timeline longitudinal (creado en Fase 3A).
 import { LongitudinalStudentTimeline } from '../components/aula-viva/LongitudinalStudentTimeline';
+// CHP-SEC-AUTHZ-AULA-VIVA-AGGREGATE-SCOPE-02 — qué cohorte pide cada principal.
+import { useAuth } from '../context/AuthContext';
+import { dataService } from '../services/dataService';
+import { isAdmin } from '../utils/permissions';
 
 function formatDays(days: number | null): string {
     if (days == null) return 'sin actividad registrada';
@@ -58,17 +62,29 @@ const AulaVivaOperacional: React.FC = () => {
     // PASO 7 — tab switcher operativo/institucional.
     const [activeTab, setActiveTab] = useState<ActiveTab>('operativo');
 
+    const { user } = useAuth();
+
     const refresh = useCallback(async () => {
+        // El agregado interinstitucional (all/global) es solo del administrador
+        // (el servidor lo deniega al mediador). El mediador ve la cohorte de su
+        // grupo: /api/groups ya llega acotado por el servidor y el CIS vuelve a
+        // autorizar el grupo al pedirlo. Sin grupo mediado → sin cohorte.
+        const mediated = dataService.getAllGroups()
+            .filter(g => !!user && (g.mediatorIds ?? []).includes(user.id))
+            .map(g => g.id).sort();
+        const scope: [string, string] | null = isAdmin(user)
+            ? ['all', 'global']
+            : (mediated.length ? ['group', mediated[0]] : null);
         const [s, q, c] = await Promise.all([
             aulaVivaOperationalService.getOperationalStatus(),
             aulaVivaOperationalService.getAttentionQueue(),
-            aulaVivaOperationalService.getCohortComparison('all', 'global'),
+            scope ? aulaVivaOperationalService.getCohortComparison(scope[0], scope[1]) : Promise.resolve(null),
         ]);
         setStatus(s);
         setAttention(q);
         setCohort(c);
         setLoading(false);
-    }, []);
+    }, [user]);
 
     const refreshRecs = useCallback(async (userId: string) => {
         const r = await aulaVivaOperationalService.getRecommendations('user', userId);

@@ -71,6 +71,9 @@ for (const [u, risk] of [['lec-a', 0.3], ['lec-b', 0.6], ['adm', 0.0]]) {
     idb.prepare(`INSERT INTO user_reading_profiles (user_id, abandono_risk, engagement_score, last_active_at, updated_at, source_watermark)
                  VALUES (?, ?, 0.2, ?, ?, 1)`).run(u, risk, NOW, NOW);
 }
+// Agregado interinstitucional (todas las instituciones): solo para el administrador.
+idb.prepare(`INSERT INTO cohort_rollups (scope_type, scope_id, period, metric_key, metric_value, updated_at, source_watermark)
+             VALUES ('all', 'global', '28d', 'active_users', 99, ?, 1)`).run(NOW);
 for (const g of ['g-a', 'g-b']) {
     for (const [k, v] of [['reader_cohort', 1], ['active_users', 1]]) {
         idb.prepare(`INSERT INTO cohort_rollups (scope_type, scope_id, period, metric_key, metric_value, updated_at, source_watermark)
@@ -160,8 +163,10 @@ try {
     {
         const r = await call('med-a', 'GET', '/cohorts/organization/org-b');
         ok('med-a → cohorte de la organización B → 403', r.s === 403, String(r.s));
+        // CHP-SEC-AUTHZ-AULA-VIVA-AGGREGATE-SCOPE-02: el agregado interinstitucional
+        // ya no es del mediador (antes lo concedía mediator_aggregate_read).
         const g = await call('med-a', 'GET', '/cohorts/all/global');
-        ok('med-a → agregado all/global sigue permitido (política mediator_aggregate_read)', g.s === 200, String(g.s));
+        ok('med-a → agregado all/global → 403', g.s === 403, String(g.s));
     }
 
     section('[A6/§13] ESCRITURAS cross-tenant: 403 y CERO efectos');
@@ -225,6 +230,40 @@ try {
         const ad = await call('adm', 'GET', '/operational/status');
         ok('admin conserva el resumen global (critical=2, high=2)', ad.b?.recommendations_summary?.critical === 2
             && ad.b?.recommendations_summary?.high === 2, JSON.stringify(ad.b?.recommendations_summary));
+    }
+
+    section('[AGGREGATE-SCOPE-02] el mediador no ve agregados interinstitucionales');
+    {
+        for (const p of ['/cohorts/all/global', '/cohorts/all/global/rollups', '/cohorts/risk/any',
+                         '/recommendations/scope/all/global']) {
+            const r = await call('med-a', 'GET', p);
+            ok(`A1 · med-a ${p} → 403`, r.s === 403, `${r.s} ${JSON.stringify(r.b)}`);
+            ok('   sin el valor global en el cuerpo', !JSON.stringify(r.b).includes('99'));
+        }
+        const own = await call('med-a', 'GET', '/cohorts/group/g-a');
+        ok('A2 · med-a cohorte propia → 200 con sus métricas', own.s === 200
+            && (own.b?.metrics || []).some(m => m.metric_key === 'active_users'), JSON.stringify(own.b));
+        ok('A6 · la cohorte propia NO trae baseline global (ni se lee)',
+            Array.isArray(own.b?.global_baseline) && own.b.global_baseline.length === 0
+            && (own.b?.metrics || []).every(m => m.global_value === null && m.delta_vs_global === null)
+            && !JSON.stringify(own.b).includes('99'), JSON.stringify(own.b));
+        ok('A3 · med-a cohorte del grupo B → 403', (await call('med-a', 'GET', '/cohorts/group/g-b')).s === 403);
+        const adm = await call('adm', 'GET', '/cohorts/all/global');
+        ok('A4 · admin all/global → 200 con el agregado', adm.s === 200
+            && (adm.b?.metrics || []).some(m => m.metric_key === 'active_users' && m.metric_value === 99), JSON.stringify(adm.b));
+        const admG = await call('adm', 'GET', '/cohorts/group/g-a');
+        ok('   admin conserva el baseline global en la comparativa', (admG.b?.global_baseline || []).some(m => m.metric_value === 99), JSON.stringify(admG.b));
+        ok('A5 · lector → agregado → 403', (await call('lec-a', 'GET', '/cohorts/all/global')).s === 403);
+    }
+    {
+        // A7 · la UI del mediador ya no pide all/global (solo el administrador).
+        const src = fs.readFileSync(new URL('../../pages/AulaVivaOperacional.tsx', import.meta.url), 'utf8');
+        const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+        ok('A7 · Centro operativo: all/global solo bajo isAdmin(user)',
+            /isAdmin\(user\)\s*\?\s*\['all', 'global'\]/.test(code)
+            && (code.match(/'all', 'global'/g) || []).length === 1, 'patrón no encontrado');
+        ok('A7 · el mediador pide la cohorte de su grupo',
+            code.includes("['group', mediated[0]]") && code.includes('getCohortComparison(scope[0], scope[1])'));
     }
 
     section('[§9/E] AGREGADOS GLOBALES sin consumidor → solo administrador');
