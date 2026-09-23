@@ -219,6 +219,7 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 // CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
 import { evaluateScopeAccess, requireScopeAccess } from './aulaViva/scopeAccess.mjs';
+import { getPrincipal, getMemberships, IdentityUnavailableError } from './identity/cis.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 
@@ -545,8 +546,8 @@ const requireAdminAccess = async (req, res, next) => {
  *
  * Nada del cliente amplía el alcance: el principal sale de la sesión firmada.
  * Alcance de la fase 1: SOLO los GET dirigidos a un sujeto o grupo concreto. Los
- * listados (`/api/users`, `/api/groups`) se acotarán por tenant en la fase 2 y
- * esta unidad no los toca.
+ * listados (`/api/users`, `/api/groups`) los acota por tenant la fase 2 con
+ * `resolveListingScope`, más abajo.
  */
 async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true } = {}) {
     if (await isAdminRequest(req)) return true;
@@ -569,6 +570,89 @@ async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = t
     if (d.decision === 'unavailable') return denied(503, { error: 'identity_unavailable', cause: d.cause });
     if (d.decision === 'unauthenticated') return denied(401, { error: 'identity_not_established' });
     return denied(403, { error: 'scope_access_denied', scope_type: scopeType, scope_id: sid });
+}
+
+/**
+ * resolveListingScope — CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01, fase 2.
+ *
+ * Los LISTADOS (`/api/users`, `/api/groups`, `/api/schools`, config de colegio)
+ * devolvían el padrón completo de todas las organizaciones a cualquier sesión.
+ * Aquí se decide, en el servidor, cuánto de ese listado corresponde al llamante:
+ *
+ *   - autoridad de máquina (admin-secret file-only) → global;
+ *   - administrador de plataforma (CIS `getPrincipal().platformAdmin`, la misma
+ *     política que `platform_admin_full_institutional_read`) → global;
+ *   - cualquier otra sesión → acotada a SU tenant: `organizationId` del registro
+ *     de identidad (misma autoridad que Biblioteca, `institutionalContextIdOf`).
+ *     Nada del cliente (query, header, ruta) amplía ese tenant.
+ *
+ * Fail-closed tipificado: identidad indisponible → 503, jamás un listado vacío
+ * silencioso ni un 403 (CHP-ADR-01 §I-2). Principal desconocido → 401.
+ *
+ * @returns {Promise<null | {global:true} | {global:false, callerId:string, orgId:string|null, user:object|null}>}
+ *          null = ya se respondió.
+ */
+async function resolveListingScope(req, res) {
+    if (await isAdminRequest(req)) return { global: true };
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    let principal;
+    try {
+        principal = getPrincipal(typeof callerId === 'string' ? callerId : '');
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] listing scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable', cause: e.causeTag });
+        return null;
+    }
+    if (!principal) {
+        res.status(401).json({ error: 'identity_not_established' });
+        return null;
+    }
+    if (principal.platformAdmin) return { global: true };
+    const user = readJSON(USERS_DB).find(u => u?.id === principal.id) || null;
+    return { global: false, callerId: principal.id, orgId: institutionalContextIdOf(user), user };
+}
+
+/**
+ * requireAdminRead — fase 2: superficies GET estrictamente administrativas u
+ * operativas (métricas del proceso, consumo TTS, gobernanza de membresías).
+ * Se monta DESPUÉS de `requireAdminAccess` (que ya exigió sesión o secreto) y
+ * cierra el desvío de GET a "cualquier sesión": solo admin-secret o
+ * administrador de plataforma. Resto → 403; identidad indisponible → 503.
+ */
+const requireAdminRead = async (req, res, next) => {
+    let scope;
+    try {
+        scope = await resolveListingScope(req, res);
+    } catch (e) {
+        log(`[AUTHZ] admin read check failed: ${e.message}`, 'ERROR');
+        return res.status(500).json({ error: 'Internal Server Error' });
+    }
+    if (!scope) return undefined;
+    if (!scope.global) return res.status(403).json({ error: 'Requiere rol administrador' });
+    return next();
+};
+
+/**
+ * Nombres de configuración de colegio que el llamante NO administrador puede
+ * leer. `school_configs.json` está indexado por nombre (igual que lo consulta
+ * el access engine con `user.colegio`), así que el nombre de la URL solo se
+ * acepta si concuerda con la identidad del servidor:
+ *   - el nombre del colegio registrado cuyo id es el `organizationId` del usuario;
+ *   - el `colegio` del registro del usuario, salvo que ese nombre pertenezca a
+ *     un colegio registrado de OTRA organización.
+ */
+function ownSchoolConfigNames(scope, schools) {
+    const names = new Set();
+    const list = Array.isArray(schools) ? schools : [];
+    const own = scope.orgId ? list.find(s => s?.id === scope.orgId) : null;
+    if (typeof own?.name === 'string' && own.name) names.add(own.name);
+    const colegio = scope.user?.colegio || scope.user?.school;
+    if (typeof colegio === 'string' && colegio) {
+        const rec = list.find(s => s?.name === colegio);
+        if (!rec || (scope.orgId && rec.id === scope.orgId)) names.add(colegio);
+    }
+    return names;
 }
 
 /**
@@ -1397,7 +1481,7 @@ if (process.env.AULA_VIVA_SCHEDULER_ENABLED === '1') {
 }
 
 // --- SYSTEM METRICS (Phase 1 observability) ---
-app.get('/api/system/metrics', requireAdminAccess, (req, res) => {
+app.get('/api/system/metrics', requireAdminAccess, requireAdminRead, (req, res) => {
     const mem = process.memoryUsage();
     const elu = performance.eventLoopUtilization();
     res.json({
@@ -4210,13 +4294,21 @@ const normalizeUser = (user) => {
 // --- USER MANAGEMENT ROUTES ---
 
 // GET USERS
-app.get('/api/users', requireAuth, (req, res) => {
+app.get('/api/users', requireAuth, async (req, res) => {
     try {
+        // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01 fase 2: el tenant lo decide el
+        // servidor; el filtro por colegio del cliente deja de ser autoridad.
+        const scope = await resolveListingScope(req, res);
+        if (!scope) return;
         // CHP-IDDB-GAP2-01: superficie ADMIN/HISTÓRICA — bajo cutover sirve
         // canónico ∪ compat sintética atestada; con flags json = readJSON.
         const users = readUsersAdminHistorical();
         // Aplicamos normalizeUser en lectura para limpiar posibles estados corruptos pasados
-        const normalizedUsers = users.map(normalizeUser);
+        let normalizedUsers = users.map(normalizeUser);
+        if (!scope.global) {
+            normalizedUsers = normalizedUsers.filter(u =>
+                u?.id === scope.callerId || (scope.orgId && u?.organizationId === scope.orgId));
+        }
         res.json(sanitizeUsersForClient(normalizedUsers));
     } catch (e) {
         res.status(500).json({ error: 'Internal Server Error' });
@@ -4895,9 +4987,15 @@ app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
 
 // --- SCHOOL MANAGEMENT ROUTES ---
 
-app.get('/api/schools', requireAuth, (req, res) => {
+app.get('/api/schools', requireAuth, async (req, res) => {
     try {
-        res.json(readJSON(SCHOOLS_DB));
+        // Fase 2: el catálogo completo de instituciones es administrativo; el
+        // resto de sesiones solo conoce la suya (la usa el bootstrap del cliente).
+        const scope = await resolveListingScope(req, res);
+        if (!scope) return;
+        const schools = readJSON(SCHOOLS_DB);
+        if (scope.global) return res.json(schools);
+        res.json((Array.isArray(schools) ? schools : []).filter(s => scope.orgId && s?.id === scope.orgId));
     } catch (e) {
         res.status(500).json({ error: 'Internal Server Error' });
     }
@@ -5016,12 +5114,23 @@ const { resolveUserContentAccess, canUserAccessContent, getAccessibleContentIds 
     fallbackMode: ACCESS_FALLBACK_MODE,
 });
 
-app.get('/api/groups', requireAuth, (req, res) => {
+app.get('/api/groups', requireAuth, async (req, res) => {
     try {
-        const groups = readJSON(GROUPS_DB);
+        // Fase 2: sin administrador, solo los grupos de la organización del
+        // llamante más aquellos en los que tiene membresía explícita (CIS).
+        const scope = await resolveListingScope(req, res);
+        if (!scope) return;
+        let groups = readJSON(GROUPS_DB);
+        if (!scope.global) {
+            const mine = new Set(getMemberships(scope.callerId).map(m => m.groupId));
+            groups = groups.filter(g => mine.has(g?.id) || (scope.orgId && g?.organizationId === scope.orgId));
+        }
         // Normalizar la salida para que el frontend siempre reciba datos consistentes
         res.json(groups.map(normalizeGroup));
     } catch (e) {
+        if (e instanceof IdentityUnavailableError) {
+            return res.status(503).json({ error: 'identity_unavailable', cause: e.causeTag });
+        }
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
@@ -7092,7 +7201,7 @@ app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess
 // Auth: requireAdminAccess — coherente con los demás endpoints administrativos
 // del sprint. Lectores normales NO necesitan ver este detalle interno.
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/admin/membership/validate', requireAdminAccess, (req, res) => {
+app.get('/api/admin/membership/validate', requireAdminAccess, requireAdminRead, (req, res) => {
     const actor = req.headers['x-user-id'] || 'unknown';
     log(`[MEMBERSHIP_VALIDATE_START] actor=${actor}`, 'INFO');
     try {
@@ -7166,7 +7275,7 @@ function parseTsRobust(value) {
 // Sort: corrupted → recoverable → fallback_dependent → fully_explicit → empty_inert,
 // alfabético dentro de cada bucket.
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/membership-governance/groups', requireAdminAccess, (req, res) => {
+app.get('/api/membership-governance/groups', requireAdminAccess, requireAdminRead, (req, res) => {
     const actor = req.headers['x-user-id'] || 'unknown';
     log(`[MGL_SNAPSHOT_REQUEST] actor=${actor} school=${req.query.school || ''} state=${req.query.state || ''} includeAudit=${req.query.includeAudit || ''}`, 'INFO');
 
@@ -7699,9 +7808,17 @@ app.put('/api/admin/landing-banner', requireAdminRole, async (req, res) => {
 });
 
 // --- SCHOOL CONFIG ROUTES (Filtering) ---
-app.get('/api/schools/:name/config', requireAuth, (req, res) => {
+app.get('/api/schools/:name/config', requireAuth, async (req, res) => {
     const { name } = req.params;
     try {
+        // Fase 2: el nombre de la URL no es autoridad. Sin administrador, solo se
+        // sirve la config de la institución del propio llamante; cualquier otro
+        // nombre —exista o no— da el mismo 403 (no es oráculo de existencia).
+        const scope = await resolveListingScope(req, res);
+        if (!scope) return;
+        if (!scope.global && !ownSchoolConfigNames(scope, readJSON(SCHOOLS_DB)).has(name)) {
+            return res.status(403).json({ error: 'scope_access_denied', scope_type: 'school_config' });
+        }
         const configs = readJSON(SCHOOL_CONFIGS_DB);
         const config = configs.find(c => c.schoolName === name) || { schoolName: name, hiddenContentIds: [] };
         res.json(config);
@@ -8081,7 +8198,7 @@ Devuelve SOLO las 4 palabras o frases cortas separadas por comas.`,
  * Output: { updatedAt, totalUsers, totalReqs, totalChars, users: [...] }
  * Auth: requireAdminAccess
  */
-app.get('/api/admin/tts/stats', requireAdminAccess, (req, res) => {
+app.get('/api/admin/tts/stats', requireAdminAccess, requireAdminRead, (req, res) => {
     const users = [];
     let totalReqs  = 0;
     let totalChars = 0;
