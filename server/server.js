@@ -5493,8 +5493,19 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
     // Antes solo se actualizaba group.memberIds/studentIds. Ahora también
     // user.groupIds en el mismo lock anidado (groups outer, users inner) para
     // que el lector quede correctamente conectado al club al unirse.
+    //
+    // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01 fase 2B: sin administrador, solo se
+    // puede unir a un grupo de SU organización. Tenant del actor = registro de
+    // identidad (resolveListingScope, fase 2); tenant del grupo = store canónico
+    // de grupos. Nada del cliente cuenta. La comparación va dentro del lock y
+    // ANTES de cualquier escritura: un join denegado no deja rastro. Grupo ajeno
+    // e id inexistente dan el mismo 403 (sin oráculo de existencia). El
+    // administrador conserva el contrato previo (404 / 403 / join).
+    const scope = await resolveListingScope(req, res);
+    if (!scope) return;
     let resultGroup = null;
     let outcome     = null;
+    try {
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
@@ -5502,6 +5513,10 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
             const groups = readCanonicalStoreForMutation(GROUPS_DB);
             const users  = readCanonicalStoreForMutation(USERS_DB);
             const index  = groups.findIndex(g => g.id === id);
+            if (!scope.global &&
+                (!scope.orgId || index === -1 || groups[index].organizationId !== scope.orgId)) {
+                outcome = { conflict: 'scope_denied' }; return;
+            }
             if (index === -1) { outcome = { conflict: 'not_found' }; return; }
             const group = groups[index];
             if (group.type !== 'club' || group.kind !== 'open') { outcome = { conflict: 'not_open_club' }; return; }
@@ -5525,6 +5540,16 @@ app.post('/api/groups/:id/join', requireUserAuth, async (req, res) => {
             if (userChanged) writeJSON(USERS_DB, users);
         });
     }, 'groupsLock');
+    } catch (e) {
+        // Store canónico ilegible: la autoridad del tenant del grupo no está
+        // disponible → 503 (CHP-ADR-01 §I-2), nunca allow ni deny silencioso.
+        if (String(e?.message).startsWith('CANONICAL_MUTATION_READ_FAILED')) {
+            log(`[AUTHZ] join: canonical store unavailable: ${e.message}`, 'ERROR');
+            return res.status(503).json({ error: 'identity_unavailable' });
+        }
+        throw e;
+    }
+    if (outcome?.conflict === 'scope_denied') return res.status(403).json({ error: 'scope_access_denied', scope_type: 'group' });
     if (outcome?.conflict === 'not_found')    return res.status(404).json({ error: 'Grupo no encontrado' });
     if (outcome?.conflict === 'not_open_club') return res.status(403).json({ error: 'Este grupo no admite uniones directas' });
     if (outcome?.conflict === 'user_missing')  return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.USER_NOT_FOUND, message: 'Usuario autenticado no existe en USERS_DB' });
