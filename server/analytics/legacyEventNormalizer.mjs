@@ -13,6 +13,12 @@
  * invisibles: 16.130 eventos históricos de un colegio real no alimentaban
  * ninguna señal. Este módulo cierra esa brecha SIN tocar el store.
  *
+ * ROL DESDE CHP-V6-READING-CANONICAL-PRODUCER-01: COMPATIBILIDAD HISTÓRICA.
+ * Desde el cutover las lecturas nuevas se persisten ya con su nombre del
+ * registry v2 (`readingCanonical.mjs`, que reutiliza ESTA tabla en el ingreso);
+ * sobre un nombre canónico esta función es identidad, así que no hay doble
+ * traducción. Aquí solo quedan por traducir las filas anteriores al cutover.
+ *
  * CONTRATO
  * --------
  *   - Función PURA. No lee disco, no abre bases, no muta su argumento.

@@ -31,6 +31,17 @@ import {
     emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
     emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
 } from './experienceBackboneEmitter.mjs';
+// CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
+import { recordCanonicalEvent } from './services/analyticsShadow.mjs';
+import {
+    toCanonicalReadingEnvelope, recordCanonicalReading, SESSION_FACTS_OWNED_BY_NATIVE,
+} from './analytics/readingCanonical.mjs';
+// `recordCanonicalEvent` informa inserted:true también ante un event_id ya
+// existente (INSERT OR IGNORE; semántica fijada por su propia suite). Para que
+// el contador `deduplicated` del ingreso siga siendo exacto se consulta antes.
+const recordReadingOnce = (env, log) => (getBackboneEventById(env.eventId)
+    ? { ok: true, inserted: false, duplicate: true }
+    : recordCanonicalEvent(env, log));
 import {
     authSessionSuccess, authSessionFailure, authSessionLegacyXUserId,
     authSessionSubjectMismatch, authSessionRevoked,
@@ -152,6 +163,7 @@ import {
     insertEvent as insertBackboneEvent,
     getBackboneEventsForMetrics,
     getBackboneEventStats,
+    getEventById as getBackboneEventById,
 } from './eventsService.js';
 import { ulid, isValidUlid } from './ulid.js';
 import {
@@ -10712,6 +10724,20 @@ app.post('/api/v1/events', requireEventsWriteAuth, (req, res) => {
                 errors.push({ eventId: evt?.eventId ?? null, error: v.error });
                 continue;
             }
+            // CHP-V6-READING-CANONICAL-PRODUCER-01: un evento de lectura con
+            // equivalencia declarada se persiste con su nombre del registry v2
+            // (validado por schema), no con el nombre v1. El resto sigue igual.
+            const canonical = toCanonicalReadingEnvelope(evt);
+            if (canonical) {
+                const r = recordCanonicalReading(canonical.envelope, recordReadingOnce, log);
+                if (r.status === 'accepted') accepted += 1;
+                else if (r.status === 'deduplicated') deduplicated += 1;
+                else {
+                    rejected += 1;
+                    errors.push({ eventId: evt.eventId, error: `canonical ${r.code}` });
+                }
+                continue;
+            }
             try {
                 const wasInserted = insertBackboneEvent(evt);
                 if (wasInserted) accepted += 1;
@@ -10840,6 +10866,18 @@ function dualWriteAnalyticsEventsToBackbone(legacyEvents, headerUserId) {
             const backbone = transformAnalyticsLegacyToBackbone(legacy, headerUserId);
             const v = validateBackboneEvent(backbone, headerUserId);
             if (!v.ok) { rejected += 1; continue; }
+            // CHP-V6-READING-CANONICAL-PRODUCER-01: abrir/latido/cerrar ya los
+            // persiste el hook nativo (/api/v1/events) con su modo real; aquí
+            // se duplicaban (y el modo se infería). Siguen en analytics_db.json.
+            const canonical = toCanonicalReadingEnvelope(backbone);
+            if (canonical && SESSION_FACTS_OWNED_BY_NATIVE.has(canonical.event)) continue;
+            if (canonical) {
+                const r = recordCanonicalReading(canonical.envelope, recordReadingOnce, log);
+                if (r.status === 'accepted') accepted += 1;
+                else if (r.status === 'deduplicated') deduplicated += 1;
+                else rejected += 1;
+                continue;
+            }
             const inserted = insertBackboneEvent(backbone);
             if (inserted) accepted += 1; else deduplicated += 1;
         } catch (e) {
@@ -10911,6 +10949,19 @@ function dualWriteSingleEventToBackbone(eventName, ts, rest, userId) {
         };
         const v = validateBackboneEvent(backbone, userId);
         if (!v.ok) return { accepted: 0, deduplicated: 0, rejected: 1, reason: v.error };
+        // CHP-V6-READING-CANONICAL-PRODUCER-01: `session_completed` (único
+        // productor de la terminación inmersiva) se persiste canónico. Los
+        // hechos de sesión, si llegaran por aquí, ya los cubre el hook nativo.
+        const canonical = toCanonicalReadingEnvelope(backbone);
+        if (canonical && SESSION_FACTS_OWNED_BY_NATIVE.has(canonical.event)) {
+            return { accepted: 0, deduplicated: 0, rejected: 0 };
+        }
+        if (canonical) {
+            const r = recordCanonicalReading(canonical.envelope, recordReadingOnce, log);
+            return { accepted: r.status === 'accepted' ? 1 : 0,
+                     deduplicated: r.status === 'deduplicated' ? 1 : 0,
+                     rejected: r.status === 'rejected' ? 1 : 0 };
+        }
         const inserted = insertBackboneEvent(backbone);
         return inserted
             ? { accepted: 1, deduplicated: 0, rejected: 0 }

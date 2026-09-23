@@ -25,6 +25,11 @@
  *   - No llama a metricsService legacy.
  *   - No transforma eventos legacy de analytics_db.json.
  */
+// CHP-V6-READING-CANONICAL-PRODUCER-01 — desde el cutover las lecturas se
+// persisten con nombres del registry v2 (sin prefijo de modo ni `_source`).
+// Estos helpers las traducen a la acción v1 y las cuentan como fuente nativa
+// (el hook de sesión es su único productor autoritativo).
+import { backboneActionOf, isCanonicalReadingEventName } from './analytics/readingCanonical.mjs';
 
 // ── Constantes ───────────────────────────────────────────────────────────────
 
@@ -53,6 +58,7 @@ const SOURCE_LEGACY  = 'legacy';
 const SOURCE_UNKNOWN = 'unknown';
 
 function getEventSource(event) {
+    if (event && isCanonicalReadingEventName(event.event)) return SOURCE_NATIVE;
     const s = event && event.payload && event.payload._source;
     return s === SOURCE_NATIVE || s === SOURCE_LEGACY ? s : SOURCE_UNKNOWN;
 }
@@ -65,9 +71,7 @@ function bucketSource(source) {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function actionFromEventName(eventName) {
-    if (typeof eventName !== 'string') return null;
-    const dot = eventName.indexOf('.');
-    return dot >= 0 ? eventName.slice(dot + 1) : eventName;
+    return backboneActionOf(eventName);
 }
 
 function isFiniteNumber(n) {
