@@ -521,7 +521,58 @@ const requireAdminAccess = async (req, res, next) => {
 };
 
 /**
- * Surgical Auth Fix Phase 5: 
+ * requireSubjectScope — CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01, fase 1.
+ *
+ * POR QUÉ EXISTE. `requireAuth` y `requireAdminAccess` desvían TODO método GET a
+ * `allowAuthenticatedGetOrReject`, que solo comprueba que haya sesión activa:
+ * ni rol ni tenant. En producción eso significaba que cualquier cuenta —incluida
+ * la de un lector menor de edad— podía consultar, indicando el id, el
+ * entitlement o el estado pedagógico de un estudiante de OTRA institución.
+ *
+ * Este guard NO inventa mecanismo: es el mismo patrón que `requireLeoMediatorScope`
+ * (CHP-LEO-MEDIATOR-CIS-SCOPE-01A), la única superficie que ya estaba acotada.
+ * La autoridad de alcance es el CIS (`evaluateScopeAccess`), la misma que usa
+ * Aula Viva; aquí solo se traduce su decisión a HTTP.
+ *
+ * Contrato:
+ *   - autoridad de máquina (admin-secret file-only) → pasa, gate canónico intacto;
+ *   - administrador de plataforma → el CIS concede;
+ *   - mediador → solo sobre sus grupos ACTIVE_REAL y sus miembros explícitos;
+ *   - sujeto sobre sí mismo → `allowSelf` (por defecto true: consultar lo propio
+ *     nunca fue el problema);
+ *   - identidad indisponible → 503, JAMÁS se colapsa a deny (CHP-ADR-01 §I-2);
+ *   - resto → 403 tipificado.
+ *
+ * Nada del cliente amplía el alcance: el principal sale de la sesión firmada.
+ * Alcance de la fase 1: SOLO los GET dirigidos a un sujeto o grupo concreto. Los
+ * listados (`/api/users`, `/api/groups`) se acotarán por tenant en la fase 2 y
+ * esta unidad no los toca.
+ */
+async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true } = {}) {
+    if (await isAdminRequest(req)) return true;
+    const sid = String(scopeId ?? '');
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    const denied = (status, body) => { res.status(status).json(body); return false; };
+    let d;
+    try {
+        d = evaluateScopeAccess(callerId, scopeType, sid);
+    } catch (e) {
+        log(`[AUTHZ] scope evaluation failed (${scopeType}): ${e.message}`, 'ERROR');
+        return denied(503, { error: 'identity_unavailable' });
+    }
+    if (d.decision === 'allow') {
+        if (d.via === 'self' && !allowSelf) {
+            return denied(403, { error: 'scope_access_denied', scope_type: scopeType, scope_id: sid });
+        }
+        return true;
+    }
+    if (d.decision === 'unavailable') return denied(503, { error: 'identity_unavailable', cause: d.cause });
+    if (d.decision === 'unauthenticated') return denied(401, { error: 'identity_not_established' });
+    return denied(403, { error: 'scope_access_denied', scope_type: scopeType, scope_id: sid });
+}
+
+/**
+ * Surgical Auth Fix Phase 5:
  * Middleware to validate a regular reader session via userId.
  * Used for pedagogical AI endpoints (Leo).
  */
@@ -1161,8 +1212,11 @@ app.post('/api/access', requireAuth, async (req, res) => {
     res.json(newRule);
 });
 
-app.get('/api/access/by-user/:userId', requireAuth, (req, res) => {
+app.get('/api/access/by-user/:userId', requireAuth, async (req, res) => {
     const { userId } = req.params;
+    // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: el entitlement de una persona solo lo
+    // ve ella misma, quien la media o la autoridad de administración.
+    if (!(await requireSubjectScope(req, res, 'user', userId))) return;
     const result = resolveUserContentAccess(userId);
     res.json(result);
 });
@@ -5659,9 +5713,12 @@ const _readFallbackOverride = (req) => {
 // Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
 // y admins (requireAuth). Filtra por misma institución y excluye a los que
 // ya son miembros (vía la fuente única getGroupMembers).
-app.get('/api/groups/:groupId/candidates', requireAuth, (req, res) => {
+app.get('/api/groups/:groupId/candidates', requireAuth, async (req, res) => {
     try {
         const { groupId } = req.params;
+        // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: los candidatos son personas del
+        // tenant del grupo; mismo alcance que su nómina.
+        if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -5731,9 +5788,12 @@ app.get('/api/groups/:groupId/candidates', requireAuth, (req, res) => {
 //
 // groupType: 'course' | 'club' — type === undefined → 'course' legacy
 // (modelo unificado: clubs y cursos son la misma entidad group).
-app.get('/api/groups/:groupId/members', requireAuth, (req, res) => {
+app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
     try {
         const { groupId } = req.params;
+        // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: la nómina de un grupo es del
+        // tenant del grupo; `allowSelf:false` — un grupo no es un sujeto propio.
+        if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -7305,9 +7365,12 @@ app.get('/api/membership-governance/groups', requireAdminAccess, (req, res) => {
 // getExplicitGroupMembers, applyLegacyColegioFallback) — este endpoint solo
 // orquesta lectura + helper. requireAuth (mediadores y admins).
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/groups/:id/diagnosis', requireAuth, (req, res) => {
+app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
     try {
         const { id } = req.params;
+        // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: el diagnóstico enumera canales y
+        // miembros del grupo; mismo alcance que su nómina.
+        if (!(await requireSubjectScope(req, res, 'group', id, { allowSelf: false }))) return;
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -7358,9 +7421,12 @@ app.get('/api/groups/:id/diagnosis', requireAuth, (req, res) => {
 // La lógica de transición de estado vive en utils/studentStatus.mjs (fuente
 // única). Este endpoint solo orquesta lectura + helper.
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/students/:id/status', requireAuth, (req, res) => {
+app.get('/api/students/:id/status', requireAuth, async (req, res) => {
     try {
         const { id } = req.params;
+        // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: expone nombre y lectura
+        // pedagógica de un menor; exige alcance sobre el sujeto.
+        if (!(await requireSubjectScope(req, res, 'user', id))) return;
         const users  = readJSON(USERS_DB)  || [];
         const groups = readJSON(GROUPS_DB) || [];
 
