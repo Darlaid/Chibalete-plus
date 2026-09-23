@@ -1683,8 +1683,10 @@ async function mutateLibrary(fn) {
  * sesión en un equipo compartido —un aula—, y además resuelve la frescura sin
  * depender de que el ETag se revalide.
  *
- * Alcance deliberadamente mínimo: SOLO las tres vistas de Biblioteca. `/api/content`
- * y `/api/content/my-catalog` NO se tocan en esta unidad, ni el edge, ni el CDN.
+ * Alcance deliberadamente mínimo: las tres vistas de Biblioteca y, desde
+ * CHP-V6-LIBRARY-VISIBILITY-01, `/api/content/my-catalog` (la autoridad de la
+ * pestaña Libros: depende de identidad y de reglas que cambian). `/api/content`
+ * general NO se toca, ni el edge, ni el CDN.
  * No cambia cuerpo, autorización ni contrato: solo añade una cabecera.
  */
 function libraryViewNoStore(req, res, next) {
@@ -10231,7 +10233,7 @@ app.post('/api/auth/logout-all', requireUserAuth, async (req, res) => {
 // GET /api/content/my-catalog
 // Devuelve solo el contenido accesible para el usuario autenticado.
 // LU no reimplementa lógica de permisos: consulta este endpoint.
-app.get('/api/content/my-catalog', requireUserAuth, (req, res) => {
+app.get('/api/content/my-catalog', libraryViewNoStore, requireUserAuth, (req, res) => {
     try {
         // CHP-ACCESS-PEDAGOGY-01D-B: mismo predicate que /api/content. Una regla
         // explícita no convierte a un lector en destinatario de material

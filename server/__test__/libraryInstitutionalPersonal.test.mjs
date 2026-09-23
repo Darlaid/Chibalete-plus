@@ -568,10 +568,12 @@ async function main() {
         const ccPe = await cc('lec-a', '/api/library/personal');
         ok('personal declara no-store', /no-store/.test(ccPe || ''), String(ccPe));
 
-        // El alcance es EXACTAMENTE el de esta unidad: las otras rutas de
-        // catálogo NO se tocan (su endurecimiento es deuda aparte).
+        // 11D dejó fuera my-catalog; CHP-V6-LIBRARY-VISIBILITY-01 §8 lo incorpora
+        // (es la autoridad de la pestaña Libros). /api/content general sigue igual.
         const ccCat = (await GET('lec-a', '/api/content/my-catalog')).headers.get('cache-control');
-        ok('my-catalog NO cambia su política en 11D', !/no-store/.test(ccCat || ''), String(ccCat));
+        ok('my-catalog declara no-store (LIBRARY-VISIBILITY-01)', /no-store/.test(ccCat || ''), String(ccCat));
+        const ccAll = (await GET('lec-a', '/api/content')).headers.get('cache-control');
+        ok('/api/content general NO cambia su política', !/no-store/.test(ccAll || ''), String(ccAll));
 
         // El cuerpo no cambió: sigue siendo la misma vista de siempre.
         const view = await json(await GET('lec-a', '/api/library/personal'));

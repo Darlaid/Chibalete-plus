@@ -47,8 +47,6 @@ section('[4/§20] LIBRARY_TABS: EXTENDED_NOT_REBUILT');
         ['editorial', 'Selección Chibalete'],
         ['album', 'Libros Álbum'],
         ['lectura', 'Continuar Leyendo'],
-        ['descargados', 'Disponibles Offline'],
-        ['recomendados', 'Para Ti'],
         ['comunidad', 'Comunidad'],
     ];
     for (const [tab, label] of PREEXISTING) {
@@ -67,6 +65,30 @@ section('[4/§20] LIBRARY_TABS: EXTENDED_NOT_REBUILT');
         ok(`§5 · la UI no dice «${word}»`,
             !page.includes(word) && !personalTab.includes(word) && !institutionalTab.includes(word));
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+section('[LIBRARY-VISIBILITY-01] LIBRARY_TAB_SET: 8');
+{
+    const EXPECTED = [
+        ['biblioteca', 'Libros'], ['experiencias', 'Experiencias'], ['personal', 'Mi biblioteca'],
+        ['institucional', 'Biblioteca institucional'], ['editorial', 'Selección Chibalete'],
+        ['album', 'Libros Álbum'], ['lectura', 'Continuar Leyendo'], ['comunidad', 'Comunidad'],
+    ];
+    const tabs = [...pageCode.matchAll(/<TabButton tab="([^"]+)" label="([^"]+)"/g)].map(m => [m[1], m[2]]);
+    ok('F · exactamente las 8 pestañas, en el orden previo',
+        JSON.stringify(tabs) === JSON.stringify(EXPECTED), JSON.stringify(tabs));
+    ok('G · «Disponibles Offline» ya no existe', !page.includes('Disponibles Offline') && !pageCode.includes('"descargados"'));
+    ok('G · «Para Ti» ya no existe', !page.includes('Para Ti') && !pageCode.includes('recomendados'));
+    ok('E · Libros se alimenta solo de getMyCatalog()',
+        pageCode.includes('dataService.getMyCatalog()') && !pageCode.includes('getContenidos(')
+        && pageCode.includes('setMiBiblioteca(authorized)'));
+    ok('E · sin política de acceso por rol en la página',
+        !/roles\.includes\(['"](administrador|mediador)['"]\)/.test(pageCode));
+    ok('H · la infraestructura offline sigue viva fuera de Biblioteca',
+        read('components/ContentCard.tsx').includes('useOffline') && read('context/OfflineContext.tsx').includes('export const useOffline'));
+    ok('H · el motor de recomendación sigue exportado',
+        read('utils/libraryCatalogSelection.mjs').includes('export function deriveRecommendedFromVisible'));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -172,8 +194,10 @@ section('[24/§23] LOADING ≠ EMPTY, y ERROR sin fallback');
     }
     ok('§23 · las capas nuevas no leen el caché offline',
         !codeOf(personalTab).includes('useOffline') && !codeOf(institutionalTab).includes('useOffline'));
-    ok('§23 · Descargados conserva su comportamiento',
-        pageCode.includes("case 'descargados':") && pageCode.includes('filterHidden(downloadedContent)'));
+    // CHP-V6-LIBRARY-VISIBILITY-01 §10: «Disponibles Offline» sale de Biblioteca;
+    // la infraestructura offline (OfflineContext, ContentCard) sigue intacta.
+    ok('§10 · Biblioteca ya no lee el caché offline',
+        !pageCode.includes('useOffline') && !pageCode.includes('downloadedContent') && !pageCode.includes("case 'descargados':"));
     ok('§24 · un fallo de escritura muestra el error del servidor, no éxito',
         pageCode.includes('if (!r.ok) setLibraryNotice(libraryErrorText(r.status, r.body))')
         && pageCode.includes('if (!r.ok) { setLibraryNotice(libraryErrorText(r.status, r.body)); return; }'));

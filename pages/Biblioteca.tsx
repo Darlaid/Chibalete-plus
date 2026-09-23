@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
-import { useOffline } from '../context/OfflineContext';
 import ContentCard from '../components/ContentCard';
 import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, CommunityPost } from '../types';
@@ -12,7 +11,6 @@ import { useAccessCheck } from '../hooks/useAccessCheck';
 // el conjunto que autoriza el servidor. Ninguna decide entitlement.
 import {
     deriveAlbumFromVisible,
-    deriveRecommendedFromVisible,
     gateProgressByVisible,
 } from '../utils/libraryCatalogSelection.mjs';
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — capas INSTITUTIONAL y PERSONAL.
@@ -107,12 +105,10 @@ const ITEMS_PER_PAGE = 20;
 
 const Biblioteca: React.FC = () => {
     const { user, accessReady } = useAuth();
-    const { downloadedContent } = useOffline();
     const [activeTab, setActiveTab] = useState('biblioteca');
     const [enProgreso, setEnProgreso] = useState<{ content: Content, progress: ProgresoLectura }[]>([]);
     const [miBiblioteca, setMiBiblioteca] = useState<Content[]>([]);
     const [librosAlbum, setLibrosAlbum] = useState<Content[]>([]);
-    const [recomendados, setRecomendados] = useState<Content[]>([]);
     const [communityPosts, setCommunityPosts] = useState<CommunityPost[]>([]);
     const [currentPage, setCurrentPage] = useState(1);
     const [searchQuery, setSearchQuery] = useState('');
@@ -215,13 +211,12 @@ const Biblioteca: React.FC = () => {
                 // respuesta ilegible) no se muestra catálogo. Nunca se degrada al
                 // filtro de cliente.
                 const authorized = visible ?? [];
-                // Las tres pestañas derivadas del catálogo se calculan sobre el
+                // Las pestañas derivadas del catálogo se calculan sobre el
                 // MISMO conjunto autorizado. Son filtros de PRESENTACIÓN (tipo,
                 // orden, tope): no deciden acceso.
                 setEnProgreso(gateProgressByVisible(prog, authorized) as typeof prog);
                 setMiBiblioteca(authorized);
                 setLibrosAlbum(deriveAlbumFromVisible(authorized) as Content[]);
-                setRecomendados(deriveRecommendedFromVisible(authorized) as Content[]);
                 setCommunityPosts(posts);
                 setSections(secs.sort((a: any, b: any) => a.order - b.order));
                 setSchoolConfig(conf);
@@ -512,14 +507,6 @@ const Biblioteca: React.FC = () => {
                 items = filterHidden(librosAlbum);
                 displayedItems = items;
                 break;
-            case 'descargados':
-                items = filterHidden(downloadedContent);
-                displayedItems = items;
-                break;
-            case 'recomendados':
-                items = filterHidden(recomendados);
-                displayedItems = items;
-                break;
             default:
                 return <p className="mt-8 text-center text-gray-500">Próximamente.</p>;
         }
@@ -655,8 +642,6 @@ const Biblioteca: React.FC = () => {
                 <TabButton tab="editorial" label="Selección Chibalete" />
                 <TabButton tab="album" label="Libros Álbum" />
                 <TabButton tab="lectura" label="Continuar Leyendo" />
-                <TabButton tab="descargados" label="Disponibles Offline" />
-                <TabButton tab="recomendados" label="Para Ti" />
                 <TabButton tab="comunidad" label="Comunidad" />
             </div>
 
