@@ -83,8 +83,8 @@ ok('load() conserva el path !url → audioFailedKeys + PB_AUDIO_UNRECOVERABLE',
    /if\s*\(\s*!url\s*\)\s*\{[\s\S]{0,500}?audioFailedKeysRef\.current\.add\s*\(\s*toChunkKey\s*\(\s*index\s*\)\s*\)[\s\S]{0,300}?PB_AUDIO_UNRECOVERABLE[\s\S]{0,120}?no_url_after_getAudioUrl/.test(hookSrc));
 
 console.log('\n[F] HF2 (resume anchored) intacto');
-ok('forceSentenceTts sigue derivándose de anchorFirstAudio',
-   /options\.anchorFirstAudio\s*===\s*true\s*&&\s*chunkKey\s*!==\s*index/.test(hookSrc));
+ok('forceSentenceTts sigue derivándose de anchorFirstAudio (frase no inicial del chunk)',
+   /options\.anchorFirstAudio\s*===\s*true\s*&&\s*index\s*!==\s*firstSentenceIndexForChunkKey\(chunkKey\)/.test(hookSrc));
 ok('cache key negativa de sentence-TTS sigue presente',
    /toSentenceTtsCacheKey\(index\)/.test(hookSrc) &&
    /SENTENCE_TTS_CACHE_KEY_OFFSET/.test(hookSrc));

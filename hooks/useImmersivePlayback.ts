@@ -833,6 +833,17 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
             console.log('[SYNC_SPAWN_SKIPPED]', { ..._spawnAttemptPayload, reason: 'mode_not_chunked' });
             return;
         }
+        // CHP-MAINT-IMMERSIVE-AUDIO-TEXT-SYNC-01 F1 — un audio de TTS de frase
+        // (reanudación anclada / override HF2) cubre UNA sola frase: se comporta
+        // como perSentence. Si se spawneara el executor por-chunk, repartiría la
+        // duración de esa frase entre [index..fin del chunk], resaltaría frases
+        // que no suenan y el catchup de `ended` haría saltar handleEnded al
+        // chunk siguiente. El avance queda en audio.onEnded → index + 1.
+        if (activeAudioCacheKeyRef.current !== null && isSentenceTtsCacheKey(activeAudioCacheKeyRef.current)) {
+            // eslint-disable-next-line no-console
+            console.log('[SYNC_SPAWN_SKIPPED]', { ..._spawnAttemptPayload, reason: 'sentence_tts_audio' });
+            return;
+        }
         // BLOCKER M-5.4.3 — Dedup: si ya hay un executor vivo para el mismo
         // sessionId Y mismo chunk, no re-spawneamos. Evita el caso "resume()
         // tras pause()" que vuelve a crear executor para una frase ya en curso.
@@ -1406,8 +1417,13 @@ export function useImmersivePlayback(ctx: PlaybackContext): ImmersivePlayback {
     ): { chunkKey: number; cacheKey: number; forceSentenceTts: boolean } => {
         const chunkKey = toChunkKey(index);
         const overrideChunkKey = sentenceTtsOverrideChunkKeyRef.current;
+        // CHP-MAINT-IMMERSIVE-AUDIO-TEXT-SYNC-01 F1 — la reanudación anclada
+        // fuerza TTS de frase solo si `index` NO es la primera frase de su
+        // chunk. Antes se comparaba `chunkKey !== index` (índice de chunk vs
+        // índice de frase) y se forzaba TTS también en el inicio de un chunk,
+        // donde el MP3 del chunk empieza exactamente en esa frase.
         const forceSentenceTts = options.forceSentenceTts === true
-            || (options.anchorFirstAudio === true && chunkKey !== index)
+            || (options.anchorFirstAudio === true && index !== firstSentenceIndexForChunkKey(chunkKey))
             || (overrideChunkKey !== null && overrideChunkKey === chunkKey);
         return {
             chunkKey,

@@ -51,8 +51,8 @@ ok('First play after resume calls pb.load(audioStartIndex, true) instead of resu
 console.log('\n[B] preexisting chunk/cache 0 cannot determine first audio');
 ok('Hook exposes PlaybackLoadOptions.anchorFirstAudio',
    /interface\s+PlaybackLoadOptions[\s\S]{0,300}?anchorFirstAudio\?:\s*boolean/.test(hookSrc));
-ok('Hook derives forceSentenceTts when anchorFirstAudio targets a chunked sentence',
-   /options\.anchorFirstAudio\s*===\s*true\s*&&\s*chunkKey\s*!==\s*index/.test(hookSrc));
+ok('Hook derives forceSentenceTts when anchorFirstAudio targets a non-first sentence of its chunk',
+   /options\.anchorFirstAudio\s*===\s*true\s*&&\s*index\s*!==\s*firstSentenceIndexForChunkKey\(chunkKey\)/.test(hookSrc));
 ok('Forced sentence TTS uses a separate negative cache key',
    /toSentenceTtsCacheKey\(index\)/.test(hookSrc)
    && /SENTENCE_TTS_CACHE_KEY_OFFSET/.test(hookSrc));
