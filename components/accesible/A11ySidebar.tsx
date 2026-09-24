@@ -192,11 +192,15 @@ const A11ySidebar: React.FC<A11ySidebarProps> = ({
                 Fondo opaco (mismo que el aside en mobile; el del tema a11y en
                 desktop) para que el contenido que pasa por debajo no se lea
                 encima. Los márgenes negativos cubren el padding superior del
-                aside en mobile. Siempre montada (también loading/error). */}
+                aside en mobile. Siempre montada (también loading/error).
+                -top-3 (mobile): `sticky` fija contra el borde del CONTENIDO del
+                scroll del aside, que en mobile tiene pt 12px; sin él asomaba una
+                franja de ~13 px de texto por encima de la zona. md:top-0: en
+                desktop el aside no tiene padding superior. */}
             <div
                 data-a11y-persistent-zone=""
                 className={[
-                    'sticky top-0 z-10',
+                    'sticky -top-3 md:top-0 z-10',
                     '-mx-4 px-4 -mt-3 pt-3 pb-2',
                     'bg-white dark:bg-gray-950',
                     'md:mx-0 md:px-0 md:mt-0 md:pt-0',

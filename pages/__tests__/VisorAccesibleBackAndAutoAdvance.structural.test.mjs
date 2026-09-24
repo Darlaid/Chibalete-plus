@@ -35,7 +35,8 @@ console.log('\n[VOLVER]');
     const zoneStart = sidebar.indexOf('data-a11y-persistent-zone');
     const zoneEnd = sidebar.indexOf('BLOQUE — Progreso') >= 0 ? sidebar.indexOf('BLOQUE — Progreso') : sidebar.indexOf('<A11yProgressSummary');
     const zone = sidebar.slice(zoneStart, zoneEnd);
-    ok('B1 zona persistente sticky top-0 dentro del aside', zoneStart > 0 && /'sticky top-0 z-10'/.test(sidebar));
+    ok('B1 zona persistente sticky dentro del aside (-top-3 mobile cubre el pt del aside, md:top-0 desktop)',
+        zoneStart > 0 && /'sticky -top-3 md:top-0 z-10'/.test(sidebar));
     ok('B1 "Volver a Biblioteca" está en la zona persistente', /Volver a Biblioteca/.test(zone) && /onClick=\{onBack\}/.test(zone));
     {
         // La zona es hija DIRECTA del <aside>, antes de cualquier bloque condicional.
