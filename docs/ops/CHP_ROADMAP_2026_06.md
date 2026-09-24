@@ -651,3 +651,34 @@ workflows, sin producción, sin SSH, sin flags, sin stores.
 ```text
 CHP-V6-PRODUCTION-RELEASE-PREFLIGHT-01
 ```
+
+---
+---
+
+# ACTA DE CIERRE — `CHP-V6-FINAL-EVIDENCE-PACK-01` (Etapa 13)
+
+Fecha de corte: 2026-09-23. Tipo: **documental + verificación read-only**. La evidencia completa de
+las Etapas 0–13, la cadena causal M4, las deudas abiertas y la matriz de afirmaciones está en
+`docs/ops/CHP_V6_FINAL_EVIDENCE_PACK_01.md`; este bloque no la duplica.
+
+Runtime final: `chibalete/api:aggscope-523b0b5` en api_1 y api_2 · `chibalete/front:aggscope-523b0b5`
+· 4/4 healthy · enforce · restricted · materializador y scheduler ON · rotación solo en api_1 ·
+expiry OFF · purge no autorizado.
+
+```text
+ETAPA_13:                         GREEN
+PLAN:                             CHP-ROADMAP-2026-06
+V6_TECHNICAL_IMPLEMENTATION:      CLOSED
+V6_TECHNICAL_INTEGRATION:         VERIFIED_IN_PRODUCTION
+M4_INTEGRATED_GATE:               GREEN
+FIELD_TECHNICAL_EVIDENCE:         YELLOW_NO_LU_TRAFFIC
+FIELD_PARTICIPATION_GATE:         WAIVED_BY_MANAGEMENT
+FIELD_DEPENDENCY:                 CLOSED_BY_MANAGEMENT_RISK_ACCEPTANCE
+DRAIN_TECHNICAL_RESULT:           NOT_GREEN
+V6:                               CLOSED_WITH_RECORDED_FIELD_LIMITATIONS_AND_OPEN_DEBTS
+```
+
+El estado objetivo de §7 Etapa 13 (`CHIBALETE_PLUS_V6: GREEN`) se registra con la cláusula de
+limitaciones: no se declara `FIELD_ADOPTION: GREEN` ni la auditoría de todos los routers o endpoints.
+Bloqueo previo a activación vigente: `AULA_VIVA_INSTITUTIONAL_ROUTER_SCOPE` →
+`MUST_CLOSE_AUTHZ_BEFORE_ENGINE_ACTIVATION`.
