@@ -40,12 +40,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import { parsePlainTextToA11yBook } from '../utils/a11yDocumentParser';
 import A11yShell from '../components/accesible/A11yShell';
 import { useA11yAnalytics } from '../hooks/useA11yAnalytics';
 import { useA11yReaderNavigation } from '../hooks/useA11yReaderNavigation';
+import { useA11yAutoAdvance } from '../hooks/useA11yAutoAdvance';
 import { useA11yReadingSettings, type ReadingLanguage } from '../hooks/useA11yReadingSettings';
 import { useReadingSegments } from '../hooks/useReadingSegments';
 // CRR Fase 2 — bridge de observación. Default OFF; cuando se activa via
@@ -103,6 +103,9 @@ function announceLanguageChange(lang: ReadingLanguage): void {
     }, 50);
 }
 
+/** Ruta canónica de Biblioteca (App.tsx). Destino único de "Volver". */
+const LIBRARY_PATH = '/biblioteca';
+
 interface VisorAccesibleProps {
     /** Contenido ya validado por AccessWrapper. Garantizado no-null. */
     content: Content;
@@ -112,8 +115,6 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
     const id = content.id;
     const { user } = useAuth();
     const navigate = useNavigate();
-    // Regreso a la ficha CONSERVANDO el origen MOOK si lo hubo.
-    const fichaPath = useFichaPath(id);
     const [book,       setBook]    = useState<A11yBook | null>(null);
     const [loading,    setLoading] = useState<boolean>(true);
     const [error,      setError]   = useState<string | null>(null);
@@ -144,13 +145,18 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
     // con acciones prev/next por capítulo o por segmento. ref-estable.
     const navigation = useA11yReaderNavigation(book, segments);
 
-    // "Volver a la ficha del libro": navegación absoluta a /contenido/:id.
-    // No usamos `navigate(-1)` (historia del browser) porque el libro
-    // pudo haberse abierto desde un email o link externo — el destino
-    // canónico es la ficha, no "lo anterior".
+    // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — "Volver a Biblioteca":
+    // destino ÚNICO e incondicional, /biblioteca. Ni `navigate(-1)` (historia
+    // del browser), ni la ficha, ni otro modo de lectura. El regreso al MOOK,
+    // cuando la lectura vino de uno, es un control SEPARADO (MookReturnButton
+    // en la barra lateral) y conserva su propio destino.
     const handleBack = useCallback(() => {
-        navigate(fichaPath);
-    }, [navigate, id]);
+        navigate(LIBRARY_PATH);
+    }, [navigate]);
+
+    // Avance automático (opt-in explícito, arranca SIEMPRE en OFF). La
+    // navegación real sigue siendo autoridad de useA11yReaderNavigation.
+    const autoAdvance = useA11yAutoAdvance({ userId: user?.id, navigation, segments });
 
     // SC 3.1.1 / 3.1.2 Language of Page / Parts.
     //
@@ -371,6 +377,7 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
             onBack={handleBack}
             onRetryLoad={retryLoad}
             navigation={navigation}
+            autoAdvance={autoAdvance}
             settingsApi={settingsApi}
             availableLanguages={availableLanguages}
             segments={segments}

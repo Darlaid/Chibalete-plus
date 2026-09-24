@@ -83,6 +83,13 @@ export interface ReaderNavigationApi {
     goToPrevSegment: () => void;
     goToNextSegment: () => void;
     /**
+     * CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — avance AUTOMÁTICO al siguiente
+     * segmento. Misma selección y mismo scroll que "Siguiente párrafo", pero
+     * sin mover el foco y sin anunciar "Sección X de Y". Devuelve false si no
+     * hay siguiente segmento (fin del libro). Solo lo invoca useA11yAutoAdvance.
+     */
+    advanceSegmentAuto: () => boolean;
+    /**
      * Navegar a un capítulo por su id estable (ej: 'chap-3'). Usado por el
      * TOC para mantener sincronizado el state interno (currentParagraphIndex,
      * progreso, regla focal) cuando el user salta vía índice.
@@ -200,6 +207,18 @@ function focusElementById(id: string): void {
         } else {
             (el as HTMLElement).focus();
         }
+    });
+}
+
+/**
+ * Scroll al elemento SIN tocar el foco. Lo usa el avance automático: el foco
+ * del usuario (p. ej. sobre el interruptor) no se mueve nunca por un salto
+ * que él no pidió.
+ */
+function scrollElementIntoReadingBand(id: string): void {
+    requestAnimationFrame(() => {
+        const el = document.getElementById(id);
+        if (el instanceof HTMLElement) smoothScrollToElement(el);
     });
 }
 
@@ -363,7 +382,11 @@ export function useA11yReaderNavigation(
     // lector de pantalla. Los botones siguen diciendo "párrafo" por
     // claridad infantil; el announcer dice "sección" porque describe la
     // unidad real que avanzó.
-    const goToSegment = useCallback((segIdx: number) => {
+    //
+    // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — `source`:
+    //   'manual' (default) → contrato de siempre: foco al párrafo + anuncio.
+    //   'auto'             → misma selección y mismo scroll, SIN foco ni anuncio.
+    const goToSegment = useCallback((segIdx: number, opts: { source?: 'manual' | 'auto' } = {}) => {
         if (totalSegments === 0) return;
         const clamped = Math.max(0, Math.min(segIdx, totalSegments - 1));
         const seg = segments[clamped];
@@ -373,9 +396,19 @@ export function useA11yReaderNavigation(
         if (paraIdx < 0) return;
         programmaticChangeAtRef.current = Date.now();
         setCurrentParagraphIndex(paraIdx);
+        if (opts.source === 'auto') {
+            scrollElementIntoReadingBand(firstParaId);
+            return;
+        }
         focusElementById(firstParaId);
         announce(`Sección ${clamped + 1} de ${totalSegments}`);
     }, [segments, totalSegments, flat]);
+
+    const advanceSegmentAuto = useCallback((): boolean => {
+        if (!hasNextSegment) return false;
+        goToSegment(currentSegmentIndex + 1, { source: 'auto' });
+        return true;
+    }, [hasNextSegment, currentSegmentIndex, goToSegment]);
 
     const goToPrevSegment = useCallback(() => {
         if (!hasPrevSegment) return;
@@ -530,6 +563,7 @@ export function useA11yReaderNavigation(
         hasNextSegment,
         goToPrevSegment,
         goToNextSegment,
+        advanceSegmentAuto,
         goToChapterById,
         observeParagraph,
     }), [
@@ -549,6 +583,7 @@ export function useA11yReaderNavigation(
         hasNextSegment,
         goToPrevSegment,
         goToNextSegment,
+        advanceSegmentAuto,
         goToChapterById,
         observeParagraph,
     ]);

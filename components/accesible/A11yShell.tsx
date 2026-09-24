@@ -36,7 +36,6 @@
  */
 
 import React from 'react';
-import { ChevronLeft } from 'lucide-react';
 import A11ySkipLinks from './A11ySkipLinks';
 import A11yLiveRegion from './A11yLiveRegion';
 import A11yDocument from './A11yDocument';
@@ -46,6 +45,7 @@ import A11yDebugSegments, { isA11yDebugEnabled } from './A11yDebugSegments';
 import { PixelButton } from './pixel/PixelButton';
 import type { A11yBook } from '../../types/a11y';
 import type { ReaderNavigationApi } from '../../hooks/useA11yReaderNavigation';
+import type { AutoAdvanceApi } from '../../hooks/useA11yAutoAdvance';
 import type { ReadingSettingsApi, ReadingLanguage } from '../../hooks/useA11yReadingSettings';
 import type { ReadingSegment } from '../../utils/readingSegments';
 
@@ -113,12 +113,16 @@ interface A11yShellProps {
      */
     observeParagraph?: (el: Element | null, paragraphId: string) => void;
     /**
-     * Callback de "Volver a la ficha del libro". Inyectado por VisorAccesible
-     * para que la navegación NO dependa del historial del browser
-     * (`navigate(-1)` puede llevar a un sitio inesperado). El componente
-     * no decide la ruta — solo el evento.
+     * Callback de "Volver a Biblioteca". Inyectado por VisorAccesible (destino
+     * único: /biblioteca). El shell no decide la ruta — solo lo entrega a la
+     * zona persistente de la barra lateral, donde vive el botón.
      */
     onBack: () => void;
+    /**
+     * CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — estado y toggle del avance
+     * automático (useA11yAutoAdvance). Se renderiza en la barra lateral.
+     */
+    autoAdvance: AutoAdvanceApi;
     /**
      * UX-3B — callback opcional para reintentar la carga del libro cuando
      * el fetch del texto plano falla (red caída, 5xx, parse). Si se provee,
@@ -154,7 +158,7 @@ interface A11yShellProps {
     segments: ReadonlyArray<ReadingSegment>;
 }
 
-const A11yShell: React.FC<A11yShellProps> = ({ book, loading, error, observeParagraph, onBack, onRetryLoad, navigation, settingsApi, availableLanguages, segments }) => {
+const A11yShell: React.FC<A11yShellProps> = ({ book, loading, error, observeParagraph, onBack, onRetryLoad, navigation, autoAdvance, settingsApi, availableLanguages, segments }) => {
     const debugEnabled = isA11yDebugEnabled();
     const showDocument = !loading && !error && book !== null;
     const showLoading = loading;
@@ -177,8 +181,10 @@ const A11yShell: React.FC<A11yShellProps> = ({ book, loading, error, observePara
 
             {/* HEADER (banner) — consola de lectura del Modo accesible.
                 Tres zonas:
-                  · izquierda: botón "Volver" (siempre visible, también en
-                    loading/error — el user debe poder salir del visor).
+                  · izquierda: espaciador simétrico. "Volver a Biblioteca"
+                    ya NO vive aquí (el header no es sticky y desaparecía al
+                    hacer scroll): está en la zona persistente de la barra
+                    lateral — CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01.
                   · centro: etiqueta "Modo accesible" (eyebrow uppercase) +
                     título del libro cuando ya cargó. NO es <h1>: el único
                     h1 sigue viviendo dentro de <main> para mantener la
@@ -203,20 +209,9 @@ const A11yShell: React.FC<A11yShellProps> = ({ book, loading, error, observePara
             >
                 <div className="w-full max-w-6xl mx-auto px-6 py-4">
                     <div className="flex items-center gap-4">
-                        {/* Volver — PixelButton neutral md. Stamp shadow leve
-                            + active "se hunde": feedback táctil sin ser gamer.
-                            En mobile ocultamos el label visible (el aria-label
-                            sigue siendo la fuente del nombre accesible). */}
-                        <PixelButton
-                            onClick={onBack}
-                            tone="neutral"
-                            size="md"
-                            icon={ChevronLeft}
-                            aria-label="Volver a la página del libro"
-                            className="shrink-0"
-                        >
-                            <span className="hidden sm:inline">Volver</span>
-                        </PixelButton>
+                        {/* Espaciador: equilibra el "% leído" de la derecha
+                            para que el título siga centrado. */}
+                        <span className="shrink-0 min-w-[3.25rem]" aria-hidden="true" />
 
                         <div className="flex-1 min-w-0 text-center">
                             <p className="text-[11px] sm:text-xs uppercase tracking-[0.2em] font-semibold text-gray-600 dark:text-gray-400">
@@ -328,6 +323,8 @@ const A11yShell: React.FC<A11yShellProps> = ({ book, loading, error, observePara
                     contenido cargado (navegación, índice). */}
                 <A11ySidebar
                     book={book}
+                    onBack={onBack}
+                    autoAdvance={autoAdvance}
                     navigation={navigation}
                     settingsApi={settingsApi}
                     availableLanguages={availableLanguages}

@@ -192,14 +192,30 @@ const ficha = fs.readFileSync(path.join(REPO, 'pages', 'PaginaDetalleLibro.tsx')
 }
 
 {
-    const lectores = ['VisorPDF', 'VisorTexto', 'VisorInmersivo', 'VisorAlbum', 'VisorAccesible'];
+    // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01: el Modo Accesible sale de esta
+    // regla. Su "Volver" va SIEMPRE a /biblioteca y el regreso al MOOK es un
+    // control separado (ver el bloque siguiente). Los otros cuatro, intactos.
+    const lectores = ['VisorPDF', 'VisorTexto', 'VisorInmersivo', 'VisorAlbum'];
     for (const l of lectores) {
         const src = fs.readFileSync(path.join(REPO, 'pages', `${l}.tsx`), 'utf8');
         assert.match(src, /useFichaPath\(/, `${l}: el regreso debe conservar el origen`);
         // CHP-WCAG-01C BIBLIOTECA-10: el regreso puede llevar estado de navegación (returnFocus).
         assert.match(src, /(navigate|useNavigateTo)\(fichaPath(\)|, \{ state: \{ returnFocus)/, `${l}: el control de regreso usa la ruta con origen`);
     }
-    ok('los cinco lectores vuelven a la ficha conservando el origen');
+    ok('los cuatro lectores con ficha vuelven a ella conservando el origen');
+}
+
+{
+    // Modo Accesible: "Volver a Biblioteca" incondicional + «Volver al MOOK»
+    // como control SEPARADO en la barra persistente, solo con origen válido.
+    const visor = fs.readFileSync(path.join(REPO, 'pages', 'VisorAccesible.tsx'), 'utf8');
+    assert.ok(!/useFichaPath\(|fichaPath/.test(visor), 'VisorAccesible ya no regresa a la ficha');
+    assert.match(visor, /const LIBRARY_PATH = '\/biblioteca';/, 'destino canónico de Biblioteca');
+    assert.match(visor, /navigate\(LIBRARY_PATH\)/, '"Volver" navega a /biblioteca');
+    const sidebar = fs.readFileSync(path.join(REPO, 'components', 'accesible', 'A11ySidebar.tsx'), 'utf8');
+    assert.match(sidebar, /<MookReturnButton/, 'el regreso al MOOK sigue disponible en el Modo Accesible');
+    assert.match(sidebar, /Volver a Biblioteca/, 'y es un control distinto de "Volver a Biblioteca"');
+    ok('Modo Accesible: Biblioteca incondicional y MOOK como control separado');
 }
 
 {

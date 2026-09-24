@@ -234,6 +234,11 @@ import { evaluateScopeAccess, requireScopeAccess } from './aulaViva/scopeAccess.
 import { getPrincipal, getMemberships, IdentityUnavailableError } from './identity/cis.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
+// CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — tiempo efectivo propio (desbloqueo
+// del avance automático). Misma autoridad que `tiempo_efectivo_lectura`.
+import { readHistoricalEvents } from './analytics/historicalEvents.mjs';
+import { computeEffectiveReadingMs } from './analytics/effectiveReadingTime.mjs';
+import { normalizeEventForSignals } from './analytics/legacyEventNormalizer.mjs';
 
 // --- LOGGING HELPER ---
 const log = (msg, type = 'INFO') => {
@@ -10269,6 +10274,40 @@ app.get('/api/content/my-catalog', libraryViewNoStore, requireUserAuth, (req, re
     } catch (e) {
         log(`GET my-catalog error (userId=${req.user.id}): ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'Error al obtener catálogo' });
+    }
+});
+
+// GET /api/reading/my-effective-time — CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01.
+//
+// Desbloqueo del avance automático del Modo Accesible (120 min de lectura
+// efectiva). SELF-ONLY: el sujeto sale SIEMPRE de la sesión (`req.user.id`);
+// la ruta no acepta userId por query, body ni path. No hay contador paralelo:
+// es `computeEffectiveReadingMs` (la misma agregación de la señal
+// `tiempo_efectivo_lectura`) sobre la historia lógica hot ∪ archive.
+// La respuesta es mínima: ni eventos, ni contenidos, ni timestamps.
+const AUTO_ADVANCE_UNLOCK_MS = 120 * 60 * 1000;
+app.get('/api/reading/my-effective-time', libraryViewNoStore, requireUserAuth, (req, res) => {
+    let principal;
+    try {
+        principal = getPrincipal(String(req.user?.id ?? ''));
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) {
+            log(`GET my-effective-time error: ${e.message}`, 'ERROR');
+            return res.status(500).json({ error: 'Error al calcular tiempo de lectura' });
+        }
+        return res.status(503).json({ error: 'identity_unavailable', cause: e.causeTag });
+    }
+    if (!principal) return res.status(401).json({ error: 'identity_not_established' });
+    try {
+        const { rows } = readHistoricalEvents({ userIds: [principal.id] });
+        const { ms } = computeEffectiveReadingMs(rows, (row) => normalizeEventForSignals(row.event));
+        res.json({
+            effectiveReadingMs: ms,
+            autoAdvanceUnlocked: ms >= AUTO_ADVANCE_UNLOCK_MS,
+        });
+    } catch (e) {
+        log(`GET my-effective-time error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error al calcular tiempo de lectura' });
     }
 });
 

@@ -5,6 +5,11 @@
  * <PixelPanel> autocontenido — borde + stamp shadow propios. La
  * separación entre bloques la da el `gap-5` del <aside> padre.
  *
+ *     ┌──────────────────┐   ← zona PERSISTENTE (sticky top-0)
+ *     │ ← Volver a Bibl. │     CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01
+ *     │ [Volver al MOOK] │     (solo si la lectura vino de un MOOK)
+ *     │ Avance automático│
+ *     └──────────────────┘
  *     ┌──────────────────┐   ← PixelPanel
  *     │ PROGRESO         │
  *     │ ...              │
@@ -26,7 +31,13 @@
  * Reglas:
  *   - Lectura SIEMPRE visible (también en loading/error).
  *   - Progreso, Navegación e Índice solo si hay book + párrafos / capítulos.
- *   - El botón "Volver" vive en el header del shell (no acá).
+ *   - "Volver a Biblioteca" y el interruptor de Avance automático viven en
+ *     una zona persistente (sticky top-0) DENTRO del aside: el aside tiene
+ *     scroll interno, así que sin ella el botón se iría de la vista con el
+ *     índice o el panel Lectura abiertos. Se renderiza SIEMPRE, también en
+ *     loading/error: el usuario siempre puede salir del visor.
+ *   - "Volver al MOOK" es un control SEPARADO (MookReturnButton), solo con
+ *     origen MOOK válido. "Volver a Biblioteca" no depende de ese origen.
  *   - Desktop: TOC abierto por default (matchMedia al mount).
  *   - Mobile: TOC y Lectura mutuamente excluyentes — abrir uno cierra el otro.
  *   - Skip link "Saltar al índice" dispara CustomEvent que aquí se escucha
@@ -40,7 +51,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
+import { ChevronDown, ChevronUp, BookOpen, ChevronLeft } from 'lucide-react';
 import A11yReaderNavigation from './A11yReaderNavigation';
 import A11yReadingSettings from './A11yReadingSettings';
 import A11yTableOfContents from './A11yTableOfContents';
@@ -48,18 +59,26 @@ import A11yProgressSummary from './A11yProgressSummary';
 import { A11Y_REQUEST_TOC_EXPAND } from './A11ySkipLinks';
 import { PixelButton } from './pixel/PixelButton';
 import { PixelPanel } from './pixel/PixelPanel';
+import { MookReturnButton } from '../MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import type { A11yBook } from '../../types/a11y';
 import type { ReaderNavigationApi } from '../../hooks/useA11yReaderNavigation';
+import type { AutoAdvanceApi } from '../../hooks/useA11yAutoAdvance';
 import type { ReadingSettingsApi, ReadingLanguage } from '../../hooks/useA11yReadingSettings';
 
 interface A11ySidebarProps {
     book: A11yBook | null;
+    /** "Volver a Biblioteca" — destino decidido por VisorAccesible (/biblioteca). */
+    onBack: () => void;
+    /** Estado y toggle del avance automático (useA11yAutoAdvance). */
+    autoAdvance: AutoAdvanceApi;
     navigation: ReaderNavigationApi;
     settingsApi: ReadingSettingsApi;
     availableLanguages: ReadonlyArray<ReadingLanguage>;
 }
 
 const TOC_PANEL_ID = 'a11y-toc-panel';
+const AUTO_ADVANCE_HINT_ID = 'a11y-autoadvance-hint';
+export const AUTO_ADVANCE_LOCKED_HINT = 'Disponible después de 2 h de lectura';
 
 // SECTION/FIRST_SECTION eliminados (UX-2B): cada bloque ahora vive en su
 // propio <PixelPanel> autocontenido (border + stamp shadow). La separación
@@ -75,8 +94,10 @@ function isDesktopBreakpoint(): boolean {
 }
 
 const A11ySidebar: React.FC<A11ySidebarProps> = ({
-    book, navigation, settingsApi, availableLanguages,
+    book, onBack, autoAdvance, navigation, settingsApi, availableLanguages,
 }) => {
+    const autoLocked = autoAdvance.status === 'LOCKED';
+    const autoActive = autoAdvance.status === 'ACTIVE';
     // Estado lifted del TOC. Inicial: expandido en desktop, colapsado en mobile.
     // Sincronización SSR-safe via factory de useState (corre solo en mount).
     const [tocExpanded, setTocExpanded] = useState<boolean>(() => isDesktopBreakpoint());
@@ -167,6 +188,75 @@ const A11ySidebar: React.FC<A11ySidebarProps> = ({
                 'focus:outline focus:outline-2 focus:outline-blue-700 focus:outline-offset-2',
             ].join(' ')}
         >
+            {/* ZONA PERSISTENTE — sticky top-0 dentro del scroll del aside.
+                Fondo opaco (mismo que el aside en mobile; el del tema a11y en
+                desktop) para que el contenido que pasa por debajo no se lea
+                encima. Los márgenes negativos cubren el padding superior del
+                aside en mobile. Siempre montada (también loading/error). */}
+            <div
+                data-a11y-persistent-zone=""
+                className={[
+                    'sticky top-0 z-10',
+                    '-mx-4 px-4 -mt-3 pt-3 pb-2',
+                    'bg-white dark:bg-gray-950',
+                    'md:mx-0 md:px-0 md:mt-0 md:pt-0',
+                    'md:bg-[var(--a11y-bg)] dark:md:bg-[var(--a11y-bg)]',
+                    'grid grid-cols-2 gap-2 md:grid-cols-1',
+                ].join(' ')}
+            >
+                <PixelButton
+                    id="a11y-back-to-library"
+                    onClick={onBack}
+                    tone="neutral"
+                    size="md"
+                    icon={ChevronLeft}
+                    className="w-full"
+                >
+                    Volver a Biblioteca
+                </PixelButton>
+
+                {/* Avance automático — role="switch". LOCKED usa aria-disabled
+                    (NO `disabled`) para seguir siendo enfocable y anunciar la
+                    condición de desbloqueo. El ON/OFF visual es aria-hidden:
+                    el estado lo comunica aria-checked. */}
+                <PixelButton
+                    id="a11y-autoadvance-switch"
+                    role="switch"
+                    aria-checked={autoActive}
+                    aria-disabled={autoLocked || undefined}
+                    aria-describedby={autoLocked ? AUTO_ADVANCE_HINT_ID : undefined}
+                    onClick={autoAdvance.toggle}
+                    tone={autoActive ? 'primary' : 'neutral'}
+                    size="md"
+                    className={['w-full', autoLocked ? 'opacity-60 cursor-not-allowed' : ''].join(' ')}
+                >
+                    Avance automático
+                    <span aria-hidden="true" className="ml-1 text-xs tabular-nums">
+                        {autoActive ? 'ON' : 'OFF'}
+                    </span>
+                </PixelButton>
+
+                {autoLocked && (
+                    <p
+                        id={AUTO_ADVANCE_HINT_ID}
+                        className="col-span-2 md:col-span-1 text-xs text-gray-700 dark:text-gray-300"
+                    >
+                        {AUTO_ADVANCE_LOCKED_HINT}
+                    </p>
+                )}
+
+                {/* Solo con origen MOOK válido (si no, no renderiza nada). */}
+                <MookReturnButton
+                    className={[
+                        'col-span-2 md:col-span-1',
+                        'inline-flex items-center justify-center gap-2 w-full min-h-12 px-4 py-2',
+                        'rounded-md border-2 border-gray-800 dark:border-gray-300',
+                        'font-bold text-gray-900 dark:text-gray-100',
+                        'focus:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2',
+                    ].join(' ')}
+                />
+            </div>
+
             {/* BLOQUE — Progreso. Solo si hay book con párrafos. */}
             {hasBook && hasParagraphs && (
                 <PixelPanel>
