@@ -235,10 +235,9 @@ import { getPrincipal, getMemberships, IdentityUnavailableError } from './identi
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — tiempo efectivo propio (desbloqueo
-// del avance automático). Misma autoridad que `tiempo_efectivo_lectura`.
-import { readHistoricalEvents } from './analytics/historicalEvents.mjs';
-import { computeEffectiveReadingMs } from './analytics/effectiveReadingTime.mjs';
-import { normalizeEventForSignals } from './analytics/legacyEventNormalizer.mjs';
+// del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
+// leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
+import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
 
 // --- LOGGING HELPER ---
 const log = (msg, type = 'INFO') => {
@@ -10283,7 +10282,8 @@ app.get('/api/content/my-catalog', libraryViewNoStore, requireUserAuth, (req, re
 // efectiva). SELF-ONLY: el sujeto sale SIEMPRE de la sesión (`req.user.id`);
 // la ruta no acepta userId por query, body ni path. No hay contador paralelo:
 // es `computeEffectiveReadingMs` (la misma agregación de la señal
-// `tiempo_efectivo_lectura`) sobre la historia lógica hot ∪ archive.
+// `tiempo_efectivo_lectura`) sobre la historia lógica hot ∪ archive, leyendo
+// solo las filas del sujeto por índice (userEffectiveReadingTime.mjs).
 // La respuesta es mínima: ni eventos, ni contenidos, ni timestamps.
 const AUTO_ADVANCE_UNLOCK_MS = 120 * 60 * 1000;
 app.get('/api/reading/my-effective-time', libraryViewNoStore, requireUserAuth, (req, res) => {
@@ -10299,8 +10299,7 @@ app.get('/api/reading/my-effective-time', libraryViewNoStore, requireUserAuth, (
     }
     if (!principal) return res.status(401).json({ error: 'identity_not_established' });
     try {
-        const { rows } = readHistoricalEvents({ userIds: [principal.id] });
-        const { ms } = computeEffectiveReadingMs(rows, (row) => normalizeEventForSignals(row.event));
+        const ms = userEffectiveReadingMs(principal.id);
         res.json({
             effectiveReadingMs: ms,
             autoAdvanceUnlocked: ms >= AUTO_ADVANCE_UNLOCK_MS,
