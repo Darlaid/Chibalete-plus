@@ -1,0 +1,423 @@
+{
+ "_comment": "CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01: fixture FIJO de la Store API. 353/33/26 = productos reales (2026-09-24) + categoría libros; 9000xx = casos sintéticos; 345 = suscripción real (sin libros).",
+ "products": [
+  {
+   "id": 353,
+   "name": "Cuatro miradas sobre el río",
+   "slug": "cuatro-miradas-sobre-el-rio",
+   "permalink": "https://chibaleteeditores.com/producto/cuatro-miradas-sobre-el-rio/",
+   "on_sale": false,
+   "prices": {
+    "price": "65000",
+    "regular_price": "65000",
+    "sale_price": "65000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 354,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-scaled.png",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-300x232.png",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-scaled.png 2560w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-300x232.png 300w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1024x792.png 1024w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-768x594.png 768w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1536x1188.png 1536w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-2048x1584.png 2048w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-480x371.png 480w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-600x464.png 600w",
+     "sizes": "(max-width: 2560px) 100vw, 2560px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-300x232.png 300w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1024x792.png 1024w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-768x594.png 768w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1536x1188.png 1536w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-2048x1584.png 2048w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-480x371.png 480w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-600x464.png 600w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "001 &#8211; Cubierta 4miradas",
+     "alt": "Portada de «Cuatro miradas sobre el río», edición de Chibalete Editores"
+    }
+   ],
+   "categories": [
+    {
+     "id": 364,
+     "name": "Territorios",
+     "slug": "territorios",
+     "link": "https://chibaleteeditores.com/categoria-producto/territorios/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p class=\"PDq2pG_selectionAnchorContainer\" data-start=\"109\" data-end=\"386\">Los relatos que componen <em data-start=\"134\" data-end=\"163\">Cuatro miradas sobre el río</em> nacen de voces diversas que comparten un mismo territorio: el río como experiencia vital. Sus autores —gentes locales, profundamente conectadas con su entorno— representan distintas formas de narrar y habitar este paisaje.</p>\n<p data-start=\"388\" data-end=\"765\">Entre ellos se encuentra una niña de seis años, cuya mirada espontánea y sensible dialoga con la de un escritor de trayectoria, así como con otras voces que, desde lo cotidiano, construyen una memoria íntima del río. Esta diversidad no solo enriquece la obra, sino que reafirma la idea de que el río pertenece a todos: a quienes lo trabajan, lo sueñan, lo cuidan y lo imaginan.</p>\n<p data-start=\"767\" data-end=\"1177\">Estos microrrelatos tuvieron su primera aparición en una publicación colectiva resultado de la convocatoria de microrrelatos organizada por la Feria del Libro de Barrancabermeja, un espacio que ha promovido la creación literaria desde y para las comunidades ribereñas. En esta nueva edición, los textos son revisitados y reimaginados, acompañados de un universo visual que amplifica sus sentidos y resonancias.</p>\n<p data-start=\"1179\" data-end=\"1517\"><em data-start=\"1179\" data-end=\"1208\">Cuatro miradas sobre el río</em> se proyecta además como una propuesta de diálogo cultural en el marco de la FILBo 2026, donde Colombia e India se encuentran alrededor de sus ríos. Esta edición invita a pensar en las múltiples formas en que distintas culturas se relacionan con el agua: como símbolo, como sustento y como memoria compartida.</p>",
+   "description": "<p class=\"PDq2pG_selectionAnchorContainer\" data-start=\"132\" data-end=\"509\"><strong data-start=\"132\" data-end=\"163\">Cuatro miradas sobre el río</strong> es un viaje sensible y poético por los paisajes, las memorias y las vidas que habitan los ríos de Colombia. A través de cuatro relatos —cada uno con una voz y una mirada distinta— el libro nos invita a contemplar el río como territorio vivo: fuente de sustento, escenario de sueños, refugio de la biodiversidad y espejo de las emociones humanas.</p>\n<p data-start=\"511\" data-end=\"872\">Desde la contemplación íntima de un pescador que se funde con el paisaje, hasta la denuncia sutil sobre la fragilidad de los ecosistemas; desde la persistencia de quienes viven de la pesca hasta la imaginación de una niña que encuentra en el río inspiración y esperanza, estas historias tejen una narrativa diversa que dialoga entre lo cotidiano y lo simbólico.</p>\n<p data-start=\"874\" data-end=\"1080\">Acompañado de un universo visual vibrante y evocador, el libro propone una experiencia de lectura donde imagen y palabra se entrelazan para despertar la sensibilidad, la empatía y el cuidado por el entorno.</p>\n<p data-start=\"1082\" data-end=\"1208\">Un libro que nos recuerda que el río no solo se mira: se escucha, se siente y se habita.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;65.000</span>",
+   "sku": "120",
+   "attributes": []
+  },
+  {
+   "id": 33,
+   "name": "Ismos para entender la política. Guía práctica para entender el barullo sin perder la calma",
+   "slug": "ismos-para-entender-la-politica-guia-practica-para-entender",
+   "permalink": "https://chibaleteeditores.com/producto/ismos-para-entender-la-politica-guia-practica-para-entender/",
+   "on_sale": false,
+   "prices": {
+    "price": "72000",
+    "regular_price": "72000",
+    "sale_price": "72000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 96,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02.jpg",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-300x484.jpg",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02.jpg 1548w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-300x484.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-600x969.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-186x300.jpg 186w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-634x1024.jpg 634w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-768x1240.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-951x1536.jpg 951w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-1268x2048.jpg 1268w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-480x775.jpg 480w",
+     "sizes": "(max-width: 1548px) 100vw, 1548px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-300x484.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-600x969.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-186x300.jpg 186w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-634x1024.jpg 634w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-768x1240.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-951x1536.jpg 951w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-1268x2048.jpg 1268w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-480x775.jpg 480w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02.jpg 1548w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "Ismos-para-entender-la-politica-02",
+     "alt": "Portada de «Ismos para entender la política. Guía práctica para entender el barullo sin perder la calma. Pa’ que me entienda», edición de Chibalete Editores"
+    }
+   ],
+   "categories": [
+    {
+     "id": 36,
+     "name": "No ficción",
+     "slug": "no-ficcion",
+     "link": "https://chibaleteeditores.com/categoria-producto/no-ficcion/"
+    },
+    {
+     "id": 367,
+     "name": "Pa' que me entienda",
+     "slug": "pa-que-me-entienda",
+     "link": "https://chibaleteeditores.com/categoria-producto/pa-que-me-entienda/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p><em data-start=\"2505\" data-end=\"2538\">Ismos para entender la política</em> es una guía clara y contemporánea para pensar el poder, las ideas y el lenguaje. Una invitación a formar criterio y entender cómo se construye lo político.</p>",
+   "description": "<p data-start=\"608\" data-end=\"639\"><strong>¿De qué trata este libro?</strong></p>\n<p data-start=\"640\" data-end=\"997\">La política puede parecer un <strong data-start=\"669\" data-end=\"705\">laberinto de palabras cambiantes</strong>. Libertad, justicia, igualdad… términos que inspiran o confunden según quién los pronuncie. <em data-start=\"800\" data-end=\"833\">Ismos para entender la política</em> invita a <strong data-start=\"843\" data-end=\"871\">mirar más allá del ruido</strong>, a descubrir las <strong data-start=\"889\" data-end=\"928\">ideas que realmente mueven al mundo</strong> y a entender cómo los discursos moldean la realidad que habitamos.</p>\n<p data-start=\"1004\" data-end=\"1052\"><strong>Un mapa de ideas antiguas y debates nuevos</strong></p>\n<p data-start=\"1053\" data-end=\"1458\">En estas páginas conviven <strong data-start=\"1079\" data-end=\"1101\">doctrinas clásicas</strong> —como el <strong data-start=\"1111\" data-end=\"1157\">liberalismo, el socialismo o el anarquismo</strong>— con <strong data-start=\"1163\" data-end=\"1192\">corrientes contemporáneas</strong> como los <strong data-start=\"1202\" data-end=\"1253\">feminismos, ecologismos o la ciudadanía digital</strong>. Aquí, <strong data-start=\"1263\" data-end=\"1311\">Platón, Hannah Arendt, Orwell y Wittgenstein</strong> conversan con <strong data-start=\"1326\" data-end=\"1365\">hashtags, memes y discursos virales</strong>, mostrando que la política no solo está en los libros, sino también en nuestras pantallas. Este libro no ofrece respuestas cerradas, sino <strong data-start=\"1556\" data-end=\"1597\">herramientas para pensar con claridad</strong>, <strong data-start=\"1599\" data-end=\"1629\">detectar trampas retóricas</strong> y <strong data-start=\"1632\" data-end=\"1661\">formar una opinión propia</strong>. Su propósito no es simplificar la política, sino <strong data-start=\"1714\" data-end=\"1748\">hacerla comprensible y cercana</strong>, porque entender las ideas que nos gobiernan es el primer paso para <strong data-start=\"1817\" data-end=\"1866\">participar activamente y decidir con criterio</strong>.</p>\n<p data-start=\"1876\" data-end=\"1921\"><strong>¿Por qué leerlo con Chibalete Editores?</strong></p>\n<p data-start=\"1922\" data-end=\"2295\">Fiel a su misión de <strong data-start=\"1942\" data-end=\"2003\">democratizar la lectura y promover el pensamiento crítico</strong>, <strong data-start=\"2005\" data-end=\"2027\">Chibalete Editores</strong> presenta <em data-start=\"2037\" data-end=\"2070\">Ismos para entender la política</em> como una guía inteligente, didáctica y contemporánea. Una lectura ideal para <strong data-start=\"2150\" data-end=\"2193\">jóvenes, docentes y ciudadanos curiosos</strong> que quieran <strong data-start=\"2206\" data-end=\"2292\">comprender el presente, cuestionar los discursos y aprender a pensar por sí mismos</strong>.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;72.000</span>",
+   "sku": "",
+   "attributes": []
+  },
+  {
+   "id": 26,
+   "name": "La guerra de los mundos",
+   "slug": "la-guerra-de-los-mundos",
+   "permalink": "https://chibaleteeditores.com/producto/la-guerra-de-los-mundos/",
+   "on_sale": false,
+   "prices": {
+    "price": "70000",
+    "regular_price": "70000",
+    "sale_price": "70000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 89,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta.jpg",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-300x446.jpg",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta.jpg 1600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-300x446.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-600x893.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-202x300.jpg 202w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-688x1024.jpg 688w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-768x1143.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1032x1536.jpg 1032w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1376x2048.jpg 1376w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-480x714.jpg 480w",
+     "sizes": "(max-width: 1600px) 100vw, 1600px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-300x446.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-600x893.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-202x300.jpg 202w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-688x1024.jpg 688w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-768x1143.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1032x1536.jpg 1032w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1376x2048.jpg 1376w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-480x714.jpg 480w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta.jpg 1600w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "La-guerra-de-los-mundos-Cubierta",
+     "alt": "Portada de «La guerra de los mundos», edición de Chibalete Editores"
+    }
+   ],
+   "categories": [
+    {
+     "id": 16,
+     "name": "Clásicos",
+     "slug": "clasicos",
+     "link": "https://chibaleteeditores.com/categoria-producto/clasicos/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p><em data-start=\"2558\" data-end=\"2583\">La guerra de los mundos</em> de H. G. Wells regresa en una nueva edición ilustrada y steampunk.</p>",
+   "description": "<p data-start=\"506\" data-end=\"539\"><strong>¿De qué trata esta edición?</strong></p>\n<p data-start=\"540\" data-end=\"960\">Nuestra edición de <em data-start=\"559\" data-end=\"584\">La guerra de los mundos</em>, de <strong data-start=\"589\" data-end=\"604\">H. G. Wells</strong>, presenta una <strong data-start=\"619\" data-end=\"639\">nueva traducción</strong> que conserva la fuerza, el ingenio y la visión científica del texto original. Este clásico de la <strong data-start=\"739\" data-end=\"758\">ciencia ficción</strong> narra la invasión marciana de la Tierra y la lucha desesperada de la humanidad por sobrevivir, convirtiéndose en una <strong data-start=\"876\" data-end=\"957\">reflexión sobre el progreso, la fragilidad humana y el miedo a lo desconocido</strong>.</p>\n<p data-start=\"967\" data-end=\"992\"><strong>¿Qué la hace única?</strong></p>\n<p data-start=\"993\" data-end=\"1506\">Más que una simple reedición, esta versión propone una <strong data-start=\"1048\" data-end=\"1077\">lectura visual y estética</strong> que celebra la <strong data-start=\"1093\" data-end=\"1111\">era victoriana</strong> y la fascinación por la tecnología. Las <strong data-start=\"1154\" data-end=\"1181\">ilustraciones steampunk</strong> —llenas de engranajes, vapor, maquinaria y estructuras metálicas— reimaginan el conflicto entre lo humano y lo alienígena con una potencia simbólica que <strong data-start=\"1335\" data-end=\"1370\">conecta ciencia, arte y emoción</strong>. Cada página revive la tensión entre innovación y destrucción, entre curiosidad y temor, tan vigente hoy como hace más de un siglo.</p>\n<p data-start=\"1513\" data-end=\"1539\"><strong>¿Por qué leerlo hoy?</strong></p>\n<p data-start=\"1540\" data-end=\"1904\"><em data-start=\"1540\" data-end=\"1565\">La guerra de los mundos</em> es más que un relato sobre marcianos: es una <strong data-start=\"1611\" data-end=\"1649\">metáfora sobre la condición humana</strong>, el impacto del avance científico y los dilemas éticos del poder tecnológico. Esta edición invita a <strong data-start=\"1752\" data-end=\"1803\">nuevos lectores y amantes de la ciencia ficción</strong> a redescubrir el legado de Wells con una mirada contemporánea, crítica y visualmente deslumbrante.</p>\n<p data-start=\"1911\" data-end=\"1962\"><strong>¿Qué aporta la edición de Chibalete Editores?</strong></p>\n<p data-start=\"1963\" data-end=\"2340\">Con su cuidada traducción y su propuesta artística inspirada en el <strong data-start=\"2030\" data-end=\"2050\">estilo steampunk</strong>, <strong data-start=\"2052\" data-end=\"2074\">Chibalete Editores</strong> ofrece una experiencia literaria y visual integral. Cada elemento —del diseño gráfico al ritmo narrativo— busca <strong data-start=\"2189\" data-end=\"2215\">unir pasado y presente</strong>, mostrando que los grandes clásicos no envejecen: <strong data-start=\"2266\" data-end=\"2337\">se transforman para seguir revelando lo humano en lo extraordinario</strong>.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;70.000</span>",
+   "sku": "",
+   "attributes": []
+  },
+  {
+   "id": 900001,
+   "name": "Fixture &#8211; libro en oferta",
+   "slug": "fixture-oferta",
+   "permalink": "https://chibaleteeditores.com/producto/fixture-oferta/",
+   "on_sale": true,
+   "prices": {
+    "price": "45000",
+    "regular_price": "60000",
+    "sale_price": "45000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 89,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta.jpg",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-300x446.jpg",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta.jpg 1600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-300x446.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-600x893.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-202x300.jpg 202w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-688x1024.jpg 688w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-768x1143.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1032x1536.jpg 1032w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1376x2048.jpg 1376w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-480x714.jpg 480w",
+     "sizes": "(max-width: 1600px) 100vw, 1600px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-300x446.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-600x893.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-202x300.jpg 202w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-688x1024.jpg 688w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-768x1143.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1032x1536.jpg 1032w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-1376x2048.jpg 1376w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta-480x714.jpg 480w, https://chibaleteeditores.com/wp-content/uploads/2026/06/La-guerra-de-los-mundos-Cubierta.jpg 1600w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "La-guerra-de-los-mundos-Cubierta",
+     "alt": "Portada de «La guerra de los mundos», edición de Chibalete Editores"
+    }
+   ],
+   "categories": [
+    {
+     "id": 16,
+     "name": "Clásicos",
+     "slug": "clasicos",
+     "link": "https://chibaleteeditores.com/categoria-producto/clasicos/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p><em data-start=\"2558\" data-end=\"2583\">La guerra de los mundos</em> de H. G. Wells regresa en una nueva edición ilustrada y steampunk.</p>",
+   "description": "<p data-start=\"506\" data-end=\"539\"><strong>¿De qué trata esta edición?</strong></p>\n<p data-start=\"540\" data-end=\"960\">Nuestra edición de <em data-start=\"559\" data-end=\"584\">La guerra de los mundos</em>, de <strong data-start=\"589\" data-end=\"604\">H. G. Wells</strong>, presenta una <strong data-start=\"619\" data-end=\"639\">nueva traducción</strong> que conserva la fuerza, el ingenio y la visión científica del texto original. Este clásico de la <strong data-start=\"739\" data-end=\"758\">ciencia ficción</strong> narra la invasión marciana de la Tierra y la lucha desesperada de la humanidad por sobrevivir, convirtiéndose en una <strong data-start=\"876\" data-end=\"957\">reflexión sobre el progreso, la fragilidad humana y el miedo a lo desconocido</strong>.</p>\n<p data-start=\"967\" data-end=\"992\"><strong>¿Qué la hace única?</strong></p>\n<p data-start=\"993\" data-end=\"1506\">Más que una simple reedición, esta versión propone una <strong data-start=\"1048\" data-end=\"1077\">lectura visual y estética</strong> que celebra la <strong data-start=\"1093\" data-end=\"1111\">era victoriana</strong> y la fascinación por la tecnología. Las <strong data-start=\"1154\" data-end=\"1181\">ilustraciones steampunk</strong> —llenas de engranajes, vapor, maquinaria y estructuras metálicas— reimaginan el conflicto entre lo humano y lo alienígena con una potencia simbólica que <strong data-start=\"1335\" data-end=\"1370\">conecta ciencia, arte y emoción</strong>. Cada página revive la tensión entre innovación y destrucción, entre curiosidad y temor, tan vigente hoy como hace más de un siglo.</p>\n<p data-start=\"1513\" data-end=\"1539\"><strong>¿Por qué leerlo hoy?</strong></p>\n<p data-start=\"1540\" data-end=\"1904\"><em data-start=\"1540\" data-end=\"1565\">La guerra de los mundos</em> es más que un relato sobre marcianos: es una <strong data-start=\"1611\" data-end=\"1649\">metáfora sobre la condición humana</strong>, el impacto del avance científico y los dilemas éticos del poder tecnológico. Esta edición invita a <strong data-start=\"1752\" data-end=\"1803\">nuevos lectores y amantes de la ciencia ficción</strong> a redescubrir el legado de Wells con una mirada contemporánea, crítica y visualmente deslumbrante.</p>\n<p data-start=\"1911\" data-end=\"1962\"><strong>¿Qué aporta la edición de Chibalete Editores?</strong></p>\n<p data-start=\"1963\" data-end=\"2340\">Con su cuidada traducción y su propuesta artística inspirada en el <strong data-start=\"2030\" data-end=\"2050\">estilo steampunk</strong>, <strong data-start=\"2052\" data-end=\"2074\">Chibalete Editores</strong> ofrece una experiencia literaria y visual integral. Cada elemento —del diseño gráfico al ritmo narrativo— busca <strong data-start=\"2189\" data-end=\"2215\">unir pasado y presente</strong>, mostrando que los grandes clásicos no envejecen: <strong data-start=\"2266\" data-end=\"2337\">se transforman para seguir revelando lo humano en lo extraordinario</strong>.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;70.000</span>",
+   "sku": "",
+   "attributes": []
+  },
+  {
+   "id": 900002,
+   "name": "Fixture agotado",
+   "slug": "fixture-agotado",
+   "permalink": "https://chibaleteeditores.com/producto/fixture-agotado/",
+   "on_sale": false,
+   "prices": {
+    "price": "72000",
+    "regular_price": "72000",
+    "sale_price": "72000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 96,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02.jpg",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-300x484.jpg",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02.jpg 1548w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-300x484.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-600x969.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-186x300.jpg 186w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-634x1024.jpg 634w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-768x1240.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-951x1536.jpg 951w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-1268x2048.jpg 1268w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-480x775.jpg 480w",
+     "sizes": "(max-width: 1548px) 100vw, 1548px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-300x484.jpg 300w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-600x969.jpg 600w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-186x300.jpg 186w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-634x1024.jpg 634w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-768x1240.jpg 768w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-951x1536.jpg 951w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-1268x2048.jpg 1268w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02-480x775.jpg 480w, https://chibaleteeditores.com/wp-content/uploads/2026/06/Ismos-para-entender-la-politica-02.jpg 1548w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "Ismos-para-entender-la-politica-02",
+     "alt": "Portada de «Ismos para entender la política. Guía práctica para entender el barullo sin perder la calma. Pa’ que me entienda», edición de Chibalete Editores"
+    }
+   ],
+   "categories": [
+    {
+     "id": 36,
+     "name": "No ficción",
+     "slug": "no-ficcion",
+     "link": "https://chibaleteeditores.com/categoria-producto/no-ficcion/"
+    },
+    {
+     "id": 367,
+     "name": "Pa' que me entienda",
+     "slug": "pa-que-me-entienda",
+     "link": "https://chibaleteeditores.com/categoria-producto/pa-que-me-entienda/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": false,
+   "short_description": "<p><em data-start=\"2505\" data-end=\"2538\">Ismos para entender la política</em> es una guía clara y contemporánea para pensar el poder, las ideas y el lenguaje. Una invitación a formar criterio y entender cómo se construye lo político.</p>",
+   "description": "<p data-start=\"608\" data-end=\"639\"><strong>¿De qué trata este libro?</strong></p>\n<p data-start=\"640\" data-end=\"997\">La política puede parecer un <strong data-start=\"669\" data-end=\"705\">laberinto de palabras cambiantes</strong>. Libertad, justicia, igualdad… términos que inspiran o confunden según quién los pronuncie. <em data-start=\"800\" data-end=\"833\">Ismos para entender la política</em> invita a <strong data-start=\"843\" data-end=\"871\">mirar más allá del ruido</strong>, a descubrir las <strong data-start=\"889\" data-end=\"928\">ideas que realmente mueven al mundo</strong> y a entender cómo los discursos moldean la realidad que habitamos.</p>\n<p data-start=\"1004\" data-end=\"1052\"><strong>Un mapa de ideas antiguas y debates nuevos</strong></p>\n<p data-start=\"1053\" data-end=\"1458\">En estas páginas conviven <strong data-start=\"1079\" data-end=\"1101\">doctrinas clásicas</strong> —como el <strong data-start=\"1111\" data-end=\"1157\">liberalismo, el socialismo o el anarquismo</strong>— con <strong data-start=\"1163\" data-end=\"1192\">corrientes contemporáneas</strong> como los <strong data-start=\"1202\" data-end=\"1253\">feminismos, ecologismos o la ciudadanía digital</strong>. Aquí, <strong data-start=\"1263\" data-end=\"1311\">Platón, Hannah Arendt, Orwell y Wittgenstein</strong> conversan con <strong data-start=\"1326\" data-end=\"1365\">hashtags, memes y discursos virales</strong>, mostrando que la política no solo está en los libros, sino también en nuestras pantallas. Este libro no ofrece respuestas cerradas, sino <strong data-start=\"1556\" data-end=\"1597\">herramientas para pensar con claridad</strong>, <strong data-start=\"1599\" data-end=\"1629\">detectar trampas retóricas</strong> y <strong data-start=\"1632\" data-end=\"1661\">formar una opinión propia</strong>. Su propósito no es simplificar la política, sino <strong data-start=\"1714\" data-end=\"1748\">hacerla comprensible y cercana</strong>, porque entender las ideas que nos gobiernan es el primer paso para <strong data-start=\"1817\" data-end=\"1866\">participar activamente y decidir con criterio</strong>.</p>\n<p data-start=\"1876\" data-end=\"1921\"><strong>¿Por qué leerlo con Chibalete Editores?</strong></p>\n<p data-start=\"1922\" data-end=\"2295\">Fiel a su misión de <strong data-start=\"1942\" data-end=\"2003\">democratizar la lectura y promover el pensamiento crítico</strong>, <strong data-start=\"2005\" data-end=\"2027\">Chibalete Editores</strong> presenta <em data-start=\"2037\" data-end=\"2070\">Ismos para entender la política</em> como una guía inteligente, didáctica y contemporánea. Una lectura ideal para <strong data-start=\"2150\" data-end=\"2193\">jóvenes, docentes y ciudadanos curiosos</strong> que quieran <strong data-start=\"2206\" data-end=\"2292\">comprender el presente, cuestionar los discursos y aprender a pensar por sí mismos</strong>.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;72.000</span>",
+   "sku": "",
+   "attributes": []
+  },
+  {
+   "id": 900003,
+   "name": "Fixture host ajeno",
+   "slug": "fixture-host-ajeno",
+   "permalink": "https://evil.example/producto/x/",
+   "on_sale": false,
+   "prices": {
+    "price": "65000",
+    "regular_price": "65000",
+    "sale_price": "65000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 354,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-scaled.png",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-300x232.png",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-scaled.png 2560w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-300x232.png 300w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1024x792.png 1024w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-768x594.png 768w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1536x1188.png 1536w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-2048x1584.png 2048w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-480x371.png 480w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-600x464.png 600w",
+     "sizes": "(max-width: 2560px) 100vw, 2560px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-300x232.png 300w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1024x792.png 1024w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-768x594.png 768w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-1536x1188.png 1536w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-2048x1584.png 2048w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-480x371.png 480w, https://chibaleteeditores.com/wp-content/uploads/2026/08/001-Cubierta-4miradas-600x464.png 600w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "001 &#8211; Cubierta 4miradas",
+     "alt": "Portada de «Cuatro miradas sobre el río», edición de Chibalete Editores"
+    }
+   ],
+   "categories": [
+    {
+     "id": 364,
+     "name": "Territorios",
+     "slug": "territorios",
+     "link": "https://chibaleteeditores.com/categoria-producto/territorios/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p class=\"PDq2pG_selectionAnchorContainer\" data-start=\"109\" data-end=\"386\">Los relatos que componen <em data-start=\"134\" data-end=\"163\">Cuatro miradas sobre el río</em> nacen de voces diversas que comparten un mismo territorio: el río como experiencia vital. Sus autores —gentes locales, profundamente conectadas con su entorno— representan distintas formas de narrar y habitar este paisaje.</p>\n<p data-start=\"388\" data-end=\"765\">Entre ellos se encuentra una niña de seis años, cuya mirada espontánea y sensible dialoga con la de un escritor de trayectoria, así como con otras voces que, desde lo cotidiano, construyen una memoria íntima del río. Esta diversidad no solo enriquece la obra, sino que reafirma la idea de que el río pertenece a todos: a quienes lo trabajan, lo sueñan, lo cuidan y lo imaginan.</p>\n<p data-start=\"767\" data-end=\"1177\">Estos microrrelatos tuvieron su primera aparición en una publicación colectiva resultado de la convocatoria de microrrelatos organizada por la Feria del Libro de Barrancabermeja, un espacio que ha promovido la creación literaria desde y para las comunidades ribereñas. En esta nueva edición, los textos son revisitados y reimaginados, acompañados de un universo visual que amplifica sus sentidos y resonancias.</p>\n<p data-start=\"1179\" data-end=\"1517\"><em data-start=\"1179\" data-end=\"1208\">Cuatro miradas sobre el río</em> se proyecta además como una propuesta de diálogo cultural en el marco de la FILBo 2026, donde Colombia e India se encuentran alrededor de sus ríos. Esta edición invita a pensar en las múltiples formas en que distintas culturas se relacionan con el agua: como símbolo, como sustento y como memoria compartida.</p>",
+   "description": "<p class=\"PDq2pG_selectionAnchorContainer\" data-start=\"132\" data-end=\"509\"><strong data-start=\"132\" data-end=\"163\">Cuatro miradas sobre el río</strong> es un viaje sensible y poético por los paisajes, las memorias y las vidas que habitan los ríos de Colombia. A través de cuatro relatos —cada uno con una voz y una mirada distinta— el libro nos invita a contemplar el río como territorio vivo: fuente de sustento, escenario de sueños, refugio de la biodiversidad y espejo de las emociones humanas.</p>\n<p data-start=\"511\" data-end=\"872\">Desde la contemplación íntima de un pescador que se funde con el paisaje, hasta la denuncia sutil sobre la fragilidad de los ecosistemas; desde la persistencia de quienes viven de la pesca hasta la imaginación de una niña que encuentra en el río inspiración y esperanza, estas historias tejen una narrativa diversa que dialoga entre lo cotidiano y lo simbólico.</p>\n<p data-start=\"874\" data-end=\"1080\">Acompañado de un universo visual vibrante y evocador, el libro propone una experiencia de lectura donde imagen y palabra se entrelazan para despertar la sensibilidad, la empatía y el cuidado por el entorno.</p>\n<p data-start=\"1082\" data-end=\"1208\">Un libro que nos recuerda que el río no solo se mira: se escucha, se siente y se habita.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;65.000</span>",
+   "sku": "120",
+   "attributes": []
+  },
+  {
+   "id": 900004,
+   "name": "Fixture sin imagen",
+   "slug": "fixture-sin-imagen",
+   "permalink": "https://chibaleteeditores.com/producto/fixture-sin-imagen/",
+   "on_sale": false,
+   "prices": {
+    "price": "65000",
+    "regular_price": "65000",
+    "sale_price": "65000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [],
+   "categories": [
+    {
+     "id": 364,
+     "name": "Territorios",
+     "slug": "territorios",
+     "link": "https://chibaleteeditores.com/categoria-producto/territorios/"
+    },
+    {
+     "id": 431,
+     "name": "Libros",
+     "slug": "libros",
+     "link": "https://chibaleteeditores.com/categoria-producto/libros/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p class=\"PDq2pG_selectionAnchorContainer\" data-start=\"109\" data-end=\"386\">Los relatos que componen <em data-start=\"134\" data-end=\"163\">Cuatro miradas sobre el río</em> nacen de voces diversas que comparten un mismo territorio: el río como experiencia vital. Sus autores —gentes locales, profundamente conectadas con su entorno— representan distintas formas de narrar y habitar este paisaje.</p>\n<p data-start=\"388\" data-end=\"765\">Entre ellos se encuentra una niña de seis años, cuya mirada espontánea y sensible dialoga con la de un escritor de trayectoria, así como con otras voces que, desde lo cotidiano, construyen una memoria íntima del río. Esta diversidad no solo enriquece la obra, sino que reafirma la idea de que el río pertenece a todos: a quienes lo trabajan, lo sueñan, lo cuidan y lo imaginan.</p>\n<p data-start=\"767\" data-end=\"1177\">Estos microrrelatos tuvieron su primera aparición en una publicación colectiva resultado de la convocatoria de microrrelatos organizada por la Feria del Libro de Barrancabermeja, un espacio que ha promovido la creación literaria desde y para las comunidades ribereñas. En esta nueva edición, los textos son revisitados y reimaginados, acompañados de un universo visual que amplifica sus sentidos y resonancias.</p>\n<p data-start=\"1179\" data-end=\"1517\"><em data-start=\"1179\" data-end=\"1208\">Cuatro miradas sobre el río</em> se proyecta además como una propuesta de diálogo cultural en el marco de la FILBo 2026, donde Colombia e India se encuentran alrededor de sus ríos. Esta edición invita a pensar en las múltiples formas en que distintas culturas se relacionan con el agua: como símbolo, como sustento y como memoria compartida.</p>",
+   "description": "<p class=\"PDq2pG_selectionAnchorContainer\" data-start=\"132\" data-end=\"509\"><strong data-start=\"132\" data-end=\"163\">Cuatro miradas sobre el río</strong> es un viaje sensible y poético por los paisajes, las memorias y las vidas que habitan los ríos de Colombia. A través de cuatro relatos —cada uno con una voz y una mirada distinta— el libro nos invita a contemplar el río como territorio vivo: fuente de sustento, escenario de sueños, refugio de la biodiversidad y espejo de las emociones humanas.</p>\n<p data-start=\"511\" data-end=\"872\">Desde la contemplación íntima de un pescador que se funde con el paisaje, hasta la denuncia sutil sobre la fragilidad de los ecosistemas; desde la persistencia de quienes viven de la pesca hasta la imaginación de una niña que encuentra en el río inspiración y esperanza, estas historias tejen una narrativa diversa que dialoga entre lo cotidiano y lo simbólico.</p>\n<p data-start=\"874\" data-end=\"1080\">Acompañado de un universo visual vibrante y evocador, el libro propone una experiencia de lectura donde imagen y palabra se entrelazan para despertar la sensibilidad, la empatía y el cuidado por el entorno.</p>\n<p data-start=\"1082\" data-end=\"1208\">Un libro que nos recuerda que el río no solo se mira: se escucha, se siente y se habita.</p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;65.000</span>",
+   "sku": "120",
+   "attributes": []
+  },
+  {
+   "id": 345,
+   "name": "Chibalete+ Digital",
+   "slug": "chibalete-plus-digital",
+   "permalink": "https://chibaleteeditores.com/producto/chibalete-plus-digital/",
+   "on_sale": false,
+   "prices": {
+    "price": "150000",
+    "regular_price": "150000",
+    "sale_price": "150000",
+    "price_range": null,
+    "currency_code": "COP",
+    "currency_symbol": "$",
+    "currency_minor_unit": 0,
+    "currency_decimal_separator": ",",
+    "currency_thousand_separator": ".",
+    "currency_prefix": "$ ",
+    "currency_suffix": ""
+   },
+   "images": [
+    {
+     "id": 349,
+     "src": "https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital.png",
+     "thumbnail": "https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-300x300.png",
+     "srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital.png 426w, https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-300x300.png 300w, https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-150x150.png 150w, https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-100x100.png 100w",
+     "sizes": "(max-width: 426px) 100vw, 426px",
+     "thumbnail_srcset": "https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-300x300.png 300w, https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-150x150.png 150w, https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital-100x100.png 100w, https://chibaleteeditores.com/wp-content/uploads/2026/08/Plan-digital.png 426w",
+     "thumbnail_sizes": "(max-width: 300px) 100vw, 300px",
+     "name": "Plan digital",
+     "alt": ""
+    }
+   ],
+   "categories": [
+    {
+     "id": 168,
+     "name": "Suscripciones",
+     "slug": "suscripciones",
+     "link": "https://chibaleteeditores.com/categoria-producto/suscripciones/"
+    }
+   ],
+   "is_in_stock": true,
+   "short_description": "<p>Acceso anual a la plataforma Chibalete+. Lee, explora contenidos digitales y participa en experiencias de lectura, escritura y oralidad.</p>\n<p>Recibe 12 meses de acceso pagando el equivalente a 10 meses.</p>",
+   "description": "<h2>¿Qué es Chibalete+ Digital?</h2>\n<p>Chibalete+ Digital es el acceso anual a la plataforma de lectura de Chibalete Editores: una biblioteca digital acompañada por experiencias, recursos y actividades para leer, escribir, conversar y mediar libros con más sentido.</p>\n<h2>¿Qué incluye?</h2>\n<ul>\n<li>12 meses de acceso a Chibalete+;</li>\n<li>biblioteca y contenidos digitales disponibles en la plataforma;</li>\n<li>experiencias de lectura, escritura y oralidad;</li>\n<li>recursos de lectura y acompañamiento;</li>\n<li>activación de usuario por correo electrónico.</li>\n</ul>\n<h2>¿Para quién es?</h2>\n<p>Es una opción pensada para familias, lectores, docentes, mediadores y comunidades que quieren acercarse al catálogo de Chibalete desde una experiencia digital acompañada.</p>\n<h2>Antes de comprar</h2>\n<ul>\n<li>La suscripción es anual: el acceso se activa por 12 meses a partir de la confirmación del pago.</li>\n<li>Este plan no incluye libros físicos. Para una experiencia con libros impresos, revisa el plan Chibalete+ Mi biblioteca.</li>\n<li>Después de la confirmación del pago, nuestro equipo activará tu acceso y enviará las instrucciones al correo registrado durante la compra.</li>\n</ul>\n<p><a href=\"https://chibaleteeditores.com/chibalete-plus/\">Conocer más sobre Chibalete+</a> · <a href=\"https://chibaleteeditores.com/tienda/suscripciones/\">Comparar planes de suscripción</a></p>",
+   "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#036;</span>&nbsp;150.000</span>",
+   "sku": "CHP-DIGITAL-ANUAL",
+   "attributes": []
+  }
+ ]
+}

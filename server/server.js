@@ -238,6 +238,8 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
+// CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
+import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
 // --- LOGGING HELPER ---
 const log = (msg, type = 'INFO') => {
@@ -10307,6 +10309,25 @@ app.get('/api/reading/my-effective-time', libraryViewNoStore, requireUserAuth, (
     } catch (e) {
         log(`GET my-effective-time error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'Error al calcular tiempo de lectura' });
+    }
+});
+
+// GET /api/store/catalog — CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01.
+//
+// Libros publicados en la tienda WooCommerce de Chibalete Editores (categoría
+// explícita `libros`). WooCommerce es la fuente de verdad y el checkout es
+// suyo: aquí solo se presenta. La URL remota es FIJA en wooCatalog.mjs; nada de
+// la petición la elige. Caché en memoria por réplica (10 min, copia real ≤ 6 h
+// si WooCommerce falla); el navegador no cachea (no-store): la frescura la
+// controla el servidor. Requiere sesión, sin autorización adicional por rol.
+const storeCatalog = createWooCatalog();
+app.get('/api/store/catalog', libraryViewNoStore, requireUserAuth, async (req, res) => {
+    try {
+        res.json(await storeCatalog.get());
+    } catch (e) {
+        const cause = e instanceof WooCatalogUnavailableError ? e.causeTag : 'unexpected';
+        log(`GET /api/store/catalog unavailable: ${cause}`, 'WARN');
+        res.status(503).json({ error: 'store_catalog_unavailable' });
     }
 });
 

@@ -64,6 +64,8 @@ import {
     parseMyCatalogResponse,
     hydrateVisibleContent,
 } from '../utils/libraryCatalogSelection.mjs';
+// CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de la Tienda (WooCommerce vía servidor).
+import { STORE_CATALOG_PATH, parseStoreCatalogResponse, type StoreCatalog } from '../utils/storeCatalog.mjs';
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — capas INSTITUTIONAL y PERSONAL.
 // Los payloads viven en el módulo puro: es ahí donde se demuestra que el
 // cliente no envía identidad ni contexto.
@@ -2876,6 +2878,21 @@ class DataService {
     // Shop
     getProductos(): Product[] {
         return this.products;
+    }
+
+    /**
+     * CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — libros de la tienda WooCommerce.
+     * La autoridad es el servidor (proxy con caché); `getProductos()` queda como
+     * legado de /admin/productos y ya no alimenta la Tienda. null = no disponible.
+     */
+    async getStoreCatalog(): Promise<StoreCatalog | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}${STORE_CATALOG_PATH}`, { credentials: 'include', cache: 'no-store' });
+            if (!res.ok) return null;
+            return parseStoreCatalogResponse(await res.json());
+        } catch {
+            return null;
+        }
     }
 
     getStoreOrders(): StoreOrder[] {
