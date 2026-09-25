@@ -123,53 +123,83 @@ const windowStats = (msByReader, readerCount) => {
     };
 };
 
-/** Tiempo efectivo por lector (histórico y 28 d) y agregado del grupo. */
-export function summarizeReading(byUser, readerIds, nowTs) {
+/** Tiempo efectivo de cada lector (histórico y 28 d), en el orden de readerIds. */
+export function readingPerReader(byUser, readerIds, nowTs) {
     const since = nowTs - WINDOW_28D_MS;
-    const all = [], last28d = [];
-    for (const id of readerIds) {
+    return readerIds.map(id => {
         const rows = byUser.get(id) || [];
-        all.push(computeEffectiveReadingMs(rows, nameOf).ms);
-        last28d.push(computeEffectiveReadingMs(rows.filter(r => r.server_ts >= since), nameOf).ms);
-    }
-    return { all: windowStats(all, readerIds.length), last28d: windowStats(last28d, readerIds.length) };
+        return {
+            allEffectiveMs: computeEffectiveReadingMs(rows, nameOf).ms,
+            last28dEffectiveMs: computeEffectiveReadingMs(rows.filter(r => r.server_ts >= since), nameOf).ms,
+        };
+    });
 }
 
-/** Interacciones Leo de la cohorte (entradas de leo_interactions_db). */
-export function summarizeLeo(interactions, readerIds) {
+/** Agregado del grupo a partir del detalle por lector. */
+export function summarizeReading(byUser, readerIds, nowTs) {
+    return aggregateReading(readingPerReader(byUser, readerIds, nowTs), readerIds.length);
+}
+const aggregateReading = (per, readerCount) => ({
+    all: windowStats(per.map(r => r.allEffectiveMs), readerCount),
+    last28d: windowStats(per.map(r => r.last28dEffectiveMs), readerCount),
+});
+
+/** Interacciones Leo de cada lector (entradas de leo_interactions_db). */
+export function leoPerReader(interactions, readerIds) {
     const cohort = new Set(readerIds);
-    const perReader = new Map();
+    const count = new Map();
     for (const it of Array.isArray(interactions) ? interactions : []) {
         if (!cohort.has(it?.userId)) continue;
-        perReader.set(it.userId, (perReader.get(it.userId) || 0) + 1);
+        count.set(it.userId, (count.get(it.userId) || 0) + 1);
     }
-    const total = [...perReader.values()].reduce((a, n) => a + n, 0);
+    return readerIds.map(id => ({ interactions: count.get(id) || 0 }));
+}
+
+/** Agregado Leo de la cohorte. */
+export function summarizeLeo(interactions, readerIds) {
+    return aggregateLeo(leoPerReader(interactions, readerIds), readerIds.length);
+}
+const aggregateLeo = (per, readerCount) => {
+    const total = per.reduce((a, r) => a + r.interactions, 0);
     return {
         interactions: total,
-        readersWithInteractions: perReader.size,
-        averageInteractionsPerReader: readerIds.length > 0 ? total / readerIds.length : 0,
+        readersWithInteractions: per.filter(r => r.interactions > 0).length,
+        averageInteractionsPerReader: readerCount > 0 ? total / readerCount : 0,
     };
-}
+};
 
 // Mismo criterio que GET /api/students/:id/status.
 const pctOf = (p) => p?.canonicalProgress?.globalPercentage ?? p?.porcentaje ?? 0;
 const isCompleted = (p) => pctOf(p) >= 90 || p?.isCompleted === true;
 
-/** Libros iniciados/completados de la cohorte (progress.db). */
-export function summarizeProgress(getProgressByUser, readerIds) {
-    let readersWithProgress = 0, booksStarted = 0, booksCompleted = 0;
-    for (const id of readerIds) {
+/** Libros de cada lector (progress.db); averagePercent = el de /status. */
+export function progressPerReader(getProgressByUser, readerIds) {
+    return readerIds.map(id => {
         const list = getProgressByUser(id) || [];
-        if (list.length) readersWithProgress++;
-        booksStarted += list.length;
-        booksCompleted += list.filter(isCompleted).length;
-    }
-    return { readersWithProgress, booksStarted, booksCompleted };
+        return {
+            booksStarted: list.length,
+            booksCompleted: list.filter(isCompleted).length,
+            averagePercent: list.length === 0 ? 0
+                : Math.round(list.reduce((a, p) => a + pctOf(p), 0) / list.length),
+        };
+    });
 }
+
+/** Libros iniciados/completados de la cohorte. */
+export function summarizeProgress(getProgressByUser, readerIds) {
+    return aggregateProgress(progressPerReader(getProgressByUser, readerIds));
+}
+const aggregateProgress = (per) => ({
+    readersWithProgress: per.filter(r => r.booksStarted > 0).length,
+    booksStarted: per.reduce((a, r) => a + r.booksStarted, 0),
+    booksCompleted: per.reduce((a, r) => a + r.booksCompleted, 0),
+});
 
 /**
  * Resumen del grupo. `getProgressByUser` y `leoInteractions` los inyecta el
  * servidor (fuentes vivas); las bases de eventos se abren en solo lectura.
+ * `readers` es el detalle por lector del MISMO cálculo (sin consultas extra):
+ * los agregados son, por construcción, la suma de ese detalle.
  */
 export function buildGroupAnalyticsSummary({
     group, users, allGroups, leoInteractions, getProgressByUser,
@@ -177,15 +207,21 @@ export function buildGroupAnalyticsSummary({
 }) {
     const readerIds = resolveGroupLectorCohort(group, users, allGroups);
     const { byUser, rowsConsidered } = readCohortHistoricalRows(readerIds, { eventsPath, archivePath });
+    const reading = readingPerReader(byUser, readerIds, nowTs);
+    const leo = leoPerReader(leoInteractions, readerIds);
+    const progress = progressPerReader(getProgressByUser, readerIds);
     return {
         summary: {
             groupId: group.id,
             readerCount: readerIds.length,
-            reading: summarizeReading(byUser, readerIds, nowTs),
-            leo: summarizeLeo(leoInteractions, readerIds),
-            progress: summarizeProgress(getProgressByUser, readerIds),
+            reading: aggregateReading(reading, readerIds.length),
+            leo: aggregateLeo(leo, readerIds.length),
+            progress: aggregateProgress(progress),
             tasks: { state: NO_SERVER_SOURCE },
             pisa: { state: NO_SERVER_SOURCE },
+            readers: readerIds.map((userId, i) => ({
+                userId, reading: reading[i], leo: leo[i], progress: progress[i],
+            })),
         },
         rowsConsidered,
     };

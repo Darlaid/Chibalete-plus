@@ -66,6 +66,10 @@ import {
 } from '../utils/libraryCatalogSelection.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de la Tienda (WooCommerce vía servidor).
 import { STORE_CATALOG_PATH, parseStoreCatalogResponse, type StoreCatalog } from '../utils/storeCatalog.mjs';
+// CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B) — analítica real del grupo.
+import {
+    GROUP_ANALYTICS_PATH, parseGroupAnalyticsSummary, lectorOnlyStudents, type GroupAnalyticsSummary,
+} from '../utils/groupAnalytics.mjs';
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — capas INSTITUTIONAL y PERSONAL.
 // Los payloads viven en el módulo puro: es ahí donde se demuestra que el
 // cliente no envía identidad ni contexto.
@@ -3142,11 +3146,31 @@ class DataService {
         // no aparezcan en users (huérfanos) se descartan al hacer el filter
         // por id. Estudiantes en memberIds y user.groupIds se unen
         // automáticamente en la helper compartida.
+        //
+        // CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B): la lista es de
+        // ESTUDIANTES, así que se queda con los lectores. El contrato de
+        // membresía da user.groupIds también al mediador (en mediatorIds);
+        // sin este filtro Grado 005 listaba 90 (80 lectores + 10 mediadores).
         const group = this.groups.find(g => g.id === groupId);
         if (!group) return [];
         const memberIds = getGroupMembers(group, this.users, { allGroups: this.groups });
         const userById = new Map(this.users.map(u => [u.id, u]));
-        return memberIds.map(id => userById.get(id)).filter((u): u is User => !!u);
+        const members = memberIds.map(id => userById.get(id)).filter((u): u is User => !!u);
+        return lectorOnlyStudents(members, group);
+    }
+
+    /**
+     * CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B) — resumen REAL del grupo
+     * (GET /api/groups/:id/analytics-summary): KPIs y detalle por lector en
+     * UNA petición. Lanza ante cualquier fallo o forma inválida: el llamador
+     * muestra ERROR, nunca ceros ni pedagogicalStats.
+     */
+    async getGroupAnalyticsSummary(groupId: string, signal?: AbortSignal): Promise<GroupAnalyticsSummary> {
+        const r = await fetch(`${this.apiUrl}${GROUP_ANALYTICS_PATH(groupId)}`, { cache: 'no-store', signal });
+        if (!r.ok) throw Object.assign(new Error(`group analytics fetch failed: ${r.status}`), { status: r.status });
+        const summary = parseGroupAnalyticsSummary(await r.json());
+        if (!summary) throw new Error('group analytics: respuesta con forma inválida');
+        return summary;
     }
 
     getAssignmentsByGroup(groupId: string): Assignment[] {

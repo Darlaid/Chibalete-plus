@@ -9,10 +9,11 @@ import { useNavigate } from 'react-router-dom';
 
 // Import extracted components
 import { ProgressBar } from '../components/aula-viva/ProgressBar';
-import { CompetencyBar } from '../components/aula-viva/CompetencyBar';
-import { DistributionChart } from '../components/aula-viva/DistributionChart';
-import { TrendChart } from '../components/aula-viva/TrendChart';
 import { StudentRow } from '../components/aula-viva/StudentRow';
+import { GroupAnalyticsKpis, GroupPisaCompetencies, GroupEvolutionPanel } from '../components/aula-viva/GroupAnalyticsKpis';
+import {
+    createLatestGroupAnalyticsLoader, indexReadersById, type GroupAnalyticsState,
+} from '../utils/groupAnalytics.mjs';
 import { GroupDiagnosisPanel } from '../components/aula-viva/GroupDiagnosisPanel';
 import { ProduccionesTab } from '../components/review/ProduccionesTab';
 import type { GroupDiagnosis } from '../utils/groupDiagnosis';
@@ -166,6 +167,11 @@ const AulaViva: React.FC = () => {
     const [diagnosis,        setDiagnosis]        = useState<GroupDiagnosis | null>(null);
     const [diagnosisLoading, setDiagnosisLoading] = useState(false);
     const [diagnosisError,   setDiagnosisError]   = useState<string | null>(null);
+    // CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B) — analítica REAL del grupo
+    // (una petición por grupo). Sustituye a pedagogicalStats/localStorage.
+    const [groupAnalytics, setGroupAnalytics] = useState<GroupAnalyticsState>({ status: 'loading' });
+    const analyticsLoader = useMemo(() => createLatestGroupAnalyticsLoader(
+        (groupId: string, signal: AbortSignal) => dataService.getGroupAnalyticsSummary(groupId, signal)), []);
     const [selectedStudent, setSelectedStudent] = useState<User | null>(null);
     // Sprint Panel del estudiante — capa narrativa por lector. Se muestra
     // SIEMPRE que hay un estudiante seleccionado, incluso cuando no hay stats
@@ -371,11 +377,25 @@ const AulaViva: React.FC = () => {
         else { setDiagnosis(null); setDiagnosisError(null); }
     }, [selectedGroup, canManageClassroom, refetchDiagnosis]);
 
+    // Analítica del grupo: una carga por cambio de grupo; la anterior se
+    // aborta y una respuesta vieja nunca pisa al grupo nuevo. Sin fallback.
+    useEffect(() => {
+        if (!selectedGroup || !canManageClassroom) { analyticsLoader.cancel(); return; }
+        analyticsLoader.load(selectedGroup, setGroupAnalytics);
+        return () => analyticsLoader.cancel();
+    }, [selectedGroup, canManageClassroom, analyticsLoader]);
+    const readerAnalytics = useMemo(
+        () => (groupAnalytics.status === 'ready' ? indexReadersById(groupAnalytics.summary) : null),
+        [groupAnalytics]);
+
     // --- Stats & Reports ---
     useEffect(() => {
         if (selectedStudent) {
-            const stats = dataService.getPedagogicalStats(selectedStudent.id);
-            setStudentStats(stats);
+            // CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B): pedagogicalStats
+            // (localStorage que nada alimenta) deja de ser fuente. La tarjeta
+            // heredada que dependía de él nunca se mostraba en producción; el
+            // panel del estudiante (/api/students/:id/status) es la autoridad.
+            setStudentStats(undefined);
             setAiReport('');
         }
     }, [selectedStudent]);
@@ -715,56 +735,6 @@ const AulaViva: React.FC = () => {
     useEffect(() => { setC3Filter('all'); }, [selectedGroup]);
 
     // --- Visuals ---
-
-    const groupAverages = useMemo(() => {
-        if (students.length === 0) return {
-            time: 0,
-            books: 0,
-            botInteractions: 0,
-            taskRate: 0,
-            bgCompLiteral: 0,
-            bgCompInferencial: 0,
-            bgCompCritica: 0
-        };
-
-        // Accumulators
-        let acc = {
-            totalTime: 0,
-            totalBooks: 0,
-            totalBot: 0,
-            totalTaskRate: 0,
-            compL: 0,
-            compI: 0,
-            compC: 0
-        };
-
-        students.forEach(s => {
-            const st = dataService.getPedagogicalStats(s.id);
-            if (st) {
-                acc.totalTime += st.totalReadingTimeMinutes;
-                acc.totalBooks += st.booksCompleted;
-                acc.totalBot += st.chatbotInteractions || 0;
-                acc.totalTaskRate += st.taskCompletionRate || 0;
-                acc.compL += st.comprension_literal;
-                acc.compI += st.comprension_inferencial;
-                acc.compC += st.reflexion_critica;
-            }
-        });
-
-        const n = students.length;
-        return {
-            time: Math.round(acc.totalTime / n),
-            books: (acc.totalBooks / n).toFixed(1),
-            botInteractions: Math.round(acc.totalBot / n),
-            taskRate: Math.round(acc.totalTaskRate / n),
-            bgCompLiteral: Math.round(acc.compL / n),
-            bgCompInferencial: Math.round(acc.compI / n),
-            bgCompCritica: Math.round(acc.compC / n)
-        };
-    }, [students]);
-
-    const groupDistribution = useMemo(() => selectedGroup ? dataService.getGroupDistribution(selectedGroup) : { low: 0, mid: 0, high: 0 }, [selectedGroup, students]);
-    const groupTrend = useMemo(() => selectedGroup ? dataService.getGroupEvolution(selectedGroup) : [], [selectedGroup, students]);
 
     const paginatedStudents = useMemo(() => {
         const start = (currentPage - 1) * itemsPerPage;
@@ -1587,53 +1557,8 @@ const AulaViva: React.FC = () => {
                         </div>
                     )}
 
-                    {/* ADVANCED KPI ROW */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6 mb-8 animate-in fade-in">
-                        {/* KPI 1 Interacción Chatbot */}
-                        <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col justify-between">
-                            <div>
-                                <p className="text-sm text-gray-500 font-bold uppercase mb-1">Interacción Chatbot</p>
-                                <p className="text-[10px] text-gray-400">Promedio preguntas/alumno</p>
-                            </div>
-                            <div className="flex items-end justify-between mt-2">
-                                <p className="text-3xl font-bold">{groupAverages.botInteractions}</p>
-                                <MessageCircle className="text-blue-400 mb-1" size={28} />
-                            </div>
-                        </div>
-
-                        {/* KPI 2 Tasa de Tareas */}
-                        <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col justify-between">
-                            <div>
-                                <p className="text-sm text-gray-500 font-bold uppercase mb-1">Cumplimiento Tareas</p>
-                                <p className="text-[10px] text-gray-400">Tasa de entrega efectiva</p>
-                            </div>
-                            <div className="flex items-end justify-between mt-2">
-                                <p className="text-3xl font-bold">{groupAverages.taskRate}%</p>
-                                <CheckCircle className="text-green-400 mb-1" size={28} />
-                            </div>
-                        </div>
-
-                        {/* KPI 3 Tiempo */}
-                        <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col justify-between">
-                            <div>
-                                <p className="text-sm text-gray-500 font-bold uppercase mb-1">Tiempo de Lectura</p>
-                                <p className="text-[10px] text-gray-400">Promedio total acumulado</p>
-                            </div>
-                            <div className="flex items-end justify-between mt-2">
-                                <p className="text-3xl font-bold">{groupAverages.time}<span className="text-lg text-gray-400 font-normal">min</span></p>
-                                <Clock className="text-purple-400 mb-1" size={28} />
-                            </div>
-                        </div>
-
-                        {/* KPI 4 Distribution */}
-                        <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col justify-center">
-                            <p className="text-sm text-gray-500 font-bold uppercase mb-2">Distribución PISA</p>
-                            <DistributionChart low={groupDistribution.low} mid={groupDistribution.mid} high={groupDistribution.high} total={students.length} />
-                            <div className="flex justify-between text-xs mt-2 text-gray-400">
-                                <span>Bajo</span><span>Medio</span><span>Alto</span>
-                            </div>
-                        </div>
-                    </div>
+                    {/* KPIs del grupo — GET /api/groups/:id/analytics-summary (1B) */}
+                    <GroupAnalyticsKpis state={groupAnalytics} />
 
                     {/* UX-3B — md:grid-cols-2 para tablet:
                           mobile  → 1 columna (analytics + panel apilados)
@@ -1648,38 +1573,9 @@ const AulaViva: React.FC = () => {
                         {/* Left Column: Charts and Analysis */}
                         <div className="lg:col-span-2 space-y-8">
 
-                            {/* PISA / Saber Pro Competencies Chart */}
-                            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 border border-gray-200 dark:border-gray-700">
-                                <h3 className="text-lg font-bold flex items-center mb-6 text-indigo-800 dark:text-indigo-400">
-                                    <BrainCircuit className="mr-2" /> Competencias PISA & Saber Pro (Promedio Grupo)
-                                </h3>
-                                <div className="space-y-6">
-                                    <CompetencyBar
-                                        label="Lectura Literal (Recuperar Información)"
-                                        value={groupAverages.bgCompLiteral}
-                                        color="bg-blue-500"
-                                        description="Capacidad de ubicar y extraer información explícita en el texto."
-                                    />
-                                    <CompetencyBar
-                                        label="Lectura Inferencial (Interpretar)"
-                                        value={groupAverages.bgCompInferencial}
-                                        color="bg-indigo-500"
-                                        description="Capacidad de deducir el sentido, propósito y relaciones no explícitas."
-                                    />
-                                    <CompetencyBar
-                                        label="Lectura Crítica (Reflexionar y Evaluar)"
-                                        value={groupAverages.bgCompCritica}
-                                        color="bg-purple-500"
-                                        description="Capacidad de juzgar y relacionar el contenido con otros contextos."
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Trend Chart (Existing) */}
-                            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 border border-gray-200 dark:border-gray-700">
-                                <h3 className="text-lg font-bold flex items-center mb-4"><TrendingUp className="mr-2 text-indigo-500" /> Evolución Histórica del Desempeño</h3>
-                                <TrendChart data={groupTrend} />
-                            </div>
+                            {/* Competencias PISA y evolución: sin fuente de servidor → estado vacío (1B) */}
+                            <GroupPisaCompetencies state={groupAnalytics} />
+                            <GroupEvolutionPanel />
 
                             {/* Student Table (Updated Columns) */}
                             <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden border border-gray-200 dark:border-gray-700">
@@ -1719,7 +1615,7 @@ const AulaViva: React.FC = () => {
                                             <tr>
                                                 <th className="p-4 rounded-tl-lg">Participante</th>
                                                 <th className="p-4 text-center">Libros</th>
-                                                <th className="p-4 text-center">Tiempo (Sem/Día)</th>
+                                                <th className="p-4 text-center">Tiempo de Lectura</th>
                                                 <th className="p-4 text-center">Chatbot</th>
                                                 <th className="p-4 text-center">Tareas</th>
                                                 <th className="p-4 text-right">PISA Global</th>
@@ -1730,7 +1626,7 @@ const AulaViva: React.FC = () => {
                                                 <StudentRow
                                                     key={student.id}
                                                     student={student}
-                                                    stats={dataService.getPedagogicalStats(student.id)}
+                                                    analytics={readerAnalytics?.get(student.id)}
                                                     onSelect={() => setSelectedStudent(student)}
                                                 />
                                             ))}

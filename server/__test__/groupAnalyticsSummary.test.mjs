@@ -339,6 +339,19 @@ async function main() {
             summarizeReading(byUser, ['lec-f1'], NOW).last28d.totalEffectiveMs === 12 * MIN);
     }
 
+    section('[SIN N+1] el detalle por lector no añade consultas');
+    {
+        let progressCalls = 0;
+        const { summary } = buildGroupAnalyticsSummary({ group: GROUPS[0], users: USERS, allGroups: GROUPS,
+            leoInteractions: LEO_ROWS, getProgressByUser: () => { progressCalls++; return []; }, nowTs: NOW, ...opts });
+        ok('progreso: exactamente 1 lectura por lector (igual que el agregado de 1A)', progressCalls === 80, String(progressCalls));
+        const src = fs.readFileSync(path.join(REPO, 'server', 'analytics', 'groupAnalyticsSummary.mjs'), 'utf8');
+        const build = src.slice(src.indexOf('export function buildGroupAnalyticsSummary'));
+        ok('eventos: una sola lectura bulk (readCohortHistoricalRows) en el resumen',
+            (build.match(/readCohortHistoricalRows\(/g) || []).length === 1 && !/readUserHistoricalRows|userEffectiveReadingMs/.test(build));
+        ok('readers en el orden de la cohorte', summary.readers.map(r => r.userId).join() === resolveGroupLectorCohort(GROUPS[0], USERS, GROUPS).join());
+    }
+
     section('[PERF] 80 lectores, en proceso');
     {
         const run = () => { const t = performance.now(); buildGroupAnalyticsSummary({ group: GROUPS[0], users: USERS, allGroups: GROUPS,
@@ -360,7 +373,7 @@ async function main() {
         ok('adm → 200', r.status === 200, `${r.status} ${JSON.stringify(body)}`);
         ok('Cache-Control: no-store', r.headers.get('cache-control') === 'no-store', String(r.headers.get('cache-control')));
         ok('A readerCount = 80 (10 mediadores + admin con groupIds fuera)', body?.readerCount === 80, String(body?.readerCount));
-        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa"]', JSON.stringify(Object.keys(body ?? {})));
+        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers"]', JSON.stringify(Object.keys(body ?? {})));
         const all = body?.reading?.all, d28 = body?.reading?.last28d;
         ok('B all > 0 y == Σ autoridad por lector', all?.totalEffectiveMs > 0 && all.totalEffectiveMs === expectedAllMs, `${all?.totalEffectiveMs} vs ${expectedAllMs}`);
         ok('B lec-001 aporta 130 min (100 hot canónico + 30 archive legacy)',
@@ -377,7 +390,30 @@ async function main() {
         ok('G tareas = { state: no_server_source } (sin completionRate)', JSON.stringify(body?.tasks) === '{"state":"no_server_source"}', JSON.stringify(body?.tasks));
         ok('H PISA = { state: no_server_source } (sin score)', JSON.stringify(body?.pisa) === '{"state":"no_server_source"}', JSON.stringify(body?.pisa));
         const txt = JSON.stringify(body);
-        for (const fuga of ['lec-0', 'med-', 'c-1', 'ev-', 'session', 'pedagogicalStats']) ok(`sin "${fuga}" en la respuesta`, !txt.includes(fuga), txt.slice(0, 200));
+        for (const fuga of ['med-', 'adm', 'c-1', 'ev-', 'session', 'pedagogicalStats', 'nombre', 'email', 'Colegio']) ok(`sin "${fuga}" en la respuesta`, !txt.includes(fuga), txt.slice(0, 200));
+
+        // ── readers: detalle por lector del MISMO cálculo ──────────────────
+        const R = body?.readers ?? [];
+        const ids = R.map(r => r.userId);
+        ok('readers: 80, ids únicos, exactamente la cohorte lectora', R.length === 80 && new Set(ids).size === 80
+            && ids.every(id => LECTORES.includes(id)), `${R.length}`);
+        ok('readers: solo { userId, reading, leo, progress }', R.every(r => JSON.stringify(Object.keys(r)) === '["userId","reading","leo","progress"]'));
+        const sum = (f) => R.reduce((a, r) => a + f(r), 0);
+        ok('Σ readers.reading.all == reading.all.totalEffectiveMs', sum(r => r.reading.allEffectiveMs) === all.totalEffectiveMs);
+        ok('Σ readers.reading.last28d == reading.last28d.totalEffectiveMs', sum(r => r.reading.last28dEffectiveMs) === d28.totalEffectiveMs);
+        ok('readers con all > 0 == readersWithActivity', R.filter(r => r.reading.allEffectiveMs > 0).length === all.readersWithActivity);
+        ok('Σ readers.leo == leo.interactions', sum(r => r.leo.interactions) === body.leo.interactions);
+        ok('Σ readers.progress == progress agregado', sum(r => r.progress.booksStarted) === 4 && sum(r => r.progress.booksCompleted) === 2
+            && R.filter(r => r.progress.booksStarted > 0).length === body.progress.readersWithProgress);
+        const by = new Map(R.map(r => [r.userId, r]));
+        ok('cada lector == userEffectiveReadingMs (autoridad indexada por usuario)',
+            LECTORES.every(id => by.get(id).reading.allEffectiveMs === userEffectiveReadingMs(id, opts)));
+        ok('lec-001: 130 min histórico, 0 en 28 d, 3 Leo, 2 libros (1 completado, promedio 53 %)',
+            JSON.stringify(by.get('lec-001')) === JSON.stringify({ userId: 'lec-001', reading: { allEffectiveMs: 130 * MIN, last28dEffectiveMs: 0 },
+                leo: { interactions: 3 }, progress: { booksStarted: 2, booksCompleted: 1, averagePercent: 53 } }), JSON.stringify(by.get('lec-001')));
+        ok('lec-003: cero real en lectura y Leo (números), 1 libro al 2 %',
+            JSON.stringify(by.get('lec-003')) === JSON.stringify({ userId: 'lec-003', reading: { allEffectiveMs: 0, last28dEffectiveMs: 0 },
+                leo: { interactions: 0 }, progress: { booksStarted: 1, booksCompleted: 0, averagePercent: 2 } }), JSON.stringify(by.get('lec-003')));
     }
 
     section('[F] grupo sin actividad → cero real, tareas/PISA siguen sin fuente');

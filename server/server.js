@@ -7563,8 +7563,9 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
 //
 // Resumen REAL del grupo para Aula Viva: cohorte lectora, tiempo efectivo
 // (histórico y 28 d) sobre hot ∪ archive, interacciones Leo, libros iniciados/
-// completados. Tareas y PISA no tienen fuente de servidor y se declaran como
-// tal (nunca 0). Solo lectura; la autoridad está en
+// completados, y `readers[]` con el detalle por lector del mismo cálculo (para
+// la tabla de Aula Viva, sin N+1). Tareas y PISA no tienen fuente de servidor
+// y se declaran como tal (nunca 0). Solo lectura; la autoridad está en
 // analytics/groupAnalyticsSummary.mjs. Mismo alcance que el diagnóstico del
 // grupo; no acepta ids de usuario.
 // ─────────────────────────────────────────────────────────────────────────────
