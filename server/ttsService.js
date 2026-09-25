@@ -69,6 +69,38 @@ const splitSentencesFromChunk = (chunkText) => {
         .filter(s => s.length > 5);
 };
 
+// --- AUDIO CACHE IDENTITY (CHP-CONTENT-CANONICAL-2026-01 1A) ---
+// El audio de un chunk se identifica por su CONTENIDO, nunca por su posición:
+// hash = generateHash(texto del chunk, idioma, voz, provider, model), el mismo
+// que ya da nombre al archivo. Un HIT exige que exista el mp3 de la identidad
+// esperada para el texto ACTUAL con un motor aceptable.
+const chunkAudioFileName = (hash, provider, model) => `chunk_${hash}_${provider}_${model}.mp3`;
+
+// Motores cuyo audio puede reutilizarse: los configurados para TTS. En modo
+// real el audio mock nunca se acepta (barrera previa); en mock se acepta todo.
+const acceptableTtsEngines = () => {
+    const engines = [AI_CONFIG.tts.primary, AI_CONFIG.tts.fallback];
+    if (TTS_MODE === 'mock' || AI_MODE === 'mock') engines.push({ provider: 'mock', model: 'mock-engine' });
+    return engines;
+};
+
+const findCachedChunkAudio = (audioDir, text, language, voice) => {
+    for (const { provider, model } of acceptableTtsEngines()) {
+        const hash = generateHash(text, language, voice, provider, model);
+        const fileName = chunkAudioFileName(hash, provider, model);
+        const filePath = path.join(audioDir, fileName);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) return { hash, provider, model, fileName };
+    }
+    return null;
+};
+
+// Escritura atómica: temporal + rename, para que ningún lector vea un archivo a medias.
+const writeFileAtomic = (filePath, data) => {
+    const tmpPath = `${filePath}.tmp-${process.pid}`;
+    fs.writeFileSync(tmpPath, data);
+    fs.renameSync(tmpPath, filePath);
+};
+
 // --- CORE FUNCTION ---
 
 export const generateAudioForContent = async (contentId, textFilePath, uploadDir, onProgress = null) => {
@@ -108,18 +140,24 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
         }
 
         const manifestPath = path.join(audioDir, 'manifest.json');
-        let manifest = {};
+        // El manifest anterior solo se lee para no borrar su audio en la GC: la
+        // reutilización se decide por identidad, nunca por sus entradas.
+        let previousManifest = {};
         if (fs.existsSync(manifestPath)) {
             try {
-                manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+                previousManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
             } catch (e) {
-                manifest = {}; 
+                previousManifest = {};
             }
         }
 
+        // Se construye un manifest NUEVO: ninguna entrada de la versión anterior
+        // (texto distinto o índices sobrantes) sobrevive. Se publica una sola vez,
+        // de forma atómica, al terminar; mientras tanto sigue visible el anterior.
+        const manifest = {};
         const saveManifest = () => {
             try {
-                fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+                writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2));
             } catch (e) {
                 log(`Error saving manifest: ${e.message}`, "ERROR");
             }
@@ -149,51 +187,30 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
             const chunkSentenceStart = globalSentenceIndex;
             globalSentenceIndex += chunkSentences.length;
             
-            // WE NO LONGER HASH PRE-FLIGHT TO AVOID INACCURATE FALLBACK MISMATCH
-            // Check cache by index first to see if we already have it safely mapped
-            
-            let skipCurrentChunk = false;
-            let existingEntry = manifest[i];
-
-            if (existingEntry && existingEntry.file) {
-                const oldFilePath = path.join(uploadDir, existingEntry.file);
-                
-                // If it physically exists and is not corrupt
-                if (fs.existsSync(oldFilePath) && fs.statSync(oldFilePath).size > 0) {
-                    
-                    // Critical Barrier: If we are in REAL mode, we MUST REJECT any old MOCK files.
-                    const isSystemInRealMode = (TTS_MODE !== 'mock' && AI_MODE !== 'mock');
-                    const isOldFileFromMock = existingEntry.provider === 'mock';
-
-                    if (isSystemInRealMode && isOldFileFromMock) {
-                        log(`[AI] Mock cache ignored in real mode for chunk ${i+1}. Will regenerate with real API.`, "TTS");
-                        // We do not skip! We will run it through the real engine and overwrite.
-                        skipCurrentChunk = false;
-                    } 
-                    else {
-                        // Acceptable Cache Hit (Either both are mock, or both are real, or we are in mock and accept old real/mock files)
-                        log(`[AI] Cache hit for content ${contentId} chunk ${i + 1} (Provider: ${existingEntry.provider || 'legacy'})`, "TTS");
-                        
-                        // Phase 5.2: Self-heal old manifests to ensure they contain the FULL text, not the old substring
-                        manifest[i].text = chunkTextContent;
-                        // MANIFEST v2: Self-heal — añadir metadata de oraciones si no existe en esta entrada
-                        if (!manifest[i].sentences) {
-                            manifest[i].sentences = chunkSentences;
-                            manifest[i].sentenceStart = chunkSentenceStart;
-                        }
-
-                        skippedCount++;
-                        skipCurrentChunk = true;
-                        
-                        if (onProgress) {
-                            onProgress({ percentage: Math.round(((i + 1) / chunks.length) * 100), currentSentence: i + 1, totalSentences: chunks.length, status: 'processing', lastUpdated: new Date().toISOString() });
-                        }
-                    }
+            // CACHE HIT solo si existe el audio de la identidad esperada para ESTE texto.
+            const cached = findCachedChunkAudio(audioDir, chunkTextContent, targetLanguage, targetVoice);
+            if (cached) {
+                log(`[AI] Cache hit for content ${contentId} chunk ${i + 1} (Provider: ${cached.provider})`, "TTS");
+                manifest[i] = {
+                    text: chunkTextContent,
+                    file: `audio/${contentId}/${cached.fileName}`,
+                    index: i,
+                    hash: cached.hash,
+                    provider: cached.provider,
+                    model: cached.model,
+                    sentences: chunkSentences,
+                    sentenceStart: chunkSentenceStart,
+                };
+                skippedCount++;
+                if (onProgress && !circuitBreakerTripped) {
+                    onProgress({ percentage: Math.round(((i + 1) / chunks.length) * 100), currentSentence: i + 1, totalSentences: chunks.length, status: 'processing', lastUpdated: new Date().toISOString() });
                 }
+                continue;
             }
 
-            // Move to next iteration if cache was deemed solidly valid
-            if (skipCurrentChunk) continue;
+            // Tras el circuit breaker no se genera nada más, pero se siguen
+            // recogiendo los HIT para no perder audio válido.
+            if (circuitBreakerTripped) continue;
 
             // Generate using Hybrid AI Engine
             log(`[AI] Cache miss, generating chunk ${i + 1}/${chunks.length}...`, "TTS");
@@ -205,10 +222,11 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
                 
                 const exactHash = generateHash(chunkTextContent, targetLanguage, targetVoice, result.provider, result.model);
                 
-                const finalFileName = `chunk_${exactHash}_${result.provider}_${result.model}.mp3`;
+                const finalFileName = chunkAudioFileName(exactHash, result.provider, result.model);
                 const finalFilePath = path.join(audioDir, finalFileName);
 
-                fs.writeFileSync(finalFilePath, result.data);
+                // Atómica: un mp3 truncado con nombre de identidad válida sería un HIT falso.
+                writeFileAtomic(finalFilePath, result.data);
                 createdCount++;
 
                 // If fallback happened, this elegantly captures the Gemini identity instead of OpenAI's
@@ -243,7 +261,6 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
                 // Si el error es sistémico (Cuota, Bloqueos, Not Found en endpoint base), ABORTAR EL RESTO DEL LOOP
                 if (errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('rate limit') || errMsg.includes('403') || errMsg.includes('404') || errMsg.includes('not found')) {
                      log(`[CRITICAL] Circuit Breaker activated due to provider error. Aborting job for content ${contentId}.`, "ERROR");
-                     saveManifest(); // Conservamos lo avanzado exitosamente
                      circuitBreakerTripped = true;
                      if (onProgress) {
                          onProgress({
@@ -255,17 +272,14 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
                              lastUpdated: new Date().toISOString()
                          });
                      }
-                     break; // ROTURA DEFINITIVA DEL BUCLE
+                     continue; // no se genera nada más; el resto del bucle solo recoge HITs
                 }
-                
-                // We MUST save manifest if abort happens midway to lock-in the chunks mapped prior to crash
-                saveManifest(); 
             }
 
-            // 3. IO Manifest Saving Optimizer (Writes to DB only every 10 chunks or at exact completion)
+            // Progreso cada 10 chunks. El manifest ya no se escribe a mitad de job:
+            // se publica una vez al final. Un job interrumpido no pierde el audio
+            // generado, porque su nombre es su identidad y el siguiente job lo reutiliza.
             if ((i + 1) % 10 === 0 || i === chunks.length - 1) {
-                saveManifest();
-                
                 const percent = Math.round(((i + 1) / chunks.length) * 100);
                 if (onProgress) {
                     onProgress({
@@ -290,11 +304,15 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
         // --- GARBAGE COLLECTION FOR ORPHAN AUDIO FILES ---
         try {
             log(`[TTS] Running audio garbage collection...`, "TTS");
+            // Se conserva también el audio que referenciaba el manifest anterior: esta
+            // pasada no borra audio que estaba publicado. Solo se borra, como antes,
+            // el mp3 que no referencia ni el manifest nuevo ni el anterior.
             const validFiles = new Set();
-            
-            for (const key of Object.keys(manifest)) {
-                if (manifest[key] && manifest[key].file) {
-                    validFiles.add(path.basename(manifest[key].file));
+            for (const source of [manifest, previousManifest]) {
+                for (const key of Object.keys(source)) {
+                    if (source[key] && source[key].file) {
+                        validFiles.add(path.basename(source[key].file));
+                    }
                 }
             }
 
