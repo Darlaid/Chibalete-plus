@@ -238,6 +238,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
+import { buildGroupAnalyticsSummary } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -7552,6 +7553,41 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
                 tone:     'error',
             },
         });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1A)
+//
+// GET /api/groups/:id/analytics-summary
+//
+// Resumen REAL del grupo para Aula Viva: cohorte lectora, tiempo efectivo
+// (histórico y 28 d) sobre hot ∪ archive, interacciones Leo, libros iniciados/
+// completados. Tareas y PISA no tienen fuente de servidor y se declaran como
+// tal (nunca 0). Solo lectura; la autoridad está en
+// analytics/groupAnalyticsSummary.mjs. Mismo alcance que el diagnóstico del
+// grupo; no acepta ids de usuario.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!(await requireSubjectScope(req, res, 'group', id, { allowSelf: false }))) return;
+        const groups = readJSON(GROUPS_DB) || [];
+        const users  = readJSON(USERS_DB)  || [];
+        const group = groups.find(g => g?.id === id);
+        if (!group) return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND });
+
+        const t0 = performance.now();
+        const { summary, rowsConsidered } = buildGroupAnalyticsSummary({
+            group, users, allGroups: groups,
+            leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
+            getProgressByUser,
+        });
+        log(`[GROUP_ANALYTICS] group=${id} readers=${summary.readerCount} rows=${rowsConsidered} ms=${Math.round(performance.now() - t0)}`);
+        res.json(summary);
+    } catch (e) {
+        log(`GET /api/groups/${req.params.id}/analytics-summary error: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'group_analytics_unavailable' });
     }
 });
 

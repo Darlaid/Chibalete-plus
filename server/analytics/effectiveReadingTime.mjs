@@ -58,6 +58,8 @@ const OPENERS = new Set(['reading_started', 'session_started']);
 const TICKS   = new Set(['session_heartbeat']);
 /** Nombres que cierran el tramo con su duración final. */
 const CLOSERS = new Set(['session_ended']);
+/** Únicos nombres lógicos que el cálculo consume; el resto se ignora. */
+export const EFFECTIVE_READING_EVENT_NAMES = Object.freeze([...OPENERS, ...TICKS, ...CLOSERS]);
 
 /**
  * Tiempo acumulado que declara una fila. Prioridad: payload.elapsedMs →
