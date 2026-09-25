@@ -289,6 +289,133 @@ console.log('groupDiagnosis — Sprint visibilidad');
         `mensajes con jerga: ${JSON.stringify(offenders)}`);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// 12. CHP-MAINT-AULA-VIVA-GROUP-MEMBERSHIP-WARNING-01 — rol en el diagnóstico
+//
+// Contrato canónico: el lector tiene groupIds + studentIds/memberIds; el
+// mediador tiene groupIds + mediatorIds. Tener el grupo en groupIds NO hace
+// estudiante a nadie: ni suma al total ni dispara W3.
+// ────────────────────────────────────────────────────────────────────────────
+{
+    // A. 80 lectores + 10 mediadores correctamente asignados (Grado 005 real).
+    const lectorIds   = Array.from({ length: 80 }, (_, i) => `l${i}`);
+    const mediatorIds = Array.from({ length: 10 }, (_, i) => `m${i}`);
+    const group = { id: 'g5', name: 'Grado 005', school: 'Villas', type: 'course',
+                    studentIds: [...lectorIds], memberIds: [...lectorIds], mediatorIds: [...mediatorIds] };
+    const users = [
+        ...lectorIds.map(id   => ({ id, roles: ['lector'],   colegio: 'Villas', groupIds: ['g5'] })),
+        ...mediatorIds.map(id => ({ id, roles: ['mediador'], colegio: 'Villas', groupIds: ['g5'] })),
+    ];
+    const d = buildGroupDiagnosis(group, users, [group]);
+
+    ok('ROL-A 80+10: totalMembers=80',          d.totalMembers === 80, `got ${d.totalMembers}`);
+    ok('ROL-A 80+10: sin W3',                    !hasItem(d.warnings, 'via_user_groupIds_only'));
+    ok('ROL-A 80+10: channels.viaUserGroupIds=0', d.channels.viaUserGroupIds === 0);
+    ok('ROL-A 80+10: healthStatus=OK',           d.healthStatus === 'OK', d.healthStatus);
+    ok('ROL-A 80+10: headline usa 80',           /El grupo tiene 80 estudiante\(s\)/.test(d.summary.headline), d.summary.headline);
+    ok('ROL-A 80+10: grupo y usuarios intactos',
+        group.studentIds.length === 80 && group.mediatorIds.length === 10
+        && users.every(u => u.groupIds.length === 1 && u.groupIds[0] === 'g5'));
+
+    // B. Un lector realmente ausente de studentIds/memberIds sigue disparando W3.
+    const usersB = [...users, { id: 'lost', roles: ['lector'], colegio: 'Villas', groupIds: ['g5'] }];
+    const dB = buildGroupDiagnosis(group, usersB, [group]);
+    const wB = findItem(dB.warnings, 'via_user_groupIds_only');
+    ok('ROL-B drift real: W3 presente',          !!wB);
+    ok('ROL-B drift real: W3 count=1',           wB && wB.count === 1 && setEq(wB.userIds, ['lost']));
+    ok('ROL-B drift real: healthStatus=WARNING', dB.healthStatus === 'WARNING');
+    ok('ROL-B drift real: totalMembers=81',      dB.totalMembers === 81, `got ${dB.totalMembers}`);
+}
+{
+    // C. Mediador con groupIds y mediatorIds → no es estudiante ni W3.
+    const group = { id: 'g1', school: 'Villas', studentIds: ['u1'], memberIds: ['u1'], mediatorIds: ['t1'] };
+    const users = [
+        { id: 'u1', roles: ['lector'],   groupIds: ['g1'] },
+        { id: 't1', roles: ['mediador'], groupIds: ['g1'] },
+    ];
+    const d = buildGroupDiagnosis(group, users, [group]);
+    ok('ROL-C mediador: sin W3',                 !hasItem(d.warnings, 'via_user_groupIds_only'));
+    ok('ROL-C mediador: totalMembers=1',         d.totalMembers === 1);
+    ok('ROL-C mediador: healthStatus=OK',        d.healthStatus === 'OK');
+
+    // C'. Defensa: un id en mediatorIds nunca es estudiante aunque tenga rol lector.
+    const usersC2 = [users[0], { id: 't1', roles: ['mediador', 'lector'], groupIds: ['g1'] }];
+    const dC2 = buildGroupDiagnosis(group, usersC2, [group]);
+    ok('ROL-C mediatorIds con rol lector: sin W3', !hasItem(dC2.warnings, 'via_user_groupIds_only'));
+    ok('ROL-C mediatorIds con rol lector: total=1', dC2.totalMembers === 1);
+}
+{
+    // D. Admin / otro con groupIds → no cuenta como estudiante ni dispara W3.
+    const group = { id: 'g1', school: 'Villas', studentIds: ['u1'], memberIds: ['u1'] };
+    const users = [
+        { id: 'u1', roles: ['lector'],        groupIds: ['g1'] },
+        { id: 'a1', roles: ['administrador'], groupIds: ['g1'] },
+        { id: 'o1', roles: [],                groupIds: ['g1'] },
+        { id: 'o2',                           groupIds: ['g1'] },
+    ];
+    const d = buildGroupDiagnosis(group, users, [group]);
+    ok('ROL-D admin/otro: sin W3',               !hasItem(d.warnings, 'via_user_groupIds_only'));
+    ok('ROL-D admin/otro: totalMembers=1',       d.totalMembers === 1);
+    ok('ROL-D admin/otro: healthStatus=OK',      d.healthStatus === 'OK');
+}
+{
+    // E. Lector explícito en studentIds, memberIds y groupIds → contado una vez.
+    const group = { id: 'g1', school: 'Villas', studentIds: ['u1'], memberIds: ['u1'] };
+    const users = [{ id: 'u1', roles: ['lector'], groupIds: ['g1'] }];
+    const d = buildGroupDiagnosis(group, users, [group]);
+    ok('ROL-E lector explícito: totalMembers=1', d.totalMembers === 1);
+    ok('ROL-E lector explícito: headline 1',     /El grupo tiene 1 estudiante\(s\)/.test(d.summary.headline));
+}
+{
+    // F. Solo mediadores declaran el grupo: el runtime NO llega al fallback
+    //    colegio (canal explícito no vacío), así que el diagnóstico tampoco lo
+    //    reporta; el grupo queda sin estudiantes.
+    const group = { id: 'g1', school: 'Villas', studentIds: [], memberIds: [], mediatorIds: ['t1'] };
+    const users = [
+        { id: 't1', roles: ['mediador'], colegio: 'Villas', groupIds: ['g1'] },
+        { id: 'u9', roles: ['lector'],   colegio: 'Villas' },
+    ];
+    const d = buildGroupDiagnosis(group, users, [group]);
+    ok('ROL-F solo mediador: fallback no reportado', d.channels.fallbackColegio === 0
+        && !hasItem(d.warnings, 'fallback_colegio_active'));
+    ok('ROL-F solo mediador: totalMembers=0',    d.totalMembers === 0);
+    ok('ROL-F solo mediador: group_empty',       hasItem(d.warnings, 'group_empty'));
+    ok('ROL-F solo mediador: sin W3',            !hasItem(d.warnings, 'via_user_groupIds_only'));
+}
+{
+    // F'. IDs huérfanos (sin usuario): el filtro de rol no los toca; siguen
+    //     contando como antes y los reporta I2, sin inventar group_empty.
+    const group = { id: 'g1', school: 'Villas', studentIds: ['x1', 'x2'], memberIds: ['x1', 'x2'] };
+    const d = buildGroupDiagnosis(group, [], [group]);
+    ok('ROL-F huérfanos: totalMembers=2',        d.totalMembers === 2);
+    ok('ROL-F huérfanos: orphan_member_ids',     hasItem(d.inconsistencies, 'orphan_member_ids'));
+    ok('ROL-F huérfanos: sin group_empty',       !hasItem(d.warnings, 'group_empty'));
+}
+{
+    // G. Ninguna recomendación sugiere la migración de membresía: su paso de
+    //    pull (user.groupIds → studentIds/memberIds) no filtra rol y metería a
+    //    los mediadores como estudiantes.
+    const scenarios = [
+        [{ id: 'g1', school: 'Villas', studentIds: ['u1', 'ghost'], memberIds: ['u1'] },
+         [{ id: 'u1', roles: ['lector'], groupIds: [] }, { id: 'u2', roles: ['lector'], groupIds: ['g1'] }]],
+        [{ id: 'g1', school: 'Villas', studentIds: [], memberIds: [] },
+         [{ id: 'u1', roles: ['lector'], colegio: 'Villas' }]],
+        [{ id: 'g1', studentIds: [], memberIds: [] }, []],
+    ];
+    const texts = [];
+    const types = new Set();
+    for (const [g, u] of scenarios) {
+        const d = buildGroupDiagnosis(g, u, [g]);
+        for (const i of [...d.inconsistencies, ...d.warnings]) {
+            types.add(i.type);
+            texts.push(i.message, i.cause, i.recommendedAction);
+        }
+    }
+    ok('MIGRACIÓN: los 6 tipos cubiertos', types.size === 6, [...types].join(','));
+    const offenders = texts.filter(t => /migraci[oó]n/i.test(t));
+    ok('MIGRACIÓN: ninguna recomendación la menciona', offenders.length === 0, JSON.stringify(offenders));
+}
+
 console.log('');
 console.log(`groupDiagnosis — pass=${pass} fail=${fail}`);
 if (fail > 0) process.exitCode = 1;

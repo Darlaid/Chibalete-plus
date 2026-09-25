@@ -26,6 +26,7 @@ import {
     getGroupMembers,
     getExplicitGroupMembers,
     applyLegacyColegioFallback,
+    userIsLectorLike,
 } from './groupMembership.mjs';
 
 const arr = (x) => (Array.isArray(x) ? x : []);
@@ -62,32 +63,47 @@ export function buildGroupDiagnosis(group, users, allGroups) {
     // ── Conteos por canal ──────────────────────────────────────────────────
     //
     // explicitSet — IDs presentes en studentIds o memberIds del grupo.
-    // viaUserGroupIds — IDs no listados arriba pero cuyo user.groupIds
-    //   apunta a este grupo (drift inverso suave: el user dice que pertenece).
+    // viaUserGroupIds — LECTORES no listados arriba pero cuyo user.groupIds
+    //   apunta a este grupo (drift inverso suave: el lector dice que pertenece).
     // fallbackOnly — IDs resueltos solo por la convención `colegio→school`
     //   cuando los canales explícitos están vacíos y la escuela tiene
     //   exactamente un grupo.
+    //
+    // CHP-MAINT-AULA-VIVA-GROUP-MEMBERSHIP-WARNING-01 — el contrato canónico
+    // también da user.groupIds al mediador (que vive en group.mediatorIds), así
+    // que tener el grupo en groupIds NO convierte a nadie en estudiante. Este
+    // módulo cuenta y advierte solo sobre lectores (userIsLectorLike) fuera de
+    // mediatorIds. getGroupMembers conserva su semántica: el filtro vive aquí.
 
     const studentSet  = new Set(arr(group.studentIds));
     const memberSet   = new Set(arr(group.memberIds));
     const explicitSet = new Set([...studentSet, ...memberSet]);
+    const mediatorSet = new Set(arr(group.mediatorIds));
+    // Un id sin usuario no tiene rol que evaluar: conserva su conteo previo y
+    // ya lo reporta I2 (orphan_member_ids).
+    const isStudent   = (id) => !mediatorSet.has(id)
+        && (!userById.has(id) || userIsLectorLike(userById.get(id)));
 
+    // Cualquier rol: solo decide si el runtime llega al fallback colegio.
+    let declaresOutsideList = false;
     const viaUserGroupIds = new Set();
     for (const u of _users) {
         if (u && arr(u.groupIds).includes(group.id) && !explicitSet.has(u.id)) {
-            viaUserGroupIds.add(u.id);
+            declaresOutsideList = true;
+            if (isStudent(u.id)) viaUserGroupIds.add(u.id);
         }
     }
 
-    // Fuente única — total resuelto, ya incluye fallback si aplica.
+    // Fuente única — total resuelto, ya incluye fallback si aplica. Se muestra
+    // como «estudiantes», así que se filtra por rol lector.
     const resolvedAll = new Set(getGroupMembers(group, _users, {
         allGroups: _groups,
         warnFn:    () => {},
-    }));
+    }).filter(isStudent));
 
     // El fallback se calcula explícitamente para distinguirlo de los otros canales.
     let fallbackOnly = new Set();
-    if (explicitSet.size === 0 && viaUserGroupIds.size === 0) {
+    if (explicitSet.size === 0 && !declaresOutsideList) {
         const fb = applyLegacyColegioFallback(group, _users, _groups);
         if (fb.used) fallbackOnly = new Set(fb.matched);
     }
@@ -107,7 +123,7 @@ export function buildGroupDiagnosis(group, users, allGroups) {
             userIds: [...new Set([...onlyInStudent, ...onlyInMember])],
             message:           `${total} estudiante(s) aparecen en una lista interna del grupo pero no en la otra.`,
             cause:             'El grupo mantiene dos listas que deberían coincidir y se desincronizaron.',
-            recommendedAction: 'Editar el grupo desde el gestor o ejecutar la migración de membresía para sincronizar las listas.',
+            recommendedAction: 'Revisar o editar la membresía del grupo desde el gestor para sincronizar las listas.',
         });
     }
 
@@ -120,7 +136,7 @@ export function buildGroupDiagnosis(group, users, allGroups) {
             userIds: orphanIds,
             message:           `${orphanIds.length} estudiante(s) están listados en el grupo pero ya no existen en el sistema.`,
             cause:             'Los usuarios fueron eliminados sin limpiar la lista de miembros del grupo.',
-            recommendedAction: 'Ejecutar la migración de membresía para limpiar las referencias huérfanas.',
+            recommendedAction: 'Revisar o editar la membresía del grupo desde el gestor para quitar las referencias huérfanas.',
         });
     }
 
@@ -138,7 +154,7 @@ export function buildGroupDiagnosis(group, users, allGroups) {
             userIds: memberMissingGroupId,
             message:           `${memberMissingGroupId.length} estudiante(s) están en este grupo pero su perfil no lo refleja.`,
             cause:             'La lista del grupo y el registro del estudiante se desincronizaron.',
-            recommendedAction: 'Ejecutar la migración de membresía para restablecer la bidireccionalidad.',
+            recommendedAction: 'Revisar o editar la membresía del grupo o el perfil del estudiante para que ambos coincidan.',
         });
     }
 
@@ -171,7 +187,7 @@ export function buildGroupDiagnosis(group, users, allGroups) {
         });
     }
 
-    // W3. via_user_groupIds_only — el estudiante declara pertenecer al
+    // W3. via_user_groupIds_only — un lector (nunca mediador) declara pertenecer al
     //     grupo pero la lista del grupo no lo incluye.
     if (viaUserGroupIds.size > 0) {
         warnings.push({
@@ -180,7 +196,7 @@ export function buildGroupDiagnosis(group, users, allGroups) {
             userIds: [...viaUserGroupIds],
             message:           `${viaUserGroupIds.size} estudiante(s) declaran pertenecer al grupo pero la lista del grupo no los incluye.`,
             cause:             'El grupo no se actualizó al asignar al estudiante; el sistema los reconoce, pero el snapshot del grupo está desactualizado.',
-            recommendedAction: 'Editar el grupo o ejecutar la migración de membresía para alinear ambos lados.',
+            recommendedAction: 'Revisar o editar la membresía del grupo para alinear la lista de estudiantes.',
         });
     }
 
