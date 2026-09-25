@@ -465,6 +465,11 @@ export interface Content {
     error?: string;
     lastUpdated: string; // ISO Date
   };
+
+  // CHP-CONTENT-CANONICAL-2026-01 1B — versión textual del texto principal
+  // (texto_plano_url). Solo la calcula el servidor; ausente en contenido legacy.
+  contentFingerprint?: string | null; // 'sha256:<hex>' del texto normalizado
+  contentVersion?: number | null;     // monotónico por Content id; +1 si cambia el fingerprint
 }
 
 // Reading status derived from progress percentage
@@ -494,6 +499,9 @@ export interface ProgresoLectura {
     globalPercentage: number;
     contentAnchor: string | null;
     contentFingerprint: string | null;
+    // 1B: versión textual del Content sobre la que se produjo esta posición.
+    // Opcional: los clientes legacy no la envían y no se exige.
+    contentVersion?: number;
     /**
      * Modo activo en el último playback. Tipo inline por compatibilidad con
      * datos persistidos en progress_db.json y validación backend.

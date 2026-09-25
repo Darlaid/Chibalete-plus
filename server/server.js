@@ -221,6 +221,7 @@ app.set('trust proxy', 1);
 
 import { generateAudioForContent } from './ttsService.js';
 import { createTtsProgressWriter } from './ttsProgressWriter.js';
+import { computeContentFingerprint, nextContentTextVersion, readUploadTextForFingerprint } from './contentFingerprint.js';
 import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini, GEMINI_TEXT_MODEL } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
@@ -3441,6 +3442,37 @@ function validateAlbumData(albumData) {
 }
 
 // SAVE CONTENT METADATA
+// CHP-CONTENT-CANONICAL-2026-01 1B — contentFingerprint/contentVersion del texto
+// principal (texto_plano_url). Se resuelve dentro del lock contra el registro
+// fresco para que el contador sea monotónico también entre réplicas.
+//   - texto_plano_url distinto al guardado → se lee y se calcula el fingerprint;
+//     mismo texto = misma versión, texto distinto = versión + 1.
+//   - mismo texto_plano_url → se conserva lo vigente (un update de metadata no lo toca).
+//   - fuente ilegible o texto retirado → fingerprint null, versión conservada.
+//   - registros legacy sin estos campos y sin cambio de texto → quedan igual.
+const applyContentTextVersion = (record, previous) => {
+    const hasVersionFields = !!previous && ('contentFingerprint' in previous || 'contentVersion' in previous);
+    const keptVersion = Number.isInteger(previous?.contentVersion) && previous.contentVersion >= 1 ? previous.contentVersion : null;
+    const textUrl = record.texto_plano_url || null;
+
+    if (textUrl && textUrl !== (previous?.texto_plano_url || null)) {
+        const sourceText = readUploadTextForFingerprint(UPLOAD_DIR, textUrl);
+        if (sourceText !== null) {
+            Object.assign(record, nextContentTextVersion(previous, computeContentFingerprint(sourceText)));
+            return;
+        }
+        log(`[CONTENT_FINGERPRINT_SKIP] contentId=${record.id} reason=source_unreadable`, 'WARN');
+        if (hasVersionFields) Object.assign(record, { contentFingerprint: null, contentVersion: keptVersion });
+        return;
+    }
+    if (!hasVersionFields) return;
+    if (!textUrl) {
+        Object.assign(record, { contentFingerprint: null, contentVersion: keptVersion });
+        return;
+    }
+    Object.assign(record, { contentFingerprint: previous.contentFingerprint ?? null, contentVersion: keptVersion });
+};
+
 app.post('/api/content', async (req, res) => {
     try {
         const newContent = req.body;
@@ -3486,6 +3518,11 @@ app.post('/api/content', async (req, res) => {
 
         const oldContent = index >= 0 ? contentList[index] : null;
 
+        // CHP-CONTENT-CANONICAL-2026-01 1B: la versión textual es autoridad del
+        // servidor. Lo que mande el cliente se descarta; se resuelve en el lock.
+        delete newContent.contentFingerprint;
+        delete newContent.contentVersion;
+
         if (oldContent) {
             // Update existing
             if (newContent.texto_plano_url && newContent.texto_plano_url !== oldContent.texto_plano_url) {
@@ -3528,6 +3565,7 @@ app.post('/api/content', async (req, res) => {
                 _jsonCache.delete(DB_FILE);
                 const freshList = readJSON(DB_FILE);
                 const freshIdx = freshList.findIndex(c => c.id === newContent.id);
+                applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
                 if (freshIdx >= 0) {
                     freshList[freshIdx] = newContent;
                 } else {
@@ -3787,7 +3825,8 @@ const normalizeCanonicalProgress = (payload) => {
         totalSentences: Math.max(0, parseInt(payload?.totalSentences || 0, 10)),
         globalPercentage: Math.max(0, Math.min(100, parseFloat(payload?.globalPercentage || 0.0))),
         contentAnchor: payload?.contentAnchor ? String(payload.contentAnchor).substring(0, 100) : null,
-        contentFingerprint: payload?.contentFingerprint ? String(payload.contentFingerprint).substring(0, 50) : null,
+        // 1B: 128 caracteres caben 'sha256:' + 64 hex; con 50 se truncaba la identidad.
+        contentFingerprint: payload?.contentFingerprint ? String(payload.contentFingerprint).substring(0, 128) : null,
         lastInteractedMode: ['pdf', 'text', 'accessible', 'immersive'].includes(payload?.lastInteractedMode)
             ? payload.lastInteractedMode : 'text'
     };
@@ -3800,6 +3839,11 @@ const normalizeCanonicalProgress = (payload) => {
     if (typeof payload?.viewportHint === 'number' && isFinite(payload.viewportHint) &&
         payload.viewportHint >= 0 && payload.viewportHint <= 100) {
         base.viewportHint = payload.viewportHint;
+    }
+    // 1B: versión textual sobre la que se produjo la posición, solo si viene y es
+    // válida. No se exige a clientes legacy ni se compara con el Content aún.
+    if (Number.isInteger(payload?.contentVersion) && payload.contentVersion >= 1) {
+        base.contentVersion = payload.contentVersion;
     }
     return base;
 };
