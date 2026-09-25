@@ -238,7 +238,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
-import { buildGroupAnalyticsSummary } from './analytics/groupAnalyticsSummary.mjs';
+import { buildGroupAnalyticsSummary, createGroupAnalyticsCache } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -7568,7 +7568,11 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
 // y se declaran como tal (nunca 0). Solo lectura; la autoridad está en
 // analytics/groupAnalyticsSummary.mjs. Mismo alcance que el diagnóstico del
 // grupo; no acepta ids de usuario.
+//
+// 1C: caché por grupo en memoria de la réplica (TTL 5 min, single-flight). El
+// scope se resuelve SIEMPRE antes de mirar la caché: un HIT nunca salta authz.
 // ─────────────────────────────────────────────────────────────────────────────
+const groupAnalyticsCache = createGroupAnalyticsCache();
 app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, async (req, res) => {
     try {
         const { id } = req.params;
@@ -7579,13 +7583,16 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         if (!group) return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND });
 
         const t0 = performance.now();
-        const { summary, rowsConsidered } = buildGroupAnalyticsSummary({
+        const r = await groupAnalyticsCache.get(id, () => buildGroupAnalyticsSummary({
             group, users, allGroups: groups,
             leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
             getProgressByUser,
-        });
-        log(`[GROUP_ANALYTICS] group=${id} readers=${summary.readerCount} rows=${rowsConsidered} ms=${Math.round(performance.now() - t0)}`);
-        res.json(summary);
+        }));
+        const ms = Math.round(performance.now() - t0);
+        log(r.cache === 'miss'
+            ? `[GROUP_ANALYTICS] group=${id} cache=miss ms=${ms} computeMs=${Math.round(r.computeMs)} readers=${r.data.readerCount} rows=${r.rowsConsidered}`
+            : `[GROUP_ANALYTICS] group=${id} cache=${r.cache} ms=${ms}`);
+        res.json(r.data);
     } catch (e) {
         log(`GET /api/groups/${req.params.id}/analytics-summary error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'group_analytics_unavailable' });

@@ -226,3 +226,55 @@ export function buildGroupAnalyticsSummary({
         rowsConsidered,
     };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1C) — caché por grupo.
+//
+// El resumen es el mismo para cualquier llamante autorizado al grupo, así que
+// se cachea por groupId (nunca por usuario) en memoria de la réplica, TTL 5 min,
+// con single-flight: varias peticiones con MISS del mismo grupo esperan UNA
+// sola Promise de cálculo. Un fallo no se cachea y libera el inflight para que
+// la siguiente petición reintente. Sin persistencia, sin scheduler, sin
+// invalidación por eventos. La autorización NO vive aquí: el llamador la
+// resuelve SIEMPRE antes de pedir el resumen (un HIT jamás salta el scope).
+// ─────────────────────────────────────────────────────────────────────────────
+export const GROUP_ANALYTICS_CACHE_TTL_MS = 300_000;
+
+/**
+ * @param {{ ttlMs?: number, now?: () => number }} [opts]
+ */
+export function createGroupAnalyticsCache({ ttlMs = GROUP_ANALYTICS_CACHE_TTL_MS, now = Date.now } = {}) {
+    /** @type {Map<string, { data:any, fetchedAt:number, expiresAt:number }>} */
+    const entries = new Map();
+    /** @type {Map<string, Promise<{ data:any, computeMs:number, rowsConsidered:number }>>} */
+    const inflight = new Map();
+    return {
+        /**
+         * @param {string} groupId
+         * @param {() => { summary:any, rowsConsidered:number }} compute
+         * @returns {Promise<{ data:any, cache:'hit'|'miss'|'inflight', computeMs:number|null, rowsConsidered:number|null }>}
+         */
+        async get(groupId, compute) {
+            const hit = entries.get(groupId);
+            if (hit && now() < hit.expiresAt) return { data: hit.data, cache: 'hit', computeMs: null, rowsConsidered: null };
+            let flight = inflight.get(groupId);
+            const joined = !!flight;
+            if (!flight) {
+                flight = Promise.resolve().then(() => {
+                    const t0 = performance.now();
+                    const { summary, rowsConsidered } = compute();
+                    const computeMs = performance.now() - t0;
+                    const fetchedAt = now();
+                    entries.set(groupId, { data: summary, fetchedAt, expiresAt: fetchedAt + ttlMs });
+                    return { data: summary, computeMs, rowsConsidered };
+                }).finally(() => { inflight.delete(groupId); });
+                inflight.set(groupId, flight);
+            }
+            const r = await flight;
+            // 'miss' = esta petición disparó el cálculo; 'inflight' = esperó el de otra.
+            return { data: r.data, cache: joined ? 'inflight' : 'miss', computeMs: r.computeMs, rowsConsidered: r.rowsConsidered };
+        },
+        /** Solo diagnóstico/tests: tamaño actual. */
+        size() { return { entries: entries.size, inflight: inflight.size }; },
+    };
+}

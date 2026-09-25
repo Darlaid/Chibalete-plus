@@ -29,6 +29,7 @@ import Database from 'better-sqlite3';
 import {
     buildGroupAnalyticsSummary, readCohortHistoricalRows, resolveGroupLectorCohort,
     summarizeReading, EFFECTIVE_READING_RAW_EVENTS, WINDOW_28D_MS,
+    createGroupAnalyticsCache, GROUP_ANALYTICS_CACHE_TTL_MS,
 } from '../analytics/groupAnalyticsSummary.mjs';
 import { userEffectiveReadingMs, readUserHistoricalRows } from '../analytics/userEffectiveReadingTime.mjs';
 import { computeEffectiveReadingMs, EFFECTIVE_READING_EVENT_NAMES } from '../analytics/effectiveReadingTime.mjs';
@@ -339,6 +340,46 @@ async function main() {
             summarizeReading(byUser, ['lec-f1'], NOW).last28d.totalEffectiveMs === 12 * MIN);
     }
 
+    section('[CACHE 1C] TTL, single-flight, fallos, aislamiento por grupo');
+    {
+        let clock = 1_000_000, calls = 0;
+        const cache = createGroupAnalyticsCache({ now: () => clock });
+        const compute = (g) => () => { calls++; return buildGroupAnalyticsSummary({ group: g, users: USERS, allGroups: GROUPS,
+            leoInteractions: LEO_ROWS, getProgressByUser: () => [], nowTs: NOW, ...opts }); };
+        ok('TTL = 300000 ms (5 min)', GROUP_ANALYTICS_CACHE_TTL_MS === 300_000);
+        const m1 = await cache.get('g-a1', compute(GROUPS[0]));
+        ok('C1 primer request → MISS, 1 cálculo', m1.cache === 'miss' && calls === 1 && typeof m1.computeMs === 'number');
+        clock += GROUP_ANALYTICS_CACHE_TTL_MS - 1;
+        const h1 = await cache.get('g-a1', compute(GROUPS[0]));
+        ok('C2 dentro del TTL → HIT, sigue en 1 cálculo', h1.cache === 'hit' && calls === 1 && h1.computeMs === null);
+        ok('C10 HIT == MISS (igualdad profunda)', JSON.stringify(h1.data) === JSON.stringify(m1.data));
+        const c4 = await cache.get('g-a2', compute(GROUPS[1]));
+        ok('C4 otro grupo → cálculo propio, sin reutilizar', c4.cache === 'miss' && calls === 2
+            && c4.data.groupId === 'g-a2' && c4.data.readerCount === 2 && m1.data.readerCount === 80);
+        clock += 1;
+        const e1 = await cache.get('g-a1', compute(GROUPS[0]));
+        ok('C5 TTL expirado → recalcula', e1.cache === 'miss' && calls === 3);
+
+        calls = 0;
+        const fresh = createGroupAnalyticsCache({ now: () => clock });
+        const five = await Promise.all(Array.from({ length: 5 }, () => fresh.get('g-a1', compute(GROUPS[0]))));
+        ok('C3 5 concurrentes al mismo grupo → 1 solo cálculo', calls === 1, String(calls));
+        ok('C3 …1 miss + 4 inflight, mismo resultado', five.filter(r => r.cache === 'miss').length === 1
+            && five.filter(r => r.cache === 'inflight').length === 4 && five.every(r => r.data === five[0].data));
+        ok('C3 inflight vacío al terminar', fresh.size().inflight === 0 && fresh.size().entries === 1);
+
+        const failing = createGroupAnalyticsCache({ now: () => clock });
+        let threw = false;
+        try { await failing.get('g-x', () => { throw new Error('boom'); }); } catch { threw = true; }
+        ok('C6 el cálculo falla → error propagado, inflight limpio, nada cacheado', threw && failing.size().inflight === 0 && failing.size().entries === 0);
+        const rec = await failing.get('g-x', compute(GROUPS[1]));
+        ok('C7 request posterior al fallo → recupera (MISS nuevo)', rec.cache === 'miss' && rec.data.groupId === 'g-a2');
+        const cc = [];
+        const conc = createGroupAnalyticsCache({ now: () => clock });
+        const both = await Promise.allSettled([1, 2, 3].map(() => conc.get('g-y', () => { cc.push(1); throw new Error('x'); })));
+        ok('C6 fallo concurrente: 1 cálculo, todos reciben el error, sin caché', cc.length === 1 && both.every(r => r.status === 'rejected') && conc.size().entries === 0);
+    }
+
     section('[SIN N+1] el detalle por lector no añade consultas');
     {
         let progressCalls = 0;
@@ -447,6 +488,18 @@ async function main() {
         ok('usa requireSubjectScope(group, allowSelf:false)', /requireSubjectScope\(req, res, 'group', id, \{ allowSelf: false \}\)/.test(handler));
     }
 
+    section('[CACHE 1C] servidor real: authz antes de la caché, single-flight HTTP');
+    {
+        // g-a1 y g-b1 ya están en caché (peticiones de adm en las secciones anteriores).
+        ok('C8 caché existente + lector no autorizado → 403', (await GET('lec-001', ROUTE('g-a1'))).status === 403);
+        ok('C8 caché existente + mediador de otra org → 403', (await GET('med-01', ROUTE('g-b1'))).status === 403);
+        ok('C9 caché existente + anónimo → 401', (await GET(null, ROUTE('g-a1'))).status === 401);
+        const five = await Promise.all(Array.from({ length: 5 }, () => GET('adm', ROUTE('g-f')).then(async r => ({ s: r.status, b: await r.text() }))));
+        const misses = (api._boot().match(/group=g-f cache=miss/g) || []).length;
+        ok('5 peticiones concurrentes a un grupo frío → 1 cálculo', misses === 1, String(misses));
+        ok('…las 5 reciben 200 y el mismo cuerpo', five.every(x => x.s === 200 && x.b === five[0].b));
+    }
+
     section('[PERF] HTTP + /api/health durante el cálculo');
     {
         const t0 = performance.now();
@@ -462,7 +515,13 @@ async function main() {
         ok('HTTP warm < 1 s (3 de 3)', times.every(x => x < 1000), times.join(','));
         ok('/api/health responde durante el cálculo en < 1 s', h.ok && h.ms < 1000, JSON.stringify(h));
         ok('sin SQLITE_BUSY ni ERROR en el log', !/SQLITE_BUSY|analytics-summary error/.test(api._boot()));
-        ok('el servidor registra la duración [GROUP_ANALYTICS]', /\[GROUP_ANALYTICS\] group=g-a1 readers=80 rows=\d+ ms=\d+/.test(api._boot()));
+        const logs = api._boot();
+        ok('log MISS: cache=miss ms computeMs readers rows', /\[GROUP_ANALYTICS\] group=g-a1 cache=miss ms=\d+ computeMs=\d+ readers=80 rows=\d+/.test(logs));
+        ok('log HIT: cache=hit ms', /\[GROUP_ANALYTICS\] group=g-a1 cache=hit ms=\d+/.test(logs));
+        const missesA1 = (logs.match(/group=g-a1 cache=miss/g) || []).length;
+        ok('g-a1: UN solo cálculo en todo el servidor (todas las demás peticiones fueron HIT)', missesA1 === 1, String(missesA1));
+        const gaLines = (logs.match(/\[GROUP_ANALYTICS\][^\n]*/g) || []).join('\n');
+        ok('el log no lleva PII ni payload', gaLines.length > 0 && !/lec-0|nombre|email|readers\[/.test(gaLines));
     }
 
     section('[IDENTIDAD] indisponible → contrato vigente (503, sin datos)');
