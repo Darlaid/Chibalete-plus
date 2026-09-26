@@ -222,6 +222,11 @@ app.set('trust proxy', 1);
 import { generateAudioForContent } from './ttsService.js';
 import { createTtsProgressWriter } from './ttsProgressWriter.js';
 import { computeContentFingerprint, nextContentTextVersion, readUploadTextForFingerprint } from './contentFingerprint.js';
+import { CANONICAL_SCHEMA_VERSION, validateCanonicalBook } from './content/canonicalBook.js';
+import {
+    canonicalBookUrlFor, buildCanonicalBookFromText, writeCanonicalBookAtomic,
+    restoreCanonicalBook, readPersistedCanonicalBook, isCanonicalBookCurrent,
+} from './content/canonicalBookStore.js';
 import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini, GEMINI_TEXT_MODEL } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
@@ -3448,29 +3453,114 @@ function validateAlbumData(albumData) {
 //   - texto_plano_url distinto al guardado → se lee y se calcula el fingerprint;
 //     mismo texto = misma versión, texto distinto = versión + 1.
 //   - mismo texto_plano_url → se conserva lo vigente (un update de metadata no lo toca).
-//   - fuente ilegible o texto retirado → fingerprint null, versión conservada.
-//   - registros legacy sin estos campos y sin cambio de texto → quedan igual.
+//   - texto retirado → fingerprint null, versión conservada.
+//   - registros legacy sin estos campos y sin cambio de texto → quedan igual
+//     (salvo la adopción canónica de 2B, abajo).
+//
+// CHP-CONTENT-CANONICAL-2026-01 2B — CanonicalBook persistido como derivado del
+// TXT (server/content/canonicalBookStore.js), en el MISMO lock:
+//   A/B. texto nuevo o cambiado → TXT → fingerprint → CanonicalBook → book.json
+//        atómico. Si falla la lectura, la importación, la validación o la
+//        escritura, el Content NO se publica (fail-closed) y no se encola TTS.
+//   C.   mismo TXT sin artefacto vigente → adopción gradual, best-effort: un
+//        fallo no bloquea el guardado de metadata.
+//   Mismo fingerprint + artefacto válido → se reutiliza (no se reescribe).
+// canonicalBookUrl/canonicalSchemaVersion/canonicalFingerprint son autoridad
+// del servidor: lo que mande el cliente se descarta y se arrastra lo guardado.
+// Con el texto retirado la metadata se conserva (canonicalFingerprint deja de
+// coincidir con contentFingerprint = no vigente) y la referencia mantiene el
+// artefacto clasificado como su registro en /internal/uploads-authz.
+const CANONICAL_CONTENT_FIELDS = ['canonicalBookUrl', 'canonicalSchemaVersion', 'canonicalFingerprint'];
+
+class CanonicalIngestionError extends Error {
+    constructor(status, code, message) {
+        super(message);
+        this.name = 'CanonicalIngestionError';
+        this.status = status;
+        this.code = code;
+    }
+}
+
+// Deja vigente el artefacto de `record` para `sourceText` (con
+// record.contentFingerprint ya resuelto): reutiliza el persistido si
+// corresponde; si no, lo construye y lo publica. Devuelve la función que
+// deshace la escritura, o null. Lanza CanonicalIngestionError.
+const ensureCanonicalBook = (record, sourceText) => {
+    const fingerprint = record.contentFingerprint;
+    let book;
+    try {
+        const url = canonicalBookUrlFor(record.id);
+        const persisted = readPersistedCanonicalBook(UPLOAD_DIR, record.id);
+        const reusable = !!persisted && persisted.schemaVersion === CANONICAL_SCHEMA_VERSION
+            && persisted.contentId === record.id && persisted.contentFingerprint === fingerprint
+            && validateCanonicalBook(persisted).length === 0;
+        Object.assign(record, { canonicalBookUrl: url, canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION, canonicalFingerprint: fingerprint });
+        if (reusable) return null;
+        book = buildCanonicalBookFromText({ contentId: record.id, text: sourceText, contentFingerprint: fingerprint });
+    } catch (e) {
+        throw new CanonicalIngestionError(422, 'canonical_import_failed', `No se pudo estructurar el texto del contenido (${e.code || e.message}). No se guardaron los cambios.`);
+    }
+    let previousBytes;
+    try {
+        previousBytes = writeCanonicalBookAtomic(UPLOAD_DIR, book);
+    } catch (e) {
+        log(`[CANONICAL_WRITE_FAIL] contentId=${record.id} err=${e.message}`, 'ERROR');
+        throw new CanonicalIngestionError(500, 'canonical_write_failed', 'No se pudo guardar la versión estructurada del texto. No se guardaron los cambios.');
+    }
+    log(`[CANONICAL_BOOK_WRITTEN] contentId=${record.id} fingerprint=${fingerprint}`, 'INFO');
+    return () => restoreCanonicalBook(UPLOAD_DIR, record.id, previousBytes);
+};
+
 const applyContentTextVersion = (record, previous) => {
+    for (const f of CANONICAL_CONTENT_FIELDS) {
+        if (previous && f in previous) record[f] = previous[f];
+        else delete record[f];
+    }
     const hasVersionFields = !!previous && ('contentFingerprint' in previous || 'contentVersion' in previous);
     const keptVersion = Number.isInteger(previous?.contentVersion) && previous.contentVersion >= 1 ? previous.contentVersion : null;
     const textUrl = record.texto_plano_url || null;
 
+    // A/B — texto nuevo o cambiado: obligatorio.
     if (textUrl && textUrl !== (previous?.texto_plano_url || null)) {
         const sourceText = readUploadTextForFingerprint(UPLOAD_DIR, textUrl);
-        if (sourceText !== null) {
-            Object.assign(record, nextContentTextVersion(previous, computeContentFingerprint(sourceText)));
-            return;
+        if (sourceText === null) {
+            log(`[CANONICAL_INGEST_FAIL] contentId=${record.id} reason=source_unreadable`, 'WARN');
+            throw new CanonicalIngestionError(422, 'source_unreadable', 'No se pudo leer el archivo de texto del contenido. No se guardaron los cambios.');
         }
-        log(`[CONTENT_FINGERPRINT_SKIP] contentId=${record.id} reason=source_unreadable`, 'WARN');
-        if (hasVersionFields) Object.assign(record, { contentFingerprint: null, contentVersion: keptVersion });
-        return;
+        Object.assign(record, nextContentTextVersion(previous, computeContentFingerprint(sourceText)));
+        return ensureCanonicalBook(record, sourceText);
     }
-    if (!hasVersionFields) return;
     if (!textUrl) {
-        Object.assign(record, { contentFingerprint: null, contentVersion: keptVersion });
-        return;
+        if (hasVersionFields) Object.assign(record, { contentFingerprint: null, contentVersion: keptVersion });
+        return null;
     }
-    Object.assign(record, { contentFingerprint: previous.contentFingerprint ?? null, contentVersion: keptVersion });
+    if (hasVersionFields) {
+        Object.assign(record, { contentFingerprint: previous.contentFingerprint ?? null, contentVersion: keptVersion });
+    }
+
+    // C — mismo TXT: adopción del artefacto si aún no hay uno vigente.
+    if (isCanonicalBookCurrent(UPLOAD_DIR, record)) return null;
+    const sourceText = readUploadTextForFingerprint(UPLOAD_DIR, textUrl);
+    if (sourceText === null) {
+        log(`[CANONICAL_ADOPT_SKIP] contentId=${record.id} reason=source_unreadable`, 'WARN');
+        return null;
+    }
+    const fingerprint = computeContentFingerprint(sourceText);
+    // Un fingerprint registrado que no coincide con el archivo NO es una
+    // adopción: la versión textual solo cambia con un texto_plano_url nuevo.
+    if (record.contentFingerprint && record.contentFingerprint !== fingerprint) {
+        log(`[CANONICAL_ADOPT_SKIP] contentId=${record.id} reason=fingerprint_mismatch`, 'WARN');
+        return null;
+    }
+    const candidate = { ...record, ...nextContentTextVersion(previous, fingerprint) };
+    try {
+        const undo = ensureCanonicalBook(candidate, sourceText);
+        Object.assign(record, candidate);
+        return undo;
+    } catch (e) {
+        log(`[CANONICAL_ADOPT_SKIP] contentId=${record.id} reason=${e.code}`, 'WARN');
+        return null;
+    }
 };
 
 app.post('/api/content', async (req, res) => {
@@ -3522,6 +3612,8 @@ app.post('/api/content', async (req, res) => {
         // servidor. Lo que mande el cliente se descarta; se resuelve en el lock.
         delete newContent.contentFingerprint;
         delete newContent.contentVersion;
+        // 2B: la metadata canónica también (applyContentTextVersion arrastra la guardada).
+        for (const f of CANONICAL_CONTENT_FIELDS) delete newContent[f];
 
         if (oldContent) {
             // Update existing
@@ -3565,15 +3657,31 @@ app.post('/api/content', async (req, res) => {
                 _jsonCache.delete(DB_FILE);
                 const freshList = readJSON(DB_FILE);
                 const freshIdx = freshList.findIndex(c => c.id === newContent.id);
-                applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
+                // 2B: artefacto canónico ANTES que content.json; si content.json
+                // no llega a escribirse, se repone el artefacto previo.
+                const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
                 if (freshIdx >= 0) {
                     freshList[freshIdx] = newContent;
                 } else {
                     freshList.push(newContent);
                 }
-                writeJSON(DB_FILE, freshList);
+                try {
+                    writeJSON(DB_FILE, freshList);
+                } catch (e) {
+                    if (undoCanonical) {
+                        try { undoCanonical(); } catch (undoErr) { log(`[CANONICAL_UNDO_FAIL] contentId=${newContent.id} err=${undoErr.message}`, 'ERROR'); }
+                    }
+                    throw e;
+                }
             }, 'contentLock');
         } catch (dbWriteErr) {
+            // 2B fail-closed: el texto no pudo canonicalizarse. No se publica la
+            // versión, no se encola TTS y no se tocan los archivos subidos (una
+            // URL deduplicada puede pertenecer a otro contenido).
+            if (dbWriteErr instanceof CanonicalIngestionError) {
+                log(`[CONTENT_SAVE_REJECTED] contentId=${newContent.id} actor=${saveActorId} reason=${dbWriteErr.code}`, 'WARN');
+                return res.status(dbWriteErr.status).json({ error: dbWriteErr.message, code: dbWriteErr.code });
+            }
             // W4: Rollback physical files on DB write failure for BOTH create and update.
             if (index === -1) {
                 // New record: rollback all uploaded files

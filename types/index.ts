@@ -470,6 +470,12 @@ export interface Content {
   // (texto_plano_url). Solo la calcula el servidor; ausente en contenido legacy.
   contentFingerprint?: string | null; // 'sha256:<hex>' del texto normalizado
   contentVersion?: number | null;     // monotónico por Content id; +1 si cambia el fingerprint
+
+  // CHP-CONTENT-CANONICAL-2026-01 2B — CanonicalBook persistido (derivado del TXT).
+  // Solo lo escribe el servidor; vigente solo si canonicalFingerprint === contentFingerprint.
+  canonicalBookUrl?: string;          // /uploads/<id>/canonical/book.json
+  canonicalSchemaVersion?: number;
+  canonicalFingerprint?: string | null;
 }
 
 // Reading status derived from progress percentage

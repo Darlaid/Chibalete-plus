@@ -156,10 +156,11 @@ try {
     await save({ ...rec('c-1'), texto_plano_url: putText('c-1/e.txt', 'El gato duerme.') });
     ok('F9 vuelve al texto original → fingerprint original, versión 4', rec('c-1').contentVersion === 4 && rec('c-1').contentFingerprint === fp('El gato duerme.'));
 
-    await save({ ...rec('c-1'), texto_plano_url: '/uploads/c-1/no-existe.txt' });
-    ok('fuente ilegible → fingerprint null, versión conservada (4)', rec('c-1').contentFingerprint === null && rec('c-1').contentVersion === 4);
-    await save({ ...rec('c-1'), texto_plano_url: putText('c-1/f.txt', 'El gato duerme.') });
-    ok('texto legible de nuevo → versión 5 (monotónica)', rec('c-1').contentVersion === 5 && rec('c-1').contentFingerprint === fp('El gato duerme.'));
+    // 2B: un texto nuevo ilegible ya no se publica con fingerprint null (fail-closed).
+    r = await save({ ...rec('c-1'), texto_plano_url: '/uploads/c-1/no-existe.txt' });
+    ok('fuente ilegible → 422 y el registro no cambia (2B fail-closed)', r.status === 422 && rec('c-1').contentFingerprint === fp('El gato duerme.') && rec('c-1').contentVersion === 4 && rec('c-1').texto_plano_url.endsWith('e.txt'));
+    await save({ ...rec('c-1'), texto_plano_url: putText('c-1/f.txt', 'El gato duerme otra vez.') });
+    ok('texto nuevo tras el rechazo → versión 5 (monotónica)', rec('c-1').contentVersion === 5 && rec('c-1').contentFingerprint === fp('El gato duerme otra vez.'));
 
     await save({ id: 'c-2', titulo: 'Sin texto', tipo: 'video', url_recurso: 'https://youtu.be/x' });
     ok('contenido sin texto → sin campos de versión', !('contentVersion' in rec('c-2')) && !('contentFingerprint' in rec('c-2')));
@@ -170,9 +171,11 @@ try {
     ok('L1 contenido legacy sin campos sigue cargando igual', !!leg && !('contentVersion' in leg) && leg.titulo === 'Legado');
     await save({ ...LEGACY, titulo: 'Legado 2' });
     const L = rec('legacy-1');
-    ok('L4 update de metadata legacy: sin campos nuevos ni pérdida de otros', L.titulo === 'Legado 2' && !('contentVersion' in L) && !('contentFingerprint' in L) && L.texto_plano_url === LEGACY.texto_plano_url && JSON.stringify(L.etiquetas) === '["a"]');
+    // 2B: un legacy con TXT legible que pasa por POST adopta su CanonicalBook,
+    // y con él su versión textual 1 (adopción gradual, sin backfill).
+    ok('L4 update de metadata legacy: sin pérdida de otros campos; adopta versión 1 (2B)', L.titulo === 'Legado 2' && L.contentVersion === 1 && L.contentFingerprint === fp('Texto legado.') && L.texto_plano_url === LEGACY.texto_plano_url && JSON.stringify(L.etiquetas) === '["a"]');
     await save({ ...rec('legacy-1'), texto_plano_url: putText('legacy-1/nuevo.txt', 'Texto legado revisado.') });
-    ok('legacy con texto nuevo → versión 1', rec('legacy-1').contentVersion === 1 && rec('legacy-1').contentFingerprint === fp('Texto legado revisado.'));
+    ok('legacy con texto nuevo → versión 2', rec('legacy-1').contentVersion === 2 && rec('legacy-1').contentFingerprint === fp('Texto legado revisado.'));
 
     console.log('\n[4] canonicalProgress');
     let s = await sync({ globalPercentage: 40, lastInteractedMode: 'text' }, '2026-09-25T10:00:00.000Z');
