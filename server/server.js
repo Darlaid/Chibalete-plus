@@ -887,6 +887,14 @@ const computeFileHashStream = (filePath) => new Promise((resolve, reject) => {
 /** hash → URL relativa (/uploads/...) */
 const uploadHashIndex = new Map();
 
+// CHP-CONTENT-CANONICAL-2026-01 3C.3A-R1 — /uploads/<id>/canonical/** son
+// artefactos derivados con autoridad propia (canonicalBookStore): nunca son
+// candidatos de deduplicación. Por componente de ruta (no substring): un
+// directorio `canonical` bajo cualquier contenido; `my-canonical-book.txt` o
+// un contenido con id `canonical` siguen indexándose.
+const isCanonicalArtifactUploadPath = (relPath) =>
+    relPath.split(/[\\/]/).slice(1, -1).includes('canonical');
+
 /** Escanea recursivamente UPLOAD_DIR y construye el índice. Fire-and-forget en startup. */
 async function buildHashIndex(dir, baseDir) {
     if (!fs.existsSync(dir)) return;
@@ -895,6 +903,7 @@ async function buildHashIndex(dir, baseDir) {
     for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
         if (entry.isDirectory()) {
+            if (isCanonicalArtifactUploadPath(path.relative(baseDir, path.join(fullPath, '_')))) continue;
             await buildHashIndex(fullPath, baseDir);
         } else if (entry.isFile()) {
             try {
@@ -3269,8 +3278,8 @@ app.post('/api/upload', (req, res) => {
             const relativePath = path.relative(UPLOAD_DIR, finalPath);
             const fileUrl = `/uploads/${relativePath.split(path.sep).join('/')}`;
 
-            // Actualizar índice con el nuevo archivo
-            uploadHashIndex.set(fileHash, fileUrl);
+            // Actualizar índice con el nuevo archivo (nunca con rutas canónicas: 3C.3A-R1)
+            if (!isCanonicalArtifactUploadPath(relativePath)) uploadHashIndex.set(fileHash, fileUrl);
 
             const elapsed = Date.now() - startedAt;
             log(`[UPLOAD_SUCCESS] actor=${actorId} file=${req.file.filename} sizeMB=${sizeMB} durationMs=${elapsed} mime=${fileTypeInfo?.mime ?? 'text'} parentId=${parentId}`, 'SUCCESS');
