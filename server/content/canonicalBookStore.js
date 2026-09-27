@@ -15,6 +15,18 @@
  *   contentFingerprint) y determinista: mismo texto → mismos bytes. Sin fechas,
  *   URLs ni nombres de archivo.
  * - Escritura atómica: temporal en el mismo directorio → fsync → rename.
+ *
+ * 3C.2 — Fuente EPUB. La fuente es el .epub subido (Content.epub_url, intacto);
+ * derivados en el MISMO directorio canónico:
+ *
+ *   /uploads/<contentId>/canonical/book.json
+ *   /uploads/<contentId>/canonical/book.txt          = renderCanonicalBookToPlainText(book)
+ *   /uploads/<contentId>/canonical/media/<sha256>.<ext>
+ *
+ * book.txt es la rendición TXT que consumen Guiado, Accesible, Inmersivo/TTS y
+ * LU vía texto_plano_url. writeCanonicalArtifactsAtomic publica media →
+ * book.txt → book.json (último: nunca apunta a media incompleta) y deshace
+ * todo lo escrito si falla cualquier paso.
  */
 import crypto from 'crypto';
 import fs from 'fs';
@@ -23,10 +35,15 @@ import path from 'path';
 import { computeContentFingerprint } from '../contentFingerprint.js';
 import { CANONICAL_SCHEMA_VERSION, CanonicalBookError, validateCanonicalBook } from './canonicalBook.js';
 import { importTxtToCanonicalBook } from './txtImporter.js';
+import { importEpubToCanonicalBook } from './epubImporter.js';
 import { renderCanonicalBookToPlainText } from './canonicalTxtRenderer.js';
+import { materializeCanonicalMedia, CANONICAL_MEDIA_SRC_RX } from './canonicalMedia.js';
+import { ZIP_LIMITS } from './safeZip.js';
 
 export const CANONICAL_DIR_NAME = 'canonical';
 export const CANONICAL_BOOK_FILENAME = 'book.json';
+export const CANONICAL_TEXT_FILENAME = 'book.txt';
+export const MAX_EPUB_SOURCE_BYTES = ZIP_LIMITS.maxArchiveBytes;
 
 // Mismo criterio que el guard de DELETE /api/content/:id: un solo segmento
 // seguro. Nada de '.', '/', '\', rutas absolutas ni traversal.
@@ -43,15 +60,39 @@ export function canonicalBookUrlFor(contentId) {
     return `/uploads/${contentId}/${CANONICAL_DIR_NAME}/${CANONICAL_BOOK_FILENAME}`;
 }
 
-/** Ruta absoluta confinada a uploadDir. Lanza si el id no es seguro o escapa. */
-export function canonicalBookPathFor(uploadDir, contentId) {
+/** URL pública de la rendición TXT canónica (texto_plano_url de un Content EPUB). */
+export function canonicalTextUrlFor(contentId) {
+    canonicalBookUrlFor(contentId);
+    return `/uploads/${contentId}/${CANONICAL_DIR_NAME}/${CANONICAL_TEXT_FILENAME}`;
+}
+
+/** Ruta absoluta de un archivo del directorio canónico, confinada a él. */
+function canonicalFilePathFor(uploadDir, contentId, relName) {
     canonicalBookUrlFor(contentId);
     const root = path.resolve(uploadDir);
-    const target = path.resolve(root, contentId, CANONICAL_DIR_NAME, CANONICAL_BOOK_FILENAME);
-    if (!target.startsWith(root + path.sep)) {
+    const dir = path.resolve(root, contentId, CANONICAL_DIR_NAME);
+    const target = path.resolve(dir, relName);
+    if (!dir.startsWith(root + path.sep) || !target.startsWith(dir + path.sep)) {
         throw new CanonicalBookError('UNSAFE_CONTENT_ID', 'la ruta canónica escapa de uploads');
     }
     return target;
+}
+
+/** Ruta absoluta confinada a uploadDir. Lanza si el id no es seguro o escapa. */
+export function canonicalBookPathFor(uploadDir, contentId) {
+    return canonicalFilePathFor(uploadDir, contentId, CANONICAL_BOOK_FILENAME);
+}
+
+export function canonicalTextPathFor(uploadDir, contentId) {
+    return canonicalFilePathFor(uploadDir, contentId, CANONICAL_TEXT_FILENAME);
+}
+
+/** Ruta absoluta de un medio materializado (src = media/<sha256>.<ext>). */
+export function canonicalMediaPathFor(uploadDir, contentId, src) {
+    if (typeof src !== 'string' || !CANONICAL_MEDIA_SRC_RX.test(src)) {
+        throw new CanonicalBookError('INVALID_MEDIA_REF', 'referencia de medio no materializada');
+    }
+    return canonicalFilePathFor(uploadDir, contentId, src);
 }
 
 /** Serialización determinista (el orden de claves lo fija el importador). */
@@ -71,6 +112,110 @@ export function buildCanonicalBookFromText({ contentId, text, contentFingerprint
         throw new CanonicalBookError('RENDER_PARITY', 'la rendición TXT no conserva el fingerprint de la fuente');
     }
     return book;
+}
+
+/**
+ * EPUB → { book, text, media } validado, SIN escribir nada: importa, materializa
+ * los medios (magic bytes, sha256), comprueba que el fingerprint no cambia y
+ * deriva la rendición TXT. Lanza CanonicalBookError.
+ */
+export function buildCanonicalBookFromEpub({ contentId, epubBuffer }) {
+    const imported = importEpubToCanonicalBook({ contentId, epubBuffer });
+    const { book, media } = materializeCanonicalMedia(epubBuffer, imported);
+    const problems = validateCanonicalBook(book);
+    if (problems.length) {
+        throw new CanonicalBookError('INVALID_BOOK', `CanonicalBook inválido: ${problems.slice(0, 3).join('; ')}`);
+    }
+    const text = renderCanonicalBookToPlainText(book);
+    if (computeContentFingerprint(text) !== imported.contentFingerprint || book.contentFingerprint !== imported.contentFingerprint) {
+        throw new CanonicalBookError('RENDER_PARITY', 'la rendición TXT no conserva el fingerprint del EPUB');
+    }
+    return { book, text, media };
+}
+
+/**
+ * Lee los bytes de una fuente `/uploads/...` confinada a uploadDir. null si la
+ * URL no es de uploads, escapa, no es un archivo regular o excede maxBytes.
+ */
+export function readUploadSourceBytes(uploadDir, url, maxBytes) {
+    if (typeof url !== 'string' || !url.startsWith('/uploads/')) return null;
+    const root = path.resolve(uploadDir);
+    const target = path.resolve(root, url.slice('/uploads/'.length));
+    if (!target.startsWith(root + path.sep)) return null;
+    try {
+        const stat = fs.statSync(target);
+        if (!stat.isFile() || stat.size > maxBytes) return null;
+        return fs.readFileSync(target);
+    } catch {
+        return null;
+    }
+}
+
+const readOrNull = (p) => { try { return fs.readFileSync(p); } catch { return null; } };
+const sha256Hex = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * Publica media → book.txt → book.json de forma atómica por archivo y
+ * conjunta por operación. Los medios son direccionados por contenido: uno ya
+ * presente con el mismo hash no se reescribe. Si un paso falla se deshace lo
+ * escrito y se relanza. Devuelve la función que deshace la publicación (para
+ * cuando content.json no llegue a escribirse).
+ */
+export function writeCanonicalArtifactsAtomic(uploadDir, { book, text, media = [] }) {
+    const contentId = book.contentId;
+    for (const ch of book.chapters) {
+        for (const b of ch.blocks) if (b.type === 'image') canonicalMediaPathFor(uploadDir, contentId, b.src);
+    }
+    const bookPath = canonicalBookPathFor(uploadDir, contentId);
+    const textPath = canonicalTextPathFor(uploadDir, contentId);
+    const done = []; // { target, previous } en orden de escritura
+    const undo = () => {
+        const errors = [];
+        for (const { target, previous } of [...done].reverse()) {
+            try {
+                if (previous) writeBytesAtomic(target, previous);
+                else fs.rmSync(target, { force: true });
+            } catch (e) { errors.push(e); }
+        }
+        if (errors.length) throw errors[0];
+    };
+    try {
+        for (const m of media) {
+            const target = canonicalMediaPathFor(uploadDir, contentId, m.path);
+            const previous = readOrNull(target);
+            if (previous && sha256Hex(previous) === path.basename(m.path).split('.')[0]) continue;
+            writeBytesAtomic(target, m.bytes);
+            done.push({ target, previous });
+        }
+        const previousText = readOrNull(textPath);
+        writeBytesAtomic(textPath, Buffer.from(text, 'utf8'));
+        done.push({ target: textPath, previous: previousText });
+        const previousBook = readOrNull(bookPath);
+        writeBytesAtomic(bookPath, serializeCanonicalBook(book));
+        done.push({ target: bookPath, previous: previousBook });
+    } catch (e) {
+        try { undo(); } catch { /* se informa el error original */ }
+        throw e;
+    }
+    return undo;
+}
+
+/**
+ * Invariante de un Content EPUB: book.json vigente, texto_plano_url = book.txt
+ * canónico con el mismo fingerprint, y todos los medios presentes.
+ */
+export function isCanonicalEpubCurrent(uploadDir, record) {
+    if (!isCanonicalBookCurrent(uploadDir, record)) return false;
+    try {
+        if (record.texto_plano_url !== canonicalTextUrlFor(record.id)) return false;
+        const text = fs.readFileSync(canonicalTextPathFor(uploadDir, record.id), 'utf8');
+        if (computeContentFingerprint(text) !== record.contentFingerprint) return false;
+        const book = readPersistedCanonicalBook(uploadDir, record.id);
+        return book.chapters.every(ch => ch.blocks.every(b => b.type !== 'image'
+            || fs.statSync(canonicalMediaPathFor(uploadDir, record.id, b.src)).isFile()));
+    } catch {
+        return false;
+    }
 }
 
 /**

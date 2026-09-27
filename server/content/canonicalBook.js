@@ -25,8 +25,10 @@
  *       } | {                   // imagen del flujo editorial (3C.1)
  *         id: 'img-0001-0001',
  *         type: 'image',
- *         src: string,          // referencia INTERNA normalizada: ruta del recurso
- *                               // dentro del paquete fuente (EPUB); nunca una URL
+ *         src: string,          // referencia INTERNA normalizada, nunca una URL:
+ *                               // al importar, ruta del recurso en el paquete (EPUB);
+ *                               // persistido (3C.2), 'media/<sha256>.<ext>' relativo
+ *                               // al directorio del artefacto canónico
  *         alt?: string,         // exactamente el de la fuente; ausente = sin alt
  *       }],
  *     }],

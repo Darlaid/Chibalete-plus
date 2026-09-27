@@ -4,7 +4,7 @@
  * EPUB → CanonicalBook v1 (el mismo contrato que el importador TXT). Puro:
  * Buffer → objeto. Sin filesystem, sin red, sin fechas, sin aleatoriedad.
  *
- *   parseEpubArchive(epubBuffer)  → { language, title, a11y, a11yStatus, images, documents }
+ *   parseEpubArchive(epubBuffer)  → { language, title, a11y, a11yStatus, images, imageMediaTypes, documents }
  *   importEpubToCanonicalBook({ contentId, epubBuffer, contentFingerprint?, language? })
  *
  * Paquete: mimetype = application/epub+zip → META-INF/container.xml → primer
@@ -252,6 +252,7 @@ export function parseEpubArchive(epubBuffer, { limits } = {}) {
         try { manifestByEntry.set(resolvePackageHref(opfDir, item.href), item); } catch { /* items remotos o inválidos: nunca son imagen aceptable */ }
     }
     const images = { accepted: 0, ignored: { noSrc: 0, remote: 0, unsupportedType: {} } };
+    const imageMediaTypes = new Map(); // entrada ZIP aceptada → media-type declarado (3C.2)
     const imageResolver = (docDir) => (el) => {
         const href = el.attrs.src;
         if (typeof href !== 'string' || !href.trim()) { images.ignored.noSrc++; return null; }
@@ -270,6 +271,7 @@ export function parseEpubArchive(epubBuffer, { limits } = {}) {
         }
         if (!isSafeCanonicalMediaSrc(entry)) fail('EPUB_IMAGE_BAD_SRC', 'ruta de imagen no apta como referencia interna');
         images.accepted++;
+        imageMediaTypes.set(entry, item.mediaType);
         return Object.hasOwn(el.attrs, 'alt') ? { src: entry, alt: el.attrs.alt } : { src: entry };
     };
 
@@ -292,7 +294,7 @@ export function parseEpubArchive(epubBuffer, { limits } = {}) {
         const docDir = path.posix.dirname(name) === '.' ? '' : path.posix.dirname(name);
         documents.push({ blocks: extractXhtmlBlocks(root, { resolveImage: imageResolver(docDir) }) });
     }
-    return { language, title, a11y, a11yStatus, images, documents };
+    return { language, title, a11y, a11yStatus, images, imageMediaTypes, documents };
 }
 
 /** Bloques por documento → capítulos v1 con IDs ordinales (texto e imágenes por separado). */

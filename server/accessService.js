@@ -185,9 +185,29 @@ function ttsOwnerClass(uploadPath, contentList) {
     return owner;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-CONTENT-CANONICAL-2026-01 3C.2 — ARTEFACTOS CANÓNICOS
+//
+// canonicalBookStore escribe bajo /uploads/<contentId>/canonical/. book.json y
+// book.txt ya se clasifican por referencia (canonicalBookUrl, texto_plano_url),
+// pero los medios (canonical/media/<sha256>.<ext>) los lista book.json, no el
+// registro. Igual que el TTS, heredan la clase del registro dueño: el
+// `contentId` es el primer segmento (ids seguros, sin normalización).
+// ────────────────────────────────────────────────────────────────────────────
+
+const CANONICAL_ARTIFACT_RX = /^\/uploads\/([A-Za-z0-9_-]{1,128})\/canonical\/[^/]/;
+
+function canonicalOwnerClass(uploadPath, contentList) {
+    const p = canonicalUploadPath(uploadPath, { decode: false });
+    const m = p && p.match(CANONICAL_ARTIFACT_RX);
+    if (!m) return null;
+    const owner = (Array.isArray(contentList) ? contentList : []).find(item => item?.id === m[1]);
+    return owner ? classifyContentItem(owner) : null;
+}
+
 /**
  * Clase de una ruta de /uploads/ según sus referencias en el catálogo y, para
- * el audio generado, según el registro dueño de la convención de TTS.
+ * el audio generado y los artefactos canónicos, según el registro dueño.
  * @returns {'PEDAGOGY_RESTRICTED'|'EMBEDDED_EXPERIENCE'|'PUBLIC_ASSET'|'GENERAL'|'UNMAPPED_ASSET'}
  */
 export function classifyUploadPath(uploadPath, contentList) {
@@ -209,9 +229,11 @@ export function classifyUploadPath(uploadPath, contentList) {
         }
     }
 
-    // Sin referencia en el catálogo: el audio de TTS hereda la clase de su
-    // contenido; lo demás sigue sin mapear.
-    if (!referenced) return ttsOwnerClass(uploadPath, contentList) ?? 'UNMAPPED_ASSET';
+    // Sin referencia en el catálogo: el audio de TTS y los artefactos canónicos
+    // heredan la clase de su contenido; lo demás sigue sin mapear.
+    if (!referenced) {
+        return ttsOwnerClass(uploadPath, contentList) ?? canonicalOwnerClass(uploadPath, contentList) ?? 'UNMAPPED_ASSET';
+    }
     if (presentationRef) return 'PUBLIC_ASSET';
     // Una sola referencia general o de Experience basta para no restringir:
     // el fichero compartido general/pedagógico se trata como general.

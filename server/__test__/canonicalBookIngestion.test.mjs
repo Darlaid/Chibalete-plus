@@ -116,7 +116,10 @@ console.log('\n[4] autorización del artefacto (clasificación de /uploads)');
         classifyUploadPath(gen.canonicalBookUrl, [gen]) === classifyUploadPath(gen.texto_plano_url, [gen]));
     ok('texto retirado: la referencia conservada mantiene la clase (no UNMAPPED)',
         classifyUploadPath(url, [{ ...ped, texto_plano_url: '', contentFingerprint: null }]) === 'PEDAGOGY_RESTRICTED');
-    ok('sin referencia sería UNMAPPED (por eso la referencia nunca se retira)', classifyUploadPath(url, [{ id: 'p-1', tipo: 'guia' }]) === 'UNMAPPED_ASSET');
+    // 3C.2: sin referencia, /uploads/<id>/canonical/* hereda la clase del registro dueño
+    // (convención de ruta, como el TTS); sin dueño en el catálogo sigue UNMAPPED.
+    ok('sin referencia: hereda la clase del dueño por convención canónica (3C.2)', classifyUploadPath(url, [{ id: 'p-1', tipo: 'guia' }]) === 'PEDAGOGY_RESTRICTED');
+    ok('sin referencia ni dueño → UNMAPPED', classifyUploadPath(url, [{ id: 'otro', tipo: 'guia' }]) === 'UNMAPPED_ASSET');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -226,6 +226,8 @@ import { CANONICAL_SCHEMA_VERSION, validateCanonicalBook } from './content/canon
 import {
     canonicalBookUrlFor, buildCanonicalBookFromText, writeCanonicalBookAtomic,
     restoreCanonicalBook, readPersistedCanonicalBook, isCanonicalBookCurrent,
+    isSafeCanonicalContentId, canonicalTextUrlFor, buildCanonicalBookFromEpub, writeCanonicalArtifactsAtomic,
+    readUploadSourceBytes, isCanonicalEpubCurrent, MAX_EPUB_SOURCE_BYTES,
 } from './content/canonicalBookStore.js';
 import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini, GEMINI_TEXT_MODEL } from './aiEngine.js';
@@ -1347,6 +1349,23 @@ const isTextFileSafe = (filePath) => {
     }
 };
 
+// 3C.2 — capa 3 de un .epub subido: tamaño acotado y el pipeline canónico
+// completo (import + materialización de medios) en memoria, sin escribir nada.
+const validateEpubUpload = (filePath, actorId) => {
+    try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile() || stat.size > MAX_EPUB_SOURCE_BYTES) {
+            log(`[UPLOAD_EPUB_INVALID] actor=${actorId} reason=size bytes=${stat.size}`, 'SECURITY');
+            return false;
+        }
+        buildCanonicalBookFromEpub({ contentId: 'epub-upload-check', epubBuffer: fs.readFileSync(filePath) });
+        return true;
+    } catch (e) {
+        log(`[UPLOAD_EPUB_INVALID] actor=${actorId} reason=${e.code || e.message}`, 'SECURITY');
+        return false;
+    }
+};
+
 const safeUnlink = (filePath) => {
     if (filePath && fs.existsSync(filePath)) {
         try {
@@ -1385,6 +1404,7 @@ const rollbackMetadataFiles = (newContent) => {
         'texto_plano_url',
         'texto_ingles_url',
         'texto_portugues_url',
+        'epub_url',
         'ilustraciones_url',
     ];
     
@@ -3008,7 +3028,7 @@ app.delete('/api/content/:id', async (req, res) => {
         };
 
         // 1. Clean individual URL-referenced files
-        const urlFields = ['portada_url', 'texto_plano_url', 'texto_ingles_url', 'texto_portugues_url', 'url_recurso'];
+        const urlFields = ['portada_url', 'texto_plano_url', 'texto_ingles_url', 'texto_portugues_url', 'url_recurso', 'epub_url'];
         urlFields.forEach(f => safeUnlinkUrl(item[f]));
 
         // 2. Clean illustrations array
@@ -3096,8 +3116,19 @@ const storage = multer.diskStorage({
     }
 });
 
+// CHP-CONTENT-CANONICAL-2026-01 3C.2 — EPUB (solo /api/upload lo acepta; el
+// resto de consumidores de `upload` lo rechaza en su capa 2 por categoría).
+// Capa 1: extensión + MIME declarado coherente. Capas 2 y 3 en el handler:
+// magic (application/epub+zip) y estructura real (import + materialización).
+const EPUB_UPLOAD_MIME_TYPES = new Set(['application/epub+zip', 'application/octet-stream']);
+const EPUB_MIME = 'application/epub+zip';
+
 // Filtro Nominal (Capa 1)
 const fileFilter = (req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() === '.epub') {
+        if (EPUB_UPLOAD_MIME_TYPES.has(file.mimetype)) return cb(null, true);
+        return cb(new Error(`Tipo nominal no permitido: ${file.originalname}`));
+    }
     const allowedExtensions = /pdf|txt|jpeg|jpg|png|webp|gif|mp3|wav|mp4|webm/;
     const allowedMimeTypes = /application\/pdf|text\/plain|image\/.*|audio\/.*|video\/.*/;
 
@@ -3184,11 +3215,15 @@ app.post('/api/upload', (req, res) => {
             // Verificar Magic Numbers reales
             const fileTypeInfo = await fileTypeFromFile(tempPath);
             const rawExt = path.extname(req.file.originalname).toLowerCase().replace('.', '');
-            const expectedCategory = getExpectedCategoryFromExtension(rawExt);
-            
+            const expectedCategory = rawExt === 'epub' ? 'epub' : getExpectedCategoryFromExtension(rawExt);
+
             let isValid = false;
 
-            if (expectedCategory === 'text') {
+            if (expectedCategory === 'epub') {
+                // Capa 2 (magic) + capa 3: el mismo pipeline que POST /api/content,
+                // en memoria y sin escribir nada. Un ZIP cualquiera no pasa.
+                isValid = fileTypeInfo?.mime === EPUB_MIME && validateEpubUpload(tempPath, actorId);
+            } else if (expectedCategory === 'text') {
                 // TXT validation: Usually file-type returns undefined for pure txt
                 // But we must check for null bytes to prevent binary spoofing
                 isValid = isTextFileSafe(tempPath);
@@ -3511,11 +3546,60 @@ const ensureCanonicalBook = (record, sourceText) => {
     return () => restoreCanonicalBook(UPLOAD_DIR, record.id, previousBytes);
 };
 
+// 3C.2 — Content con fuente EPUB (epub_url): la fuente se conserva tal cual y
+// texto_plano_url es SIEMPRE la rendición canónica /uploads/<id>/canonical/book.txt
+// (autoridad del servidor), que siguen consumiendo lectores, TTS y LU.
+//   - epub_url nuevo o cambiado → obligatorio: leer → importar → materializar
+//     medios → book.txt → fingerprint → media + book.txt + book.json atómicos.
+//     Cualquier fallo = no se publica (fail-closed).
+//   - mismo epub_url con artefactos vigentes → se conserva todo.
+//   - mismo epub_url sin artefactos vigentes → reconstrucción best-effort.
+// La versión textual sigue el contrato 1B sobre el fingerprint del TXT canónico.
+const applyEpubTextVersion = (record, previous) => {
+    const changed = record.epub_url !== (previous?.epub_url || null);
+    record.texto_plano_url = canonicalTextUrlFor(record.id);
+    if (!changed) {
+        const keptVersion = Number.isInteger(previous?.contentVersion) && previous.contentVersion >= 1 ? previous.contentVersion : null;
+        Object.assign(record, { contentFingerprint: previous?.contentFingerprint ?? null, contentVersion: keptVersion });
+        if (isCanonicalEpubCurrent(UPLOAD_DIR, record)) return null;
+    }
+    const skip = (reason) => { log(`[CANONICAL_EPUB_ADOPT_SKIP] contentId=${record.id} reason=${reason}`, 'WARN'); return null; };
+    const epubBuffer = typeof record.epub_url === 'string' && /\.epub$/i.test(record.epub_url)
+        ? readUploadSourceBytes(UPLOAD_DIR, record.epub_url, MAX_EPUB_SOURCE_BYTES) : null;
+    if (!epubBuffer) {
+        if (!changed) return skip('source_unreadable');
+        log(`[CANONICAL_INGEST_FAIL] contentId=${record.id} reason=epub_unreadable`, 'WARN');
+        throw new CanonicalIngestionError(422, 'source_unreadable', 'No se pudo leer el archivo EPUB del contenido. No se guardaron los cambios.');
+    }
+    let built;
+    try {
+        built = buildCanonicalBookFromEpub({ contentId: record.id, epubBuffer });
+    } catch (e) {
+        if (!changed) return skip(e.code || 'import_failed');
+        throw new CanonicalIngestionError(422, 'canonical_import_failed', `No se pudo estructurar el EPUB del contenido (${e.code || e.message}). No se guardaron los cambios.`);
+    }
+    const fingerprint = built.book.contentFingerprint;
+    let undo;
+    try {
+        undo = writeCanonicalArtifactsAtomic(UPLOAD_DIR, built);
+    } catch (e) {
+        log(`[CANONICAL_WRITE_FAIL] contentId=${record.id} err=${e.message}`, 'ERROR');
+        if (!changed) return null;
+        throw new CanonicalIngestionError(500, 'canonical_write_failed', 'No se pudo guardar la versión estructurada del EPUB. No se guardaron los cambios.');
+    }
+    Object.assign(record, nextContentTextVersion(previous, fingerprint), {
+        canonicalBookUrl: canonicalBookUrlFor(record.id), canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION, canonicalFingerprint: fingerprint,
+    });
+    log(`[CANONICAL_EPUB_WRITTEN] contentId=${record.id} fingerprint=${fingerprint} media=${built.media.length}`, 'INFO');
+    return undo;
+};
+
 const applyContentTextVersion = (record, previous) => {
     for (const f of CANONICAL_CONTENT_FIELDS) {
         if (previous && f in previous) record[f] = previous[f];
         else delete record[f];
     }
+    if (record.epub_url) return applyEpubTextVersion(record, previous);
     const hasVersionFields = !!previous && ('contentFingerprint' in previous || 'contentVersion' in previous);
     const keptVersion = Number.isInteger(previous?.contentVersion) && previous.contentVersion >= 1 ? previous.contentVersion : null;
     const textUrl = record.texto_plano_url || null;
@@ -3614,6 +3698,13 @@ app.post('/api/content', async (req, res) => {
         delete newContent.contentVersion;
         // 2B: la metadata canónica también (applyContentTextVersion arrastra la guardada).
         for (const f of CANONICAL_CONTENT_FIELDS) delete newContent[f];
+        // 3C.2: con fuente EPUB, texto_plano_url es la rendición canónica (no la del cliente).
+        if (newContent.epub_url) {
+            if (!isSafeCanonicalContentId(newContent.id)) {
+                return res.status(422).json({ error: 'El id del contenido no admite una fuente EPUB.', code: 'unsafe_content_id' });
+            }
+            newContent.texto_plano_url = canonicalTextUrlFor(newContent.id);
+        }
 
         if (oldContent) {
             // Update existing
@@ -3660,6 +3751,14 @@ app.post('/api/content', async (req, res) => {
                 // 2B: artefacto canónico ANTES que content.json; si content.json
                 // no llega a escribirse, se repone el artefacto previo.
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
+                // 3C.2: en EPUB la URL del texto es fija; un texto nuevo se
+                // reconoce por su fingerprint (solo medios → mismo fingerprint → sin TTS).
+                if (newContent.epub_url && !shouldGenerateTTS && newContent.contentFingerprint
+                    && newContent.contentFingerprint !== (freshIdx >= 0 ? freshList[freshIdx].contentFingerprint ?? null : null)) {
+                    shouldGenerateTTS = true;
+                    newContent.status = 'disponible';
+                    newContent.ttsStatus = 'generando';
+                }
                 if (freshIdx >= 0) {
                     freshList[freshIdx] = newContent;
                 } else {
@@ -3689,7 +3788,7 @@ app.post('/api/content', async (req, res) => {
                 log('Rollback orfandad aplicado (nuevo registro).', 'WARN');
             } else {
                 // Update: only rollback URLs that differ from the previous saved state
-                const urlFields = ['portada_url', 'texto_plano_url', 'texto_ingles_url', 'texto_portugues_url', 'url_recurso'];
+                const urlFields = ['portada_url', 'texto_plano_url', 'texto_ingles_url', 'texto_portugues_url', 'url_recurso', 'epub_url'];
                 const changedUrls = {};
                 urlFields.forEach(f => {
                     if (newContent[f] && newContent[f] !== (oldContent?.[f])) {

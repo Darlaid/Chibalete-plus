@@ -476,6 +476,10 @@ export interface Content {
   canonicalBookUrl?: string;          // /uploads/<id>/canonical/book.json
   canonicalSchemaVersion?: number;
   canonicalFingerprint?: string | null;
+
+  // 3C.2 — fuente EPUB (se conserva). Si existe, el servidor fija
+  // texto_plano_url = /uploads/<id>/canonical/book.txt (rendición canónica).
+  epub_url?: string;
 }
 
 // Reading status derived from progress percentage
