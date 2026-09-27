@@ -2393,7 +2393,8 @@ class DataService {
     }
 
     getRecomendadosComunidad(roles: string[], checkAccessForUserId?: string): Content[] {
-        return this.getContenidos(roles, checkAccessForUserId).sort((a, b) => b.metricas.calificacion_promedio - a.metricas.calificacion_promedio).slice(0, 5);
+        return this.getContenidos(roles, checkAccessForUserId)
+            .sort((a, b) => (b.metricas?.calificacion_promedio ?? 0) - (a.metricas?.calificacion_promedio ?? 0)).slice(0, 5);
     }
 
     getLibrosAlbum(roles: string[], checkAccessForUserId?: string): Content[] {
@@ -2997,8 +2998,9 @@ class DataService {
         const authorCounts: Record<string, number> = {};
 
         this.content.forEach(c => {
-            const reads = c.metricas.veces_leido;
-            c.etiquetas.forEach(tag => {
+            // 3C.3B-R1: un registro incompleto no debe tumbar el Panel Admin.
+            const reads = c.metricas?.veces_leido ?? 0;
+            (c.etiquetas ?? []).forEach(tag => {
                 tagCounts[tag] = (tagCounts[tag] || 0) + reads;
             });
             authorCounts[c.autor] = (authorCounts[c.autor] || 0) + reads;

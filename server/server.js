@@ -3516,6 +3516,28 @@ function validateAlbumData(albumData) {
 // artefacto clasificado como su registro en /internal/uploads-authz.
 const CANONICAL_CONTENT_FIELDS = ['canonicalBookUrl', 'canonicalSchemaVersion', 'canonicalFingerprint'];
 
+// CHP-CONTENT-CANONICAL-2026-01 3C.3B-R1 — defaults mínimos de Content con
+// autoridad backend. Hasta ahora solo los fijaba el cliente (SubirContenido.tsx:
+// metricas, publico_objetivo, autor «Anónimo»); un POST por API sin ellos
+// persistía un registro que rompe superficies existentes (AdminDashboard →
+// getContentInsights lee metricas.veces_leido y recorre etiquetas; Home ordena
+// por metricas.calificacion_promedio; la búsqueda usa autor.toLowerCase()).
+// Solo se rellena lo AUSENTE: lo que envía el cliente se respeta; en un update,
+// el valor guardado se conserva antes que el default. Sin metadata editorial.
+const CONTENT_METRICAS_DEFAULT = Object.freeze({ veces_leido: 0, calificacion_promedio: 0 });
+const CONTENT_DEFAULTS = Object.freeze({
+    publico_objetivo: () => 'todos',
+    autor: () => 'Anónimo',
+    etiquetas: () => [],
+});
+const applyContentDefaults = (record, previous) => {
+    for (const [field, make] of Object.entries(CONTENT_DEFAULTS)) {
+        if (record[field] === undefined || record[field] === null) record[field] = previous?.[field] ?? make();
+    }
+    const metricas = record.metricas ?? previous?.metricas;
+    record.metricas = { ...CONTENT_METRICAS_DEFAULT, ...(metricas && typeof metricas === 'object' && !Array.isArray(metricas) ? metricas : {}) };
+};
+
 class CanonicalIngestionError extends Error {
     constructor(status, code, message) {
         super(message);
@@ -3757,6 +3779,8 @@ app.post('/api/content', async (req, res) => {
                 _jsonCache.delete(DB_FILE);
                 const freshList = readJSON(DB_FILE);
                 const freshIdx = freshList.findIndex(c => c.id === newContent.id);
+                // 3C.3B-R1: defaults mínimos contra el registro vigente (dentro del lock).
+                applyContentDefaults(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
                 // 2B: artefacto canónico ANTES que content.json; si content.json
                 // no llega a escribirse, se repone el artefacto previo.
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
