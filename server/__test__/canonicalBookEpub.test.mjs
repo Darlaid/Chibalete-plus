@@ -1,5 +1,6 @@
 /**
- * canonicalBookEpub.test.mjs — CHP-CONTENT-CANONICAL-2026-01 PARTE 3A.
+ * canonicalBookEpub.test.mjs — CHP-CONTENT-CANONICAL-2026-01 PARTE 3A (+ 3C.1:
+ * heading level y bloque image, secciones [7] y [8]).
  *
  * EPUB → CanonicalBook v1 (server/content/epubImporter.js + safeZip.js +
  * strictXml.js). Los fixtures E1–E20 se construyen EN MEMORIA con un escritor
@@ -20,7 +21,7 @@ import dns from 'node:dns';
 const { importEpubToCanonicalBook, parseEpubArchive, resolvePackageHref } = await import('../content/epubImporter.js');
 const { openZip, ZIP_LIMITS } = await import('../content/safeZip.js');
 const { parseStrictXml } = await import('../content/strictXml.js');
-const { validateCanonicalBook } = await import('../content/canonicalBook.js');
+const { validateCanonicalBook, chapterTitle, headingLevel } = await import('../content/canonicalBook.js');
 const { renderCanonicalBookToPlainText: render } = await import('../content/canonicalTxtRenderer.js');
 const { computeContentFingerprint: fp } = await import('../contentFingerprint.js');
 const { importTxtToCanonicalBook } = await import('../content/txtImporter.js');
@@ -92,7 +93,7 @@ function epub(docs, { opfMeta, extra = [], order, spine, items } = {}) {
     return buildZip(order ? order(files) : files);
 }
 const imp = (buf, extra = {}) => importEpubToCanonicalBook({ contentId: 'c-epub', epubBuffer: buf, ...extra });
-const texts = (book) => book.chapters.flatMap(c => c.blocks.map(b => `${b.type[0]}:${b.text}`));
+const texts = (book) => book.chapters.flatMap(c => c.blocks.map(b => b.type === 'image' ? `img:${b.src}` : `${b.type[0]}:${b.text}`));
 
 // ── Pureza: red, filesystem, reloj, aleatoriedad ─────────────────────────────
 const calls = { net: 0, fs: 0, time: 0, random: 0 };
@@ -239,8 +240,10 @@ ok('profundidad acotada → XML_TOO_DEEP', code(() => parseStrictXml('<a>'.repea
 ok('carácter de control → XML_INVALID_CHAR', code(() => parseStrictXml('<a>\u0001</a>')) === 'XML_INVALID_CHAR');
 
 console.log('\n[5] orden, vacío, determinismo, fingerprint');
-const E19 = epub({ 'Text/c.xhtml': xhtml('<div><img src="a.png" alt="solo imagen"/></div>') });
-ok('E19 EPUB sin texto → EPUB_NO_TEXT', code(() => imp(E19)) === 'EPUB_NO_TEXT');
+// 3C.1: la imagen se resuelve, así que el fixture la declara (si no, EPUB_IMAGE_MISSING).
+const E19 = epub({ 'Text/c.xhtml': xhtml('<div><img src="a.png" alt="solo imagen"/></div>') },
+    { items: [['d0', 'Text/c.xhtml'], ['i0', 'Text/a.png', 'image/png']], spine: ['d0'], extra: [{ name: 'OEBPS/Text/a.png', data: 'png' }] });
+ok('E19 EPUB sin texto (solo imagen) → EPUB_NO_TEXT', code(() => imp(E19)) === 'EPUB_NO_TEXT');
 const docs20 = { 'Text/z-primero.xhtml': xhtml('<h1>Primero</h1><p>1</p>'), 'Text/a-segundo.xhtml': xhtml('<h1>Segundo</h1><p>2</p>') };
 const E20 = epub(docs20, { order: f => [f[0], f[4], f[3], f[2], f[1]] });
 ok('E20 orden del spine ≠ orden del ZIP → manda el spine', JSON.stringify(texts(imp(E20))) === JSON.stringify(['h:Primero', 'p:1', 'h:Segundo', 'p:2']));
@@ -271,6 +274,103 @@ const pb = parseEpubArchive(epub({ 'Text/c.xhtml': xhtml('<p>x</p>') }, { opfMet
 ok('a11y EPUB 2 parcial → PARTIAL', pb.a11yStatus === 'PARTIAL' && pb.a11y.accessMode[0] === 'textual');
 ok('sin a11y → ABSENT', parseEpubArchive(E1).a11yStatus === 'ABSENT');
 ok('la metadata a11y NO entra en CanonicalBook', !('a11y' in imp(epub({ 'Text/c.xhtml': xhtml('<p>x</p>') }, { opfMeta: A11Y }))));
+
+// ── 3C.1 — heading level + bloque image ──────────────────────────────────────
+console.log('\n[7] 3C.1 heading level e imágenes');
+// Fixture con imágenes sintéticas (bytes ficticios: no se decodifican ni extraen).
+function epubImg(docs, images = {}, { extra = [] } = {}) {
+    const names = Object.keys(docs);
+    const items = [...names.map((n, i) => [`d${i}`, n]), ...Object.entries(images).map(([n, mt], i) => [`i${i}`, n, mt])];
+    return epub(docs, { items, spine: names.map((_, i) => `d${i}`), extra: [...Object.keys(images).map(n => ({ name: `OEBPS/${n}`, data: 'img' })), ...extra] });
+}
+const IMGS = { 'Images/a.png': 'image/png', 'Images/b.jpg': 'image/jpeg', 'Images/c.gif': 'image/gif', 'Images/d.webp': 'image/webp' };
+const shape = (book) => book.chapters.map(c => c.blocks.map(b => b.type === 'image' ? `img:${b.src.split('/').pop()}` : b.type === 'heading' ? `h${b.level}` : 'p'));
+
+// A
+const A = imp(epub({ 'Text/c.xhtml': xhtml('<h1>Uno</h1><p>a</p><h2>Dos</h2><p>b</p><h3>Tres</h3><p>c</p><h6>Seis</h6><p>d</p>') }));
+ok('A h1/h2/h3/h6 → heading level 1/2/3/6', JSON.stringify(A.chapters.map(c => c.blocks[0].level)) === '[1,2,3,6]' && validateCanonicalBook(A).length === 0);
+ok('A heading conserva forma {id,type,text,level} y el texto de 3A', JSON.stringify(A.chapters[1].blocks[0]) === '{"id":"h-0002-0001","type":"heading","text":"Dos","level":2}');
+
+// B
+const B = imp(epubImg({ 'Text/c.xhtml': xhtml('<p>Uno.</p><p>Dos.</p><img src="../Images/a.png" alt="x"/><p>Tres.</p>') }, IMGS));
+ok('B P P IMG P → paragraph paragraph image paragraph', JSON.stringify(shape(B)) === JSON.stringify([['p', 'p', 'img:a.png', 'p']]), JSON.stringify(shape(B)));
+ok('B IDs: texto por ordinal de texto, imagen por ordinal de imagen', JSON.stringify(B.chapters[0].blocks.map(b => b.id)) === JSON.stringify(['p-0001-0001', 'p-0001-0002', 'img-0001-0001', 'p-0001-0003']));
+ok('B src = entrada del ZIP normalizada (sin ../, sin esquema)', B.chapters[0].blocks[2].src === 'OEBPS/Images/a.png' && validateCanonicalBook(B).length === 0);
+const B2 = imp(epubImg({
+    'Text/a.xhtml': xhtml('<img src="../Images/a.png" alt=""/><h1>Título</h1><p>Texto con <img src="../Images/b.jpg" alt=""/> imagen.</p><div>suelto <img src="../Images/c.gif" alt=""/> más</div><figure><img src="../Images/d.webp" alt=""/><figcaption>Pie.</figcaption></figure>'),
+    'Text/b.xhtml': xhtml('<div><img src="../Images/a.png" alt=""/></div>'),
+    'Text/c.xhtml': xhtml('<p>Final.</p>'),
+}, IMGS));
+ok('B imagen previa al h1 → se antepone al capítulo del h1 (no abre capítulo); inline → tras su bloque',
+    JSON.stringify(shape(B2)) === JSON.stringify([['img:a.png', 'h1', 'p', 'img:b.jpg', 'p', 'img:c.gif', 'img:d.webp', 'p'], ['img:a.png'], ['p']]), JSON.stringify(shape(B2)));
+ok('B el texto que rodea una imagen no se parte', texts(B2).includes('p:Texto con imagen.') && texts(B2).includes('p:suelto más'));
+ok('B capítulo explícito que empieza por imagen: título = su heading', !B2.chapters[0].implicit && chapterTitle(B2.chapters[0]) === 'Título');
+ok('B documento solo con imágenes → capítulo implícito solo-imagen', B2.chapters[1].implicit === true && B2.chapters[1].blocks.length === 1 && B2.chapters[1].blocks[0].id === 'img-0002-0001');
+ok('B libro con imágenes válido', validateCanonicalBook(B2).length === 0, validateCanonicalBook(B2).join('; '));
+
+// C, D, E
+const alts = imp(epubImg({ 'Text/c.xhtml': xhtml('<p>t</p><img src="../Images/a.png" alt="Conejo  blanco &amp; reloj"/><img src="../Images/b.jpg" alt=""/><img src="../Images/c.gif"/>') }, IMGS)).chapters[0].blocks.slice(1);
+ok('C alt descriptivo → se conserva exacto', alts[0].alt === 'Conejo  blanco & reloj');
+ok('D alt="" → alt: ""', Object.hasOwn(alts[1], 'alt') && alts[1].alt === '');
+ok('E sin alt → alt ausente (no se inventa, no se usa el nombre de archivo)', !('alt' in alts[2]) && JSON.stringify(Object.keys(alts[2])) === '["id","type","src"]');
+
+// F
+const imgDoc = (src) => epubImg({ 'Text/c.xhtml': xhtml(`<p>t</p><img src="${src}" alt=""/>`) }, IMGS, { extra: [{ name: 'OEBPS/Images/suelta.png', data: 'x' }] });
+ok('F src con traversal fuera del paquete → EPUB_PATH_ESCAPE', code(() => imp(imgDoc('../../../etc/x.png'))) === 'EPUB_PATH_ESCAPE');
+ok('F src %2e%2e codificado → EPUB_PATH_ESCAPE', code(() => imp(imgDoc('%2e%2e/%2e%2e/%2e%2e/x.png'))) === 'EPUB_PATH_ESCAPE');
+ok('F src absoluto → EPUB_BAD_HREF', code(() => imp(imgDoc('/Images/a.png'))) === 'EPUB_BAD_HREF');
+ok('F recurso inexistente → EPUB_IMAGE_MISSING', code(() => imp(imgDoc('../Images/nope.png'))) === 'EPUB_IMAGE_MISSING');
+ok('F recurso en el ZIP pero fuera del manifest → EPUB_IMAGE_UNDECLARED', code(() => imp(imgDoc('../Images/suelta.png'))) === 'EPUB_IMAGE_UNDECLARED');
+const remoteDoc = epubImg({ 'Text/c.xhtml': xhtml('<p>t</p><img src="https://x.test/a.png" alt=""/><img src="data:image/png;base64,AAAA" alt=""/><img src="javascript:alert(1)" alt=""/><img alt="sin src"/>') }, IMGS);
+const remoteBook = pure(() => imp(remoteDoc));
+ok('F http:/data:/javascript: y sin src → ignoradas, sin red', remoteBook.chapters[0].blocks.length === 1 && calls.net === 0);
+ok('F ignoradas quedan en el diagnóstico', JSON.stringify(parseEpubArchive(remoteDoc).images) === JSON.stringify({ accepted: 0, ignored: { noSrc: 1, remote: 3, unsupportedType: {} } }));
+const svgDoc = epubImg({ 'Text/c.xhtml': xhtml('<p>t</p><img src="../Images/s.svg" alt="svg"/>') }, { 'Images/s.svg': 'image/svg+xml' });
+ok('F SVG por <img> → fuera (no se amplía la superficie)', imp(svgDoc).chapters[0].blocks.length === 1 && parseEpubArchive(svgDoc).images.ignored.unsupportedType['image/svg+xml'] === 1);
+ok('F <img> dentro de svg/hidden/aria-hidden → descartada con su subárbol', imp(epubImg({ 'Text/c.xhtml': xhtml('<p>t</p><div hidden=""><img src="../Images/a.png" alt=""/></div><span aria-hidden="true"><img src="../Images/b.jpg" alt=""/></span>') }, IMGS)).chapters[0].blocks.length === 1);
+
+// G
+const plain = imp(epub({ 'Text/c.xhtml': xhtml('<h1>T</h1><p>Uno.</p><p>Dos.</p>') }));
+const withImgs = imp(epubImg({ 'Text/c.xhtml': xhtml('<img src="../Images/a.png" alt=""/><h1>T</h1><p>Uno.</p><img src="../Images/b.jpg" alt="b"/><p>Dos.</p><img src="../Images/c.gif"/>') }, IMGS));
+ok('G la rendición TXT ignora los bloques image', render(withImgs) === render(plain) && render(withImgs) === 'T\n\nUno.\n\nDos.');
+ok('G libro solo-imagen al inicio no altera el separador inicial', render({ chapters: [{ blocks: [{ type: 'image', src: 'a.png' }] }, { blocks: [{ type: 'paragraph', text: 'x' }] }] }) === 'x');
+
+// H
+ok('H fingerprint idéntico con y sin imágenes', withImgs.contentFingerprint === plain.contentFingerprint);
+ok('H imágenes no renumeran capítulos ni bloques de texto',
+    JSON.stringify(withImgs.chapters.map(c => c.blocks.filter(b => b.type !== 'image'))) === JSON.stringify(plain.chapters.map(c => c.blocks)));
+ok('H level no altera el fingerprint (h1 vs h3, mismo texto)',
+    imp(epub({ 'Text/c.xhtml': xhtml('<h3>Capítulo 1</h3><p>Uno.</p>') })).contentFingerprint === imp(epub({ 'Text/c.xhtml': xhtml('<h1>Capítulo 1</h1><p>Uno.</p>') })).contentFingerprint);
+ok('H TXT: headings sin level (artefacto 2B intacto), headingLevel = 1',
+    (() => { const t = importTxtToCanonicalBook({ contentId: 'c', text: 'Capítulo 1\n\nUno.', contentFingerprint: fp('Capítulo 1\n\nUno.') }); const h = t.chapters[0].blocks[0]; return !('level' in h) && headingLevel(h) === 1 && validateCanonicalBook(t).length === 0; })());
+
+// I
+const EI = epubImg({ 'Text/a.xhtml': xhtml('<h2>T</h2><p>a</p><img src="../Images/a.png" alt=""/>'), 'Text/b.xhtml': xhtml('<img src="../Images/b.jpg"/>') }, IMGS);
+ok('I determinismo con imágenes: import ×2 → mismos bytes', JSON.stringify(imp(EI)) === JSON.stringify(imp(EI)));
+Object.keys(calls).forEach(k => { calls[k] = 0; });
+pure(() => imp(EI));
+ok('I pureza con imágenes: 0 red, 0 filesystem, 0 reloj, 0 aleatoriedad', Object.values(calls).every(v => v === 0), JSON.stringify(calls));
+
+// Esquema
+console.log('\n[8] validateCanonicalBook — ampliación mínima');
+const vbook = (blocks, ch = {}) => ({ schemaVersion: 1, contentId: 'c', contentFingerprint: 'sha256:' + '0'.repeat(64), chapters: [{ id: 'ch-0001', ...ch, blocks }] });
+const H = (extra = {}) => ({ id: 'h-0001-0001', type: 'heading', text: 'T', ...extra });
+const I1 = (extra = {}) => ({ id: 'img-0001-0001', type: 'image', src: 'OEBPS/Images/a.png', ...extra });
+const P = (n, extra = {}) => ({ id: `p-0001-000${n}`, type: 'paragraph', text: 'x', ...extra });
+const valid = (b) => validateCanonicalBook(b).length === 0;
+ok('heading sin level (legado 2A/2B) → válido', valid(vbook([H(), P(2)])));
+ok('heading level 1..6 → válido; 0, 7, 1.5, "1", null → inválido', [1, 6].every(l => valid(vbook([H({ level: l })]))) && [0, 7, 1.5, '1', null].every(l => !valid(vbook([H({ level: l })]))));
+ok('level en paragraph → inválido (campo no admitido)', !valid(vbook([H(), P(2, { level: 1 })])));
+ok('campos arbitrarios → inválido', !valid(vbook([H({ html: '<b>' })])) && !valid(vbook([I1({ width: 10 })])) && !valid(vbook([I1({ text: 'x' })], { implicit: true })));
+ok('imagen antes del heading en capítulo explícito → válido', valid(vbook([I1(), H(), P(2)])));
+ok('párrafo antes del heading → inválido', !valid(vbook([{ ...P(1) }, { ...H(), id: 'h-0001-0002' }])));
+ok('capítulo solo-imagen implícito → válido; explícito → inválido', valid(vbook([I1()], { implicit: true })) && !valid(vbook([I1()])));
+ok('id de imagen fuera de su ordinal → inválido', !valid(vbook([H(), { ...I1(), id: 'img-0001-0002' }])) && !valid(vbook([H(), { ...I1(), id: 'p-0001-0002' }])));
+ok('src inseguro → inválido (esquema, data:, javascript:, absoluto, traversal, \\, vacío, ?#, control)',
+    ['https://x.test/a.png', 'data:image/png;base64,AA', 'javascript:alert(1)', '/etc/a.png', '../a.png', 'a/../../b.png', 'a/./b.png', 'a//b.png', 'a\\b.png', '', 'a.png?x', 'a.png#f', 'C:/a.png', 'a\u0000.png', 'x'.repeat(513)]
+        .every(src => !valid(vbook([H(), I1({ src })]))));
+ok('alt no string → inválido; alt "" → válido', !valid(vbook([H(), I1({ alt: 3 })])) && valid(vbook([H(), I1({ alt: '' })])));
+ok('tipo desconocido → inválido', !valid(vbook([H(), { id: 'v-0001-0001', type: 'video', src: 'a.mp4' }])));
 
 console.log(`\ncanonicalBookEpub — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

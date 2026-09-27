@@ -4,7 +4,7 @@
  * EPUB → CanonicalBook v1 (el mismo contrato que el importador TXT). Puro:
  * Buffer → objeto. Sin filesystem, sin red, sin fechas, sin aleatoriedad.
  *
- *   parseEpubArchive(epubBuffer)  → { language, title, a11y, a11yStatus, documents }
+ *   parseEpubArchive(epubBuffer)  → { language, title, a11y, a11yStatus, images, documents }
  *   importEpubToCanonicalBook({ contentId, epubBuffer, contentFingerprint?, language? })
  *
  * Paquete: mimetype = application/epub+zip → META-INF/container.xml → primer
@@ -15,8 +15,9 @@
  * application/xhtml+xml y no es el documento de navegación. Lo demás (CSS,
  * fuentes, imágenes, audio, video, scripts, recursos fuera del spine) se ignora.
  *
- * XHTML → texto (strictXml.js, sin DTD). Nada de HTML llega a la salida:
- *   - h1–h6 → bloque `heading`; p → bloque `paragraph` (inline anidado = texto);
+ * XHTML → bloques (strictXml.js, sin DTD). Nada de HTML llega a la salida:
+ *   - h1–h6 → bloque `heading` con level 1–6 (3C.1); p → bloque `paragraph`
+ *     (inline anidado = texto);
  *   - texto suelto dentro de contenedores de bloque (div, section, li,
  *     blockquote, td…) → `paragraph` en el límite del contenedor, para no
  *     perder palabras;
@@ -27,10 +28,25 @@
  *     controles, rp; y elementos `hidden`, aria-hidden="true" o
  *     epub:type/role de paginación, índice o landmarks.
  *
+ * Imágenes (3C.1): cada <img> aceptada → bloque `image` en la posición que
+ * ocupa en el DOM del XHTML (nunca la de la maqueta impresa). Una imagen
+ * dentro de un bloque de texto (p/h, o texto suelto que la rodea) va justo
+ * DESPUÉS de ese bloque: partirlo alteraría el texto. `src` = nombre de la
+ * entrada del ZIP (ruta normalizada del paquete), que debe existir y estar
+ * declarada en el manifest con un tipo raster admitido; `alt` = el de la
+ * fuente, tal cual (ausente si no lo hay). Nada se extrae ni se escribe aquí.
+ *   - src con esquema (http:, data:, javascript:…) → se ignora, nunca se sigue;
+ *   - tipo no admitido (SVG incluido) → se ignora;
+ *   - traversal/ruta absoluta, recurso ausente o no declarado → rechazo.
+ *   Lo ignorado queda en parseEpubArchive().images (diagnóstico).
+ *
  * Capítulos: cada documento del spine abre capítulo, y cada encabezado abre
  * otro (CanonicalBook v1 admite un único heading, al inicio del capítulo; es
  * la misma regla que aplica el importador TXT a «Capítulo N»). Texto previo al
- * primer encabezado → capítulo implícito, sin título inventado.
+ * primer encabezado → capítulo implícito, sin título inventado. Las imágenes
+ * no abren capítulo: las previas al primer texto del documento se anteponen al
+ * capítulo que ese texto abre; un documento solo con imágenes forma un
+ * capítulo implícito. Así el texto conserva capítulos, IDs y fingerprint.
  *
  * Fingerprint: contentFingerprint es el de 1B sobre la RENDICIÓN TXT del libro
  * (renderCanonicalBookToPlainText): identidad del TEXTO, no del archivo. El
@@ -44,7 +60,7 @@ import path from 'path';
 import { computeContentFingerprint } from '../contentFingerprint.js';
 import {
     CANONICAL_SCHEMA_VERSION, CanonicalBookError, assertValidFingerprint,
-    chapterId, blockId, validateCanonicalBook,
+    chapterId, blockId, isTextBlock, isSafeCanonicalMediaSrc, validateCanonicalBook,
 } from './canonicalBook.js';
 import { renderCanonicalBookToPlainText } from './canonicalTxtRenderer.js';
 import { openZip, validateEntryName } from './safeZip.js';
@@ -56,6 +72,8 @@ const EPUB_MIMETYPE = 'application/epub+zip';
 const OPF_MEDIA_TYPE = 'application/oebps-package+xml';
 const XHTML_MEDIA_TYPE = 'application/xhtml+xml';
 const LANGUAGE_RX = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/;
+// Raster que los visores muestran como <img> sin superficie activa. SVG queda fuera.
+const IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 const SKIP = new Set(['head', 'script', 'style', 'nav', 'svg', 'math', 'iframe', 'object', 'embed', 'audio', 'video',
     'canvas', 'template', 'noscript', 'form', 'button', 'input', 'select', 'textarea', 'map', 'rp']);
@@ -109,31 +127,52 @@ function isSkipped(el) {
     return sem.some(t => SKIP_SEMANTICS.has(t));
 }
 
-/** XHTML (árbol) → [{ type: 'heading'|'paragraph', text }]. */
-export function extractXhtmlBlocks(root) {
+/**
+ * XHTML (árbol) → [{ type: 'heading', level, text } | { type: 'paragraph', text }
+ * | { type: 'image', src, alt? }]. `resolveImage(img)` devuelve { src, alt? },
+ * null para ignorarla, o lanza; sin él las imágenes se ignoran (como en 3A).
+ */
+export function extractXhtmlBlocks(root, { resolveImage } = {}) {
     const blocks = [];
     let loose = [];
+    let deferred = []; // imágenes dentro de texto suelto: van tras ese párrafo
     const flushLoose = () => {
         const text = finishBlockText(loose);
         if (text) blocks.push({ type: 'paragraph', text });
+        blocks.push(...deferred);
         loose = [];
+        deferred = [];
     };
-    const collect = (node, parts) => {
+    const image = (node) => {
+        const img = resolveImage ? resolveImage(node) : null;
+        return img ? { type: 'image', ...img } : null;
+    };
+    const collect = (node, parts, images) => {
         if (node.type === 'text') { parts.push(node.value); return; }
         if (isSkipped(node)) return;
         if (node.name === 'br') { parts.push('\u0000'); return; }
-        for (const c of node.children) collect(c, parts);
+        if (node.name === 'img') { const img = image(node); if (img) images.push(img); return; }
+        for (const c of node.children) collect(c, parts, images);
     };
     const walk = (node) => {
         if (node.type === 'text') { loose.push(node.value); return; }
         if (isSkipped(node)) return;
         if (node.name === 'br') { loose.push('\u0000'); return; }
+        if (node.name === 'img') {
+            const img = image(node);
+            if (!img) return;
+            if (finishBlockText(loose)) deferred.push(img);
+            else { flushLoose(); blocks.push(img); }
+            return;
+        }
         if (HEADINGS.has(node.name) || node.name === 'p') {
             flushLoose();
             const parts = [];
-            collect(node, parts);
+            const images = [];
+            collect(node, parts, images);
             const text = finishBlockText(parts);
-            if (text) blocks.push({ type: node.name === 'p' ? 'paragraph' : 'heading', text });
+            if (text) blocks.push(node.name === 'p' ? { type: 'paragraph', text } : { type: 'heading', level: Number(node.name[1]), text });
+            blocks.push(...images);
             return;
         }
         const isBlock = BLOCK_CONTAINERS.has(node.name);
@@ -207,6 +246,33 @@ export function parseEpubArchive(epubBuffer, { limits } = {}) {
         manifest.set(id, { href, mediaType: item.attrs['media-type'] || '', properties: (item.attrs.properties || '').split(/\s+/) });
     }
 
+    // Imágenes: solo recursos del paquete declarados en el manifest (por entrada ZIP).
+    const manifestByEntry = new Map();
+    for (const item of manifest.values()) {
+        try { manifestByEntry.set(resolvePackageHref(opfDir, item.href), item); } catch { /* items remotos o inválidos: nunca son imagen aceptable */ }
+    }
+    const images = { accepted: 0, ignored: { noSrc: 0, remote: 0, unsupportedType: {} } };
+    const imageResolver = (docDir) => (el) => {
+        const href = el.attrs.src;
+        if (typeof href !== 'string' || !href.trim()) { images.ignored.noSrc++; return null; }
+        let entry;
+        try { entry = resolvePackageHref(docDir, href.trim()); } catch (e) {
+            if (e.code === 'EPUB_REMOTE_RESOURCE') { images.ignored.remote++; return null; }
+            throw e;
+        }
+        if (!zip.entries.has(entry)) fail('EPUB_IMAGE_MISSING', 'imagen referenciada ausente en el ZIP');
+        const item = manifestByEntry.get(entry);
+        if (!item) fail('EPUB_IMAGE_UNDECLARED', 'imagen no declarada en el manifest');
+        if (!IMAGE_MEDIA_TYPES.has(item.mediaType)) {
+            const t = item.mediaType || '(vacío)';
+            images.ignored.unsupportedType[t] = (images.ignored.unsupportedType[t] || 0) + 1;
+            return null;
+        }
+        if (!isSafeCanonicalMediaSrc(entry)) fail('EPUB_IMAGE_BAD_SRC', 'ruta de imagen no apta como referencia interna');
+        images.accepted++;
+        return Object.hasOwn(el.attrs, 'alt') ? { src: entry, alt: el.attrs.alt } : { src: entry };
+    };
+
     const itemrefs = childElements(spineEl, 'itemref');
     if (itemrefs.length === 0) fail('EPUB_EMPTY_SPINE', 'spine vacío');
     const seen = new Set();
@@ -223,26 +289,45 @@ export function parseEpubArchive(epubBuffer, { limits } = {}) {
         if (item.mediaType !== XHTML_MEDIA_TYPE || item.properties.includes('nav')) continue;
         const root = readXml(zip, name, true);
         if (root.name !== 'html') fail('EPUB_BAD_XHTML', 'documento del spine sin elemento html');
-        documents.push({ blocks: extractXhtmlBlocks(root) });
+        const docDir = path.posix.dirname(name) === '.' ? '' : path.posix.dirname(name);
+        documents.push({ blocks: extractXhtmlBlocks(root, { resolveImage: imageResolver(docDir) }) });
     }
-    return { language, title, a11y, a11yStatus, documents };
+    return { language, title, a11y, a11yStatus, images, documents };
 }
 
-/** Bloques por documento → capítulos v1 con IDs ordinales. */
+/** Bloques por documento → capítulos v1 con IDs ordinales (texto e imágenes por separado). */
 function toChapters(documents) {
     const chapters = [];
     let current = null;
+    let textOrdinal = 0, imageOrdinal = 0;
+    const open = (implicit) => {
+        current = implicit ? { id: chapterId(chapters.length + 1), implicit: true, blocks: [] } : { id: chapterId(chapters.length + 1), blocks: [] };
+        chapters.push(current);
+        textOrdinal = 0; imageOrdinal = 0;
+    };
+    const pushImage = (b) => {
+        const block = { id: blockId('image', chapters.length, ++imageOrdinal), type: 'image', src: b.src };
+        if ('alt' in b) block.alt = b.alt;
+        current.blocks.push(block);
+    };
     for (const doc of documents) {
         current = null; // cada documento del spine abre capítulo
+        let leading = []; // imágenes previas al primer texto del documento
         for (const b of doc.blocks) {
-            if (b.type === 'heading' || !current) {
-                current = b.type === 'heading'
-                    ? { id: chapterId(chapters.length + 1), blocks: [] }
-                    : { id: chapterId(chapters.length + 1), implicit: true, blocks: [] };
-                chapters.push(current);
+            if (b.type === 'image') {
+                if (current) pushImage(b); else leading.push(b);
+                continue;
             }
-            current.blocks.push({ id: blockId(b.type, chapters.length, current.blocks.length + 1), type: b.type, text: b.text });
+            if (b.type === 'heading' || !current) {
+                open(b.type !== 'heading');
+                leading.forEach(pushImage);
+                leading = [];
+            }
+            const block = { id: blockId(b.type, chapters.length, ++textOrdinal), type: b.type, text: b.text };
+            if (b.type === 'heading') block.level = b.level;
+            current.blocks.push(block);
         }
+        if (leading.length) { open(true); leading.forEach(pushImage); }
     }
     return chapters;
 }
@@ -251,7 +336,7 @@ export function importEpubToCanonicalBook({ contentId, epubBuffer, contentFinger
     if (typeof contentId !== 'string' || !contentId) fail('INVALID_CONTENT_ID', 'contentId debe ser un string no vacío');
     const parsed = parseEpubArchive(epubBuffer, { limits });
     const chapters = toChapters(parsed.documents);
-    if (chapters.length === 0) fail('EPUB_NO_TEXT', 'el EPUB no contiene texto extraíble en su spine');
+    if (!chapters.some(ch => ch.blocks.some(isTextBlock))) fail('EPUB_NO_TEXT', 'el EPUB no contiene texto extraíble en su spine');
 
     const fingerprint = computeContentFingerprint(renderCanonicalBookToPlainText({ chapters }));
     if (contentFingerprint !== undefined && contentFingerprint !== null) {
