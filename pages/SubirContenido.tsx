@@ -10,6 +10,7 @@ import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ExperienceStudio from '../components/studio/ExperienceStudio';
 import LandingBannerManager from '../components/LandingBannerManager';
+import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource } from '../utils/epubSourceUpload.mjs';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -870,10 +871,25 @@ const SubirContenido: React.FC = () => {
 
                 // FIX: Evitar que el frontend mande un tipo que no tiene visor real como ePub ciegamente
                 if (mainContent.resourceFile && mainContent.resourceFile.name.toLowerCase().endsWith('.epub')) {
-                    alert("Error: El formato ePub aún no está soportado en los visores activos de la app. Por favor, sube PDF o TXT.");
+                    alert("Error: el EPUB no va como archivo principal. Súbelo en el campo «Texto Plano (Español) o EPUB».");
                     setIsUploading(false);
                     return;
                 }
+
+                // 3D.1 — EPUB como fuente del texto: solo contenido NUEVO; un
+                // contenido con epub_url no admite otra fuente (EPUB_REIMPORT prohibido).
+                const epubBlock = epubSourceBlockReason({
+                    isUpdate,
+                    existingContent: isUpdate ? existingParents.find(c => c.id === editingId) : null,
+                    textoPlanoFile: mainContent.textoPlanoFile,
+                });
+                if (epubBlock) {
+                    setUploadError(epubBlock);
+                    setIsUploading(false);
+                    submittingRef.current = false;
+                    return;
+                }
+                const epubSource = isEpubFile(mainContent.textoPlanoFile);
 
                 // Validation: Only strict if NEW. If UPDATE, files are optional.
                 // Cover: Required unless video/podcast. Resource: Required unless album/collection.
@@ -949,7 +965,9 @@ const SubirContenido: React.FC = () => {
                 const coverUrl = await uploadIfFile(mainContent.coverFile, 'Portada');
                 savedCoverUrl = coverUrl; // hoist to outer scope for materials loop
                 const resourceUrl = await uploadIfFile(mainContent.resourceFile, 'Archivo principal');
-                const txtEsUrl = await uploadIfFile(mainContent.textoPlanoFile, 'Texto plano (ES)');
+                // EPUB: se declara application/epub+zip; el servidor valida y deriva el texto.
+                const epubUrl = epubSource ? await uploadIfFile(asEpubUploadFile(mainContent.textoPlanoFile as File), 'EPUB') : undefined;
+                const txtEsUrl = epubSource ? undefined : await uploadIfFile(mainContent.textoPlanoFile, 'Texto plano (ES)');
                 const txtEnUrl = await uploadIfFile(mainContent.textoInglesFile, 'Texto (EN)');
                 const txtPtUrl = await uploadIfFile(mainContent.textoPortuguesFile, 'Texto (PT)');
 
@@ -1070,7 +1088,8 @@ const SubirContenido: React.FC = () => {
                     numero_paginas: mainContent.tipo === 'libro' ? 10 : (mainContent.tipo === 'libro_album' ? (albumPages.length > 0 ? albumPages.length : (existingContent?.numero_paginas || undefined)) : (existingContent?.numero_paginas || undefined)),
                 };
 
-                await dataService.saveContentToApi(newContent);
+                // 3D.1: con EPUB se envía epub_url y NO texto_plano_url (lo fija el servidor).
+                await dataService.saveContentToApi(epubUrl ? withEpubSource(newContent, epubUrl) : newContent);
             }
 
             // 2. Create Child Materials — sequential for orphan tracking
@@ -1154,7 +1173,10 @@ const SubirContenido: React.FC = () => {
             // lo excede. El backend devuelve `code: LIMIT_FILE_SIZE` con el
             // límite real, así que no quemamos un número en el cliente.
             let userFriendlyMessage: string;
-            if (errorMessage.includes('Invalid file type') || errorMessage.includes('extensión')) {
+            if (isEpubFile(mainContent.textoPlanoFile) && !errorMessage.includes('Network')) {
+                // 3D.1: el servidor es la autoridad sobre el EPUB; su mensaje se muestra tal cual.
+                userFriendlyMessage = `No se pudo publicar el EPUB: ${errorMessage}`;
+            } else if (errorMessage.includes('Invalid file type') || errorMessage.includes('extensión')) {
                 userFriendlyMessage = 'El tipo de archivo no está permitido. Revisa las extensiones aceptadas.';
             } else if (errorMessage.includes('LIMIT_FILE_SIZE') || errorMessage.includes('tope técnico') || errorMessage.includes('too large')) {
                 userFriendlyMessage = errorMessage; // El backend ya da mensaje con el tope real
@@ -2829,16 +2851,18 @@ const SubirContenido: React.FC = () => {
                                 <div className="bg-yellow-50 dark:bg-yellow-900/20 p-4 rounded-lg mb-4 border border-yellow-200 dark:border-yellow-700">
                                     <p className="text-sm text-yellow-800 dark:text-yellow-200 flex items-start">
                                         <span className="mr-2 text-lg">⚠️</span>
-                                        <b>Importante para Accesibilidad:</b> Para que funcionen el "Modo Guiado" (Dislexia/TTS) y el "Modo Inmersivo", es <u>obligatorio</u> subir el archivo de texto plano (.txt) correspondiente.
+                                        <b>Importante para Accesibilidad:</b> Para que funcionen el "Modo Guiado" (Dislexia/TTS) y el "Modo Inmersivo", es <u>obligatorio</u> subir el archivo de texto plano (.txt) correspondiente, o un EPUB del que el servidor deriva ese texto.
                                     </p>
                                 </div>
 
                                 <div className="grid md:grid-cols-3 gap-4">
                                     <div>
-                                        <label htmlFor="sc-texto-es" className="block text-xs font-medium mb-1">Texto Plano (Español)</label>
-                                        <input id="sc-texto-es" type="file" accept=".txt,.md" onChange={(e) => handleMainFileChange(e, 'textoPlanoFile')} className="w-full text-xs text-gray-500" />
-                                        <p className="text-[10px] text-gray-500 mt-1">Requerido para voz y adaptación.</p>
-                                        {editingId && !mainContent.textoPlanoFile && existingParents.find(p => p.id === editingId)?.texto_plano_url && (
+                                        <label htmlFor="sc-texto-es" className="block text-xs font-medium mb-1">Texto Plano (Español) o EPUB</label>
+                                        <input id="sc-texto-es" type="file" accept=".txt,.md,.epub,application/epub+zip" onChange={(e) => handleMainFileChange(e, 'textoPlanoFile')} className="w-full text-xs text-gray-500" />
+                                        <p className="text-[10px] text-gray-500 mt-1">Requerido para voz y adaptación. Un EPUB solo sirve para crear un contenido nuevo.</p>
+                                        {editingId && !mainContent.textoPlanoFile && existingParents.find(p => p.id === editingId)?.epub_url ? (
+                                            <p className="mt-1 text-[10px] text-green-600">✓ EPUB fuente actual (por ahora no se puede reemplazar)</p>
+                                        ) : editingId && !mainContent.textoPlanoFile && existingParents.find(p => p.id === editingId)?.texto_plano_url && (
                                             <p className="mt-1 text-[10px] text-green-600">✓ Archivo actual existe</p>
                                         )}
                                     </div>
