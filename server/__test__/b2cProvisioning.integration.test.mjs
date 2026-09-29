@@ -41,11 +41,12 @@ fs.writeFileSync(B2C_PROVISIONING_SECRET_PATH, SECRET, { mode: 0o400 }); fs.chmo
 const PW = 'contrasena-fixture';
 fs.writeFileSync(P.users, JSON.stringify([
     { id: 'COLE', email: 'lector.colegio@fixture.invalid', nombre_completo: 'Lector Colegio', password: bcrypt.hashSync(PW, 4), roles: ['lector'], accountStatus: 'active', groupIds: ['g-colegio'] },
+    { id: 'MIXTO', email: 'mixto@fixture.invalid', nombre_completo: 'Mixto', password: bcrypt.hashSync(PW, 4), roles: ['lector'], accountStatus: 'active', groupIds: ['g-colegio'], b2c: true },
     { id: 'ADMIN', email: 'admin@fixture.invalid', nombre_completo: 'Admin', password: bcrypt.hashSync(PW, 4), roles: ['administrador'], accountStatus: 'active', groupIds: [] },
 ]));
 fs.writeFileSync(P.groups, JSON.stringify([
     { id: 'group-b2c-lectores', name: 'Chibalete+ — Lectores', type: 'course', memberIds: [], studentIds: [], mediatorIds: [] },
-    { id: 'g-colegio', name: 'Colegio', type: 'course', memberIds: ['COLE'], studentIds: ['COLE'], mediatorIds: [] },
+    { id: 'g-colegio', name: 'Colegio', type: 'course', memberIds: ['COLE', 'MIXTO'], studentIds: ['COLE', 'MIXTO'], mediatorIds: [] },
 ]));
 fs.writeFileSync(P.schools, '[]');
 fs.writeFileSync(P.access, JSON.stringify([
@@ -67,6 +68,7 @@ const child = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env: {
     INSIGHTS_SQLITE_PATH: tmp + '/insights.db', EVENTS_SQLITE_PATH: tmp + '/events.db',
     SESSIONS_DB: P.sessions, SESSION_KEY_CURRENT_PATH: P.key,
     ACCESS_FALLBACK_MODE: 'restricted', SESSION_AUTH_MODE: 'enforce',
+    SESSION_ALLOWED_ORIGINS: 'https://app.test', ALLOWED_ORIGINS: 'https://app.test',
 } });
 let boot = ''; child.stdout.on('data', d => boot += d); child.stderr.on('data', d => boot += d);
 
@@ -117,7 +119,7 @@ try {
     console.log('[3] idempotencia (reintento del mismo pedido)');
     const r1b = await signed('/api/b2c/provision', { ...A, activationAt: Date.now() });
     ok('already_activated, mismo usuario y misma regla', r1b.status === 200 && r1b.body.status === 'already_activated' && r1b.body.userId === r1.body.userId && r1b.body.ruleId === r1.body.ruleId);
-    ok('sin duplicados: 3 reglas, 3 usuarios', J(P.access).length === 3 && J(P.users).length === 3);
+    ok('sin duplicados: 3 reglas, 4 usuarios (fixtures COLE, MIXTO, ADMIN + 1 nuevo)', J(P.access).length === 3 && J(P.users).length === 4);
     ok('expiresAt NO se recalcula', J(P.access).find(r => r.id === 'access-b2c-test-order-1001').expiresAt === r1.body.expiresAt);
     ok('enlace nuevo (respuesta perdida recuperable) y el anterior deja de valer', r1b.body.activationUrl && r1b.body.activationUrl !== r1.body.activationUrl);
     ok('el enlace anterior ya no activa', (await activate(r1.body.activationUrl)) === 404);
@@ -171,13 +173,55 @@ try {
     ok('dry_run_activated con expiresAt calculado', d1.status === 200 && d1.body.status === 'dry_run_activated' && d1.body.expiresAt > Date.now());
     ok('dry-run no escribe usuarios ni reglas', fs.readFileSync(P.users, 'utf8') === snapU && fs.readFileSync(P.access, 'utf8') === snapA);
 
+    console.log('[E] P2-ENTITLEMENT-EXPIRY-01 — Leo, Experiencias y TTS');
+    const call = async (method, path, cookie, body) => { const r = await fetch(base + path, { method, headers: { 'content-type': 'application/json', cookie, origin: 'https://app.test' }, body: body ? JSON.stringify(body) : undefined });
+        let b = null; try { b = await r.json(); } catch { /* */ } return { status: r.status, body: b }; };
+    const expiredCode = (r) => r.status === 403 && r.body?.code === 'ENTITLEMENT_EXPIRED';
+    const premium = async (cookie, uid) => ({
+        ask: await call('POST', '/api/leo/ask', cookie, { question: 'hola', contentId: 'obra-1', userId: uid }),
+        chat: await call('POST', '/api/leo/chat', cookie, { message: 'hola', contentId: 'obra-1', userId: uid }),
+        recap: await call('POST', '/api/leo/recap', cookie, { contentId: 'obra-1', userId: uid }),
+        mem: await call('GET', `/api/leo/memory/${uid}/obra-1`, cookie),
+        list: await call('GET', '/api/experiences', cookie),
+        detail: await call('GET', '/api/experiences/exp-inexistente', cookie),
+        run: await call('POST', '/api/experiences/exp-inexistente/run', cookie, {}),
+        route: await call('GET', '/api/experiences/exp-inexistente/route', cookie),
+        tts: await call('POST', '/api/tts', cookie, { text: 'hola' }),
+    });
+    // A. B2C vigente (1001 sigue vigente en este punto) → nada devuelve ENTITLEMENT_EXPIRED
+    const pA = await premium(L1.cookie, u1.id);
+    ok('A. B2C vigente: Leo, Experiencias y TTS llegan a su lógica (ningún 403)', Object.values(pA).every(r => r.status !== 403), JSON.stringify(Object.fromEntries(Object.entries(pA).map(([k, v]) => [k, v.status]))));
+    // B. B2C vencido sin otras reglas → login sí, premium no
+    const L2b = await login('vencido@fixture.invalid');
+    ok('B. B2C vencido: el login sigue funcionando', L2b.status === 200);
+    const pB = await premium(L2b.cookie, r2.body.userId);
+    ok('B. Leo (ask, chat, recap, memoria) → 403 ENTITLEMENT_EXPIRED', expiredCode(pB.ask) && expiredCode(pB.chat) && expiredCode(pB.recap) && expiredCode(pB.mem));
+    ok('B. Experiencias: listado vacío; detalle, inicio y recorrido → 403', pB.list.status === 200 && Array.isArray(pB.list.body) && pB.list.body.length === 0 && expiredCode(pB.detail) && expiredCode(pB.run) && expiredCode(pB.route));
+    ok('B. TTS → 403', expiredCode(pB.tts));
+    ok('B. libros: tampoco abre la obra B2C', !(await canRead(L2b.cookie, r2.body.userId, 'obra-1')));
+    // C. B2C vencido + colegio vigente → conserva solo lo del colegio
+    const rM = await signed('/api/b2c/provision', order(1010, 'mixto@fixture.invalid', { activationAt: Date.now() - 400 * 864e5 }));
+    ok('C. identidad B2C mixta con suscripción vencida', rM.status === 200 && rM.body.userId === 'MIXTO' && rM.body.expiresAt < Date.now());
+    const LM = await login('mixto@fixture.invalid');
+    ok('C. abre la obra del colegio y NO la obra B2C', await canRead(LM.cookie, 'MIXTO', 'obra-colegio') && !(await canRead(LM.cookie, 'MIXTO', 'obra-1')));
+    const pC = await premium(LM.cookie, 'MIXTO');
+    ok('C. la regla de colegio vigente mantiene Leo y Experiencias (doctrina escolar, ningún 403)', Object.values(pC).every(r => r.status !== 403), JSON.stringify(Object.fromEntries(Object.entries(pC).map(([k, v]) => [k, v.status]))));
+    // D. identidad de colegio (no B2C) con su B2C reembolsado → nada cambia para ella
+    const pD = await premium(L4.cookie, 'COLE');
+    ok('D. colegio con B2C reembolsado: Leo/Experiencias sin bloqueo (ningún 403) y su obra de colegio intacta', Object.values(pD).every(r => r.status !== 403) && await canRead(L4.cookie, 'COLE', 'obra-colegio'));
+    ok('D. las reglas de colegio siguen intactas en el almacén', JSON.stringify(J(P.access).find(r => r.id === 'rule-colegio').titleIds) === '["obra-colegio"]');
+
     console.log('[10] entrada inválida y registros');
     ok('plan inválido → 400 invalid_plan', (await signed('/api/b2c/provision', order(1006, 'x@fixture.invalid', { plan: 'mensual' }))).body?.code === 'invalid_plan');
     ok('clave de idempotencia ajena → 400', (await signed('/api/b2c/provision', order(1007, 'x@fixture.invalid', { idempotencyKey: 'test:order:1' }))).status === 400);
     await sleep(300);
     const leaks = boot.split(/\r?\n/).filter(l => /comprador\.uno@|vencido@|nuevo@/i.test(l));
     console.log('    líneas con correo (rutas preexistentes):', JSON.stringify(leaks.map(l => l.replace(/\S+@fixture\.invalid/gi, '<correo>').slice(0, 120))));
-    ok('las líneas [B2C] no contienen correos', !leaks.some(l => l.includes('[B2C]')));
+    await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'nadie@fixture.invalid', password: 'x' }) });
+    await sleep(200);
+    const fullEmails = boot.split(/\r?\n/).filter(l => /[\w.+-]+@fixture\.invalid/i.test(l));
+    ok('CHP-PRIVACY-LOGGING-01: ningún registro contiene un correo completo', fullEmails.length === 0, JSON.stringify(fullEmails.map(l => l.slice(0, 100))));
+    ok('el login fallido se registra redactado', /Login fallido: n\*\*\*@fixture\.invalid/.test(boot));
     ok('los registros no contienen el secreto ni tokens de invitación', !boot.includes(SECRET) && !/[0-9a-f]{64}/.test(boot));
 
     console.log(`\nresultado: ${pass} correctas, ${fail} fallidas`);

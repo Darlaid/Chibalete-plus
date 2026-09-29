@@ -48,6 +48,8 @@ import {
 } from './observability/metrics.js';
 import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js';
 import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
+import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
+import { redactEmail } from './lib/logPrivacy.js';
 import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
@@ -729,6 +731,11 @@ const requireUserAuth = async (req, res, next) => {
     req.user = user;
     next();
 };
+
+// P2-ENTITLEMENT-EXPIRY-01: Leo, Experiencias y TTS exigen entitlement vigente a las identidades B2C.
+// Resolución perezosa: resolveUserContentAccess se inicializa más abajo (accessService).
+const b2cEntitlementGuard = createB2cEntitlementGuard({ resolve: (id) => resolveUserContentAccess(id), log });
+const b2cEntitlementListGuard = createB2cEntitlementGuard({ resolve: (id) => resolveUserContentAccess(id), log, onExpired: 'empty' });
 
 /**
  * Validates that the authenticated user (x-user-id header) matches the :userId URL param.
@@ -2383,18 +2390,18 @@ app.post('/api/experiences/:id/cover', requireAdminAccess, (req, res) => {
 });
 
 // ── Usuario (actor = sesión canónica; sin identidades del cliente) ──────────
-app.get('/api/experiences', requireUserAuth, (req, res) => {
+app.get('/api/experiences', requireUserAuth, b2cEntitlementListGuard, (req, res) => {
     try { res.json(experienceStore.listPublishedFor(readMook(), req.user.id)); }
     catch (e) { res.status(500).json({ error: 'No se pudieron listar las Experiencias' }); }
 });
 
 // Landing (comprender ANTES de iniciar) — NO crea run.
-app.get('/api/experiences/:id', requireUserAuth, (req, res) => {
+app.get('/api/experiences/:id', requireUserAuth, b2cEntitlementGuard, (req, res) => {
     try { res.json(experienceStore.experienceDetail(readMook(), req.params.id, req.user.id)); }
     catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
-app.post('/api/experiences/:id/run', requireUserAuth, async (req, res) => {
+app.post('/api/experiences/:id/run', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         const contentList = readJSON(DB_FILE);
         let out;
@@ -2408,7 +2415,7 @@ app.post('/api/experiences/:id/run', requireUserAuth, async (req, res) => {
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
-app.get('/api/experiences/:id/route', requireUserAuth, (req, res) => {
+app.get('/api/experiences/:id/route', requireUserAuth, b2cEntitlementGuard, (req, res) => {
     try {
         const doc = readMook();
         const run = doc.runs.find(r => r.userId === req.user.id && r.experienceId === req.params.id && r.status !== 'abandoned');
@@ -2417,7 +2424,7 @@ app.get('/api/experiences/:id/route', requireUserAuth, (req, res) => {
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
-app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth, async (req, res) => {
+app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         let out;
         await mutateMook((doc) => {
@@ -2442,7 +2449,7 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth,
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
-app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth, async (req, res) => {
+app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         let out;
         await mutateMook((doc) => {
@@ -2604,7 +2611,7 @@ app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res
 // Reenvío del participante tras ajustes solicitados — dueño derivado de sesión;
 // la entrega anterior se conserva (append-only). Emite el tipo EXISTENTE
 // evidence_submitted (flag dormant intacto; payload solo ids, sin contenido).
-app.post('/api/experiences/evidence/:evidenceId/resubmit', requireUserAuth, async (req, res) => {
+app.post('/api/experiences/evidence/:evidenceId/resubmit', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         let ev;
         await mutateMook((doc) => {
@@ -4645,7 +4652,7 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
                 user.password = await hashPasswordIfNeeded(password);
                 users[userIndex] = user;
                 writeJSONAsync(USERS_DB, users).catch(e => log(`Auto-upgrade write error: ${e.message}`, 'ERROR'));
-                log(`Auto-upgraded password hash for legacy user: ${normalizedEmail}`, 'ACCESS');
+                log(`Auto-upgraded password hash for legacy user: user=${user.id}`, 'ACCESS');
             }
         }
 
@@ -4655,7 +4662,7 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
             //   (a) que el email existe, (b) que la contraseña era correcta.
             // El detalle real queda solo en logs internos.
             if (!isUserActive(user)) {
-                log(`Login bloqueado para ${normalizedEmail}: accountStatus=${user.accountStatus}`, 'ACCESS');
+                log(`Login bloqueado para user=${user.id}: accountStatus=${user.accountStatus}`, 'ACCESS');
                 return res.status(401).json({ error: 'Credenciales inválidas' });
             }
             // Sprint Modo Accesible — persistir lastLoginAt en el momento exacto
@@ -4666,7 +4673,7 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
             user.lastLoginAt = new Date().toISOString();
             users[userIndex] = user;
             writeJSONAsync(USERS_DB, users).catch(e => log(`lastLoginAt write error: ${e.message}`, 'ERROR'));
-            log(`Login exitoso: ${normalizedEmail} ip=${req.ip}`, 'ACCESS');
+            log(`Login exitoso: user=${user.id} ip=${req.ip}`, 'ACCESS');
             // CHP-IDDB-M1-A: emite sesión firmada (cookie HttpOnly) si el modo lo
             // habilita. En 'off' es no-op y el cliente sigue con x-user-id.
             await issueSessionCookie(res, user);
@@ -4674,8 +4681,8 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
         }
     }
 
-    const safeEmail = normalizedEmail || 'unknown';
-    log(`Login fallido: ${safeEmail} ip=${req.ip}`, 'ACCESS');
+    // CHP-PRIVACY-LOGGING-01: sin identidad conocida, solo forma redactada.
+    log(`Login fallido: ${redactEmail(normalizedEmail)} ip=${req.ip}`, 'ACCESS');
     res.status(401).json({ error: 'Credenciales inválidas' });
 });
 
@@ -4795,7 +4802,7 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
     }
 
     if (result.regenerated) {
-        log(`Invite regenerated: ${result.email} (${result.userId}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+        log(`Invite regenerated: user=${result.userId} expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
         return res.status(200).json({
             success:       true,
             userId:        result.userId,
@@ -4807,7 +4814,7 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
         });
     }
 
-    log(`Invite created: ${newUser.email} (${newUser.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+    log(`Invite created: user=${newUser.id} expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
     res.status(201).json({
         success:       true,
         userId:        newUser.id,
@@ -4844,7 +4851,7 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
         const user = users[index];
         if (user.accountStatus !== 'invited') return { conflict: 'already_active' };
         if (!user.inviteExpiresAt || Date.now() > user.inviteExpiresAt) {
-            log(`Accept-invite rechazado — token expirado: ${user.email}`, 'ACCESS');
+            log(`Accept-invite rechazado — token expirado: user=${user.id}`, 'ACCESS');
             return { conflict: 'expired' };
         }
         const { inviteToken: _tok, inviteExpiresAt: _exp, ...rest } = user;
@@ -4858,7 +4865,7 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
     if (conflict?.conflict === 'already_active') return res.status(409).json({ error: 'Esta cuenta ya fue activada' });
     if (conflict?.conflict === 'expired') return res.status(410).json({ error: 'El enlace de invitación expiró. Solicita uno nuevo a tu administrador.', code: 'TOKEN_EXPIRED' });
 
-    log(`Account activated: ${activated.email} (${activated.id})`, 'ACCESS');
+    log(`Account activated: user=${activated.id}`, 'ACCESS');
     return res.status(200).json({
         success: true,
         user:    sanitizeUserForClient(activated),
@@ -4898,7 +4905,7 @@ app.post('/api/resend-invite', requireAuth, async (req, res) => {
     if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
     if (conflict?.conflict === 'wrong_status') return res.status(409).json({ error: `No se puede reenviar: la cuenta está en estado '${conflict.status}'` });
 
-    log(`Invite resent: ${sentUser.email} (${sentUser.id}) expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
+    log(`Invite resent: user=${sentUser.id} expires=${new Date(inviteExpiresAt).toISOString()}`, 'ACCESS');
     return res.status(200).json({
         success:       true,
         userId:        sentUser.id,
@@ -5044,11 +5051,11 @@ const handleResetConfirm = async (req, res) => {
         if (index === -1) return { conflict: 'not_found' };
         const user = users[index];
         if (!isUserActive(user)) {
-            log(`Reset rechazado — cuenta no activa: ${user.email} status=${user.accountStatus}`, 'ACCESS');
+            log(`Reset rechazado — cuenta no activa: user=${user.id} status=${user.accountStatus}`, 'ACCESS');
             return { conflict: 'not_active' };
         }
         if (!user.resetExpiresAt || Date.now() > user.resetExpiresAt) {
-            log(`Reset rechazado — token expirado: ${user.email}`, 'ACCESS');
+            log(`Reset rechazado — token expirado: user=${user.id}`, 'ACCESS');
             return { conflict: 'expired' };
         }
         const { resetToken: _rt, resetExpiresAt: _re, ...rest } = user;
@@ -5068,7 +5075,7 @@ const handleResetConfirm = async (req, res) => {
     if (conflict?.conflict === 'not_active') return res.status(409).json({ error: 'No se puede restablecer esta cuenta' });
     if (conflict?.conflict === 'expired') return res.status(410).json({ error: 'El enlace de restablecimiento expiró. Solicita uno nuevo.', code: 'TOKEN_EXPIRED' });
 
-    log(`Password reset completed: ${updated.email} (${updated.id})`, 'ACCESS');
+    log(`Password reset completed: user=${updated.id}`, 'ACCESS');
     writeAuditLog({
         action:       'reset_password_confirm',
         targetUserId: updated.id,
@@ -5185,7 +5192,7 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
         });
     }
 
-    log(`User created: ${userToSave.email} (${userToSave.id})`, 'ACCESS');
+    log(`User created: user=${userToSave.id}`, 'ACCESS');
     writeAuditLog({
         action:       'create_user',
         targetUserId: userToSave.id,
@@ -8406,7 +8413,7 @@ const _ttsSemaphore = (() => {
 // --- TTS ON-DEMAND (Sprint 1 — Security) ---
 // Centraliza la generación de audio en el backend.
 // El frontend nunca llama a proveedores de IA directamente.
-app.post('/api/tts', requireUserAuth, ttsUserLimiter, async (req, res) => {
+app.post('/api/tts', requireUserAuth, b2cEntitlementGuard, ttsUserLimiter, async (req, res) => {
     const { text } = req.body;
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -8709,7 +8716,7 @@ app.post('/api/admin/album-cache/gc', requireAdminAccess, async (req, res) => {
 });
 
 // --- LEO PEDAGOGICAL ENGINE (Fase 5 / D1) ---
-app.post('/api/leo/ask', requireUserAuth, async (req, res) => {
+app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'companion', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -8749,7 +8756,7 @@ app.post('/api/leo/ask', requireUserAuth, async (req, res) => {
 });
 
 // --- LEO MEMORY (Fase 5.6) ---
-app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, (req, res) => {
+app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const key = makeProgressKey(userId, contentId);
@@ -8775,7 +8782,7 @@ app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, (req, res) => {
     }
 });
 
-app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, async (req, res) => {
+app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const payload = req.body;
@@ -8855,7 +8862,7 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
 });
 
 // --- LEO CHAT (Fase 6 / D1) ---
-app.post('/api/leo/chat', requireUserAuth, async (req, res) => {
+app.post('/api/leo/chat', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'chatbot', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -8873,7 +8880,7 @@ app.post('/api/leo/chat', requireUserAuth, async (req, res) => {
 });
 
 // --- LEO RECAP (Fase 6 / D1) ---
-app.post('/api/leo/recap', requireUserAuth, async (req, res) => {
+app.post('/api/leo/recap', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'recap', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
