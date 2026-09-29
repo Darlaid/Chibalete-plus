@@ -12,6 +12,7 @@ import { useAccessCheck } from '../hooks/useAccessCheck';
 import {
     deriveAlbumFromVisible,
     gateProgressByVisible,
+    isPedagogyChildMaterial,
 } from '../utils/libraryCatalogSelection.mjs';
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — capas INSTITUTIONAL y PERSONAL.
 // Ambas pestañas dibujan EXACTAMENTE la vista que devuelve el servidor: la
@@ -277,7 +278,11 @@ const Biblioteca: React.FC = () => {
             const hiddenSet = new Set(schoolConfig.hiddenContentIds);
             // V4: standalone === false = contenido destinado a Experiencias; no se
             // descubre como obra independiente en Biblioteca (ausente ⇒ visible).
-            return list.filter(c => c && c.id && !hiddenSet.has(c.id) && (c as any).standalone !== false);
+            // CHP-UI-PEDAGOGY-VISIBILITY-01: guías/contextos hijos de un libro se
+            // consultan desde la ficha del padre, no como tarjeta suelta.
+            const findById = (id: string) => dataService.getContenidoById(id);
+            return list.filter(c => c && c.id && !hiddenSet.has(c.id) && (c as any).standalone !== false
+                && !isPedagogyChildMaterial(c, findById));
         };
 
         // CHP-MOOK-V4 — pestaña Experiencias: descubrimiento y entrada al runtime.

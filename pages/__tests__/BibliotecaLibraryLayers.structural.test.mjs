@@ -276,5 +276,31 @@ section('[M1-A] el navegador sigue sin emitir x-user-id');
     }
 }
 
+// ── CHP-UI-PEDAGOGY-VISIBILITY-01 R2A — materiales pedagógicos hijos ────────
+section('[CM] materiales pedagógicos hijos: solo presentación top-level');
+{
+    const fh = page.slice(page.indexOf('const filterHidden = '));
+    const body = fh.slice(0, fh.indexOf('\n        };'));
+    ok('filterHidden aplica isPedagogyChildMaterial', body.includes('isPedagogyChildMaterial(c, findById)'));
+    ok('…junto a los filtros de presentación existentes',
+        body.includes('hiddenSet.has(c.id)') && body.includes('standalone !== false'));
+    ok('el padre se resuelve en el catálogo canónico del cliente', body.includes('dataService.getContenidoById(id)'));
+    ok('la regla se importa del módulo de presentación',
+        /isPedagogyChildMaterial,\s*\n\}\s*from '\.\.\/utils\/libraryCatalogSelection\.mjs'/.test(page));
+    const sel = read('utils/libraryCatalogSelection.mjs');
+    const fn = sel.slice(sel.indexOf('export function isPedagogyChildMaterial('));
+    const fnBody = fn.slice(0, fn.indexOf('\n}'));
+    ok('regla estrecha: solo guia y contexto_pedagogico',
+        /PEDAGOGY_CHILD_MATERIAL_TYPES = Object\.freeze\(\['guia', 'contexto_pedagogico'\]\)/.test(sel));
+    ok('exige parentId, padre existente y padre no colección',
+        fnBody.includes('item.parentId') && fnBody.includes('!!parent') && fnBody.includes('!parent.isCollection'));
+    ok('no es una regla genérica parentId → oculto', !/standalone|podcast|video/.test(fnBody));
+    // El flujo del padre no cambia.
+    const detail = read('pages/PaginaDetalleLibro.tsx');
+    ok('la ficha del libro sigue listando sus hijos', detail.includes('dataService.getContenidosHijos(content.id'));
+    ok('getContenidosHijos sigue sin filtro de presentación',
+        /getContenidosHijos\(parentId: string[^)]*\): Content\[\] \{[\s\S]{0,300}?return this\.content\.filter\(c => c\.parentId === parentId\);/.test(client));
+}
+
 console.log(`\nBibliotecaLibraryLayers.structural: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

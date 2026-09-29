@@ -104,6 +104,30 @@ export function hydrateVisibleContent(authorizedIds, cachedContent) {
 }
 
 /**
+ * CHP-UI-PEDAGOGY-VISIBILITY-01 — material pedagógico HIJO de un libro.
+ *
+ * Las guías y los contextos pedagógicos que se suben como materiales de un
+ * libro (`parentId` → ese libro) se consultan desde la ficha del padre
+ * (`getContenidosHijos`); no son títulos de primer nivel. Filtro de
+ * PRESENTACIÓN: no quita nada del catálogo autorizado ni del acceso.
+ *
+ * Deliberadamente estrecho: no oculta podcasts ni vídeos hijos, ni hijos con
+ * padre inexistente (su única entrada es Biblioteca), ni miembros de una
+ * colección (`parentId` → colección también marca pertenencia).
+ *
+ * @param {object} item contenido candidato a tarjeta top-level
+ * @param {(id: string) => object|undefined} findById búsqueda en el catálogo canónico
+ */
+export const PEDAGOGY_CHILD_MATERIAL_TYPES = Object.freeze(['guia', 'contexto_pedagogico']);
+
+export function isPedagogyChildMaterial(item, findById) {
+    if (!item || !item.parentId) return false;
+    if (!PEDAGOGY_CHILD_MATERIAL_TYPES.includes(item.tipo)) return false;
+    const parent = typeof findById === 'function' ? findById(item.parentId) : undefined;
+    return !!parent && !parent.isCollection;
+}
+
+/**
  * Pestaña «Libros Álbum» — misma derivación que `dataService.getLibrosAlbum`,
  * pero aplicada sobre el conjunto autorizado por el servidor en vez de sobre el
  * catálogo completo filtrado en cliente. Filtro de PRESENTACIÓN por `tipo`.
