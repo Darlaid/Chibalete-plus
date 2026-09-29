@@ -47,6 +47,8 @@ import {
     authSessionSubjectMismatch, authSessionRevoked,
 } from './observability/metrics.js';
 import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js';
+import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
+import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -290,7 +292,8 @@ app.use(cors({
     },
     credentials: true
 }));
-app.use(express.json());
+// CHP-B2C-PROVISIONING-01: se conserva el cuerpo crudo SOLO en /api/b2c/ (HMAC sobre los bytes exactos).
+app.use(express.json({ verify: (req, _res, buf) => { if (req.originalUrl && req.originalUrl.startsWith('/api/b2c/')) req.rawBody = buf.toString('utf8'); } }));
 
 // CHP-ACCESS-PEDAGOGY-01D-B — ruta del autorizador de assets que el edge
 // consulta por `auth_request`. El edge la consulta UNA VEZ POR ASSET, así que
@@ -4904,6 +4907,73 @@ app.post('/api/resend-invite', requireAuth, async (req, res) => {
         inviteExpiresAt,
         activationUrl: `/#/activar?token=${inviteToken}`,
     });
+});
+
+// ---------------------------------------------------------------------------
+// CHP-B2C-PROVISIONING-01 (WEB-REORG P2-C) — tienda → Chibalete+, servidor a servidor.
+// Autenticación: HMAC con secreto dedicado file-only (/app/secrets/b2c_provisioning_secret).
+// Una regla de ámbito usuario por pedido, con caducidad; nunca se toca el grupo B2C compartido.
+// Lógica pura y pruebas: server/b2c/b2cProvisioning.mjs.
+// ---------------------------------------------------------------------------
+const b2cGuard = createB2cGuard({ readSecret: readB2cProvisioningSecret, log });
+const b2cFail = (res, e) => {
+    if (e instanceof B2cError) return res.status(e.status).json({ status: 'error', code: e.code });
+    log(`[B2C] unexpected error: ${e?.message || e}`, 'ERROR');
+    return res.status(500).json({ status: 'error', code: 'internal_error' });
+};
+
+app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
+    try {
+        const nowMs = Date.now();
+        const input = validateProvisionInput(req.body, nowMs);
+        const newToken = crypto.randomBytes(32).toString('hex');
+        const newUserId = `user-${nowMs}-${crypto.randomBytes(3).toString('hex')}`;
+        const readRulesFresh = () => { _jsonCache.delete(ACCESS_DB); const r = readJSON(ACCESS_DB); return Array.isArray(r) ? r : []; };
+
+        // Fase 1 — identidad (lock de usuarios). Sin regla todavía = sin acceso (modo restringido).
+        const userPhase = await mutateUsers((users) => {
+            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken });
+            if (input.dryRun || plan.userOp === 'none') return plan;
+            if (plan.userOp === 'create') users.push(plan.user);
+            else users[users.findIndex(u => u.id === plan.userId)] = plan.user;
+            writeJSON(USERS_DB, users);
+            return plan;
+        });
+
+        // Fase 2 — regla personal con caducidad (lock de accesos).
+        const rulePhase = await mutateAccessRules((rules) => {
+            const plan = planRulePhase({ rules, input, userId: userPhase.userId, nowMs });
+            if (!input.dryRun && plan.ruleOp === 'create') { rules.push(plan.rule); writeJSON(ACCESS_DB, rules); }
+            return plan;
+        });
+
+        const status = rulePhase.ruleOp === 'none' ? 'already_activated' : 'activated';
+        log(`[B2C] provision ${input.source}:${input.orderId} → ${input.dryRun ? 'dry_run:' : ''}${status} user=${userPhase.userId} userOp=${userPhase.userOp}`, 'ACCESS');
+        return res.status(200).json({
+            status: input.dryRun ? `dry_run_${status}` : status,
+            ruleId: rulePhase.rule.id,
+            userId: userPhase.userId,
+            activationAt: rulePhase.rule.b2c?.activationAt ?? input.activationAt,
+            expiresAt: rulePhase.rule.expiresAt,
+            accountStatus: userPhase.user?.accountStatus || 'active',
+            activationUrl: userPhase.activationUrl,
+            reusedAccount: userPhase.reusedAccount,
+        });
+    } catch (e) { return b2cFail(res, e); }
+});
+
+app.post('/api/b2c/revoke', b2cGuard, async (req, res) => {
+    try {
+        const nowMs = Date.now();
+        const input = validateRevokeInput(req.body);
+        const plan = await mutateAccessRules((rules) => {
+            const p = planRevoke({ rules, input, nowMs });
+            if (!input.dryRun && p.ruleOp === 'update') { rules[rules.findIndex(r => r.id === p.rule.id)] = p.rule; writeJSON(ACCESS_DB, rules); }
+            return p;
+        });
+        log(`[B2C] revoke ${input.source}:${input.orderId} → ${plan.status}`, 'ACCESS');
+        return res.status(200).json({ status: plan.status, ruleId: plan.rule.id, expiresAt: plan.rule.expiresAt });
+    } catch (e) { return b2cFail(res, e); }
 });
 
 // ---------------------------------------------------------------------------
