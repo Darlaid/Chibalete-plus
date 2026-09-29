@@ -29,6 +29,7 @@ import {
     deriveAlbumFromVisible,
     deriveRecommendedFromVisible,
     gateProgressByVisible,
+    isPedagogyChildMaterial,
 } from '../../utils/libraryCatalogSelection.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -142,10 +143,11 @@ function preflightAllows(user, item, contentList = CONTENT) {
 }
 
 /** Pestaña Libros tal y como la arma la página, con las funciones REALES. */
-const libraryBooksTab = (user, cached = CONTENT) => {
-    const visible = hydrateVisibleContent(parseMyCatalogResponse(myCatalog(user)), cached) ?? [];
+const libraryBooksTab = (user, cached = CONTENT, contentList = CONTENT) => {
+    const visible = hydrateVisibleContent(parseMyCatalogResponse(myCatalog(user, contentList)), cached) ?? [];
     // `filterHidden` de Biblioteca.tsx: presentación, no acceso.
-    return visible.filter(c => c && c.id && c.standalone !== false);
+    const findById = (id) => cached.find(c => c.id === id);
+    return visible.filter(c => c && c.id && c.standalone !== false && !isPedagogyChildMaterial(c, findById));
 };
 const byId = (u) => USERS.find(x => x.id === u);
 
@@ -467,6 +469,66 @@ section('[PV] MY_CATALOG_PREFLIGHT_PARITY (pedagogía)');
     ok('NO-BYPASS · admin: preflight concede pv-gen', preflightAllows(users.admin, item('pv-gen'), PV));
     ok('NO-BYPASS · …y my-catalog no lo incluye', !cat(users.admin).includes('pv-gen'));
     ok('NO-BYPASS · mediador sin restricción: tampoco', !cat(users.medOpen).includes('pv-gen'));
+}
+
+// ── CM · CHP-UI-PEDAGOGY-VISIBILITY-01 R2A — materiales pedagógicos hijos ────
+section('[CM] PEDAGOGY_CHILD_MATERIALS fuera del nivel superior');
+{
+    // Forma real de producción (ids reales de los casos B–E).
+    const CM = [
+        { id: 'cm-libro-alicia', tipo: 'libro', titulo: 'Alicia' },
+        { id: 'cm-libro-guerra', tipo: 'libro', titulo: 'La guerra de los mundos' },
+        { id: 'cm-libro-ajedrez', tipo: 'libro', titulo: 'Novela de ajedrez' },
+        { id: 'cm-col', tipo: 'libro', titulo: 'Colección', isCollection: true },
+        { id: 'cm-guia', tipo: 'guia', titulo: 'Guía de lectura', parentId: 'cm-libro-alicia' },
+        { id: 'cm-ctx', tipo: 'contexto_pedagogico', titulo: 'bio carroll', parentId: 'cm-libro-alicia' },
+        { id: 'child-content-1765751724398-0-1765814004450', tipo: 'podcast', titulo: 'La guerra de los mundos (1938)', parentId: 'cm-libro-guerra' },
+        { id: 'content-1765986434403-0', tipo: 'video', titulo: 'Detrás de las páginas 009', parentId: 'cm-libro-ajedrez' },
+        { id: 'content-1765984421218-0', tipo: 'video', titulo: 'Alicia Capítulo 1', parentId: 'content-1765753010425' },
+        { id: 'content-1765985212432-0', tipo: 'video', titulo: 'Alicia Capítulo 2', parentId: 'content-1765753010425' },
+        { id: 'cm-col-libro', tipo: 'libro', titulo: 'Miembro de colección', parentId: 'cm-col' },
+        { id: 'cm-col-guia', tipo: 'guia', titulo: 'Guía miembro de colección', parentId: 'cm-col' },
+        { id: 'cm-guia-huerfana', tipo: 'guia', titulo: 'Guía huérfana', parentId: 'cm-no-existe' },
+        { id: 'cm-art', tipo: 'articulo_pedagogico', titulo: 'Aprendizaje basado en retos' },
+        { id: 'cm-emb', tipo: 'guia', titulo: 'Nodo', standalone: false },
+    ];
+    const admin = { id: 'cm-admin', roles: ['administrador'] };
+    USERS.push({ ...admin, accountStatus: 'active' });
+    const GENERAL_GRANTS = CM.filter(c => !isPedagogyRestrictedItem(c)).map(c => c.id);
+    ACCESS.push({ id: 'r-cm-admin', scope: 'user', scopeId: admin.id, titleIds: GENERAL_GRANTS, collectionIds: [] });
+
+    const catalog = myCatalog(admin, CM).catalog.map(r => r.id);
+    const tab = libraryBooksTab(admin, CM, CM).map(c => c.id);
+    const byId = (id) => CM.find(c => c.id === id);
+
+    // A. guía / contexto pedagógico con padre existente
+    ok('A · la guía hija está en el catálogo autorizado', catalog.includes('cm-guia'));
+    ok('A · …y NO aparece como tarjeta top-level', !tab.includes('cm-guia'));
+    ok('A · el contexto pedagógico hijo tampoco', catalog.includes('cm-ctx') && !tab.includes('cm-ctx'));
+    // B–E. hijos legítimos que siguen visibles
+    ok('B · podcast hijo de libro (La guerra de los mundos) SIGUE visible', tab.includes('child-content-1765751724398-0-1765814004450'));
+    ok('C · vídeo hijo de libro (Novela de ajedrez) SIGUE visible', tab.includes('content-1765986434403-0'));
+    ok('D · vídeo huérfano Alicia Cap. 1 SIGUE visible', tab.includes('content-1765984421218-0'));
+    ok('E · vídeo huérfano Alicia Cap. 2 SIGUE visible', tab.includes('content-1765985212432-0'));
+    // F. colecciones
+    ok('F · libro miembro de una colección SIGUE visible', tab.includes('cm-col-libro'));
+    ok('F · guía cuyo parentId es una colección SIGUE visible', tab.includes('cm-col-guia'));
+    ok('F · guía con padre inexistente SIGUE visible (única entrada)', tab.includes('cm-guia-huerfana'));
+    // Independientes y standalone:false
+    ok('independiente · articulo_pedagogico sin parentId aparece normal', tab.includes('cm-art'));
+    ok('independiente · los libros padre aparecen normal',
+        ['cm-libro-alicia', 'cm-libro-guerra', 'cm-libro-ajedrez'].every(id => tab.includes(id)));
+    ok('standalone:false sigue oculto como antes', !tab.includes('cm-emb'));
+    // Acceso intacto: es presentación, no entitlement.
+    ok('my-catalog NO cambia: incluye los materiales hijos', ['cm-guia', 'cm-ctx'].every(id => catalog.includes(id)));
+    ok('preflight NO cambia: el admin sigue autorizado a la guía hija', preflightAllows(admin, byId('cm-guia'), CM));
+    // C (encargo). Accesible desde el padre: misma relación que getContenidosHijos.
+    const hijos = (parentId) => CM.filter(c => c.parentId === parentId).map(c => c.id);
+    ok('el material sigue disponible desde su libro padre (getContenidosHijos)',
+        setEq(hijos('cm-libro-alicia'), ['cm-guia', 'cm-ctx']), JSON.stringify(hijos('cm-libro-alicia')));
+    // Predicado aislado
+    ok('predicado · sin lookup no oculta nada (fail-open de presentación)', !isPedagogyChildMaterial(byId('cm-guia'), undefined));
+    ok('predicado · sin parentId → false', !isPedagogyChildMaterial(byId('cm-art'), byId));
 }
 
 console.log(`\nlibraryServerAuthoritative: ${pass} passed, ${fail} failed`);
