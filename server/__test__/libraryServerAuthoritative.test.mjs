@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { createAccessService, isPedagogyRestrictedItem } from '../accessService.js';
+import { createAccessService, createPrivilegedContentAccess, isPedagogyRestrictedItem } from '../accessService.js';
 import {
     parseMyCatalogResponse,
     hydrateVisibleContent,
@@ -98,7 +98,7 @@ const normalizeUser = (u) => (u ? { ...u } : u);
 const normalizeGroup = (g) => (g ? { ...g, type: ['course', 'club'].includes(g.type) ? g.type : 'course',
     mediatorIds: g.mediatorIds ?? [], memberIds: g.memberIds ?? [] } : g);
 
-const { getAccessibleContentIds } = createAccessService({
+const { getAccessibleContentIds, canUserAccessContent } = createAccessService({
     readJSON, log: () => {}, normalizeUser, normalizeGroup,
     USERS_DB, GROUPS_DB, ACCESS_DB, fallbackMode: 'restricted',
 });
@@ -106,16 +106,39 @@ const { getAccessibleContentIds } = createAccessService({
 const PEDAGOGY_PRIVILEGED_ROLES = ['administrador', 'mediador'];
 const rolesOf = (u) => u.roles ?? (u.rol ? [u.rol] : []);
 
-/** Réplica del cuerpo de `GET /api/content/my-catalog` (server.js). */
-function myCatalog(user) {
+// CHP-UI-PEDAGOGY-VISIBILITY-01 — school_configs en memoria para la decisión
+// de rol REAL (createPrivilegedContentAccess), la misma que usa el preflight.
+let SCHOOL_CONFIGS = [];
+const privilegedFor = (user, contentList = CONTENT) => createPrivilegedContentAccess(user, {
+    loadSchoolConfigs: () => SCHOOL_CONFIGS,
+    resolveCollectionContentIds: (ids) => contentList.filter(c => c.parentId && ids.includes(c.parentId)).map(c => c.id),
+});
+
+/** Réplica de `visibleCatalogForUser` + cuerpo de `GET /api/content/my-catalog` (server.js). */
+function myCatalog(user, contentList = CONTENT) {
     const { titleIds, collectionIds } = getAccessibleContentIds(user.id);
     const seesPedagogy = rolesOf(user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
-    const catalog = CONTENT.filter(item =>
+    const privileged = privilegedFor(user, contentList);
+    const catalog = contentList.filter(item =>
+        (!privileged || privileged(item.id).allowed) &&
         (titleIds.includes(item.id) ||
-            (item.collectionId && collectionIds.includes(item.collectionId))) &&
+            (item.collectionId && collectionIds.includes(item.collectionId)) ||
+            (privileged && isPedagogyRestrictedItem(item))) &&
         (seesPedagogy || !isPedagogyRestrictedItem(item))
     );
     return { success: true, catalog: catalog.map(i => ({ id: i.id, title: i.titulo, type: i.tipo, coverImage: null, collectionId: i.collectionId ?? null })) };
+}
+
+/**
+ * Modelo del preflight `GET /api/content/:id/access` con fallbackMode
+ * 'restricted' (el de estos fixtures): decisión de rol → veto pedagógico →
+ * scope engine. Asignaciones: siempre vacías en el servidor actual.
+ */
+function preflightAllows(user, item, contentList = CONTENT) {
+    const privileged = privilegedFor(user, contentList);
+    if (privileged) return privileged(item.id).allowed;
+    if (isPedagogyRestrictedItem(item)) return false;
+    return canUserAccessContent(user.id, item.id, item).allowed;
 }
 
 /** Pestaña Libros tal y como la arma la página, con las funciones REALES. */
@@ -150,6 +173,19 @@ section('[0] la réplica del handler sigue coincidiendo con el fuente');
     ok('mismo predicate de títulos/colecciones',
         pred.includes('titleIds.includes(item.id)') && pred.includes('collectionIds.includes(item.collectionId)'));
     ok('mismo predicate pedagógico', pred.includes('seesPedagogy || !isPedagogyRestrictedItem(item)'));
+    // CHP-UI-PEDAGOGY-VISIBILITY-01
+    ok('recorta con la decisión de rol del preflight',
+        pred.includes('privilegedContentAccessFor(user)') && pred.includes('!privileged || privileged(item.id).allowed'));
+    ok('pedagogía independiente solo por rol privilegiado',
+        pred.includes('privileged && isPedagogyRestrictedItem(item)'));
+    const pf = src.slice(src.indexOf("app.get('/api/content/:id/access'"));
+    const pfBody = pf.slice(0, pf.indexOf('\n});'));
+    ok('el preflight usa la MISMA decisión de rol', pfBody.includes('privilegedContentAccessFor(user)'));
+    ok('el preflight ya no replica la lógica de rol/schoolConfig del mediador',
+        !pfBody.includes("roles.includes('mediador')") && !pfBody.includes("roles.includes('administrador')"));
+    const helper = src.slice(src.indexOf('function privilegedContentAccessFor('));
+    ok('privilegedContentAccessFor delega en createPrivilegedContentAccess',
+        helper.slice(0, helper.indexOf('\n}')).includes('createPrivilegedContentAccess(user'));
 }
 
 // ── §8 CASOS OBLIGATORIOS ───────────────────────────────────────────────────
@@ -185,10 +221,14 @@ section('[8] casos A–J');
     ok('E · mediador NO recibe el catálogo completo', v.length < CONTENT.length);
     ok('E · el mediador sí ve pedagogía (rol, decidido en servidor)', v.includes('c-ped-1'));
 }
-// F. admin sin reglas → vacío
+// F. admin sin reglas → sin bypass para el contenido general
+// CHP-UI-PEDAGOGY-VISIBILITY-01: el material pedagógico independiente no lleva
+// grants (se concede por rol) y el preflight se lo autoriza: sí aparece.
 {
-    const v = libraryBooksTab(byId('u-admin'));
-    ok('F · admin sin reglas → Biblioteca vacía, sin bypass', v.length === 0, JSON.stringify(v.map(c => c.id)));
+    const v = libraryBooksTab(byId('u-admin')).map(c => c.id);
+    ok('F · admin sin reglas → ningún contenido general, sin bypass',
+        !v.some(id => !isPedagogyRestrictedItem(CONTENT.find(c => c.id === id))), JSON.stringify(v));
+    ok('F · admin sin reglas → sí recibe el pedagógico independiente', setEq(v, ['c-ped-1']), JSON.stringify(v));
 }
 // G. pedagógico no permitido
 {
@@ -336,6 +376,97 @@ section('[E] Biblioteca.tsx no decide entitlement');
     ok('getContenidos sigue existiendo para las demás superficies', ds.includes('getContenidos(roles: string[]'));
     ok('getLibrosAlbum sigue existiendo', ds.includes('getLibrosAlbum(roles: string[]'));
     ok('getRecomendadosComunidad sigue existiendo', ds.includes('getRecomendadosComunidad(roles: string[]'));
+}
+
+// ── PV · CHP-UI-PEDAGOGY-VISIBILITY-01 — my-catalog ⇔ preflight ────────────
+section('[PV] MY_CATALOG_PREFLIGHT_PARITY (pedagogía)');
+{
+    // Forma real de producción: módulos 1–3 `libro` con grant; Programa y
+    // módulos 4–9 `articulo_pedagogico` SIN grant (el migrador V6 los excluye).
+    const PV = [
+        { id: 'pv-m1', tipo: 'libro', titulo: 'MÓDULO 1', sectionIds: ['sec-ped'] },
+        { id: 'pv-m2', tipo: 'libro', titulo: 'MÓDULO 2', sectionIds: ['sec-ped'] },
+        { id: 'pv-m3', tipo: 'libro', titulo: 'MÓDULO 3', sectionIds: ['sec-ped'] },
+        { id: 'pv-tut', tipo: 'video', titulo: 'Tutorial', sectionIds: ['sec-ped'] },
+        { id: 'pv-pi', tipo: 'articulo_pedagogico', titulo: 'Programa Integral', sectionIds: ['sec-ped'] },
+        ...[4, 5, 6, 7, 8, 9].map(n => ({ id: `pv-m${n}`, tipo: 'articulo_pedagogico', titulo: `MÓDULO ${n}`, sectionIds: ['sec-ped'] })),
+        { id: 'pv-mook', tipo: 'articulo_pedagogico', titulo: 'Nodo MOOK', standalone: false },
+        { id: 'pv-mook-ng', tipo: 'articulo_pedagogico', titulo: 'Nodo MOOK sin grant', standalone: false },
+        { id: 'pv-gen', tipo: 'libro', titulo: 'General sin grant' },
+    ];
+    const GRANTED = ['pv-m1', 'pv-m2', 'pv-m3', 'pv-tut', 'pv-mook'];
+    const PED_4_9 = ['pv-m4', 'pv-m5', 'pv-m6', 'pv-m7', 'pv-m8', 'pv-m9'];
+    const ALL_PED_SECTION = ['pv-m1', 'pv-m2', 'pv-m3', 'pv-tut', 'pv-pi', ...PED_4_9];
+
+    const users = {
+        admin:     { id: 'pv-admin',    roles: ['administrador'] },
+        medOpen:   { id: 'pv-med-open', roles: ['mediador'] },                         // sin schoolConfig → MEDIATOR_ROLE
+        medOrg:    { id: 'pv-med-org',  roles: ['mediador'], colegio: 'Colegio PV' },  // schoolConfig restrictiva
+        lector:    { id: 'pv-lector',   roles: ['lector'] },                           // sin grant
+        lectorPed: { id: 'pv-lector-g', roles: ['lector'] },                           // grant explícito incl. pedagógico
+    };
+    USERS.push(...Object.values(users).map(u => ({ ...u, accountStatus: 'active' })));
+    for (const u of [users.admin, users.medOpen, users.medOrg]) {
+        ACCESS.push({ id: `r-${u.id}`, scope: 'user', scopeId: u.id, titleIds: GRANTED, collectionIds: [] });
+    }
+    ACCESS.push({ id: 'r-pv-lector-g', scope: 'user', scopeId: users.lectorPed.id, titleIds: ['pv-m1', 'pv-m4'], collectionIds: [] });
+    // La institución del mediador deja fuera pv-m9 (pedagógico) y pv-m2 (con grant).
+    SCHOOL_CONFIGS = [{ schoolName: 'Colegio PV', availableContentIds: PV.map(c => c.id).filter(id => !['pv-m9', 'pv-m2'].includes(id)) }];
+
+    const cat = (u) => myCatalog(u, PV).catalog.map(r => r.id);
+    const tab = (u) => (hydrateVisibleContent(parseMyCatalogResponse(myCatalog(u, PV)), PV) ?? []).filter(c => c.standalone !== false);
+    const pedSection = (u) => tab(u).filter(c => c.sectionIds?.includes('sec-ped')).map(c => c.id);
+    const item = (id) => PV.find(c => c.id === id);
+
+    // A. admin: Módulo 4 autorizado por preflight → aparece
+    ok('A · preflight admin autoriza Módulo 4', preflightAllows(users.admin, item('pv-m4'), PV));
+    ok('A · Módulo 4 aparece en my-catalog del admin', cat(users.admin).includes('pv-m4'));
+    // B. admin: 4–9 todos + sección Pedagogía completa
+    ok('B · admin recibe Módulos 4–9', PED_4_9.every(id => cat(users.admin).includes(id)), JSON.stringify(cat(users.admin)));
+    ok('B · Biblioteca → Pedagogía del admin = 1–9 + Programa + Tutorial',
+        setEq(pedSection(users.admin), ALL_PED_SECTION), JSON.stringify(pedSection(users.admin)));
+    // C. mediador con acceso pedagógico permitido
+    ok('C · mediador sin restricción institucional ve toda la sección Pedagogía',
+        setEq(pedSection(users.medOpen), ALL_PED_SECTION), JSON.stringify(pedSection(users.medOpen)));
+    // D. mediador con schoolConfig que niega
+    ok('D · preflight niega pv-m9 al mediador de Colegio PV', !preflightAllows(users.medOrg, item('pv-m9'), PV));
+    ok('D · pv-m9 (pedagógico) NO aparece en su my-catalog', !cat(users.medOrg).includes('pv-m9'));
+    ok('D · pv-m2 (con grant pero fuera de su institución) tampoco', !cat(users.medOrg).includes('pv-m2'));
+    ok('D · el resto de Pedagogía sí',
+        setEq(pedSection(users.medOrg), ALL_PED_SECTION.filter(id => !['pv-m9', 'pv-m2'].includes(id))),
+        JSON.stringify(pedSection(users.medOrg)));
+    // E. usuario normal sin grant
+    ok('E · lector sin grant no recibe material pedagógico',
+        !cat(users.lector).some(id => isPedagogyRestrictedItem(item(id))));
+    ok('E · lector sin grant → catálogo vacío', cat(users.lector).length === 0, JSON.stringify(cat(users.lector)));
+    // F. grant explícito existente sigue funcionando
+    ok('F · lector con grant recibe pv-m1', cat(users.lectorPed).includes('pv-m1'));
+    ok('F · …pero un grant explícito no le abre pedagogía (veto del preflight)', !cat(users.lectorPed).includes('pv-m4'));
+    ok('F · mediador y admin siguen recibiendo sus grants (1–3, Tutorial)',
+        ['pv-m1', 'pv-m3', 'pv-tut'].every(id => cat(users.admin).includes(id) && cat(users.medOpen).includes(id)));
+    // G. standalone:false sin cambio: lo decide el grant; la pestaña lo oculta
+    ok('G · nodo MOOK con grant sigue en my-catalog', cat(users.admin).includes('pv-mook'));
+    ok('G · nodo MOOK sin grant NO entra por rol (no es PEDAGOGY_RESTRICTED)', !cat(users.admin).includes('pv-mook-ng'));
+    ok('G · y Biblioteca no dibuja nodos MOOK (presentación)', !tab(users.admin).some(c => c.standalone === false));
+
+    // Paridad: my-catalog ⇔ preflight en todo el fixture salvo el contenido
+    // GENERAL/EMBEBIDO sin grant, que se trata aparte (NO-BYPASS).
+    const NO_GRANT_NON_PED = ['pv-gen', 'pv-mook-ng'];
+    const PARITY = PV.filter(c => !NO_GRANT_NON_PED.includes(c.id));
+    for (const [name, u] of Object.entries(users)) {
+        const inCat = new Set(cat(u));
+        const mism = PARITY.filter(c => inCat.has(c.id) !== preflightAllows(u, c, PV)).map(c => c.id);
+        ok(`PARITY · ${name}: MY_CATALOG_ACCESS == PREFLIGHT_ACCESS`, mism.length === 0, JSON.stringify(mism));
+    }
+    // Invariante dura en TODO el fixture: my-catalog ⊆ preflight.
+    for (const [name, u] of Object.entries(users)) {
+        ok(`SUBSET · ${name}: my-catalog ⊆ preflight`, PV.filter(c => cat(u).includes(c.id)).every(c => preflightAllows(u, c, PV)));
+    }
+    // Contenido no pedagógico sin grant: el preflight de rol lo concede (canal
+    // legacy ADMIN_ROLE / MEDIATOR_ROLE) y Biblioteca NO lo replica (11B-1).
+    ok('NO-BYPASS · admin: preflight concede pv-gen', preflightAllows(users.admin, item('pv-gen'), PV));
+    ok('NO-BYPASS · …y my-catalog no lo incluye', !cat(users.admin).includes('pv-gen'));
+    ok('NO-BYPASS · mediador sin restricción: tampoco', !cat(users.medOpen).includes('pv-gen'));
 }
 
 console.log(`\nlibraryServerAuthoritative: ${pass} passed, ${fail} failed`);

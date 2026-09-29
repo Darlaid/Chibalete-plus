@@ -2402,7 +2402,9 @@ class DataService {
     }
 
     getArticulosPedagogicos(): Content[] {
-        return this.content.filter(c => c.tipo === 'articulo_pedagogico');
+        // CHP-UI-PEDAGOGY-VISIBILITY-01: los nodos de Experiencias (MOOK) son
+        // `standalone === false`; no se muestran como tarjetas independientes.
+        return this.content.filter(c => c.tipo === 'articulo_pedagogico' && c.standalone !== false);
     }
 
     buscarContenido(query: string, roles: string[]): Content[] {
