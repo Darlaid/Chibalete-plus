@@ -119,6 +119,71 @@ export function isPedagogyRestrictedItem(item) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// CHP-UI-PEDAGOGY-VISIBILITY-01 — DECISIÓN DE ROL DEL PREFLIGHT
+//
+// Ramas ADMIN_ROLE / MEDIATOR_ORG / MEDIATOR_ROLE de
+// `GET /api/content/:id/access`, extraídas SIN cambiar su semántica para que
+// /api/content/my-catalog pregunte a la MISMA autoridad en vez de replicarla.
+//
+// Devuelve `null` si el usuario no es administrador ni mediador (el preflight
+// sigue su jerarquía). Si lo es, devuelve `decide(contentId)` →
+// `{ allowed, via, school }`. El catálogo institucional del mediador se
+// calcula una vez por usuario, no por contenido.
+//
+// Errores leyendo school_configs se comportan como en el preflight: se
+// notifican por `onSchoolConfigError` y el mediador cae en MEDIATOR_ROLE.
+// ────────────────────────────────────────────────────────────────────────────
+export function createPrivilegedContentAccess(user, {
+    loadSchoolConfigs,
+    resolveCollectionContentIds,
+    now = Date.now(),
+    onSchoolConfigError = () => {},
+} = {}) {
+    const roles = user?.roles || (user?.role ? [user.role] : (user?.rol ? [user.rol] : ['lector']));
+    if (roles.includes('administrador')) {
+        return () => ({ allowed: true, via: 'ADMIN_ROLE', school: null });
+    }
+    if (!roles.includes('mediador')) return null;
+
+    const isEntityActive = (startStr, endStr) => {
+        if (!startStr && !endStr) return true;
+        if (startStr && now < new Date(startStr).getTime()) return false;
+        if (endStr   && now > new Date(endStr).getTime())   return false;
+        return true;
+    };
+
+    const mediatorSchool = user.colegio || user.school || '';
+    let orgCatalog = null; // null ⇒ sin restricción institucional activa
+    if (mediatorSchool) {
+        try {
+            const schoolConfigs = loadSchoolConfigs();
+            const schoolConfig = Array.isArray(schoolConfigs)
+                ? schoolConfigs.find(s => s.schoolName === mediatorSchool)
+                : schoolConfigs[mediatorSchool];
+            if (schoolConfig && isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
+                const hasExplicitRestriction =
+                    Array.isArray(schoolConfig.availableContentIds) ||
+                    (Array.isArray(schoolConfig.collectionIds) && schoolConfig.collectionIds.length > 0);
+                if (hasExplicitRestriction) {
+                    const orgTitles = Array.isArray(schoolConfig.availableContentIds) ? schoolConfig.availableContentIds : [];
+                    const orgExtra  = resolveCollectionContentIds(schoolConfig.collectionIds || []);
+                    orgCatalog = new Set([...orgTitles, ...orgExtra]);
+                }
+            }
+        } catch (e) {
+            onSchoolConfigError(e);
+        }
+    }
+
+    return (contentId) => {
+        if (orgCatalog === null) return { allowed: true, via: 'MEDIATOR_ROLE', school: mediatorSchool };
+        return orgCatalog.has(contentId)
+            ? { allowed: true,  via: 'MEDIATOR_ORG',             school: mediatorSchool }
+            : { allowed: false, via: 'MEDIATOR_ORG_RESTRICTION', school: mediatorSchool };
+    };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // CHP-ACCESS-PEDAGOGY-01D-B-R3 — TTS GENERADO
 //
 // El audio de TTS no se referencia nunca en el catálogo: los productores lo

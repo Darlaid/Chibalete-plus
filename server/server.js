@@ -81,6 +81,8 @@ import {
     classifyUploadPath,
     isPedagogyRestrictedItem,
     normalizeUploadRequestPath,
+    // CHP-UI-PEDAGOGY-VISIBILITY-01 — decisión de rol compartida preflight ↔ my-catalog.
+    createPrivilegedContentAccess,
 } from './accessService.js';
 import {
     init as initMetrics,
@@ -1871,15 +1873,35 @@ const requireLibraryActor = createLibraryActorAuth({
  * predicate pedagógico de CHP-ACCESS-PEDAGOGY-01D-B. No replica reglas ni las
  * reinterpreta: es el cuerpo que /api/content/my-catalog ya usaba, extraído
  * para que Biblioteca intersecte contra EXACTAMENTE lo mismo.
+ *
+ * CHP-UI-PEDAGOGY-VISIBILITY-01: para admin y mediador el conjunto se recorta
+ * con la MISMA decisión de rol que el preflight (privilegedContentAccessFor),
+ * así my-catalog ⊆ preflight también bajo restricción institucional. El
+ * material pedagógico independiente no lleva grants (el migrador V6 lo excluye
+ * por diseño: se concede por rol), así que para ellos entra si el preflight lo
+ * permite. El contenido general sigue exigiendo grant explícito: Biblioteca no
+ * replica el canal legacy MEDIATOR_ROLE.
  */
 function visibleCatalogForUser(user, contentList) {
     const { titleIds, collectionIds } = getAccessibleContentIds(user.id);
     const seesPedagogy = pedagogyRolesOf(user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
+    const privileged = privilegedContentAccessFor(user);
     return contentList.filter(item =>
+        (!privileged || privileged(item.id).allowed) &&
         (titleIds.includes(item.id) ||
-            (item.collectionId && collectionIds.includes(item.collectionId))) &&
+            (item.collectionId && collectionIds.includes(item.collectionId)) ||
+            (privileged && isPedagogyRestrictedItem(item))) &&
         (seesPedagogy || !isPedagogyRestrictedItem(item))
     );
+}
+
+/** Decisión de rol del preflight (admin/mediador) para este usuario, o null. */
+function privilegedContentAccessFor(user) {
+    return createPrivilegedContentAccess(user, {
+        loadSchoolConfigs: () => readJSON(SCHOOL_CONFIGS_DB),
+        resolveCollectionContentIds,
+        onSchoolConfigError: (e) => log(`[access-check] Error reading school_configs for mediator: ${e.message}`, 'WARN'),
+    });
 }
 
 /** El mismo conjunto, como Set de ids, para intersectar la vista de una capa. */
@@ -2725,8 +2747,12 @@ app.get('/api/content/:id/access', async (req, res) => {
         // 7. FALLBACK            → según ACCESS_FALLBACK_MODE (open | restricted)
 
         // 3. Admin: acceso total irrestricto
-        const roles = user.roles || (user.role ? [user.role] : (user.rol ? [user.rol] : ['lector']));
-        if (roles.includes('administrador')) {
+        // CHP-UI-PEDAGOGY-VISIBILITY-01: la decisión de rol (admin y mediador,
+        // paso 6) vive en createPrivilegedContentAccess, compartida con
+        // my-catalog. Mismo orden, mismas respuestas.
+        const privilegedAccess = privilegedContentAccessFor(user);
+        const privilegedDecision = privilegedAccess ? privilegedAccess(contentId) : null;
+        if (privilegedDecision?.via === 'ADMIN_ROLE') {
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ADMIN_ROLE`, 'ACCESS');
             return res.json({ allowed: true, reason: 'Acceso administrativo total.' });
         }
@@ -2749,33 +2775,16 @@ app.get('/api/content/:id/access', async (req, res) => {
 
         // 6. Mediador: acceso ampliado dentro de su organización
         // DT-05: 'profesor' eliminado del modelo — solo 'mediador' es válido.
-        if (roles.includes('mediador')) {
-            const mediatorSchool = user.colegio || user.school || '';
-            if (mediatorSchool) {
-                try {
-                    const schoolConfigs = readJSON(SCHOOL_CONFIGS_DB);
-                    const schoolConfig = Array.isArray(schoolConfigs)
-                        ? schoolConfigs.find(s => s.schoolName === mediatorSchool)
-                        : schoolConfigs[mediatorSchool];
-                    if (schoolConfig && isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
-                        const hasExplicitRestriction =
-                            Array.isArray(schoolConfig.availableContentIds) ||
-                            (Array.isArray(schoolConfig.collectionIds) && schoolConfig.collectionIds.length > 0);
-                        if (hasExplicitRestriction) {
-                            const orgTitles  = Array.isArray(schoolConfig.availableContentIds) ? schoolConfig.availableContentIds : [];
-                            const orgExtra   = resolveCollectionContentIds(schoolConfig.collectionIds || []);
-                            const orgCatalog = [...new Set([...orgTitles, ...orgExtra])];
-                            if (orgCatalog.includes(contentId)) {
-                                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
-                                return res.json({ allowed: true, reason: 'Acceso de mediador por catálogo institucional.' });
-                            }
-                            log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
-                            return res.status(403).json({ allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' });
-                        }
-                    }
-                } catch (e) {
-                    log(`[access-check] Error reading school_configs for mediator: ${e.message}`, 'WARN');
-                }
+        // Decisión calculada arriba por createPrivilegedContentAccess.
+        if (privilegedDecision) {
+            const { via, school: mediatorSchool } = privilegedDecision;
+            if (via === 'MEDIATOR_ORG') {
+                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
+                return res.json({ allowed: true, reason: 'Acceso de mediador por catálogo institucional.' });
+            }
+            if (via === 'MEDIATOR_ORG_RESTRICTION') {
+                log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
+                return res.status(403).json({ allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' });
             }
             // Sin restricción institucional activa → acceso total (legado para mediadores sin configuración)
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
