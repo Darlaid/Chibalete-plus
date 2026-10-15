@@ -80,10 +80,12 @@ let out = '';
 child.stdout.on('data', d => { out += d; });
 child.stderr.on('data', d => { out += d; });
 
-const upload = async (name, data, type) => {
+// 3D.3-R4: la dedup solo opera dentro del mismo dueño (parentId).
+const upload = async (name, data, type, parentId) => {
     const fd = new FormData();
     fd.append('file', new Blob([data], { type }), name);
-    const r = await fetch(`${base}/api/upload`, { method: 'POST', headers: { 'x-user-id': 'ADM' }, body: fd });
+    const q = parentId ? `?parentId=${encodeURIComponent(parentId)}` : '';
+    const r = await fetch(`${base}/api/upload${q}`, { method: 'POST', headers: { 'x-user-id': 'ADM' }, body: fd });
     return { status: r.status, body: await r.json().catch(() => ({})) };
 };
 const isCanonical = (url) => typeof url === 'string' && url.split('/').slice(2, -1).includes('canonical');
@@ -107,19 +109,19 @@ try {
     const firstX = r.body.url;
     r = await upload('logo-otra-vez.png', X, 'image/png');
     ok('dedup incremental normal: segundo upload de X → el archivo normal recién subido', r.status === 200 && r.body.deduplicated === true && r.body.url === firstX, JSON.stringify(r.body));
-    r = await upload('w.png', W, 'image/png');
-    ok('bytes W (canónico + fuente normal) → dedup a la fuente normal', r.status === 200 && r.body.deduplicated === true && r.body.url === '/uploads/content-0/normal-w.png', JSON.stringify(r.body));
+    r = await upload('w.png', W, 'image/png', 'content-0');
+    ok('bytes W (canónico + fuente normal) → dedup a la fuente normal (mismo dueño)', r.status === 200 && r.body.deduplicated === true && r.body.url === '/uploads/content-0/normal-w.png', JSON.stringify(r.body));
 
     console.log('\n[3] canonical/book.txt no es candidato de dedup');
     r = await upload('texto.txt', T, 'text/plain');
     ok('bytes de book.txt → NO recibe content-a/canonical/book.txt', r.status === 200 && !isCanonical(r.body.url) && r.body.deduplicated !== true, JSON.stringify(r.body));
 
     console.log('\n[4] dedup normal sin regresión');
-    r = await upload('otra.png', Z, 'image/png');
+    r = await upload('otra.png', Z, 'image/png', 'content-b');
     ok('fuente normal indexada al arrancar → dedup intacta', r.status === 200 && r.body.deduplicated === true && r.body.url === '/uploads/content-b/source.png', JSON.stringify(r.body));
-    r = await upload('x.txt', N, 'text/plain');
+    r = await upload('x.txt', N, 'text/plain', 'content-c');
     ok('nombre con «canonical» (my-canonical-book.txt) sigue indexado', r.body.deduplicated === true && r.body.url === '/uploads/content-c/my-canonical-book.txt', JSON.stringify(r.body));
-    r = await upload('y.png', Q, 'image/png');
+    r = await upload('y.png', Q, 'image/png', 'content-c');
     ok('nombre con «canonical» (canonical-cover.png) sigue indexado', r.body.deduplicated === true && r.body.url === '/uploads/content-c/canonical-cover.png', JSON.stringify(r.body));
     ok('artefactos canónicos intactos', fs.readFileSync(path.join(up, 'content-a/canonical/media/logo.png')).equals(X) && fs.readFileSync(path.join(up, 'content-a/canonical/book.txt'), 'utf8') === T);
 } catch (e) {

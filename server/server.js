@@ -228,6 +228,7 @@ app.set('trust proxy', 1);
 import { generateAudioForContent } from './ttsService.js';
 import { createTtsProgressWriter } from './ttsProgressWriter.js';
 import { computeContentFingerprint, nextContentTextVersion, readUploadTextForFingerprint } from './contentFingerprint.js';
+import { uploadOwnerOfRel, uploadOwnerOfUrl, uploadDedupKey, uploadReferencesExcept, externalReferrersUnder } from './uploadOwnership.js';
 import { CANONICAL_SCHEMA_VERSION, validateCanonicalBook } from './content/canonicalBook.js';
 import {
     canonicalBookUrlFor, buildCanonicalBookFromText, writeCanonicalBookAtomic,
@@ -883,20 +884,24 @@ const saveContentLocks = new Map();
 //
 // Límites conocidos:
 //   - In-process: si hay múltiples instancias, el índice no se sincroniza entre ellas.
-//     Para el setup de VPS única actual esto es correcto.
+//     3D.3-R4: por eso un hit solo se devuelve si el archivo sigue existiendo
+//     (resolveLiveDedupHit); una entrada vieja de la otra réplica se descarta.
 //   - El índice no persiste entre reinicios del proceso, pero se reconstruye en <1 s
 //     para catálogos típicos (<500 archivos).
+//   - 3D.3-R4: la clave es dueño + sha256 (uploadDedupKey): nunca se reutiliza un
+//     archivo de OTRO contenido (/uploads/<otro>/...) — ese alias permitía que el
+//     DELETE de un contenido borrara archivos que otro seguía usando.
 
-/** Calcula el MD5 de un archivo leyéndolo como stream — nunca bloquea el event loop. */
+/** Calcula el SHA-256 de un archivo leyéndolo como stream — nunca bloquea el event loop. */
 const computeFileHashStream = (filePath) => new Promise((resolve, reject) => {
-    const hash = crypto.createHash('md5');
+    const hash = crypto.createHash('sha256');
     fs.createReadStream(filePath)
         .on('data', chunk => hash.update(chunk))
         .on('end',  () => resolve(hash.digest('hex')))
         .on('error', reject);
 });
 
-/** hash → URL relativa (/uploads/...) */
+/** uploadDedupKey(dueño, sha256) → URL relativa (/uploads/...) */
 const uploadHashIndex = new Map();
 
 // CHP-CONTENT-CANONICAL-2026-01 3C.3A-R1 — /uploads/<id>/canonical/** son
@@ -921,10 +926,30 @@ async function buildHashIndex(dir, baseDir) {
             try {
                 const hash = await computeFileHashStream(fullPath);
                 const rel  = path.relative(baseDir, fullPath);
-                uploadHashIndex.set(hash, `/uploads/${rel.split(path.sep).join('/')}`);
+                uploadHashIndex.set(uploadDedupKey(uploadOwnerOfRel(rel), hash), `/uploads/${rel.split(path.sep).join('/')}`);
             } catch (_e) { /* skip unreadable files */ }
         }
     }
+}
+
+/**
+ * 3D.3-R4 — URL del hit de dedup solo si el archivo sigue existiendo como archivo
+ * regular dentro de UPLOAD_DIR. Si no (borrado por la otra réplica, purga, etc.)
+ * la entrada se elimina del índice local y el upload sigue su camino normal.
+ */
+function resolveLiveDedupHit(key) {
+    const url = uploadHashIndex.get(key);
+    if (!url) return null;
+    const abs = path.resolve(UPLOAD_DIR, url.slice('/uploads/'.length));
+    const rel = path.relative(path.resolve(UPLOAD_DIR), abs);
+    let live = false;
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+        try { live = fs.statSync(abs).isFile(); } catch (_e) { live = false; }
+    }
+    if (live) return url;
+    uploadHashIndex.delete(key);
+    log(`[UPLOAD_DEDUP_STALE] url=${url} — entrada eliminada del índice local`, 'WARN');
+    return null;
 }
 
 log(`[CONFIG] UPLOADS_ROOT : ${UPLOADS_ROOT}`);
@@ -3042,11 +3067,27 @@ app.delete('/api/content/:id', async (req, res) => {
 
         const item = contentList[itemIndex];
 
+        // 3D.3-R4 — propiedad por subárbol: DELETE de <id> solo borra lo que vive
+        // bajo /uploads/<id>/ y que ningún OTRO registro referencia. Ante la duda
+        // se conservan archivos de más (sin GC nuevo): nunca se pierden datos ajenos.
+        const otherRefs = uploadReferencesExcept(contentList, id);
+        const removedUrls = new Set();
+        const removedPrefixes = [];
+
         // Helper: safely resolve a /uploads/... URL to an absolute path and unlink
         // UPLOAD_DIR = .../public/uploads; stored URLs are /uploads/filename
         // So: resolve one level up from UPLOAD_DIR (.../public) + rel (uploads/filename)
         const safeUnlinkUrl = (relUrl) => {
             if (!relUrl || typeof relUrl !== 'string') return;
+            if (uploadOwnerOfUrl(relUrl) !== id) {
+                log(`[DELETE_KEEP_FOREIGN] contentId=${id} url=${relUrl} owner=${uploadOwnerOfUrl(relUrl) || '(root)'}`, 'WARN');
+                return;
+            }
+            if (otherRefs.has(relUrl)) {
+                log(`[DELETE_KEEP_SHARED] contentId=${id} url=${relUrl} referencedBy=${otherRefs.get(relUrl).join(',')}`, 'WARN');
+                return;
+            }
+            removedUrls.add(relUrl);
             const rel = relUrl.replace(/^\/+/, ''); // strip leading slash
             const base = path.resolve(UPLOAD_DIR, '..'); // .../public
             const abs = path.resolve(base, rel);
@@ -3064,9 +3105,14 @@ app.delete('/api/content/:id', async (req, res) => {
             item.ilustraciones_url.forEach(u => safeUnlinkUrl(u));
         }
 
-        // 3. Clean main content folder: /uploads/<id>/
+        // 3. Clean main content folder: /uploads/<id>/ — salvo que otro registro
+        //    siga usando algo de ese subárbol (3D.3-R4: se retiene completo).
         const contentDir = path.join(UPLOAD_DIR, id);
-        if (fs.existsSync(contentDir)) {
+        const contentDirReferrers = externalReferrersUnder(otherRefs, `/uploads/${id}/`);
+        if (contentDirReferrers.length > 0) {
+            log(`[DELETE_KEEP_SUBTREE] contentId=${id} dir=/uploads/${id}/ referencedBy=${contentDirReferrers.join(',')}`, 'WARN');
+        } else if (fs.existsSync(contentDir)) {
+            removedPrefixes.push(`/uploads/${id}/`);
             try {
                 fs.rmSync(contentDir, { recursive: true, force: true });
                 log(`Deleted content dir: ${contentDir}`, 'DEBUG');
@@ -3075,9 +3121,13 @@ app.delete('/api/content/:id', async (req, res) => {
             }
         }
 
-        // 4. Clean TTS audio folder: /uploads/audio/<id>/
+        // 4. Clean TTS audio folder: /uploads/audio/<id>/ (misma regla de subárbol)
         const audioDir = path.join(UPLOAD_DIR, 'audio', id);
-        if (fs.existsSync(audioDir)) {
+        const audioDirReferrers = externalReferrersUnder(otherRefs, `/uploads/audio/${id}/`);
+        if (audioDirReferrers.length > 0) {
+            log(`[DELETE_KEEP_SUBTREE] contentId=${id} dir=/uploads/audio/${id}/ referencedBy=${audioDirReferrers.join(',')}`, 'WARN');
+        } else if (fs.existsSync(audioDir)) {
+            removedPrefixes.push(`/uploads/audio/${id}/`);
             try {
                 fs.rmSync(audioDir, { recursive: true, force: true });
                 log(`Deleted audio dir: ${audioDir}`, 'DEBUG');
@@ -3098,18 +3148,10 @@ app.delete('/api/content/:id', async (req, res) => {
         }
 
         // 6. Evict deleted URLs from uploadHashIndex to prevent stale dedup hits
-        const deletedUrls = new Set([
-            ...urlFields.map(f => item[f]).filter(u => u && typeof u === 'string'),
-            ...(Array.isArray(item.ilustraciones_url) ? item.ilustraciones_url.filter(Boolean) : [])
-        ]);
-        if (Array.isArray(item.pages)) {
-            item.pages.forEach(p => { if (p?.url) deletedUrls.add(p.url); if (p?.thumb) deletedUrls.add(p.thumb); });
-        }
-        if (Array.isArray(item.materials)) {
-            item.materials.forEach(m => { if (m?.url) deletedUrls.add(m.url); });
-        }
-        for (const [hash, indexedUrl] of uploadHashIndex) {
-            if (deletedUrls.has(indexedUrl)) uploadHashIndex.delete(hash);
+        //    (3D.3-R4: solo lo que de verdad se borró; lo retenido sigue siendo válido.
+        //    La otra réplica no se entera: resolveLiveDedupHit descarta sus entradas viejas.)
+        for (const [key, indexedUrl] of uploadHashIndex) {
+            if (removedUrls.has(indexedUrl) || removedPrefixes.some(p => indexedUrl.startsWith(p))) uploadHashIndex.delete(key);
         }
 
         // 7. Remove DB record — done last, after cleanup (atomic cross-container)
@@ -3268,8 +3310,11 @@ app.post('/api/upload', (req, res) => {
 
             // Deduplicación O(1): hash del archivo actual con stream (no carga en RAM),
             // consulta el índice en memoria construido al arrancar.
+            // 3D.3-R4: solo dentro del mismo dueño (parentId) y solo si el archivo existe.
             const fileHash = await computeFileHashStream(tempPath);
-            const dedupUrl = uploadHashIndex.get(fileHash);
+            const destOwner = uploadOwnerOfRel(path.relative(UPLOAD_DIR, path.join(UPLOAD_DIR, req.query.parentId || '', '_')));
+            const dedupKey = uploadDedupKey(destOwner, fileHash);
+            const dedupUrl = resolveLiveDedupHit(dedupKey);
             if (dedupUrl) {
                 safeUnlink(tempPath);
                 const elapsed = Date.now() - startedAt;
@@ -3298,7 +3343,7 @@ app.post('/api/upload', (req, res) => {
             const fileUrl = `/uploads/${relativePath.split(path.sep).join('/')}`;
 
             // Actualizar índice con el nuevo archivo (nunca con rutas canónicas: 3C.3A-R1)
-            if (!isCanonicalArtifactUploadPath(relativePath)) uploadHashIndex.set(fileHash, fileUrl);
+            if (!isCanonicalArtifactUploadPath(relativePath)) uploadHashIndex.set(uploadDedupKey(uploadOwnerOfRel(relativePath), fileHash), fileUrl);
 
             const elapsed = Date.now() - startedAt;
             log(`[UPLOAD_SUCCESS] actor=${actorId} file=${req.file.filename} sizeMB=${sizeMB} durationMs=${elapsed} mime=${fileTypeInfo?.mime ?? 'text'} parentId=${parentId}`, 'SUCCESS');
@@ -3334,6 +3379,13 @@ app.post('/api/upload/purge', (req, res) => {
     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
         log(`[PURGE_FAIL] actor=${actorId} reason=path_traversal url=${url}`, 'SECURITY');
         return res.status(400).json({ error: 'Path traversal rejected' });
+    }
+    // 3D.3-R4: una URL que algún contenido guardado referencia no es un huérfano
+    // (p. ej. un hit de dedup sobre un archivo vivo del mismo contenido).
+    const purgeRefs = uploadReferencesExcept(readJSON(DB_FILE), null).get(url);
+    if (purgeRefs) {
+        log(`[PURGE_SKIP] actor=${actorId} url=${url} reason=referenced_by=${purgeRefs.join(',')}`, 'WARN');
+        return res.json({ success: true, kept: true });
     }
     log(`[PURGE_START] actor=${actorId} url=${url}`, 'INFO');
     safeUnlink(resolved);
