@@ -884,8 +884,18 @@ class DataService {
             throw new Error(errBody.error || `Error ${response.status} al guardar metadata`);
         }
 
-        // Update local state immediately
-        this.agregarContenido(contentItem);
+        // Update local state immediately with the record the SERVER saved: it can
+        // differ from the payload (3D.3-R2: with epub_url the server sets
+        // texto_plano_url = canonical/book.txt, which the client never sends).
+        const body = await response.json().catch(() => null);
+        const saved: Content = body?.content?.id === contentItem.id ? body.content : contentItem;
+        const idx = this.content.findIndex(c => c.id === saved.id);
+        if (idx > -1) {
+            this.content[idx] = saved;
+            this.saveState('content', this.content);
+        } else {
+            this.agregarContenido(saved);
+        }
     }
 
     async deleteContent(id: string): Promise<void> {
