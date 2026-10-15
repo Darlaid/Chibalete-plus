@@ -34,5 +34,16 @@ ok('EPUB como archivo principal sigue rechazado (orienta al campo correcto)', /r
 ok('errores del EPUB: se muestra el mensaje del servidor', /No se pudo publicar el EPUB: \$\{errorMessage\}/.test(page));
 ok('la UI no fija canónicos ni versión (autoridad del servidor)', !/canonicalBookUrl|contentFingerprint|contentVersion/.test(page));
 
+// 3D.3-R1 — el PDF/audio no es obligatorio con EPUB; misma semántica en HTML y JS.
+const recurso = page.match(/<input id="sc-recurso"[\s\S]*?\/>/)?.[0] ?? '';
+const portada = page.match(/<input id="sc-portada"[\s\S]*?\/>/)?.[0] ?? '';
+ok('R1: required del archivo principal = isMainResourceInputRequired (EPUB → no required)',
+    /required=\{isMainResourceInputRequired\(\{ isUpdate: !!editingId, resourceURL: mainContent\.resourceURL, textoPlanoFile: mainContent\.textoPlanoFile \}\)\}/.test(recurso), recurso);
+ok('R1: portada sigue obligatoria en libro nuevo', /required=\{!editingId && !\['video', 'podcast'\]\.includes\(mainContent\.tipo\)\}/.test(portada), portada);
+ok('R1: la validación JS acepta el campo de texto/EPUB como alternativa al recurso (coherente con HTML)',
+    /const hasValidAlternative = !!mainContent\.textoPlanoFile;/.test(page) && /&& !hasValidAlternative;/.test(page));
+ok('R1: indicación «Opcional cuando el contenido se crea desde EPUB» solo en nuevo + EPUB',
+    /\{!editingId && isEpubFile\(mainContent\.textoPlanoFile\) && \(\s*<p[^>]*>Opcional cuando el contenido se crea desde EPUB<\/p>/.test(page));
+
 console.log(`\nSubirContenidoEpub.structural — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

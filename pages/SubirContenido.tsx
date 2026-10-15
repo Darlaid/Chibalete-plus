@@ -10,7 +10,7 @@ import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ExperienceStudio from '../components/studio/ExperienceStudio';
 import LandingBannerManager from '../components/LandingBannerManager';
-import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource } from '../utils/epubSourceUpload.mjs';
+import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource, isMainResourceInputRequired } from '../utils/epubSourceUpload.mjs';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -1614,6 +1614,9 @@ const SubirContenido: React.FC = () => {
                                 {mainContent.tipo !== 'libro_album' && !mainContent.isCollection && (
                                     <div>
                                         <label className="block text-sm font-bold mb-2">2. Archivo Principal {mainContent.tipo === 'video' ? '(O Enlace)' : '(PDF/Audio)'}</label>
+                                        {!editingId && isEpubFile(mainContent.textoPlanoFile) && (
+                                            <p className="-mt-1 mb-2 text-xs text-gray-500">Opcional cuando el contenido se crea desde EPUB</p>
+                                        )}
 
                                         {mainContent.tipo === 'video' && (
                                             <div className="mb-2">
@@ -1633,7 +1636,7 @@ const SubirContenido: React.FC = () => {
                                         )}
 
                                         <label htmlFor="sc-recurso" className="block text-xs text-gray-400 mb-1">{mainContent.tipo === 'video' ? 'Opción B: Subir Archivo Local' : 'Subir Archivo'}</label>
-                                        <input id="sc-recurso" type="file" onChange={(e) => handleMainFileChange(e, 'resourceFile')} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required={!editingId && !mainContent.resourceURL} />
+                                        <input id="sc-recurso" type="file" onChange={(e) => handleMainFileChange(e, 'resourceFile')} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required={isMainResourceInputRequired({ isUpdate: !!editingId, resourceURL: mainContent.resourceURL, textoPlanoFile: mainContent.textoPlanoFile })} />
                                         {editingId && !mainContent.resourceFile && existingParents.find(p => p.id === editingId)?.url_recurso && (
                                             <p className="mt-1 text-xs text-green-600">✓ Archivo actual existente (Sube otro para cambiarlo)</p>
                                         )}

@@ -37,6 +37,15 @@ export function epubSourceBlockReason({ isUpdate, existingContent, textoPlanoFil
     return null;
 }
 
+/**
+ * 3D.3-R1 — `required` del input «Archivo Principal (PDF/Audio)». Un contenido
+ * NUEVO creado desde EPUB no exige PDF/audio (la validación JS del submit ya
+ * acepta el campo de texto como alternativa). Sin EPUB, el contrato no cambia.
+ * @param {{ isUpdate: boolean, resourceURL?: string, textoPlanoFile?: File | null }} args
+ */
+export const isMainResourceInputRequired = ({ isUpdate, resourceURL, textoPlanoFile }) =>
+    !isUpdate && !resourceURL && !isEpubFile(textoPlanoFile);
+
 /** Payload del contenido con el EPUB como fuente: epub_url sí, texto_plano_url no. */
 export function withEpubSource(content, epubUrl) {
     const { texto_plano_url: _discarded, ...rest } = content;
