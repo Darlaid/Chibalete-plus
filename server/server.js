@@ -4417,7 +4417,9 @@ app.get('/api/progress/user/:userId', async (req, res) => {
         const { userId } = req.params;
         const users = readJSON(USERS_DB);
 
-        const requester = resolveRequester(req, users);
+        // 3E.5: misma identidad que POST …/sync (cookie de sesión; x-user-id solo
+        // donde el modo vigente aún lo admite). resolveRequester no veía la cookie.
+        const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
@@ -4444,13 +4446,23 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
         const { userId, contentId } = req.params;
         const users = readJSON(USERS_DB);
 
-        const requester = resolveRequester(req, users);
+        // 3E.5: misma identidad que POST …/sync (ver GET /api/progress/user).
+        const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
         if (!isOwner && !isAdmin && !isMediator) {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        // 3E.5: el dueño (no privilegiado) solo lee el progreso de un título al que
+        // hoy tiene acceso — la MISMA autoridad que /api/content/:id/access.
+        if (isOwner && !isAdmin && !isMediator) {
+            const decision = await decideContentAccess(userId, contentId);
+            if (decision.status !== 200 || !decision.body?.allowed) {
+                log(`GET progress/item denied: param=${userId} content=${contentId} reason=no_content_access`, 'WARN');
+                return res.status(403).json({ error: 'Acceso denegado' });
+            }
         }
 
         const progress = getProgressItem(userId, contentId);
@@ -9655,6 +9667,17 @@ function loadAndInitMetrics() {
  * Resolve the requesting user from x-user-id header.
  * Returns null if header is missing or user not found.
  */
+/**
+ * 3E.5 — requester autenticado como en requireProgressOwner: cookie de sesión
+ * firmada (compat/enforce) o, donde el modo vigente aún lo admite, x-user-id
+ * legacy (authenticatedUserIdOf → sessionAuth.authenticate). null si no hay.
+ */
+async function sessionRequesterOf(req, users) {
+    const ident = await authenticatedUserIdOf(req);
+    if (!ident.ok || !ident.userId) return null;
+    return users.find(u => u.id === ident.userId) ?? null;
+}
+
 function resolveRequester(req, users) {
     const id = reqUserId(req);
     if (!id) return null;
