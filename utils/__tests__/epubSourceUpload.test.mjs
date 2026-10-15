@@ -7,6 +7,7 @@
 import {
     EPUB_MIME, EPUB_REIMPORT_BLOCKED_MESSAGE, EPUB_ONLY_NEW_CONTENT_MESSAGE,
     isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource,
+    isMainResourceInputRequired,
 } from '../epubSourceUpload.mjs';
 
 let pass = 0, fail = 0;
@@ -38,6 +39,20 @@ const payload = withEpubSource({ ...content, texto_plano_url: '/uploads/c-1/viej
 ok('withEpubSource: añade epub_url', payload.epub_url === '/uploads/c-1/libro.epub');
 ok('withEpubSource: NO incluye texto_plano_url (ni como clave)', !('texto_plano_url' in payload) && !JSON.stringify(payload).includes('texto_plano_url'));
 ok('withEpubSource: conserva el resto de la metadata y no muta el original', payload.titulo === 'T' && payload.publico_objetivo === 'todos' && content.epub_url === undefined);
+
+// 3D.3-R1 — «Archivo Principal (PDF/Audio)» no es obligatorio en contenido nuevo desde EPUB.
+const req = (o) => isMainResourceInputRequired({ isUpdate: false, resourceURL: '', textoPlanoFile: null, ...o });
+ok('R1: nuevo + EPUB (MIME vacío) → archivo principal NO required', req({ textoPlanoFile: epub }) === false);
+ok('R1: nuevo + EPUB (application/zip) → NO required', req({ textoPlanoFile: epubZip }) === false);
+ok('R1: nuevo + EPUB (application/epub+zip) → NO required', req({ textoPlanoFile: already }) === false);
+ok('R1: nuevo sin EPUB ni archivo de texto → required (contrato actual)', req({}) === true);
+ok('R1: nuevo + TXT → required como antes (sin cambios)', req({ textoPlanoFile: txt }) === true);
+ok('R1: nuevo + .zip no-EPUB → required (detección por extensión, no por MIME)', req({ textoPlanoFile: new File(['x'], 'a.zip', { type: EPUB_MIME }) }) === true);
+ok('R1: vídeo con URL → no required (sin cambios)', req({ resourceURL: 'https://youtu.be/x' }) === false);
+ok('R1: edición (EPUB existente, metadata-only) → no required', isMainResourceInputRequired({ isUpdate: true, resourceURL: '', textoPlanoFile: null }) === false);
+ok('R1: nuevo EPUB + portada + metadata sin PDF → ni HTML ni bloqueo EPUB impiden el submit',
+    req({ textoPlanoFile: epub }) === false && epubSourceBlockReason({ isUpdate: false, existingContent: null, textoPlanoFile: epub }) === null);
+ok('R1: reimportación EPUB sigue bloqueada', epubSourceBlockReason({ isUpdate: true, existingContent: { epub_url: '/uploads/c/x.epub' }, textoPlanoFile: epub }) === EPUB_REIMPORT_BLOCKED_MESSAGE);
 
 console.log(`\nepubSourceUpload — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);
