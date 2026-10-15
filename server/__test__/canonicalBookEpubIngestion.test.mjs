@@ -351,9 +351,12 @@ try {
     r = await save({ id: 'ped-1', titulo: 'Guía', tipo: 'guia', standalone: true, epub_url: put('ped-1/g.epub', pedEpub) });
     const pedMedia = `/uploads/ped-1/canonical/media/${sha(IMG.png(42))}.png`;
     const authz = async (uri, headers = {}) => (await fetch(`${base}/api/internal/uploads-authz`, { headers: { 'x-original-uri': uri, ...headers } })).status;
-    ok('pedagogía EPUB: media, book.txt, book.json y .epub → 401 sin sesión',
+    ok('pedagogía EPUB: media, book.txt y book.json → 401 sin sesión',
         r.status === 200 && fs.existsSync(path.join(up, pedMedia.slice(9)))
-        && (await Promise.all([pedMedia, rec('ped-1').texto_plano_url, rec('ped-1').canonicalBookUrl, rec('ped-1').epub_url].map(u2 => authz(u2)))).every(s => s === 401));
+        && (await Promise.all([pedMedia, rec('ped-1').texto_plano_url, rec('ped-1').canonicalBookUrl].map(u2 => authz(u2)))).every(s => s === 401));
+    // 3E.3: el .epub fuente ya no es un asset público para NADIE (solo
+    // GET /api/content/:id/epub): 403 con o sin sesión, antes de clasificar.
+    ok('pedagogía EPUB: .epub → 403 (bloqueo público 3E.3)', await authz(rec('ped-1').epub_url) === 403);
     ok('general EPUB: media → 204 sin sesión', await authz(`/uploads/e-1/canonical/media/${sha(IMG.png(1))}.png`) === 204);
 
     ok('sin temporales residuales en uploads', !listTree(up).some(f => /\.tmp-/.test(f)), listTree(up).filter(f => /\.tmp-/.test(f)).join(','));

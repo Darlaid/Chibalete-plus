@@ -159,5 +159,27 @@ console.log('\n[I] ruta dev y aislamiento del motor (estructural)');
     ok('nunca reader.js / reader.html / ui/ upstream', sources.every(([, s]) => !/foliate-js\/(reader\.(js|html)|ui\/)/.test(s)));
 }
 
+console.log('\n[3E.3] entrada productiva epub-reader.html');
+{
+    const html = fs.readFileSync(path.join(ROOT, 'epub-reader.html'), 'utf8');
+    const scripts = [...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
+    ok('una sola <script>, local y module (sin Tailwind CDN ni scripts externos)', scripts.length === 1 && /type="module" src="\/epub-reader\.tsx"/.test(scripts[0]) && !/cdn\.|https?:/.test(scripts.join('')));
+    ok('sin reader.html/reader.js de foliate', !/foliate/.test(html));
+    const entry = fs.readFileSync(path.join(ROOT, 'epub-reader.tsx'), 'utf8');
+    ok('la entrada usa el CSS compilado local y EpubReaderApp', /import '\.\/components\/epub-reader\/epubReader\.css';/.test(entry) && /<EpubReaderApp \/>/.test(entry));
+    const cfg = fs.readFileSync(path.join(ROOT, 'vite.config.ts'), 'utf8');
+    const csp = cfg.slice(cfg.indexOf('export const EPUB_READER_CSP'), cfg.indexOf("].join('; ')"));
+    ok("CSP: script-src 'self' (sin unsafe-inline/eval ni blob:)", /"script-src 'self'"/.test(csp) && !/script-src[^"]*(unsafe|blob|data)/.test(csp));
+    ok('CSP: frame-src blob: data:, object-src none, form-action none', /"frame-src blob: data:"/.test(csp) && /"object-src 'none'"/.test(csp) && /"form-action 'none'"/.test(csp));
+    ok('CSP solo en build y solo para epub-reader.html', /apply: 'build'/.test(cfg) && /endsWith\('\/epub-reader\.html'\)\) return html;/.test(cfg));
+    ok('build multi-entrada: index + epub-reader', /index: path\.resolve\(__dirname, 'index\.html'\)/.test(cfg) && /'epub-reader': path\.resolve\(__dirname, 'epub-reader\.html'\)/.test(cfg));
+    const appSrc = fs.readFileSync(path.join(ROOT, 'components', 'epub-reader', 'EpubReaderApp.tsx'), 'utf8');
+    ok('sesión = mismo mecanismo de la SPA (/api/auth/me same-origin)', /fetch\('\/api\/auth\/me', \{ credentials: 'same-origin'/.test(appSrc));
+    ok('EPUB solo por /api/content/:id/epub (nunca epub_url)', /fetch\(`\/api\/content\/\$\{encodeURIComponent\(contentId\)\}\/epub`, \{ credentials: 'same-origin'/.test(appSrc) && !/epub_url/.test(appSrc.replace(/^\s*(\/\/|\*).*$/gm, '')));
+    ok('401/403/404 → estados Chibalete+ con volver a la ficha', /res\.status === 401/.test(appSrc) && /res\.status === 403/.test(appSrc) && /res\.status === 404/.test(appSrc) && /Volver a la ficha/.test(appSrc));
+    const docker = fs.readFileSync(path.join(ROOT, 'Dockerfile.front'), 'utf8');
+    ok('Dockerfile.front copia la entrada y el motor vendorizado', /COPY epub-reader\.html epub-reader\.tsx \.\//.test(docker) && /COPY vendor\/foliate-js\/ \.\/vendor\/foliate-js\//.test(docker));
+}
+
 console.log(`\nchibaleteEpubReader — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

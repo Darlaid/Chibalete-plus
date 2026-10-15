@@ -16,6 +16,9 @@ RUN npm ci --prefer-offline
 
 # Copy all frontend source
 COPY index.html index.tsx index.css App.tsx metadata.json vite.config.ts tsconfig.json ./
+# CHP-CONTENT-CANONICAL-2026-01 3E.3 — entrada del lector EPUB + motor foliate vendorizado
+COPY epub-reader.html epub-reader.tsx ./
+COPY vendor/foliate-js/ ./vendor/foliate-js/
 COPY pages/       ./pages/
 COPY components/  ./components/
 COPY context/     ./context/

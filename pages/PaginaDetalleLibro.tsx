@@ -2,10 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { readMookContext, withMookContext, mookReturnPath } from '../utils/mookReturn.mjs';
+import { hasEpubOriginal, epubReaderHref } from '../utils/epubReaderLink.mjs';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { Content } from '../types';
-import { Book, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2, Glasses, Smartphone } from 'lucide-react';
+import { Book, BookOpen, FileText, Image as ImageIcon, ChevronLeft, Star, Send, UserPen, X, Zap, Play, Eye, WifiOff, Download, CheckCircle, Loader2, Glasses, Smartphone } from 'lucide-react';
 import {
     getOfflineAssignment,
     assignOfflineBook,
@@ -419,6 +420,14 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                     <button onClick={() => goRead(`/leer/pdf/${content.id}`)} className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
                                         <Book size={16}/> Ver PDF Original
                                     </button>
+                                )}
+                                {/* CHP-CONTENT-CANONICAL-2026-01 3E.3: representación del original (no un modo
+                                    pedagógico): a la derecha del PDF. Solo viaja el contentId; el lector
+                                    pide el archivo a GET /api/content/:id/epub (autorizado). */}
+                                {hasEpubOriginal(content) && (
+                                    <a href={epubReaderHref(content.id)} className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
+                                        <BookOpen size={16}/> Ver EPUB original
+                                    </a>
                                 )}
                                 {content.ilustraciones_url && content.ilustraciones_url.length > 0 && (
                                     <button 

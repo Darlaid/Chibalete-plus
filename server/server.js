@@ -2728,30 +2728,24 @@ app.get('/api/content', async (req, res) => {
 // GET /api/content/:id/access?userId=...
 // Árbitro server-side mínimo. Responde { allowed: true } o { allowed: false, reason: '...' }
 // No depende del reloj del cliente. Utiliza Date.now() del servidor.
-app.get('/api/content/:id/access', async (req, res) => {
-    const { id: contentId } = req.params;
-    const { userId } = req.query;
-
-    // --- Anti-Spoofing de userId ---
-    // CHP-IDDB-M1-A: la identidad autenticada es la COOKIE de sesión firmada en
-    // compat/enforce (el navegador ya no envía x-user-id); en 'off' se conserva
-    // el contrato histórico (x-user-id). El query `userId` debe coincidir con la
-    // identidad autenticada — nunca es autoridad por sí mismo.
-    let sessionUserId;
+// Identidad autenticada del request: COOKIE de sesión firmada en compat/enforce;
+// en 'off', el contrato histórico x-user-id. (Antes inline en /access.)
+async function authenticatedUserIdOf(req) {
     if (sessionIssuanceEnabled()) {
         const d = await sessionAuth.authenticate(req);
-        if (!d.ok) return res.status(d.status).json({ allowed: false, reason: 'Sesión no válida.' });
-        sessionUserId = d.userId;
-    } else {
-        sessionUserId = req.headers['x-user-id'];
+        return d.ok ? { ok: true, userId: d.userId } : { ok: false, status: d.status };
     }
-    if (!sessionUserId || sessionUserId !== userId) {
-        return res.status(401).json({ allowed: false, reason: 'Sesión no válida.' });
-    }
+    return { ok: true, userId: req.headers['x-user-id'] || null };
+}
 
+// CHP-CONTENT-CANONICAL-2026-01 3E.3 — la cadena de decisión de acceso a un título,
+// extraída TAL CUAL del handler GET /api/content/:id/access para que /access y
+// /api/content/:id/epub compartan una única autoridad (sin duplicar reglas).
+// Devuelve { status, body } con exactamente las respuestas históricas de /access.
+async function decideContentAccess(userId, contentId) {
     // 1. Input guard
     if (!contentId || !userId) {
-        return res.status(400).json({ allowed: false, reason: 'Parámetros incompletos.' });
+        return { status: 400, body: { allowed: false, reason: 'Parámetros incompletos.' } };
     }
 
     try {
@@ -2759,7 +2753,7 @@ app.get('/api/content/:id/access', async (req, res) => {
         const users = readJSON(USERS_DB);
         const user = users.find(u => u.id === userId);
         if (!user) {
-            return res.status(403).json({ allowed: false, reason: 'Usuario no encontrado.' });
+            return { status: 403, body: { allowed: false, reason: 'Usuario no encontrado.' } };
         }
 
         // Jerarquía de acceso (orden de evaluación):
@@ -2779,14 +2773,14 @@ app.get('/api/content/:id/access', async (req, res) => {
         const privilegedDecision = privilegedAccess ? privilegedAccess(contentId) : null;
         if (privilegedDecision?.via === 'ADMIN_ROLE') {
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ADMIN_ROLE`, 'ACCESS');
-            return res.json({ allowed: true, reason: 'Acceso administrativo total.' });
+            return { status: 200, body: { allowed: true, reason: 'Acceso administrativo total.' } };
         }
 
         // 4. Verificar que el contenido existe
         const contentList = readJSON(DB_FILE);
         const content = contentList.find(c => c.id === contentId);
         if (!content) {
-            return res.status(404).json({ allowed: false, reason: 'Contenido no encontrado.' });
+            return { status: 404, body: { allowed: false, reason: 'Contenido no encontrado.' } };
         }
 
         // 5. Helper de vigencia temporal server-side (árbitro real de tiempo)
@@ -2805,15 +2799,15 @@ app.get('/api/content/:id/access', async (req, res) => {
             const { via, school: mediatorSchool } = privilegedDecision;
             if (via === 'MEDIATOR_ORG') {
                 log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
-                return res.json({ allowed: true, reason: 'Acceso de mediador por catálogo institucional.' });
+                return { status: 200, body: { allowed: true, reason: 'Acceso de mediador por catálogo institucional.' } };
             }
             if (via === 'MEDIATOR_ORG_RESTRICTION') {
                 log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
-                return res.status(403).json({ allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' });
+                return { status: 403, body: { allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' } };
             }
             // Sin restricción institucional activa → acceso total (legado para mediadores sin configuración)
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
-            return res.json({ allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' });
+            return { status: 200, body: { allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' } };
         }
 
         // CHP-ACCESS-PEDAGOGY-01D-B: llegados aquí el usuario NO es administrador
@@ -2823,7 +2817,7 @@ app.get('/api/content/:id/access', async (req, res) => {
         // son PEDAGOGY_RESTRICTED, así que siguen su camino habitual.
         if (isPedagogyRestrictedItem(content)) {
             log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via PEDAGOGY_RESTRICTED`, 'ACCESS');
-            return res.status(403).json({ allowed: false, reason: 'Material pedagógico reservado a mediadores.' });
+            return { status: 403, body: { allowed: false, reason: 'Material pedagógico reservado a mediadores.' } };
         }
 
         // 6. Verificar excepción por asignación pedagógica (Aula Viva)
@@ -2848,7 +2842,7 @@ app.get('/api/content/:id/access', async (req, res) => {
 
         if (hasAssignment) {
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ASSIGNMENT`, 'ACCESS');
-            return res.json({ allowed: true, reason: 'Acceso por asignación pedagógica.' });
+            return { status: 200, body: { allowed: true, reason: 'Acceso por asignación pedagógica.' } };
         }
 
         // --- FASE E7: MOTOR DE ACCESO ESTRICTO POR SCOPES ---
@@ -2858,9 +2852,9 @@ app.get('/api/content/:id/access', async (req, res) => {
         if (!scopeDecision.legacyFallback) {
             // El Scope Engine dictaminó en modo estricto.
             if (scopeDecision.allowed) {
-                return res.json({ allowed: true, reason: scopeDecision.reason });
+                return { status: 200, body: { allowed: true, reason: scopeDecision.reason } };
             } else {
-                return res.status(403).json({ allowed: false, reason: scopeDecision.reason });
+                return { status: 403, body: { allowed: false, reason: scopeDecision.reason } };
             }
         }
         // Si hay legacyFallback, continuamos con las políticas heredadas (Fase 5/6)
@@ -2883,7 +2877,7 @@ app.get('/api/content/:id/access', async (req, res) => {
             if (available === 'all') {
                 // Shortcut: acceso total explícito desde cualquier grupo activo
                 log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ALL (${g.id})`, 'ACCESS');
-                return res.json({ allowed: true, reason: 'Acceso total por grupo activo.' });
+                return { status: 200, body: { allowed: true, reason: 'Acceso total por grupo activo.' } };
             }
 
             let effectiveIds = [];
@@ -2921,7 +2915,7 @@ app.get('/api/content/:id/access', async (req, res) => {
                     if (isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
                         if (orgAccess === 'all') {
                             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ORG_ALL (${schoolName})`, 'ACCESS');
-                            return res.json({ allowed: true, reason: 'Acceso total por organización.' });
+                            return { status: 200, body: { allowed: true, reason: 'Acceso total por organización.' } };
                         }
                         if (Array.isArray(orgAccess) && orgAccess.length > 0) {
                             if (unionAccess === null) {
@@ -2945,25 +2939,25 @@ app.get('/api/content/:id/access', async (req, res) => {
         if (!hasAnyActiveGroupRule) {
             if (ACCESS_FALLBACK_MODE === 'restricted') {
                 log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via LEGACY_NO_RULES (restricted mode)`, 'ACCESS');
-                return res.status(403).json({ allowed: false, reason: 'Acceso restringido: sin catálogo activo para este usuario.' });
+                return { status: 403, body: { allowed: false, reason: 'Acceso restringido: sin catálogo activo para este usuario.' } };
             }
             log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via LEGACY_OPEN (no active rules)`, 'ACCESS');
-            return res.json({ allowed: true, reason: 'Sin restricciones comerciales activas (modo legacy).' });
+            return { status: 200, body: { allowed: true, reason: 'Sin restricciones comerciales activas (modo legacy).' } };
         }
 
         if (unionAccess !== null && Array.isArray(unionAccess)) {
             if (unionAccess.includes(contentId)) {
                 log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_CATALOG`, 'ACCESS');
-                return res.json({ allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' });
+                return { status: 200, body: { allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' } };
             } else {
                 log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via CATALOG_RESTRICTION`, 'ACCESS');
-                return res.status(403).json({ allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' });
+                return { status: 403, body: { allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' } };
             }
         }
 
         // Todos los grupos activos tenían bloqueo total ([]) → acceso denegado
         log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via GROUP_BLOCK`, 'ACCESS');
-        return res.status(403).json({ allowed: false, reason: 'Acceso bloqueado por reglas del grupo.' });
+        return { status: 403, body: { allowed: false, reason: 'Acceso bloqueado por reglas del grupo.' } };
 
     } catch (err) {
         log(`[access-check] Error inesperado: ${err.message}`, 'ERROR');
@@ -2971,11 +2965,97 @@ app.get('/api/content/:id/access', async (req, res) => {
         // de denegación legítima (403 + errorCode ACCESS_DENIED). El frontend
         // los muestra distinto: error técnico ofrece reintentar, denegación
         // dice "no tienes acceso". Mantenemos `allowed: false` por compat.
-        return res.status(500).json({
+        return { status: 500, body: {
             allowed:   false,
             errorCode: 'ACCESS_CHECK_FAILED',
             reason:    'Error de servidor al verificar acceso.',
+        } };
+    }
+}
+
+app.get('/api/content/:id/access', async (req, res) => {
+    const { id: contentId } = req.params;
+    const { userId } = req.query;
+
+    // --- Anti-Spoofing de userId ---
+    // CHP-IDDB-M1-A: la identidad autenticada es la COOKIE de sesión firmada en
+    // compat/enforce (el navegador ya no envía x-user-id); en 'off' se conserva
+    // el contrato histórico (x-user-id). El query `userId` debe coincidir con la
+    // identidad autenticada — nunca es autoridad por sí mismo.
+    const ident = await authenticatedUserIdOf(req);
+    if (!ident.ok) return res.status(ident.status).json({ allowed: false, reason: 'Sesión no válida.' });
+    const sessionUserId = ident.userId;
+    if (!sessionUserId || sessionUserId !== userId) {
+        return res.status(401).json({ allowed: false, reason: 'Sesión no válida.' });
+    }
+
+    const decision = await decideContentAccess(userId, contentId);
+    return res.status(decision.status).json(decision.body);
+});
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-CONTENT-CANONICAL-2026-01 3E.3 — EPUB ORIGINAL AUTORIZADO
+//
+// Única vía para obtener el .epub fuente (el GET público /uploads/**.epub está
+// bloqueado). El cliente solo envía el contentId; la ruta sale del registro.
+//   sin sesión → 401 · sin registro o sin epub_url → 404 · sin acceso → 403
+//   epub_url fuera de /uploads/<id>/, no-.epub, traversal o no regular → 404
+//   con acceso → 200 application/epub+zip, Content-Length, private.
+// Autoridad: decideContentAccess (la misma de /api/content/:id/access).
+// Sin Range en v1 (descarga completa).
+// ────────────────────────────────────────────────────────────────────────────
+app.get('/api/content/:id/epub', async (req, res) => {
+    const { id: contentId } = req.params;
+    try {
+        const ident = await authenticatedUserIdOf(req);
+        if (!ident.ok || !ident.userId) return res.status(ident.status && ident.status !== 200 ? ident.status : 401).json({ error: 'Sesión no válida.' });
+        const userId = ident.userId;
+
+        const content = readJSON(DB_FILE).find(c => c && c.id === contentId);
+        if (!content || typeof content.epub_url !== 'string' || !content.epub_url) {
+            return res.status(404).json({ error: 'Este contenido no tiene EPUB original.' });
+        }
+
+        const decision = await decideContentAccess(userId, contentId);
+        if (decision.status !== 200 || !decision.body?.allowed) {
+            const status = decision.status === 500 ? 500 : (decision.status === 404 ? 404 : 403);
+            log(`[EPUB_ORIGINAL] contentId=${contentId} user=${userId} → ${status}`, 'ACCESS');
+            return res.status(status).json({ error: decision.body?.reason || 'No tienes acceso a este contenido.' });
+        }
+
+        // La ruta sale SOLO del registro: dentro de /uploads/<contentId>/, .epub, regular.
+        const url = content.epub_url;
+        const rel = url.startsWith('/uploads/') ? url.slice('/uploads/'.length) : null;
+        const abs = rel ? path.resolve(UPLOAD_DIR, rel) : null;
+        const relCheck = abs ? path.relative(path.resolve(UPLOAD_DIR), abs) : '..';
+        let stat = null;
+        if (abs && !relCheck.startsWith('..') && !path.isAbsolute(relCheck)
+            && uploadOwnerOfRel(relCheck) === contentId && /\.epub$/i.test(abs)) {
+            try { stat = fs.lstatSync(abs); } catch (_e) { stat = null; }
+        }
+        if (!stat || !stat.isFile()) {
+            log(`[EPUB_ORIGINAL] contentId=${contentId} epub_url no servible (${url})`, 'WARN');
+            return res.status(404).json({ error: 'El EPUB original no está disponible.' });
+        }
+
+        log(`[EPUB_ORIGINAL] contentId=${contentId} user=${userId} bytes=${stat.size}`, 'ACCESS');
+        res.set({
+            'Content-Type': 'application/epub+zip',
+            'Content-Length': String(stat.size),
+            'Cache-Control': 'private, no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Disposition': `inline; filename="${contentId}.epub"`,
         });
+        const stream = fs.createReadStream(abs);
+        stream.on('error', (e) => {
+            log(`[EPUB_ORIGINAL] contentId=${contentId} error de lectura: ${e.message}`, 'ERROR');
+            if (!res.headersSent) res.status(500).end(); else res.destroy(e);
+        });
+        stream.pipe(res);
+    } catch (e) {
+        log(`[EPUB_ORIGINAL] contentId=${contentId} error inesperado: ${e.message}`, 'ERROR');
+        if (!res.headersSent) res.status(500).json({ error: 'Error de servidor al preparar el EPUB.' });
     }
 });
 
@@ -3003,6 +3083,11 @@ app.get(UPLOADS_AUTHZ_PATH, async (req, res) => {
             log(`[uploads-authz] URI rechazada (${normalized.reason})`, 'ACCESS');
             return res.status(404).end();
         }
+
+        // 3E.3: el EPUB fuente NUNCA es un asset público: solo
+        // GET /api/content/:id/epub (autorizado) lo entrega. 403 (no 404):
+        // auth_request solo propaga 401/403; cualquier otro código sería un 500.
+        if (/\.epub$/i.test(normalized.path)) return res.status(403).end();
 
         // Solo la pedagogía independiente exige identidad. Todo lo demás
         // conserva EXACTAMENTE su comportamiento público actual.
@@ -11498,6 +11583,8 @@ function dualWriteSingleEventToBackbone(eventName, ts, rest, userId) {
 
 
 // --- STATIC FILES ---
+// 3E.3: mismo bloqueo del EPUB fuente que el autorizador del edge.
+app.use('/uploads', (req, res, next) => (/\.epub$/i.test(req.path) ? res.status(403).end() : next()));
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 if (IS_PROD) {

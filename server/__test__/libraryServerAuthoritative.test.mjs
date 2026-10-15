@@ -182,7 +182,11 @@ section('[0] la réplica del handler sigue coincidiendo con el fuente');
         pred.includes('privileged && isPedagogyRestrictedItem(item)'));
     const pf = src.slice(src.indexOf("app.get('/api/content/:id/access'"));
     const pfBody = pf.slice(0, pf.indexOf('\n});'));
-    ok('el preflight usa la MISMA decisión de rol', pfBody.includes('privilegedContentAccessFor(user)'));
+    // 3E.3: la cadena de decisión del preflight vive en decideContentAccess
+    // (compartida con GET /api/content/:id/epub); el handler solo la invoca.
+    const decide = src.slice(src.indexOf('async function decideContentAccess('));
+    const decideBody = decide.slice(0, decide.search(/\r?\n\}\r?\n/));
+    ok('el preflight usa la MISMA decisión de rol', pfBody.includes('decideContentAccess(userId, contentId)') && decideBody.includes('privilegedContentAccessFor(user)'));
     ok('el preflight ya no replica la lógica de rol/schoolConfig del mediador',
         !pfBody.includes("roles.includes('mediador')") && !pfBody.includes("roles.includes('administrador')"));
     const helper = src.slice(src.indexOf('function privilegedContentAccessFor('));

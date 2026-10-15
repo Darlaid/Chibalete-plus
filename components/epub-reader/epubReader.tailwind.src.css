@@ -1,0 +1,17 @@
+/*
+ * Fuente del CSS del lector EPUB (3E.3). La SPA usa Tailwind por CDN; la
+ * entrada epub-reader.html NO (CSP script-src 'self'), así que se compila aquí
+ * el MISMO Tailwind v3 solo con las clases que usa el lector:
+ *
+ *   npx -y tailwindcss@3.4.17 -i components/epub-reader/epubReader.tailwind.src.css \
+ *     -o components/epub-reader/epubReader.css --minify \
+ *     --content "./components/epub-reader/*.tsx"
+ *
+ * Regenerar al cambiar clases de components/epub-reader/*.tsx.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { --font-ui: 'Inter', system-ui, sans-serif; }
+body { font-family: var(--font-ui); overscroll-behavior-y: none; }
