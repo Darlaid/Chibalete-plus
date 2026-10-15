@@ -98,6 +98,9 @@ const InformeVisor = React.lazy(() => import('./pages/InformeVisor'));
 const ActivarCuenta = React.lazy(() => import('./pages/ActivarCuenta'));
 const ResetPassword = React.lazy(() => import('./pages/ResetPassword'));
 const ChibaleteLU = React.lazy(() => import('./pages/ChibaleteLU'));
+// CHP-CONTENT-CANONICAL-2026-01 3E.2 — spike local del lector EPUB: SOLO en desarrollo.
+// En el build de producción import.meta.env.DEV es false y Vite elimina este import.
+const DevEpubReader = import.meta.env.DEV ? React.lazy(() => import('./pages/DevEpubReader')) : null;
 
 
 
@@ -477,6 +480,7 @@ const AppContent: React.FC = () => {
                 } />
 
                 {/* Fallback route */}
+                {DevEpubReader && <Route path="/dev/epub-reader" element={<DevEpubReader />} />}
                 <Route path="*" element={<Navigate to={user ? "/" : "/bienvenida"} replace />} />
             </Routes>
         </Suspense>
