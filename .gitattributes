@@ -1,1 +1,4 @@
 *.sh text eol=lf
+
+# CHP-CONTENT-CANONICAL-2026-01 3E.1 — snapshot vendorizado de foliate-js: bytes exactos del upstream (sin conversión EOL)
+vendor/foliate-js/** -text
