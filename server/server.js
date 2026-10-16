@@ -24,6 +24,7 @@ import { cleanupExpiredSessions } from './db/sessionStore.js';
 import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
 import { createLibraryActorAuth, institutionalContextIdOf, personalContextIdOf } from './lib/libraryScope.js';
 import * as libraryStore from './lib/libraryStore.js';
+import { mergeCanonicalProgress } from './lib/epubProgress.js';
 import * as experienceStore from './lib/experienceStore.js';
 // CHP-MOOK-COVER-UPLOAD-01A — contrato de la cubierta, compartido con el frontend.
 import { validateCover, extensionForMime, COVER_UPLOAD_MAX_BYTES } from './lib/coverPolicy.js';
@@ -4500,12 +4501,20 @@ app.post('/api/progress/:userId/:contentId/sync', requireProgressOwner, async (r
              return res.json({ success: true, ignored: true, progress: existing });
         }
 
+        // 3E.6: el merge conserva `canonicalProgress.epub` en guardados legacy y,
+        // en guardados EPUB, solo toca `epub` + globalPercentage (ni isCompleted).
+        const merged = mergeCanonicalProgress(existing?.canonicalProgress, payload.canonicalProgress,
+            { normalize: normalizeCanonicalProgress, updatedAt: incomingDate });
+        if (!merged.ok) return res.status(400).json({ error: 'canonicalProgress.epub inválido', reason: merged.reason });
+
         const newProgress = {
             id: key,
             userId,
             contentId,
-            isCompleted: payload.isCompleted || (existing?.isCompleted || false),
-            canonicalProgress: normalizeCanonicalProgress(payload.canonicalProgress),
+            isCompleted: merged.epubSave
+                ? (existing?.isCompleted || false)
+                : (payload.isCompleted || (existing?.isCompleted || false)),
+            canonicalProgress: merged.canonicalProgress,
             updatedAt: incomingDate,
             history: mergeHistoryWithLimit(existing?.history || [], payload.session)
         };
@@ -10967,12 +10976,19 @@ app.post('/api/progress/my/:contentId', requireUserAuth, (req, res) => {
             return res.json({ success: true, ignored: true, progress: existing });
         }
 
+        // 3E.6: mismo merge que …/sync (conserva `canonicalProgress.epub`).
+        const merged = mergeCanonicalProgress(existing?.canonicalProgress, payload.canonicalProgress,
+            { normalize: normalizeCanonicalProgress, updatedAt: incomingDate });
+        if (!merged.ok) return res.status(400).json({ error: 'canonicalProgress.epub inválido', reason: merged.reason });
+
         const newProgress = {
             id: key,
             userId,
             contentId,
-            isCompleted: payload.isCompleted || (existing?.isCompleted || false),
-            canonicalProgress: normalizeCanonicalProgress(payload.canonicalProgress),
+            isCompleted: merged.epubSave
+                ? (existing?.isCompleted || false)
+                : (payload.isCompleted || (existing?.isCompleted || false)),
+            canonicalProgress: merged.canonicalProgress,
             updatedAt: incomingDate,
             history: mergeHistoryWithLimit(existing?.history || [], payload.session),
         };

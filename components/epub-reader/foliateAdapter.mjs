@@ -100,6 +100,11 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
     // close (p. ej. React StrictMode monta-desmonta-monta) no deja vistas huérfanas.
     let generation = 0;
     const relocateListeners = new Set();
+    // 3E.6: motivo del último relocate según el renderer de foliate ('page',
+    // 'snap', 'scroll', 'navigation' = lector; 'anchor' = re-maquetación
+    // automática, p. ej. al cargar imágenes). El renderer lo emite en el mismo
+    // dispatch, justo DESPUÉS del relocate de la vista.
+    let lastRelocateReason = null;
 
     const ensureFilterStyle = () => {
         const root = styleRoot ?? globalThis.document?.head;
@@ -150,6 +155,7 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
             ensureFilterStyle();
             host.append(created);
             await created.open(book);
+            created.renderer?.addEventListener?.('relocate', (e) => { if (!stale()) lastRelocateReason = e.detail?.reason ?? null; });
             if (stale()) { created.close?.(); created.remove?.(); throw Object.assign(new Error('apertura cancelada'), { code: 'EPUB_OPEN_CANCELLED' }); }
             layout = created.isFixedLayout ? 'pre-paginated' : (book.rendition?.layout ?? 'reflowable');
             await created.init?.({ showTextStart: false });
@@ -167,6 +173,7 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
         goToFraction(f) { return view?.goToFraction(f); },
         onRelocate(cb) { relocateListeners.add(cb); return () => relocateListeners.delete(cb); },
         get layout() { return layout; },
+        get lastRelocateReason() { return lastRelocateReason; },
         get isOpen() { return !!view; },
         setVisualFilter(css) {
             if (!view) return;
@@ -208,6 +215,7 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
             view?.remove?.();
             view = null;
             layout = null;
+            lastRelocateReason = null;
         },
     };
 }

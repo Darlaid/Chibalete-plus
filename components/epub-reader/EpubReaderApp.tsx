@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Loader2, Lock, ShieldAlert, ChevronLeft } from 'lucide-react';
 import ChibaleteEpubReader, { type EpubOpenInfo, type EpubRelocateState } from './ChibaleteEpubReader';
 import { contentDetailHref, readEpubContentId } from '../../utils/epubReaderLink.mjs';
+import { computeEpubFingerprint, createEpubProgressSaver, pickRestoreCfi } from './epubProgress.mjs';
 
 /**
  * CHP-CONTENT-CANONICAL-2026-01 3E.3 — app de la entrada productiva
@@ -13,6 +14,11 @@ import { contentDetailHref, readEpubContentId } from '../../utils/epubReaderLink
  *    servidor; nunca epub_url);
  * 3. lo abre en ChibaleteEpubReader (foliate solo como motor).
  * Sin Range en v1: descarga completa con progreso por Content-Length.
+ *
+ * 3E.6: la posición se guarda en el progreso EXISTENTE
+ * (`canonicalProgress.epub` vía GET progress/item + POST …/sync). El
+ * fingerprint de la fuente es el SHA-256 de los bytes ya descargados; solo se
+ * restaura el CFI si coincide con el guardado.
  */
 type Phase =
     | { kind: 'checking' }
@@ -20,7 +26,12 @@ type Phase =
     | { kind: 'ready'; file: File }
     | { kind: 'error'; code: 'invalid' | 'auth' | 'forbidden' | 'notfound' | 'failed'; message?: string };
 
-type Metrics = { downloadMs?: number; bytes?: number; firstContentMs?: number; navigableMs?: number; heapMB?: number };
+type Metrics = {
+    downloadMs?: number; bytes?: number; firstContentMs?: number; navigableMs?: number; heapMB?: number;
+    sha256Ms?: number; progressReadMs?: number; restoreMs?: number;
+};
+type ResumeInfo = { fingerprint: string; cfi: string | null };
+type Saver = ReturnType<typeof createEpubProgressSaver>;
 const heapMB = () => {
     const m = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
     return m ? Math.round(m.usedJSHeapSize / 1048576) : undefined;
@@ -52,7 +63,10 @@ const EpubReaderApp: React.FC = () => {
     const metrics = useRef<Metrics>({});
     const t0 = useRef(0);
     const dbg = useRef<Record<string, unknown>>({});
-    const adapterRef = useRef<{ auditImages: () => Promise<unknown> } | null>(null);
+    const adapterRef = useRef<{ auditImages: () => Promise<unknown>; lastRelocateReason?: string | null } | null>(null);
+    const userIdRef = useRef<string | null>(null);
+    const resumeRef = useRef<Promise<ResumeInfo | null> | null>(null);
+    const saverRef = useRef<Saver | null>(null);
 
     const exposeDebug = useCallback((patch: Record<string, unknown>) => {
         if (!debugEnabled()) return;
@@ -67,6 +81,8 @@ const EpubReaderApp: React.FC = () => {
             try {
                 const me = await fetch('/api/auth/me', { credentials: 'same-origin', signal: ctrl.signal });
                 if (!me.ok) { setPhase({ kind: 'error', code: 'auth' }); return; }
+                const meJson = await me.json().catch(() => null);
+                userIdRef.current = meJson?.id ?? meJson?.user?.id ?? null;
 
                 t0.current = performance.now();
                 const res = await fetch(`/api/content/${encodeURIComponent(contentId)}/epub`, { credentials: 'same-origin', signal: ctrl.signal });
@@ -91,6 +107,7 @@ const EpubReaderApp: React.FC = () => {
                 }
                 metrics.current = { ...metrics.current, downloadMs: Math.round(performance.now() - t0.current), bytes: loaded };
                 const file = new File(chunks as BlobPart[], `${contentId}.epub`, { type: 'application/epub+zip' });
+                resumeRef.current = prepareResume(file, contentId, userIdRef.current, (patch) => { metrics.current = { ...metrics.current, ...patch }; });
                 exposeDebug({ contentId });
                 setPhase({ kind: 'ready', file });
             } catch (e) {
@@ -102,8 +119,53 @@ const EpubReaderApp: React.FC = () => {
     }, [contentId, exposeDebug]);
 
     const back = useCallback(() => {
+        saverRef.current?.flush({ keepalive: true });
         window.location.assign(contentId ? contentDetailHref(contentId) : '/');
     }, [contentId]);
+
+    // Al salir (cerrar pestaña, cambiar de app) se guarda la última posición válida.
+    useEffect(() => {
+        const onHide = () => { saverRef.current?.flush({ keepalive: true }); };
+        const onVisibility = () => { if (document.visibilityState === 'hidden') onHide(); };
+        window.addEventListener('pagehide', onHide);
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            window.removeEventListener('pagehide', onHide);
+            document.removeEventListener('visibilitychange', onVisibility);
+            saverRef.current?.dispose();
+        };
+    }, []);
+
+    // El libro ya está abierto: restaurar (si procede) y solo entonces armar el guardado.
+    const onAdapter = useCallback((a: unknown) => {
+        adapterRef.current = a as never;
+        saverRef.current?.dispose();
+        saverRef.current = null;
+        if (!a || !contentId) return;
+        const adapter = a as { goTo: (t: string) => Promise<unknown> };
+        (async () => {
+            const resume = await resumeRef.current;
+            const userId = userIdRef.current;
+            if (!resume || !userId || adapterRef.current !== a) return;
+            const saver = createEpubProgressSaver({
+                fingerprint: resume.fingerprint,
+                initialCfi: resume.cfi,
+                send: (body, { keepalive }) => fetch(`/api/progress/${encodeURIComponent(userId)}/${encodeURIComponent(contentId)}/sync`, {
+                    method: 'POST', credentials: 'same-origin', keepalive,
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+                }).catch(() => undefined),
+            });
+            saverRef.current = saver;
+            if (resume.cfi) {
+                const r0 = performance.now();
+                try { await adapter.goTo(resume.cfi); } catch { /* CFI no navegable: queda en el inicio */ }
+                metrics.current = { ...metrics.current, restoreMs: Math.round(performance.now() - r0) };
+            }
+            if (adapterRef.current !== a) return;
+            saver.arm();
+            exposeDebug({ fingerprint: resume.fingerprint, restoredCfi: resume.cfi });
+        })();
+    }, [contentId, exposeDebug]);
 
     const onOpened = useCallback((info: EpubOpenInfo) => {
         metrics.current = { ...metrics.current, navigableMs: Math.round(performance.now() - t0.current), heapMB: heapMB() };
@@ -113,7 +175,11 @@ const EpubReaderApp: React.FC = () => {
         metrics.current = { ...metrics.current, firstContentMs: Math.round(performance.now() - t0.current) };
         exposeDebug({});
     }, [exposeDebug]);
-    const onRelocate = useCallback((loc: EpubRelocateState) => { exposeDebug({ loc }); }, [exposeDebug]);
+    const onRelocate = useCallback((loc: EpubRelocateState) => {
+        // El motivo (renderer) llega en el mismo dispatch, después de este callback.
+        queueMicrotask(() => saverRef.current?.onRelocate({ ...loc, reason: adapterRef.current?.lastRelocateReason ?? null }));
+        exposeDebug({ loc });
+    }, [exposeDebug]);
 
     const backButton = (
         <button type="button" onClick={back} className="flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
@@ -129,7 +195,7 @@ const EpubReaderApp: React.FC = () => {
                 onOpened={onOpened}
                 onFirstRelocate={onFirstRelocate}
                 onRelocate={onRelocate}
-                onAdapter={(a) => { adapterRef.current = a as never; }}
+                onAdapter={onAdapter}
             />
         );
     }
@@ -163,5 +229,26 @@ const EpubReaderApp: React.FC = () => {
         </StatusCard>
     );
 };
+
+/**
+ * Fingerprint de la fuente (bytes exactos ya descargados) + progreso guardado.
+ * Cualquier fallo → null: el libro se abre desde el inicio y no se guarda.
+ */
+async function prepareResume(file: File, contentId: string, userId: string | null, record: (patch: Metrics) => void): Promise<ResumeInfo | null> {
+    try {
+        const s0 = performance.now();
+        const fingerprint = await computeEpubFingerprint(file);
+        record({ sha256Ms: Math.round(performance.now() - s0) });
+        if (!userId) return null;
+        const p0 = performance.now();
+        let cfi: string | null = null;
+        const res = await fetch(`/api/progress/item/${encodeURIComponent(userId)}/${encodeURIComponent(contentId)}`, { credentials: 'same-origin' });
+        if (res.ok) cfi = pickRestoreCfi((await res.json())?.progress, fingerprint);
+        record({ progressReadMs: Math.round(performance.now() - p0) });
+        return { fingerprint, cfi };
+    } catch {
+        return null;
+    }
+}
 
 export default EpubReaderApp;

@@ -40,6 +40,7 @@ function fakeEngine({ layout = 'reflowable', manifest = [], texts = {}, openDela
             const listeners = {};
             const style = new Map();
             const attrs = new Map();
+            const rListeners = {};
             const v = {
                 isFixedLayout: layout === 'pre-paginated',
                 classList: { add: (c) => calls.push(['class', c]) },
@@ -51,7 +52,11 @@ function fakeEngine({ layout = 'reflowable', manifest = [], texts = {}, openDela
                 next: () => calls.push(['next']), prev: () => calls.push(['prev']),
                 goTo: (t) => calls.push(['goTo', t]), goToFraction: (f) => calls.push(['goToFraction', f]),
                 close: () => calls.push(['close']), remove: () => calls.push(['remove']),
-                renderer: { setStyles: (css) => calls.push(['setStyles', css]), setAttribute: (k, val) => attrs.set(k, val), attrs },
+                renderer: {
+                    setStyles: (css) => calls.push(['setStyles', css]), setAttribute: (k, val) => attrs.set(k, val), attrs,
+                    addEventListener: (n, cb) => { (rListeners[n] ??= []).push(cb); },
+                    emit: (n, detail) => (rListeners[n] ?? []).forEach((cb) => cb({ detail })),
+                },
             };
             views.push(v);
             return v;
@@ -86,6 +91,11 @@ console.log('[A/B] inicialización y open(File)');
     ok('D. relocate → estado normalizado (fraction, sección, toc, cfi, location)', state?.fraction === 0.5077 && state.sectionIndex === 8 && state.sectionCount === 14 && state.tocLabel === 'Capítulo VII' && state.tocHref === 'c7.xhtml' && state.cfi === 'epubcfi(/6/18!/4)' && state.location.total === 1800);
     off(); state = null; eng.views[0].emit('relocate', { fraction: 1 });
     ok('D. onRelocate devuelve un off() efectivo', state === null);
+    // 3E.6: el motivo lo emite el renderer de foliate en el mismo dispatch.
+    eng.views[0].renderer.emit('relocate', { reason: 'anchor' });
+    ok('D. lastRelocateReason refleja el renderer (anchor)', ad.lastRelocateReason === 'anchor');
+    eng.views[0].renderer.emit('relocate', { reason: 'page' });
+    ok('D. … y se actualiza (page)', ad.lastRelocateReason === 'page');
 
     console.log('\n[F/G] filtros visuales');
     ad.setVisualFilter(buildFilterCss(applyPreset('invertido')));
