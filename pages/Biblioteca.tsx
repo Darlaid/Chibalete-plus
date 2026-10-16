@@ -641,11 +641,11 @@ const Biblioteca: React.FC = () => {
 
             <div className="flex space-x-3 overflow-x-auto pb-4 scrollbar-hide">
                 <TabButton tab="biblioteca" label="Libros" />
+                <TabButton tab="album" label="Libros Álbum" />
                 <TabButton tab="experiencias" label="Experiencias" highlight={true} />
                 <TabButton tab="personal" label="Mi biblioteca" />
                 <TabButton tab="institucional" label="Biblioteca institucional" />
                 <TabButton tab="editorial" label="Selección Chibalete" />
-                <TabButton tab="album" label="Libros Álbum" />
                 <TabButton tab="lectura" label="Continuar Leyendo" />
                 <TabButton tab="comunidad" label="Comunidad" />
             </div>

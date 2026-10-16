@@ -71,12 +71,12 @@ section('[4/§20] LIBRARY_TABS: EXTENDED_NOT_REBUILT');
 section('[LIBRARY-VISIBILITY-01] LIBRARY_TAB_SET: 8');
 {
     const EXPECTED = [
-        ['biblioteca', 'Libros'], ['experiencias', 'Experiencias'], ['personal', 'Mi biblioteca'],
-        ['institucional', 'Biblioteca institucional'], ['editorial', 'Selección Chibalete'],
-        ['album', 'Libros Álbum'], ['lectura', 'Continuar Leyendo'], ['comunidad', 'Comunidad'],
+        ['biblioteca', 'Libros'], ['album', 'Libros Álbum'], ['experiencias', 'Experiencias'],
+        ['personal', 'Mi biblioteca'], ['institucional', 'Biblioteca institucional'],
+        ['editorial', 'Selección Chibalete'], ['lectura', 'Continuar Leyendo'], ['comunidad', 'Comunidad'],
     ];
     const tabs = [...pageCode.matchAll(/<TabButton tab="([^"]+)" label="([^"]+)"/g)].map(m => [m[1], m[2]]);
-    ok('F · exactamente las 8 pestañas, en el orden previo',
+    ok('F · exactamente las 8 pestañas, en el orden vigente (Libros Álbum tras Libros)',
         JSON.stringify(tabs) === JSON.stringify(EXPECTED), JSON.stringify(tabs));
     ok('G · «Disponibles Offline» ya no existe', !page.includes('Disponibles Offline') && !pageCode.includes('"descargados"'));
     ok('G · «Para Ti» ya no existe', !page.includes('Para Ti') && !pageCode.includes('recomendados'));
