@@ -165,7 +165,10 @@ console.log('\n[I] ruta dev y aislamiento del motor (estructural)');
     const foliateImporters = sources.filter(([, s]) => /vendor\/foliate-js/.test(s.replace(/^\s*(\/\/|\*).*$/gm, ''))).map(([f]) => f);
     ok('solo el adapter importa el motor', foliateImporters.join() === 'foliateAdapter.mjs', foliateImporters.join());
     const adapter = sources.find(([f]) => f === 'foliateAdapter.mjs')[1];
-    ok('el adapter importa únicamente view.js (motor)', (adapter.match(/import\('\.\.\/\.\.\/vendor\/foliate-js\/[^']+'\)/g) ?? []).join() === "import('../../vendor/foliate-js/view.js')");
+    // 3F.1-R: además de view.js, el loader EPUB del adapter usa los mismos módulos
+    // de motor que foliate makeBook (zip.js y epub.js). Nada de UI upstream.
+    ok('el adapter importa únicamente módulos de motor (view.js, zip.js, epub.js)', (adapter.match(/import\('\.\.\/\.\.\/vendor\/foliate-js\/[^']+'\)/g) ?? []).sort().join()
+        === ["import('../../vendor/foliate-js/epub.js')", "import('../../vendor/foliate-js/vendor/zip.js')", "import('../../vendor/foliate-js/view.js')"].sort().join());
     ok('nunca reader.js / reader.html / ui/ upstream', sources.every(([, s]) => !/foliate-js\/(reader\.(js|html)|ui\/)/.test(s)));
 }
 

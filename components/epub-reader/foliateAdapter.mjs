@@ -33,11 +33,57 @@ const MARKUP_MEDIA_TYPE = /(x?html|xml|svg)/i;
 export const FILTER_CSS_VAR = '--chp-epub-filter';
 const FILTER_STYLE_ID = 'chp-epub-filter-part';
 
+/**
+ * 3F.1-R — búsqueda de entradas ZIP tolerante a hrefs percent-encoded.
+ *
+ * foliate (epub.js `resolveURL`) normaliza los href del manifest con
+ * `decodeURI`, que NO decodifica caracteres reservados (`%2C` → `,`, `%3B`…).
+ * Un EPUB válido con `href="Me_desconecto%2C_Luego.xhtml"` y la entrada ZIP
+ * `Me_desconecto,_Luego.xhtml` no se encuentra: la sección carga `null` y el
+ * paginador falla (`#display` → `this.#view.document` de undefined). Primero el
+ * nombre exacto (comportamiento de foliate); solo si no existe, el nombre
+ * decodificado. Sin tocar vendor/.
+ */
+export function createZipEntryResolver(entries) {
+    const map = new Map((entries ?? []).map((e) => [e.filename, e]));
+    return (name) => {
+        if (typeof name !== 'string') return null;
+        if (map.has(name)) return map.get(name);
+        let decoded;
+        try { decoded = decodeURIComponent(name); } catch { return null; }
+        return decoded !== name && map.has(decoded) ? map.get(decoded) : null;
+    };
+}
+
+/**
+ * EPUB con el MISMO loader que foliate `makeZipLoader` (zip.js sin workers,
+ * loadText/loadBlob/getSize) y el mismo `new EPUB(loader).init()`; solo cambia
+ * la búsqueda de entradas (createZipEntryResolver). Lo que no sea ZIP sigue
+ * por `makeBook` de foliate.
+ */
+async function makeEpubBook(file, fallbackMakeBook) {
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (!(head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04)) return fallbackMakeBook(file);
+    const { configure, ZipReader, BlobReader, TextWriter, BlobWriter } = await import('../../vendor/foliate-js/vendor/zip.js');
+    configure({ useWebWorkers: false });
+    const entries = await new ZipReader(new BlobReader(file)).getEntries();
+    const entryOf = createZipEntryResolver(entries);
+    const load = (f) => (name, ...args) => { const entry = entryOf(name); return entry ? f(entry, ...args) : null; };
+    const loader = {
+        entries,
+        loadText: load((entry) => entry.getData(new TextWriter())),
+        loadBlob: load((entry, type) => entry.getData(new BlobWriter(type))),
+        getSize: (name) => entryOf(name)?.uncompressedSize ?? 0,
+    };
+    const { EPUB } = await import('../../vendor/foliate-js/epub.js');
+    return new EPUB(loader).init();
+}
+
 /** Motor real: módulos de engine únicamente (nunca reader.js / reader.html / ui/). */
 export const loadFoliateEngine = async () => {
     const mod = await import('../../vendor/foliate-js/view.js');
     return {
-        makeBook: mod.makeBook,
+        makeBook: (file) => makeEpubBook(file, mod.makeBook),
         createView: () => document.createElement('foliate-view'),
     };
 };
