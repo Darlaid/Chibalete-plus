@@ -294,7 +294,116 @@ export function parseEpubArchive(epubBuffer, { limits } = {}) {
         const docDir = path.posix.dirname(name) === '.' ? '' : path.posix.dirname(name);
         documents.push({ blocks: extractXhtmlBlocks(root, { resolveImage: imageResolver(docDir) }) });
     }
-    return { language, title, a11y, a11yStatus, images, imageMediaTypes, documents };
+    // 3F.1: estructura del paquete para inspectEpubArchive (no la usa la importación).
+    const pkg = { zip, opfDir, metadata, manifest, spineEl };
+    return { language, title, a11y, a11yStatus, images, imageMediaTypes, documents, pkg };
+}
+
+// ─── 3F.1 — Inspección del EPUB para el admin (solo lectura) ────────────────
+// Mismo paquete y mismo parser que la importación; añade lo que el editor
+// necesita ver antes de publicar: diseño, tabla de contenido y scripts. Los
+// criterios de scripts son los del lector (foliateAdapter.inspectScriptedContent):
+// manifest `scripted` o JavaScript, <script>, atributos on* y URLs javascript:.
+const JS_MEDIA_TYPE = /\/(x-)?(javascript|ecmascript)$/i;
+const RENDERED_MARKUP = /(x?html|svg)/i;
+const URL_ATTRS = /^(href|src|action|formaction)$/;
+
+function walkElements(el, visit) {
+    visit(el);
+    for (const c of el.children) if (c.type === 'element') walkElements(c, visit);
+}
+
+function scriptReasonsOf(root) {
+    const reasons = [];
+    walkElements(root, (el) => {
+        if (el.name === 'script') reasons.push('script');
+        for (const [qname, value] of Object.entries(el.attrs)) {
+            const local = qname.split(':').pop().toLowerCase();
+            if (local.startsWith('on')) reasons.push(`atributo ${local}`);
+            else if (URL_ATTRS.test(local) && /^\s*javascript:/i.test(String(value))) reasons.push('javascript: URL');
+        }
+    });
+    return reasons;
+}
+
+function packageScriptReasons({ zip, opfDir, manifest }) {
+    const reasons = [];
+    for (const item of manifest.values()) {
+        if (JS_MEDIA_TYPE.test(item.mediaType)) reasons.push(`manifest: ${item.href} (${item.mediaType})`);
+        if (item.properties.includes('scripted')) reasons.push(`manifest: ${item.href} (scripted)`);
+        if (!RENDERED_MARKUP.test(item.mediaType)) continue;
+        let entry;
+        try { entry = resolvePackageHref(opfDir, item.href); } catch { continue; }
+        if (!zip.entries.has(entry)) continue;
+        // Un documento que el lector renderizaría y que no se puede analizar no es seguro.
+        let root;
+        try { root = readXml(zip, entry, true); } catch { reasons.push(`${item.href}: no analizable`); continue; }
+        for (const r of scriptReasonsOf(root)) reasons.push(`${item.href}: ${r}`);
+    }
+    return reasons;
+}
+
+function packageLayout({ metadata, spineEl }) {
+    const meta = metadata ? childElements(metadata, 'meta').find(m => m.attrs.property === 'rendition:layout') : null;
+    if (meta && collapse(textContent(meta)) === 'pre-paginated') return 'fixed';
+    const refs = childElements(spineEl, 'itemref');
+    if (refs.length && refs.every(r => (r.attrs.properties || '').split(/\s+/).includes('rendition:layout-pre-paginated'))) return 'fixed';
+    return 'reflowable';
+}
+
+function packageToc({ zip, opfDir, manifest, spineEl }) {
+    const nav = [...manifest.values()].find(i => i.properties.includes('nav'));
+    if (nav) {
+        try {
+            const root = readXml(zip, resolvePackageHref(opfDir, nav.href), true);
+            let entries = null;
+            walkElements(root, (el) => {
+                if (entries !== null || el.name !== 'nav') return;
+                const type = Object.entries(el.attrs).find(([k]) => k.split(':').pop() === 'type')?.[1] || '';
+                if (!String(type).split(/\s+/).includes('toc')) return;
+                let n = 0;
+                walkElements(el, (x) => { if (x.name === 'a') n++; });
+                entries = n;
+            });
+            if (entries !== null) return { present: entries > 0, entries };
+        } catch { /* nav ilegible: se intenta la NCX */ }
+    }
+    const ncx = spineEl.attrs.toc ? manifest.get(spineEl.attrs.toc) : null;
+    if (ncx) {
+        try {
+            const root = readXml(zip, resolvePackageHref(opfDir, ncx.href), false);
+            let n = 0;
+            walkElements(root, (x) => { if (x.name === 'navPoint') n++; });
+            return { present: n > 0, entries: n };
+        } catch { /* NCX ilegible */ }
+    }
+    return { present: false, entries: 0 };
+}
+
+/**
+ * Resumen del EPUB para el editor. Lanza CanonicalBookError si el paquete no
+ * es un EPUB válido (los mismos códigos que la importación).
+ * @returns {{ chapters:number, images:number, layout:'reflowable'|'fixed',
+ *            toc:{present:boolean, entries:number}, scripts:boolean, scriptReasons:string[],
+ *            hasText:boolean, bytes:number, title:string|null, publishable:boolean }}
+ */
+export function inspectEpubArchive(epubBuffer, { limits } = {}) {
+    const parsed = parseEpubArchive(epubBuffer, { limits });
+    const chapters = toChapters(parsed.documents);
+    const hasText = chapters.some(ch => ch.blocks.some(isTextBlock));
+    const scriptReasons = packageScriptReasons(parsed.pkg);
+    return {
+        chapters: chapters.length,
+        images: parsed.images.accepted,
+        layout: packageLayout(parsed.pkg),
+        toc: packageToc(parsed.pkg),
+        scripts: scriptReasons.length > 0,
+        scriptReasons: scriptReasons.slice(0, 5),
+        hasText,
+        bytes: epubBuffer.length,
+        title: parsed.title,
+        publishable: hasText && scriptReasons.length === 0,
+    };
 }
 
 /** Bloques por documento → capítulos v1 con IDs ordinales (texto e imágenes por separado). */

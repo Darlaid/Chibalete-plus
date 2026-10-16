@@ -237,6 +237,7 @@ import {
     isSafeCanonicalContentId, canonicalTextUrlFor, buildCanonicalBookFromEpub, writeCanonicalArtifactsAtomic,
     readUploadSourceBytes, isCanonicalEpubCurrent, MAX_EPUB_SOURCE_BYTES,
 } from './content/canonicalBookStore.js';
+import { inspectEpubArchive } from './content/epubImporter.js';
 import * as ttsQueue from './ttsQueue.js';
 import { runHybridTask, getGemini, GEMINI_TEXT_MODEL } from './aiEngine.js';
 import { getOrGenerateAlbumRegionAudio, cleanupAlbumCache, purgeAlbumCacheForContent } from './albumTtsService.js';
@@ -1398,20 +1399,28 @@ const isTextFileSafe = (filePath) => {
 
 // 3C.2 — capa 3 de un .epub subido: tamaño acotado y el pipeline canónico
 // completo (import + materialización de medios) en memoria, sin escribir nada.
+// 3F.1: además rechaza EPUB con scripts (mismos criterios que el lector, que
+// no los abre): un EPUB así no es publicable. Devuelve { ok, code }.
 const validateEpubUpload = (filePath, actorId) => {
     try {
         const stat = fs.statSync(filePath);
         if (!stat.isFile() || stat.size > MAX_EPUB_SOURCE_BYTES) {
             log(`[UPLOAD_EPUB_INVALID] actor=${actorId} reason=size bytes=${stat.size}`, 'SECURITY');
-            return false;
+            return { ok: false, code: 'EPUB_TOO_LARGE' };
         }
-        buildCanonicalBookFromEpub({ contentId: 'epub-upload-check', epubBuffer: fs.readFileSync(filePath) });
-        return true;
+        const epubBuffer = fs.readFileSync(filePath);
+        buildCanonicalBookFromEpub({ contentId: 'epub-upload-check', epubBuffer });
+        if (inspectEpubArchive(epubBuffer).scripts) {
+            log(`[UPLOAD_EPUB_INVALID] actor=${actorId} reason=EPUB_SCRIPTED`, 'SECURITY');
+            return { ok: false, code: 'EPUB_SCRIPTED' };
+        }
+        return { ok: true };
     } catch (e) {
         log(`[UPLOAD_EPUB_INVALID] actor=${actorId} reason=${e.code || e.message}`, 'SECURITY');
-        return false;
+        return { ok: false, code: e.code || 'EPUB_INVALID' };
     }
 };
+const EPUB_SCRIPTED_MESSAGE = 'Este EPUB contiene scripts y no se puede publicar por seguridad.';
 
 const safeUnlink = (filePath) => {
     if (filePath && fs.existsSync(filePath)) {
@@ -3378,7 +3387,12 @@ app.post('/api/upload', (req, res) => {
             if (expectedCategory === 'epub') {
                 // Capa 2 (magic) + capa 3: el mismo pipeline que POST /api/content,
                 // en memoria y sin escribir nada. Un ZIP cualquiera no pasa.
-                isValid = fileTypeInfo?.mime === EPUB_MIME && validateEpubUpload(tempPath, actorId);
+                const epubCheck = fileTypeInfo?.mime === EPUB_MIME ? validateEpubUpload(tempPath, actorId) : { ok: false };
+                if (epubCheck.code === 'EPUB_SCRIPTED') {
+                    safeUnlink(tempPath);
+                    return res.status(415).json({ error: EPUB_SCRIPTED_MESSAGE, code: 'EPUB_SCRIPTED' });
+                }
+                isValid = epubCheck.ok;
             } else if (expectedCategory === 'text') {
                 // TXT validation: Usually file-type returns undefined for pure txt
                 // But we must check for null bytes to prevent binary spoofing
@@ -3446,6 +3460,40 @@ app.post('/api/upload', (req, res) => {
             log(`[UPLOAD_FAIL] actor=${actorId} reason=validation_crash error=${validationErr.message} sizeMB=${sizeMB} durationMs=${elapsed} aborted=${abortedByClient}`, 'ERROR');
             safeUnlink(tempPath);
             res.status(415).json({ error: 'El archivo no pudo ser leído. Puede estar corrupto o truncado.' });
+        }
+    });
+});
+
+// CHP-CONTENT-CANONICAL-2026-01 3F.1 — Inspección de un EPUB antes de publicar.
+// Solo lectura: el archivo queda en TEMP_DIR y se borra siempre; no se guarda
+// nada ni entra en el índice de dedup. Mismo parser que la importación
+// (inspectEpubArchive). Protegido por app.use('/api/upload', requireAdminRole).
+app.post('/api/upload/epub-inspect', (req, res) => {
+    upload.single('file')(req, res, async (err) => {
+        const tempPath = req.file?.path;
+        try {
+            if (err) {
+                if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'El archivo supera el tope técnico de seguridad.', code: 'LIMIT_FILE_SIZE' });
+                return res.status(400).json({ error: err.message });
+            }
+            if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+            if (path.extname(req.file.originalname).toLowerCase() !== '.epub' || (await fileTypeFromFile(tempPath))?.mime !== EPUB_MIME) {
+                return res.status(415).json({ error: 'El archivo no es un EPUB.', code: 'EPUB_INVALID' });
+            }
+            if (req.file.size > MAX_EPUB_SOURCE_BYTES) return res.status(413).json({ error: 'El EPUB supera el tamaño máximo admitido.', code: 'EPUB_TOO_LARGE' });
+            let inspection;
+            try {
+                inspection = inspectEpubArchive(fs.readFileSync(tempPath));
+            } catch (e) {
+                return res.status(422).json({ error: 'El archivo no es un EPUB válido.', code: e.code || 'EPUB_INVALID' });
+            }
+            const { scriptReasons: _internal, ...summary } = inspection;
+            res.json({ success: true, inspection: summary });
+        } catch (e) {
+            log(`[EPUB_INSPECT_FAIL] error=${e.message}`, 'ERROR');
+            if (!res.headersSent) res.status(500).json({ error: 'No se pudo inspeccionar el EPUB.' });
+        } finally {
+            safeUnlink(tempPath);
         }
     });
 });
@@ -3782,12 +3830,21 @@ const applyEpubTextVersion = (record, previous) => {
     return undo;
 };
 
+// 3F.1: un EPUB añadido con POST /api/content/:id/epub-edition es una EDICIÓN
+// del contenido, no la fuente de su texto: el contenido conserva su texto
+// propio (o ninguno). El EPUB solo es fuente cuando el texto del contenido ES
+// su rendición canónica (contenido creado desde EPUB, 3C.2).
+const canonicalTextUrlOrNull = (id) => { try { return canonicalTextUrlFor(id); } catch { return null; } };
+const isAttachedEpubEdition = (record, previous) => !!previous?.epub_url
+    && record.epub_url === previous.epub_url
+    && previous.texto_plano_url !== canonicalTextUrlOrNull(previous.id);
+
 const applyContentTextVersion = (record, previous) => {
     for (const f of CANONICAL_CONTENT_FIELDS) {
         if (previous && f in previous) record[f] = previous[f];
         else delete record[f];
     }
-    if (record.epub_url) return applyEpubTextVersion(record, previous);
+    if (record.epub_url && !isAttachedEpubEdition(record, previous)) return applyEpubTextVersion(record, previous);
     const hasVersionFields = !!previous && ('contentFingerprint' in previous || 'contentVersion' in previous);
     const keptVersion = Number.isInteger(previous?.contentVersion) && previous.contentVersion >= 1 ? previous.contentVersion : null;
     const textUrl = record.texto_plano_url || null;
@@ -3887,7 +3944,7 @@ app.post('/api/content', async (req, res) => {
         // 2B: la metadata canónica también (applyContentTextVersion arrastra la guardada).
         for (const f of CANONICAL_CONTENT_FIELDS) delete newContent[f];
         // 3C.2: con fuente EPUB, texto_plano_url es la rendición canónica (no la del cliente).
-        if (newContent.epub_url) {
+        if (newContent.epub_url && !isAttachedEpubEdition(newContent, oldContent)) {
             if (!isSafeCanonicalContentId(newContent.id)) {
                 return res.status(422).json({ error: 'El id del contenido no admite una fuente EPUB.', code: 'unsafe_content_id' });
             }
@@ -3943,7 +4000,8 @@ app.post('/api/content', async (req, res) => {
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
                 // 3C.2: en EPUB la URL del texto es fija; un texto nuevo se
                 // reconoce por su fingerprint (solo medios → mismo fingerprint → sin TTS).
-                if (newContent.epub_url && !shouldGenerateTTS && newContent.contentFingerprint
+                if (newContent.epub_url && !isAttachedEpubEdition(newContent, freshIdx >= 0 ? freshList[freshIdx] : null)
+                    && !shouldGenerateTTS && newContent.contentFingerprint
                     && newContent.contentFingerprint !== (freshIdx >= 0 ? freshList[freshIdx].contentFingerprint ?? null : null)) {
                     shouldGenerateTTS = true;
                     newContent.status = 'disponible';
@@ -8481,6 +8539,77 @@ app.post('/api/schools/:name/config', requireAdminAccess, async (req, res) => {
 // RETRY/REPAIR ROUTE (Must be before static catch-all)
 // requireAdminRole aplicado vía app.use('/api/content', requireAdminRole).
 // requireAuth (x-admin-secret) fue removido: el frontend envía x-user-id, no el secret.
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-CONTENT-CANONICAL-2026-01 3F.1 — Añadir una edición EPUB a un contenido
+// EXISTENTE. ATTACH ≠ REIMPORT ≠ TTS: solo fija `epub_url`; no llama a
+// applyContentTextVersion/applyEpubTextVersion, no genera canonical, no
+// encola TTS y no toca progreso, acceso ni otros campos.
+//   sin contenido → 404 · ya tiene epub_url → 409 (no se reemplaza)
+//   EPUB fuera de /uploads/<contentId>/ (R4), no .epub o inexistente → 422
+//   EPUB inválido o con scripts → 422
+// Protegido por app.use('/api/content', requireAdminRole).
+// ────────────────────────────────────────────────────────────────────────────
+const EPUB_ALREADY_ATTACHED_MESSAGE = 'Este contenido ya tiene una edición EPUB.';
+
+/** Ruta absoluta de un .epub subido bajo /uploads/<contentId>/ (no canónico), o null. */
+const ownedEpubUploadPath = (contentId, url) => {
+    if (typeof url !== 'string' || !url.startsWith('/uploads/') || !/\.epub$/i.test(url)) return null;
+    const abs = path.resolve(UPLOAD_DIR, url.slice('/uploads/'.length));
+    const rel = path.relative(path.resolve(UPLOAD_DIR), abs);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    if (uploadOwnerOfRel(rel) !== contentId || isCanonicalArtifactUploadPath(rel)) return null;
+    try { return fs.lstatSync(abs).isFile() ? abs : null; } catch { return null; }
+};
+
+app.post('/api/content/:id/epub-edition', async (req, res) => {
+    const contentId = req.params.id;
+    const actorId = req.headers['x-user-id'] ?? req.auth?.userId ?? 'unknown';
+    const epubUrl = req.body?.epub_url;
+    try {
+        const current = readJSON(DB_FILE).find(c => c && c.id === contentId);
+        if (!current) return res.status(404).json({ error: 'Contenido no encontrado.', code: 'content_not_found' });
+        if (current.epub_url) return res.status(409).json({ error: EPUB_ALREADY_ATTACHED_MESSAGE, code: 'epub_already_attached' });
+
+        const abs = ownedEpubUploadPath(contentId, epubUrl);
+        if (!abs) {
+            log(`[EPUB_ATTACH_REJECTED] contentId=${contentId} actor=${actorId} reason=not_owned url=${String(epubUrl).slice(0, 200)}`, 'SECURITY');
+            return res.status(422).json({ error: 'El EPUB debe estar subido para este mismo contenido.', code: 'epub_not_owned' });
+        }
+        if (fs.statSync(abs).size > MAX_EPUB_SOURCE_BYTES) return res.status(422).json({ error: 'El EPUB supera el tamaño máximo admitido.', code: 'EPUB_TOO_LARGE' });
+        let inspection;
+        try {
+            inspection = inspectEpubArchive(fs.readFileSync(abs));
+        } catch (e) {
+            return res.status(422).json({ error: 'El archivo no es un EPUB válido.', code: e.code || 'EPUB_INVALID' });
+        }
+        if (inspection.scripts) {
+            log(`[EPUB_ATTACH_REJECTED] contentId=${contentId} actor=${actorId} reason=EPUB_SCRIPTED`, 'SECURITY');
+            return res.status(422).json({ error: EPUB_SCRIPTED_MESSAGE, code: 'EPUB_SCRIPTED' });
+        }
+
+        let saved = null;
+        await withFileLock(DB_FILE, () => {
+            _jsonCache.delete(DB_FILE);
+            const list = readJSON(DB_FILE);
+            const i = list.findIndex(c => c && c.id === contentId);
+            if (i < 0) throw Object.assign(new Error('content_not_found'), { httpStatus: 404 });
+            if (list[i].epub_url) throw Object.assign(new Error('epub_already_attached'), { httpStatus: 409 });
+            list[i] = { ...list[i], epub_url: epubUrl };
+            writeJSON(DB_FILE, list);
+            saved = list[i];
+        }, 'contentLock');
+
+        log(`[EPUB_ATTACH] contentId=${contentId} actor=${actorId} url=${epubUrl} bytes=${inspection.bytes}`, 'SUCCESS');
+        const { scriptReasons: _internal, ...summary } = inspection;
+        res.json({ success: true, content: saved, inspection: summary });
+    } catch (e) {
+        if (e.httpStatus === 409) return res.status(409).json({ error: EPUB_ALREADY_ATTACHED_MESSAGE, code: 'epub_already_attached' });
+        if (e.httpStatus === 404) return res.status(404).json({ error: 'Contenido no encontrado.', code: 'content_not_found' });
+        log(`[EPUB_ATTACH_FAIL] contentId=${contentId} actor=${actorId} error=${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'No se pudo añadir la edición EPUB.' });
+    }
+});
+
 app.post('/api/content/:id/retry', async (req, res) => {
     const { id } = req.params;
     const actorId = req.headers['x-user-id'] ?? 'unknown';

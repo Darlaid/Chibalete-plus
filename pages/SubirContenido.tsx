@@ -10,7 +10,10 @@ import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ExperienceStudio from '../components/studio/ExperienceStudio';
 import LandingBannerManager from '../components/LandingBannerManager';
-import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource, isMainResourceInputRequired } from '../utils/epubSourceUpload.mjs';
+import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource, isMainResourceInputRequired, isEpubTextSource } from '../utils/epubSourceUpload.mjs';
+import { EPUB_BOOK_FLOWS, ILLUSTRATED_KEEPS_ORIGINAL_MESSAGE } from '../utils/epubAdmin.mjs';
+import EpubInspectorCard from '../components/admin/EpubInspectorCard';
+import AttachEpubPanel from '../components/admin/AttachEpubPanel';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -386,6 +389,12 @@ const SubirContenido: React.FC = () => {
 
     const [selectedParentId, setSelectedParentId] = useState<string>('');
     const [editingId, setEditingId] = useState<string | null>(null); // New State for Editing
+    // 3F.1 — operación EPUB dentro de «Crear»: TXT/EPUB, EPUB ilustrado o añadir EPUB.
+    // Ilustrado usa el MISMO pipeline EPUB; la diferencia es solo editorial/UI.
+    const [bookFlow, setBookFlow] = useState<'text' | 'illustrated' | 'attach'>('text');
+    const [epubInspectBlock, setEpubInspectBlock] = useState<string | null>(null);
+    const attachFlow = uploadMode === 'new' && !editingId && bookFlow === 'attach';
+    const illustratedFlow = uploadMode === 'new' && !editingId && bookFlow === 'illustrated';
 
     const handleEditContent = async (content: Content) => {
         setUploadMode('new'); // Reuse 'new' mode for editor
@@ -885,6 +894,16 @@ const SubirContenido: React.FC = () => {
                 });
                 if (epubBlock) {
                     setUploadError(epubBlock);
+                    setIsUploading(false);
+                    submittingRef.current = false;
+                    return;
+                }
+                // 3F.1: ilustrado exige el EPUB; un EPUB no publicable (scripts, sin
+                // texto) no se envía (el servidor lo vuelve a validar igualmente).
+                const epubFlowBlock = (!isUpdate && bookFlow === 'illustrated' && !isEpubFile(mainContent.textoPlanoFile) ? 'Selecciona el EPUB ilustrado.' : null)
+                    || (isEpubFile(mainContent.textoPlanoFile) ? epubInspectBlock : null);
+                if (epubFlowBlock) {
+                    setUploadError(epubFlowBlock);
                     setIsUploading(false);
                     submittingRef.current = false;
                     return;
@@ -1451,10 +1470,47 @@ const SubirContenido: React.FC = () => {
                     </div>
                 )}
 
+                {/* 3F.1 — operación de libro: TXT/EPUB, EPUB ilustrado o añadir EPUB */}
+                {uploadMode === 'new' && !editingId && (
+                    <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700">
+                        <h2 className="text-lg font-semibold mb-4 text-indigo-600 dark:text-indigo-400">¿Qué quieres hacer?</h2>
+                        <div className="grid sm:grid-cols-3 gap-4">
+                            {EPUB_BOOK_FLOWS.map((flow: { id: 'text' | 'illustrated' | 'attach'; title: string; description: string }) => (
+                                <button
+                                    key={flow.id}
+                                    type="button"
+                                    onClick={() => {
+                                        setBookFlow(flow.id);
+                                        setEpubInspectBlock(null);
+                                        setUploadError(null);
+                                        setMainContent(prev => ({ ...prev, textoPlanoFile: null }));
+                                    }}
+                                    aria-pressed={bookFlow === flow.id}
+                                    className={`p-4 rounded-lg border-2 text-left transition-all ${bookFlow === flow.id ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-indigo-300'}`}
+                                >
+                                    <span className="block font-bold mb-1">{flow.title}</span>
+                                    <span className="block text-sm text-gray-500">{flow.description}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {attachFlow && <AttachEpubPanel contents={existingParents} />}
+
                 {/* 2. Información de la Obra Principal (Solo si es NEW) */}
-                {uploadMode === 'new' && (
+                {uploadMode === 'new' && !attachFlow && (
                     <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 animate-in slide-in-from-bottom-4">
                         <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200 border-b border-gray-200 dark:border-gray-700 pb-4 mb-6">Información Principal</h2>
+
+                        {illustratedFlow && (
+                            <div className="mb-6 rounded-xl border-2 border-indigo-200 dark:border-indigo-800 p-5">
+                                <label htmlFor="sc-epub-ilustrado" className="block text-sm font-bold mb-1">EPUB ilustrado (recurso principal)</label>
+                                <input id="sc-epub-ilustrado" type="file" accept=".epub,application/epub+zip" onChange={(e) => handleMainFileChange(e, 'textoPlanoFile')} className="w-full text-sm text-gray-500" />
+                                <p className="text-xs text-gray-600 dark:text-gray-300 mt-2">{ILLUSTRATED_KEEPS_ORIGINAL_MESSAGE}</p>
+                                <EpubInspectorCard file={isEpubFile(mainContent.textoPlanoFile) ? mainContent.textoPlanoFile : null} onResult={(_i, block) => setEpubInspectBlock(block)} />
+                            </div>
+                        )}
 
                         <div className="grid md:grid-cols-2 gap-6 mb-6">
                             <div>
@@ -2859,16 +2915,24 @@ const SubirContenido: React.FC = () => {
                                 </div>
 
                                 <div className="grid md:grid-cols-3 gap-4">
+                                    {!illustratedFlow && (
                                     <div>
                                         <label htmlFor="sc-texto-es" className="block text-xs font-medium mb-1">Texto Plano (Español) o EPUB</label>
                                         <input id="sc-texto-es" type="file" accept=".txt,.md,.epub,application/epub+zip" onChange={(e) => handleMainFileChange(e, 'textoPlanoFile')} className="w-full text-xs text-gray-500" />
                                         <p className="text-[10px] text-gray-500 mt-1">Requerido para voz y adaptación. Un EPUB solo sirve para crear un contenido nuevo.</p>
-                                        {editingId && !mainContent.textoPlanoFile && existingParents.find(p => p.id === editingId)?.epub_url ? (
+                                        {editingId && !mainContent.textoPlanoFile && isEpubTextSource(existingParents.find(p => p.id === editingId)) ? (
                                             <p className="mt-1 text-[10px] text-green-600">✓ EPUB fuente actual (por ahora no se puede reemplazar)</p>
                                         ) : editingId && !mainContent.textoPlanoFile && existingParents.find(p => p.id === editingId)?.texto_plano_url && (
                                             <p className="mt-1 text-[10px] text-green-600">✓ Archivo actual existe</p>
                                         )}
+                                        {editingId && existingParents.find(p => p.id === editingId)?.epub_url && !isEpubTextSource(existingParents.find(p => p.id === editingId)) && (
+                                            <p className="mt-1 text-[10px] text-green-600">✓ Edición EPUB añadida (no cambia este texto)</p>
+                                        )}
+                                        {!editingId && isEpubFile(mainContent.textoPlanoFile) && (
+                                            <EpubInspectorCard file={mainContent.textoPlanoFile} onResult={(_i, block) => setEpubInspectBlock(block)} />
+                                        )}
                                     </div>
+                                    )}
                                     <div>
                                         <label htmlFor="sc-texto-en" className="block text-xs font-medium mb-1">Texto Plano (Inglés)</label>
                                         <input id="sc-texto-en" type="file" accept=".txt" onChange={(e) => handleMainFileChange(e, 'textoInglesFile')} className="w-full text-xs text-gray-500" />
@@ -2909,7 +2973,7 @@ const SubirContenido: React.FC = () => {
 
                 {/* 4. Materiales del Ecosistema (Hijos) */}
                 {
-                    mainContent.tipo !== 'memoria_club' && uploadMode !== 'experiencia' && uploadMode !== 'banner' && (
+                    mainContent.tipo !== 'memoria_club' && uploadMode !== 'experiencia' && uploadMode !== 'banner' && !attachFlow && (
                         <div className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-xl border border-dashed border-gray-300 dark:border-gray-700">
                             <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200 flex items-center">
@@ -3029,7 +3093,7 @@ const SubirContenido: React.FC = () => {
                     )
                 }
 
-                {uploadMode !== 'experiencia' && uploadMode !== 'banner' && (
+                {uploadMode !== 'experiencia' && uploadMode !== 'banner' && !attachFlow && (
                 <div className="pt-4">
                     {/* Inline error — shown instead of alert() so the form stays accessible for retry */}
                     {uploadError && (

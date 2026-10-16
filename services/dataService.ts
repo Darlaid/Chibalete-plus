@@ -1,6 +1,7 @@
 import type {
     User,
     Content,
+    EpubInspection,
     ProgresoLectura,
     ReadingStatus,
     LeoReaderProfile,
@@ -852,6 +853,37 @@ class DataService {
         } catch (_e) {
             // Best-effort only — never throw from cleanup paths
         }
+    }
+
+    // CHP-CONTENT-CANONICAL-2026-01 3F.1 — inspección de un EPUB antes de publicar
+    // (solo lectura: el servidor no guarda el archivo). Lanza con el mensaje del servidor.
+    async inspectEpub(file: File): Promise<EpubInspection> {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch(`${this.apiUrl}/upload/epub-inspect`, { method: 'POST', credentials: 'same-origin', body: formData });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !body?.inspection) throw new Error(body?.error || `Error ${res.status} al inspeccionar el EPUB`);
+        return body.inspection as EpubInspection;
+    }
+
+    // 3F.1 — añade una edición EPUB (ya subida bajo /uploads/<contentId>/) a un
+    // contenido existente. Solo cambia epub_url; el servidor rechaza el resto.
+    async attachEpubEdition(contentId: string, epubUrl: string): Promise<Content> {
+        const res = await fetch(`${this.apiUrl}/content/${encodeURIComponent(contentId)}/epub-edition`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ epub_url: epubUrl }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !body?.content) throw new Error(body?.error || `Error ${res.status} al añadir el EPUB`);
+        const saved = body.content as Content;
+        const idx = this.content.findIndex(c => c.id === saved.id);
+        if (idx > -1) {
+            this.content[idx] = saved;
+            this.saveState('content', this.content);
+        }
+        return saved;
     }
 
     // --- Phase 8: Oral Reading Persistence ---

@@ -125,7 +125,8 @@ function ratchetEstructural() {
         bloques.push(src.slice(i, i + 600));
         i = src.indexOf('withFileLock(DB_FILE', i + 1);
     }
-    ok('los 6 flujos RMW de content.json siguen presentes', bloques.length === 6, String(bloques.length));
+    // 3F.1: el 7.º flujo es POST /api/content/:id/epub-edition (añadir edición EPUB).
+    ok('los 7 flujos RMW de content.json siguen presentes', bloques.length === 7, String(bloques.length));
 
     const sinInvalidar = bloques.filter(b => {
         const inval = b.indexOf('_jsonCache.delete(DB_FILE)');
@@ -136,7 +137,7 @@ function ratchetEstructural() {
         sinInvalidar.length + ' flujo(s) leen sin invalidar');
 
     const escrituras = (src.match(/writeJSON\(DB_FILE/g) || []).length;
-    ok('toda escritura de content.json vive dentro de un lock', escrituras === 6, escrituras + ' escrituras');
+    ok('toda escritura de content.json vive dentro de un lock', escrituras === 7, escrituras + ' escrituras');
 
     ok('la auditoría de arranque ya no reescribe la lista leída fuera del lock',
         !/withFileLock\(DB_FILE, \(\) => \{\s*writeJSON\(DB_FILE, contentList\)/.test(src));

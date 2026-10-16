@@ -28,11 +28,20 @@ export function asEpubUploadFile(file) {
 }
 
 /**
+ * 3F.1 — ¿Hay que tratar el EPUB del contenido como FUENTE de su texto?
+ * Un EPUB añadido como edición a un contenido con texto PROPIO (no la rendición
+ * canónica del EPUB) no lo es: ese texto sigue editable. Sin texto propio se
+ * mantiene el criterio conservador de 3D.1 (fuente).
+ */
+export const isEpubTextSource = (content) => !!content?.epub_url
+    && (!content.texto_plano_url || content.texto_plano_url === `/uploads/${content.id}/canonical/book.txt`);
+
+/**
  * Motivo para bloquear el guardado, o null.
  * @param {{ isUpdate: boolean, existingContent?: { epub_url?: string } | null, textoPlanoFile?: File | null }} args
  */
 export function epubSourceBlockReason({ isUpdate, existingContent, textoPlanoFile }) {
-    if (existingContent?.epub_url && textoPlanoFile) return EPUB_REIMPORT_BLOCKED_MESSAGE;
+    if (isEpubTextSource(existingContent) && textoPlanoFile) return EPUB_REIMPORT_BLOCKED_MESSAGE;
     if (isUpdate && isEpubFile(textoPlanoFile)) return EPUB_ONLY_NEW_CONTENT_MESSAGE;
     return null;
 }

@@ -1360,3 +1360,16 @@ export interface ImportResult {
   warnings: number;
   errors: ImportRowError[];
 }
+
+// CHP-CONTENT-CANONICAL-2026-01 3F.1 — resumen de POST /api/upload/epub-inspect.
+export interface EpubInspection {
+  chapters: number;
+  images: number;
+  layout: 'reflowable' | 'fixed';
+  toc: { present: boolean; entries: number };
+  scripts: boolean;
+  hasText: boolean;
+  bytes: number;
+  title: string | null;
+  publishable: boolean;
+}
