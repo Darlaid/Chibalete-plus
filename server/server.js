@@ -4187,6 +4187,12 @@ const sanitizeUserForClient = (user) => {
     return safeUser;
 };
 
+// Campos de perfil público que un lector puede ver de otro usuario de su tenant.
+const PUBLIC_USER_PROFILE_FIELDS = ['id', 'nombre_completo', 'nombre_usuario', 'avatar_url', 'bio_corta', 'roles',
+    'mediatorKind', 'colegio', 'groupIds', 'libros_leidos', 'seguidores', 'seguidos', 'nivel_lectura'];
+const publicUserProfile = (user) => Object.fromEntries(
+    PUBLIC_USER_PROFILE_FIELDS.filter(f => user?.[f] !== undefined).map(f => [f, user[f]]));
+
 const sanitizeUsersForClient = (users) => {
     return users.map(sanitizeUserForClient);
 };
@@ -4781,6 +4787,13 @@ app.get('/api/users', requireAuth, async (req, res) => {
         if (!scope.global) {
             normalizedUsers = normalizedUsers.filter(u =>
                 u?.id === scope.callerId || (scope.orgId && u?.organizationId === scope.orgId));
+            // CHP-CONTENT-CANONICAL-2026-01 3E.5-S1: un lector (sin rol mediador/
+            // administrador) solo necesita el perfil público de los demás (nombre,
+            // avatar, rol/mediatorKind en club, visor y Perfil). Su propio registro
+            // va completo; correo, último acceso, estado y tenant ajenos no salen.
+            if (!pedagogyRolesOf(scope.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r))) {
+                normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
+            }
         }
         res.json(sanitizeUsersForClient(normalizedUsers));
     } catch (e) {
@@ -8914,9 +8927,20 @@ app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, async (req, res) 
 });
 
 // --- LEO MEMORY (Fase 5.6) ---
+// CHP-CONTENT-CANONICAL-2026-01 3E.5-S1: la memoria Leo es OWNER-ONLY (lectura
+// y escritura, sin excepción de mediador ni admin). requireUserAuth establece la
+// identidad de la sesión; el :userId del path se conserva por compatibilidad
+// pero debe ser exactamente ese sujeto.
+const leoMemoryOwnerDenied = (req, res) => {
+    if (String(reqUserId(req)) === String(req.params.userId)) return false;
+    res.status(403).json({ error: 'scope_access_denied', scope_type: 'user', scope_id: String(req.params.userId) });
+    return true;
+};
+
 app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, (req, res) => {
     try {
         const { userId, contentId } = req.params;
+        if (leoMemoryOwnerDenied(req, res)) return;
         const key = makeProgressKey(userId, contentId);
         const db = ensureLeoMemoryDbShape(readJSON(LEO_MEMORY_DB));
         const memory = db.memoryMap[key];
@@ -8943,6 +8967,7 @@ app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGua
 app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
+        if (leoMemoryOwnerDenied(req, res)) return;
         const payload = req.body;
         const key = makeProgressKey(userId, contentId);
 

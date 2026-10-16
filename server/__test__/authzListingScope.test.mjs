@@ -75,6 +75,11 @@ const USERS = [
     { id: 'med-b',  roles: ['mediador'],      organizationId: ORG_B, colegio: 'Colegio Beta', accountStatus: 'active', mediatorKind: 'teacher', email: 'med-b@beta.test' },
     { id: 'lec-a1', roles: ['lector'],        organizationId: ORG_A, colegio: 'Colegio Alfa', accountStatus: 'active', email: 'lec-a1@alfa.test' },
     { id: 'lec-a2', roles: ['lector'],        organizationId: ORG_A, colegio: 'Colegio Alfa', accountStatus: 'active', email: 'lec-a2@alfa.test' },
+    // 3E.5-S1: registro con campos internos/sensibles para el test de shape.
+    { id: 'lec-a3', roles: ['lector'],        organizationId: ORG_A, colegio: 'Colegio Alfa', accountStatus: 'active', email: 'lec-a3@alfa.test',
+      nombre_completo: 'Lectora Tres', nombre_usuario: 'lt3', avatar_url: '/a.png', bio_corta: 'hola', groupIds: ['g-a1'], libros_leidos: 2, seguidores: 1, seguidos: 0, nivel_lectura: 'medio',
+      lastLoginAt: '2026-10-01T00:00:00Z', social_connections: { facebook: true }, password: 'x', inviteToken: 't', inviteExpiresAt: 1, resetToken: 'r', resetExpiresAt: 1,
+      credentialVersion: 3, b2c: true, mustChangePassword: false, createdAt: '2026-01-01', telefono: '000' },
     { id: 'lec-b1', roles: ['lector'],        organizationId: ORG_B, colegio: 'Colegio Beta', accountStatus: 'active', email: 'lec-b1@beta.test' },
     { id: 'lec-x',  roles: ['lector'],                                                        accountStatus: 'active', email: 'lec-x@none.test' },
     // Afirma por texto pertenecer a Beta, pero su identidad es de Alfa.
@@ -198,6 +203,31 @@ async function main() {
         ok('sin sesión → 401 (contrato de auth intacto)', anon.status === 401, String(anon.status));
         const sinPwd = JSON.stringify(await json(await GET('adm', '/api/users')));
         ok('la sanitización previa se conserva (sin password)', !sinPwd.includes('"password"'));
+    }
+    {
+        // 3E.5-S1: un lector recibe de los demás solo su perfil público.
+        const rows = await json(await GET('lec-a1', '/api/users'));
+        const self = rows.find(u => u.id === 'lec-a1');
+        const others = rows.filter(u => u.id !== 'lec-a1');
+        ok('lector → su propio registro completo (email, organizationId)', self?.email === 'lec-a1@alfa.test' && self?.organizationId === ORG_A, JSON.stringify(self));
+        // Shape por allowlist: cualquier campo fuera del perfil público es fuga,
+        // no solo los nombres conocidos.
+        const PUBLIC = new Set(['id', 'nombre_completo', 'nombre_usuario', 'avatar_url', 'bio_corta', 'roles',
+            'mediatorKind', 'colegio', 'groupIds', 'libros_leidos', 'seguidores', 'seguidos', 'nivel_lectura']);
+        const extra = others.flatMap(u => Object.keys(u).filter(k => !PUBLIC.has(k)).map(k => `${u.id}.${k}`));
+        ok('lector → de los demás SOLO claves del perfil público (allowlist)', extra.length === 0, extra.join(','));
+        const a3 = others.find(u => u.id === 'lec-a3');
+        ok('lector → del registro rico conserva el perfil público', a3?.nombre_completo === 'Lectora Tres' && a3?.avatar_url === '/a.png' && a3?.seguidores === 1, JSON.stringify(a3));
+        ok('lector → su propio registro sin credenciales (sanitización previa)', self && self.password === undefined && self.inviteToken === undefined && self.resetToken === undefined);
+        const admA3 = (await json(await GET('adm', '/api/users'))).find(u => u.id === 'lec-a3');
+        ok('admin → registro de tenant sin recorte (salvo credenciales)', admA3?.email === 'lec-a3@alfa.test' && admA3?.lastLoginAt && admA3?.social_connections && admA3?.password === undefined && admA3?.resetToken === undefined);
+        ok('lector → de los demás no recibe email/organizationId/accountStatus',
+            others.length > 0 && others.every(u => u.email === undefined && u.organizationId === undefined && u.accountStatus === undefined),
+            JSON.stringify(others));
+        const medRow = others.find(u => u.id === 'med-a');
+        ok('lector → del mediador conserva nombre/rol/mediatorKind', medRow?.mediatorKind === 'teacher' && medRow?.roles?.includes('mediador'), JSON.stringify(medRow));
+        const medView = await json(await GET('med-a', '/api/users'));
+        ok('mediador → sigue recibiendo los registros de su tenant sin recorte', medView.find(u => u.id === 'lec-a2')?.email === 'lec-a2@alfa.test');
     }
 
     section('[2] /api/groups — solo grupos de la organización o de membresía propia');
