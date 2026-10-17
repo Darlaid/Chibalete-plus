@@ -333,6 +333,144 @@ export function normalizeUploadRequestPath(rawUri) {
     return { ok: true, path: collapsed };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-CONTENT-PROTECTION-2026-01 CP-1 — AUTORIZACIÓN ESTRICTA DE ASSETS
+//
+// `classifyUploadPath` (arriba) es el contrato LEGACY: todo lo no pedagógico
+// es público. El modo estricto (UPLOADS_AUTHZ_MODE=strict) resuelve, para cada
+// ruta, sus contenidos DUEÑOS y pregunta a la autoridad de acceso existente
+// (decideContentAccess) por cada uno. No hay semántica de acceso nueva.
+//
+// Resolución (siempre por el catálogo, nunca por parámetros del request):
+//   1. PÚBLICO deliberado: referenciado como portada (`portada_url`) o en la
+//      lista de rutas públicas que aporta el servidor (banner de bienvenida),
+//      bajo un prefijo público (`experience-covers/`) o APK de distribución
+//      en la raíz de /uploads.
+//   2. CONTENIDO: registros que lo referencian en cualquier otro campo
+//      (incluidas `ilustraciones_url` y las páginas de `album_data`: son
+//      interior del título, no carátula). Un asset referenciado por varios
+//      registros tiene varios dueños explícitos; basta acceso a uno de ellos.
+//   3. Sin referencia: TTS (`audio/<contentId>/…`) y artefactos canónicos
+//      (`<contentId>/canonical/…`) heredan su dueño por convención de ruta,
+//      igual que en el contrato legacy.
+//   4. Nada de lo anterior → UNMAPPED (denegado salvo administrador).
+//
+// La ruta del request llega YA decodificada una vez (normalizeUploadRequestPath)
+// y aquí NO se vuelve a decodificar: la ruta comparada es exactamente la que
+// sirve el edge. Las referencias del catálogo sí se decodifican (pueden estar
+// escapadas), igual que en `itemAssetPaths`.
+// ────────────────────────────────────────────────────────────────────────────
+
+export const UPLOAD_ASSET_DECISION = Object.freeze({
+    PUBLIC: 'PUBLIC',
+    AUTHORIZED: 'AUTHORIZED',
+    UNAUTHENTICATED: 'UNAUTHENTICATED',
+    FORBIDDEN: 'FORBIDDEN',
+    UNMAPPED: 'UNMAPPED',
+});
+
+/** Campos que hacen pública una ruta en modo estricto: SOLO la portada. */
+const STRICT_PUBLIC_FIELDS = Object.freeze(['portada_url']);
+
+/** Directorios dedicados a carátulas públicas (escritos solo por su endpoint). */
+const PUBLIC_UPLOAD_PREFIXES = Object.freeze([`${UPLOADS_PREFIX}experience-covers/`]);
+
+/** APK de distribución de LU: fichero `.apk` directamente bajo /uploads/. */
+const PUBLIC_APK_RX = /^\/uploads\/[^/]+\.apk$/i;
+
+/**
+ * Dueños y clase de una ruta ya normalizada.
+ * @returns {{ kind: 'PUBLIC'|'CONTENT'|'UNMAPPED', owners: Array<{ id: string, cls: string }> }}
+ */
+export function resolveUploadAsset(uploadPath, contentList, { publicPaths = [] } = {}) {
+    const target = canonicalUploadPath(uploadPath, { decode: false });
+    if (!target) return { kind: 'UNMAPPED', owners: [] };
+
+    if (PUBLIC_APK_RX.test(target) || PUBLIC_UPLOAD_PREFIXES.some(p => target.startsWith(p))) {
+        return { kind: 'PUBLIC', owners: [] };
+    }
+    for (const value of publicPaths) {
+        if (canonicalUploadPath(value) === target) return { kind: 'PUBLIC', owners: [] };
+    }
+
+    const list = Array.isArray(contentList) ? contentList : [];
+    const owners = new Map();
+    for (const item of list) {
+        if (!item || typeof item !== 'object' || typeof item.id !== 'string') continue;
+        for (const [key, value] of Object.entries(item)) {
+            let hit = false;
+            walkStrings(value, (s) => { if (!hit && canonicalUploadPath(s) === target) hit = true; });
+            if (!hit) continue;
+            // Una portada es pública aunque otro registro use el mismo fichero
+            // como contenido: ya se muestra en el catálogo a cualquiera.
+            if (STRICT_PUBLIC_FIELDS.includes(key)) return { kind: 'PUBLIC', owners: [] };
+            owners.set(item.id, classifyContentItem(item));
+        }
+    }
+
+    if (owners.size === 0) {
+        const seg = ttsContentSegment(target);
+        if (seg) {
+            for (const item of list) {
+                const id = item?.id;
+                if (typeof id === 'string' && id.length > 0 && (id === seg || safeAudioSegment(id) === seg)) {
+                    owners.set(id, classifyContentItem(item));
+                }
+            }
+        }
+    }
+    if (owners.size === 0) {
+        const m = target.match(CANONICAL_ARTIFACT_RX);
+        const owner = m && list.find(item => item?.id === m[1]);
+        if (owner) owners.set(owner.id, classifyContentItem(owner));
+    }
+
+    if (owners.size === 0) return { kind: 'UNMAPPED', owners: [] };
+    return { kind: 'CONTENT', owners: [...owners].map(([id, cls]) => ({ id, cls })) };
+}
+
+/**
+ * Decisión estricta para una ruta ya normalizada de /uploads/.
+ *
+ * @param {string} uploadPath  salida `path` de normalizeUploadRequestPath
+ * @param {{
+ *   contentList: any[],
+ *   publicPaths?: string[],
+ *   viewer: { machine: boolean, user: any, roles: string[] },
+ *   seesPedagogy: (viewer: any) => boolean,
+ *   canAccessContent: (userId: string, contentId: string) => Promise<boolean>,
+ * }} ctx
+ * @returns {Promise<{ decision: string, reason: string, contentId?: string }>}
+ */
+export async function decideUploadAssetAccess(uploadPath, { contentList, publicPaths = [], viewer, seesPedagogy, canAccessContent }) {
+    const D = UPLOAD_ASSET_DECISION;
+    // El EPUB fuente solo sale por GET /api/content/:id/epub, para nadie aquí.
+    if (/\.epub$/i.test(uploadPath)) return { decision: D.FORBIDDEN, reason: 'RAW_EPUB' };
+
+    const asset = resolveUploadAsset(uploadPath, contentList, { publicPaths });
+    if (asset.kind === 'PUBLIC') return { decision: D.PUBLIC, reason: 'PUBLIC_ASSET' };
+
+    const isAdmin = !!viewer?.machine || (viewer?.roles || []).includes('administrador');
+    if (asset.kind === 'UNMAPPED') {
+        // Subidas aún no guardadas en un registro (vista previa del autor):
+        // solo el administrador, que tiene acceso total por definición.
+        if (isAdmin) return { decision: D.AUTHORIZED, reason: 'UNMAPPED_ADMIN' };
+        return { decision: D.UNMAPPED, reason: 'UNMAPPED_ASSET' };
+    }
+
+    if (!viewer?.machine && !viewer?.user) return { decision: D.UNAUTHENTICATED, reason: 'NO_SESSION' };
+    if (viewer.machine) return { decision: D.AUTHORIZED, reason: 'MACHINE' };
+
+    for (const owner of asset.owners) {
+        // Pedagogía independiente: contrato vigente (rol), sin rediseño en CP-1.
+        const allowed = owner.cls === 'PEDAGOGY_RESTRICTED'
+            ? seesPedagogy(viewer)
+            : await canAccessContent(viewer.user.id, owner.id);
+        if (allowed) return { decision: D.AUTHORIZED, reason: 'CONTENT_ACCESS', contentId: owner.id };
+    }
+    return { decision: D.FORBIDDEN, reason: 'NO_CONTENT_ACCESS', contentId: asset.owners[0].id };
+}
+
 
 /**
  * @param {{

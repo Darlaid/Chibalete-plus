@@ -82,6 +82,9 @@ import {
     classifyUploadPath,
     isPedagogyRestrictedItem,
     normalizeUploadRequestPath,
+    // CHP-CONTENT-PROTECTION-2026-01 CP-1 — autorización estricta de /uploads.
+    decideUploadAssetAccess,
+    UPLOAD_ASSET_DECISION,
     // CHP-UI-PEDAGOGY-VISIBILITY-01 — decisión de rol compartida preflight ↔ my-catalog.
     createPrivilegedContentAccess,
 } from './accessService.js';
@@ -222,6 +225,11 @@ if (!process.env.ACCESS_FALLBACK_MODE) {
     // Warn loudly so this is visible in PM2 logs on every startup
     console.warn('[WARN] ACCESS_FALLBACK_MODE not set in .env — defaulting to "restricted". Set ACCESS_FALLBACK_MODE=open explicitly if open access is intended.');
 }
+// CHP-CONTENT-PROTECTION-2026-01 CP-1 — 'legacy' (defecto: solo pedagogía y
+// .epub protegidos, contrato 01D-B intacto) | 'strict' (todo asset editorial
+// exige acceso al contenido dueño). Cualquier otro valor = legacy.
+const UPLOADS_AUTHZ_STRICT = process.env.UPLOADS_AUTHZ_MODE === 'strict';
+console.log(`[BOOT] UPLOADS_AUTHZ_MODE=${UPLOADS_AUTHZ_STRICT ? 'strict' : 'legacy'}`);
 
 // Configurar trust proxy para express-rate-limit detrás de Nginx Docker -> Host
 app.set('trust proxy', 1);
@@ -3086,12 +3094,43 @@ app.get('/api/content/:id/epub', async (req, res) => {
 //
 // La location que lo publica es `internal`: inalcanzable desde internet.
 // ────────────────────────────────────────────────────────────────────────────
+// CP-1 — modo estricto: veredicto por contenido dueño (decideContentAccess),
+// compartido por el autorizador del edge y el `express.static` de Node.
+//   público → 204 (caché pública) · sin sesión → 401 · sin acceso / no mapeado
+//   / .epub → 403 · autorizado → 204 + X-CHP-Cache: private
+async function strictUploadVerdict(req, uploadPath) {
+    const viewer = await resolveViewerPrincipal(req);
+    const banner = readJSON(LANDING_BANNER_DB);
+    const verdict = await decideUploadAssetAccess(uploadPath, {
+        contentList: readJSON(DB_FILE),
+        publicPaths: (Array.isArray(banner) ? banner : []).map(s => s?.imageUrl).filter(u => typeof u === 'string'),
+        viewer,
+        seesPedagogy: viewerSeesPedagogy,
+        canAccessContent: async (userId, contentId) => {
+            const d = await decideContentAccess(userId, contentId);
+            return d.status === 200 && d.body?.allowed === true;
+        },
+    });
+    const D = UPLOAD_ASSET_DECISION;
+    if (verdict.decision === D.PUBLIC) return { status: 204, private: false };
+    if (verdict.decision === D.AUTHORIZED) return { status: 204, private: true };
+    if (verdict.decision === D.UNAUTHENTICATED) return { status: 401 };
+    log(`[uploads-authz] ${verdict.reason} contentId=${verdict.contentId ?? '-'} user=${viewer.user?.id ?? '-'}`, 'ACCESS');
+    return { status: 403 };
+}
+
 app.get(UPLOADS_AUTHZ_PATH, async (req, res) => {
     try {
         const normalized = normalizeUploadRequestPath(req.get('x-original-uri') || '');
         if (!normalized.ok) {
             log(`[uploads-authz] URI rechazada (${normalized.reason})`, 'ACCESS');
             return res.status(404).end();
+        }
+
+        if (UPLOADS_AUTHZ_STRICT) {
+            const v = await strictUploadVerdict(req, normalized.path);
+            if (v.private) res.set('X-CHP-Cache', 'private');
+            return res.status(v.status).end();
         }
 
         // 3E.3: el EPUB fuente NUNCA es un asset público: solo
@@ -11778,6 +11817,23 @@ function dualWriteSingleEventToBackbone(eventName, ts, rest, userId) {
 // --- STATIC FILES ---
 // 3E.3: mismo bloqueo del EPUB fuente que el autorizador del edge.
 app.use('/uploads', (req, res, next) => (/\.epub$/i.test(req.path) ? res.status(403).end() : next()));
+// CP-1: en modo estricto Node aplica el MISMO veredicto que el edge (ruta
+// paralela del contenedor front y desarrollo local sin edge).
+if (UPLOADS_AUTHZ_STRICT) {
+    app.use('/uploads', async (req, res, next) => {
+        try {
+            const normalized = normalizeUploadRequestPath(req.originalUrl);
+            if (!normalized.ok) return res.status(404).end();
+            const v = await strictUploadVerdict(req, normalized.path);
+            if (v.status !== 204) return res.status(v.status).end();
+            if (v.private) res.set('Cache-Control', 'private, no-store');
+            return next();
+        } catch (e) {
+            log(`[uploads-static] Error inesperado: ${e.message}`, 'ERROR');
+            return res.status(500).end();
+        }
+    });
+}
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 if (IS_PROD) {
