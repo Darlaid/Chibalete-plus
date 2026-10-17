@@ -281,7 +281,12 @@ try {
     ok('legacy: pedagogía sin sesión → 401', (await la(U(F.pedPdf))).status === 401);
     ok('legacy: .epub → 403', (await la(U(F.epub))).status === 403);
 
-    ok('stores de contenido y acceso intactos', fs.readFileSync(P.content).equals(before.content) && fs.readFileSync(P.access).equals(before.access));
+    // La auditoría TTS de arranque (checkMissingTTS) puede marcar `ttsStatus`
+    // en registros con texto sin manifest: es ajena a la autorización. Todo lo
+    // demás del catálogo y el store de acceso deben quedar byte a byte.
+    const stripTts = (buf) => JSON.stringify(JSON.parse(buf).map(c => Object.fromEntries(Object.entries(c).filter(([k]) => !/^tts/i.test(k)))));
+    ok('stores de contenido (salvo campos tts*) y acceso intactos',
+        stripTts(fs.readFileSync(P.content)) === stripTts(before.content) && fs.readFileSync(P.access).equals(before.access));
 } catch (e) {
     fail++;
     console.error('  ✗ excepción:', e.stack || e);
