@@ -85,6 +85,8 @@ import {
     // CHP-CONTENT-PROTECTION-2026-01 CP-1 — autorización estricta de /uploads.
     decideUploadAssetAccess,
     UPLOAD_ASSET_DECISION,
+    // CP-3 (R2) — catálogo sin localizadores editoriales de títulos sin acceso.
+    withoutEditorialLocators,
     // CHP-UI-PEDAGOGY-VISIBILITY-01 — decisión de rol compartida preflight ↔ my-catalog.
     createPrivilegedContentAccess,
 } from './accessService.js';
@@ -2730,13 +2732,39 @@ const viewerSeesPedagogy = (viewer) =>
 // preflight. Los lectores no ven material pedagógico independiente; mediador,
 // administrador y la autoridad de máquina siguen viendo el catálogo completo.
 // Los nodos de Experience (`standalone === false`) no se filtran nunca.
-app.get('/api/content', async (req, res) => {
+//
+// CHP-CONTENT-PROTECTION-2026-01 CP-3 (R2): cada título conserva su metadata
+// pública, pero sus localizadores editoriales (/uploads, salvo portada) solo
+// viajan a quien tiene acceso a ese título. Veredicto por título = el mismo del
+// autorizador estricto de /uploads: pedagogía por rol, el resto por
+// decideContentAccess. La autoridad de máquina recibe el registro íntegro.
+// La respuesta pasa a depender de la identidad: no-store (equipos compartidos).
+async function catalogForViewer(items, viewer) {
+    if (viewer.machine) return items;
+    const userId = viewer.user?.id;
+    const out = [];
+    for (const item of items) {
+        let allowed = false;
+        if (userId && item && typeof item.id === 'string') {
+            if (isPedagogyRestrictedItem(item)) {
+                allowed = viewerSeesPedagogy(viewer);
+            } else {
+                const d = await decideContentAccess(userId, item.id);
+                allowed = d.status === 200 && d.body?.allowed === true;
+            }
+        }
+        out.push(allowed ? item : withoutEditorialLocators(item));
+    }
+    return out;
+}
+
+app.get('/api/content', libraryViewNoStore, async (req, res) => {
     try {
         const all = readJSON(DB_FILE);
         if (!Array.isArray(all)) return res.json(all);
         const viewer = await resolveViewerPrincipal(req);
-        if (viewerSeesPedagogy(viewer)) return res.json(all);
-        return res.json(all.filter(item => !isPedagogyRestrictedItem(item)));
+        const visible = viewerSeesPedagogy(viewer) ? all : all.filter(item => !isPedagogyRestrictedItem(item));
+        return res.json(await catalogForViewer(visible, viewer));
     } catch (error) {
         res.status(500).json({ error: 'Failed to read database' });
     }
@@ -11002,6 +11030,10 @@ app.post('/api/auth/logout', requireUserAuth, (req, res) => {
         log(`[SESSION] logout revoke error: ${e.message}`, 'WARN');
     }
     res.clearCookie(SESSION_COOKIE, sessionCookieOptions({ isProd: IS_PROD }));
+    // CP-3 (R7): vacía la caché HTTP del navegador (copias editoriales de la
+    // época `public, immutable`). No "storage": borraría preferencias y la cola
+    // de progreso pendiente; el cliente limpia sus stores editoriales él mismo.
+    res.set('Clear-Site-Data', '"cache"');
     res.json({ success: true });
 });
 
@@ -11021,6 +11053,10 @@ app.post('/api/auth/logout-all', requireUserAuth, async (req, res) => {
         return res.status(500).json({ error: 'No se pudo cerrar todas las sesiones' });
     }
     res.clearCookie(SESSION_COOKIE, sessionCookieOptions({ isProd: IS_PROD }));
+    // CP-3 (R7): vacía la caché HTTP del navegador (copias editoriales de la
+    // época `public, immutable`). No "storage": borraría preferencias y la cola
+    // de progreso pendiente; el cliente limpia sus stores editoriales él mismo.
+    res.set('Clear-Site-Data', '"cache"');
     res.json({ success: true });
 });
 

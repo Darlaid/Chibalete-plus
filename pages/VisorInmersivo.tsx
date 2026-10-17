@@ -135,6 +135,9 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     // Background access check — never blocks rendering
     const [accessDenied, setAccessDenied] = useState(false);
     const [accessDenyReason, setAccessDenyReason] = useState<string>('');
+    // CP-3 (R6): id con veredicto positivo de /access. Hasta que coincide con
+    // content.id, el StartupEngine no arranca (ningún byte editorial).
+    const [accessAllowedFor, setAccessAllowedFor] = useState<string | null>(null);
 
     // Playback speed — state para la UI del selector, ref para el hook
     const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -1238,6 +1241,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 if (data.allowed !== true) {
                     setAccessDenied(true);
                     setAccessDenyReason(data.reason || 'Acceso no autorizado.');
+                } else {
+                    setAccessAllowedFor(content.id);
                 }
             } catch {
                 if (!cancelled) {
@@ -1339,7 +1344,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             }
         });
 
-        engine.start();
+        // CP-3 (R6): engine.start() (TXT, manifest, anchors) lo dispara el
+        // efecto de abajo cuando /access autoriza ESTE contentId.
 
         // F20/P3 — log de bootstrap del content change. Permite diagnosticar
         // cuando el libro nuevo queda en "Sin audio" o status='error': se ve
@@ -1450,6 +1456,14 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [content.id]);
+
+    // CP-3 (R6): sin veredicto positivo no se pide ningún byte editorial. El
+    // engine del contentId actual ya existe (efecto anterior); start() es
+    // idempotente. Denegado o error → nunca arranca (overlay de acceso).
+    useEffect(() => {
+        if (accessAllowedFor !== content.id) return;
+        engineRef.current?.start();
+    }, [accessAllowedFor, content.id]);
 
     // Post-hydration: resolve progress + prepare audio (runs once per content load)
     useEffect(() => {

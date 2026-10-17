@@ -4,7 +4,6 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { MookReturnButton, useFichaPath } from '../components/MookReturn';  // CHP-MOOK-CONTEXTUAL-READING-RETURN-01
 import { useAuth } from '../context/AuthContext';
 import type { Content, Assignment } from '../types';
-import { getOfflineText, saveOfflineText } from '../utils/offlineTextCache';
 import { getResumeToast } from '../utils/canonicalProgress';
 import { ChevronLeft, Type, Volume2, VolumeX, Globe, Moon, Sun, Loader2, Ruler, Image as ImageIcon, X, Mic, RefreshCw, Settings, ChevronUp, ChevronDown, Minus, Plus, MessageCircle } from 'lucide-react';
 import { generarMicroResumenRecordatorio } from '../services/geminiService';
@@ -283,18 +282,9 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                             const textData = await response.text();
                             if (textData && !textData.trim().startsWith("<!DOCTYPE")) {
                                 setText(textData);
-                                // B3/B4: Cache the text for offline reading.
-                                // Always overwrites the previous entry — 1-book-at-a-time design.
-                                // Failure is silent (quota / private mode): the read session proceeds normally.
-                                saveOfflineText({
-                                    contentId: content.id,
-                                    title: content.titulo,
-                                    autor: content.autor,
-                                    portada_url: content.portada_url,
-                                    texto: textData,
-                                    language,
-                                    cachedAt: new Date().toISOString(),
-                                });
+                                // CP-3 (R7): el texto ya NO se copia a localStorage. La
+                                // lectura offline es de Chibalete LU; Guiado depende
+                                // siempre del servidor protegido.
                                 // E: Wait for remote progress — ensures resume effect sees latest data.
                                 fromRemoteProgressRef.current = await remoteProgressPromise;
                                 setLoading(false);
@@ -304,18 +294,6 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     } catch (fetchErr) {
                         console.warn("[Visor] Network error fetching file:", fetchErr);
                     }
-                }
-
-                // B4: Network failed (or no URL configured) — try offline cache before showing error.
-                // Only serves cache for the exact same language to avoid wrong-language reads.
-                const offlineCached = getOfflineText(content.id, language);
-                if (offlineCached) {
-                    setText(offlineCached.texto);
-                    setOfflineMode(true);
-                    // E: Offline path — remote sync already failed (network down); mark as local-only.
-                    fromRemoteProgressRef.current = false;
-                    setLoading(false);
-                    return;
                 }
 
                 // UX-3B — error de carga: pantalla limpia con Reintentar

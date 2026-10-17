@@ -471,6 +471,38 @@ export async function decideUploadAssetAccess(uploadPath, { contentList, publicP
     return { decision: D.FORBIDDEN, reason: 'NO_CONTENT_ACCESS', contentId: asset.owners[0].id };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// CHP-CONTENT-PROTECTION-2026-01 CP-3 (R2) — CATÁLOGO SIN LOCALIZADORES AJENOS
+//
+// `GET /api/content` sigue listando la metadata pública de cada título, pero a
+// quien NO tiene acceso a un título no le entrega las rutas a sus bytes.
+// Mismo criterio que `resolveUploadAsset`: es editorial todo campo que
+// referencie algo bajo /uploads/, salvo la portada (STRICT_PUBLIC_FIELDS).
+// No hay lista de campos que mantener: `texto_plano_url*`, `url_recurso`,
+// `epub_url`, `canonicalBookUrl`, `ilustraciones_url`, `album_data`,
+// `mediaAssets`… caen por la misma regla. Las URLs externas (YouTube,
+// archive.org) no son bytes de Chibalete+ y se conservan.
+// Los campos se OMITEN (no null): los clientes ya comprueban su presencia.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** ¿Referencia este valor (a cualquier profundidad) algo bajo /uploads/? */
+function referencesUploads(value) {
+    let hit = false;
+    walkStrings(value, (s) => { if (!hit && canonicalUploadPath(s)) hit = true; });
+    return hit;
+}
+
+/** Copia del registro sin sus campos editoriales. No muta el original. */
+export function withoutEditorialLocators(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const out = {};
+    for (const [key, value] of Object.entries(item)) {
+        if (!STRICT_PUBLIC_FIELDS.includes(key) && referencesUploads(value)) continue;
+        out[key] = value;
+    }
+    return out;
+}
+
 
 /**
  * @param {{

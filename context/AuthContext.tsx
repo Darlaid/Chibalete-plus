@@ -1,6 +1,8 @@
 import React, { createContext, useState, useContext, ReactNode, useEffect } from 'react';
 import type { User } from '../types';
 import { dataService } from '../services/dataService';
+import { clearEditorialClientStorage } from '../utils/clientEditorialStorage';
+import { clearOfflineText } from '../utils/offlineTextCache';
 
 interface AuthContextType {
   user: User | null;
@@ -20,6 +22,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   useEffect(() => {
     let active = true;
     const initAuth = async () => {
+      // CP-3 (R7): el texto íntegro de Guiado ya no se persiste; se purga la
+      // copia que dejaran versiones anteriores aunque no se cierre sesión.
+      clearOfflineText();
       try {
         // Wait for data service to be ready (load users from API if needed)
         await dataService.waitForInitialization();
@@ -130,6 +135,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setAccessReady(false);
     localStorage.removeItem('chibalete_user_id');
     sessionStorage.removeItem('chibalete_user_id');
+    // CP-3 (R7): contenido editorial y localizadores cacheados en el navegador.
+    clearEditorialClientStorage();
     // Ensure full hard redirect and avoid back-button unmounting issues by forcing Window relocation
     window.location.replace('/#/bienvenida');
   };
