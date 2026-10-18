@@ -523,12 +523,14 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
      *
      * CP-3A: `logDecision: false` silencia sus líneas [ACCESS] (evaluación
      * masiva del catálogo). El resultado es idéntico con logging on/off.
+     * CP-3D: `readStore` permite reutilizar el snapshot de stores de una request
+     * (catálogo). Default: el readJSON del servicio, idéntico a hoy.
      *
      * @returns {{ titleIds: string[], collectionIds: string[], appliedRules: string[], hasBroadAccess: boolean }}
      */
-    function resolveUserContentAccess(userId, { logDecision = true } = {}) {
+    function resolveUserContentAccess(userId, { logDecision = true, readStore = readJSON } = {}) {
         const log = logDecision ? logFn : () => {};
-        const users = readJSON(USERS_DB);
+        const users = readStore(USERS_DB);
         const rawUser = users.find(u => u.id === userId);
         if (!rawUser) {
             return { titleIds: [], collectionIds: [], appliedRules: [], hasBroadAccess: false };
@@ -536,7 +538,10 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
         const user = normalizeUser(rawUser);
 
         // Grupos donde es mediador o miembro (memberIds como fuente canónica, groupIds como fallback)
-        const groups = readJSON(GROUPS_DB).map(normalizeGroup);
+        // CP-3D: con snapshot de request, los grupos se normalizan una vez por
+        // request (normalizeGroup es pura); sin él, como siempre.
+        const normalizeAll = () => readStore(GROUPS_DB).map(normalizeGroup);
+        const groups = readStore.derived ? readStore.derived('groups:normalized', normalizeAll) : normalizeAll();
         const userGroups = groups.filter(g =>
             (g.mediatorIds && g.mediatorIds.includes(userId)) ||
             (g.memberIds   && g.memberIds.includes(userId))   ||
@@ -551,7 +556,7 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
         // ninguna decisión vigente; sí cierra la vía textual.
         const organizationId = user.organizationId || null;
 
-        const accessRules = readJSON(ACCESS_DB);
+        const accessRules = readStore(ACCESS_DB);
         const now = Date.now();
 
         const appliedRules = [];
@@ -599,9 +604,14 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
      *
      * @returns {{ allowed: boolean, legacyFallback: boolean, reason: string }}
      */
-    function canUserAccessContent(userId, contentId, content, { logDecision = true } = {}) {
+    function canUserAccessContent(userId, contentId, content, { logDecision = true, readStore = readJSON } = {}) {
         const log = logDecision ? logFn : () => {};
-        const scopeData = resolveUserContentAccess(userId, { logDecision });
+        // CP-3D: dentro del snapshot de una request el scope del usuario es el
+        // mismo para todos los títulos: se resuelve una vez. Sin snapshot, como siempre.
+        const resolveScope = () => resolveUserContentAccess(userId, { logDecision, readStore });
+        const scopeData = readStore.derived
+            ? readStore.derived(`scope:${userId}:${logDecision}`, resolveScope)
+            : resolveScope();
 
         // Sin reglas activas: comportamiento según fallbackMode
         if (scopeData.appliedRules.length === 0) {

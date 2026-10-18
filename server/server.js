@@ -1328,9 +1328,9 @@ async function mutateBundles(fn) {
 /**
  * Resuelve los IDs de contenido (libros) que pertenecen a un conjunto de colecciones.
  */
-function resolveCollectionContentIds(collectionIds) {
+function resolveCollectionContentIds(collectionIds, readStore = readJSON) {
     if (!Array.isArray(collectionIds) || collectionIds.length === 0) return [];
-    const contentList = readJSON(DB_FILE);
+    const contentList = readStore(DB_FILE);
     const colSet = new Set(collectionIds);
     return contentList
         .filter(c => c.parentId && colSet.has(c.parentId))
@@ -2727,6 +2727,26 @@ async function resolveViewerPrincipal(req) {
 const viewerSeesPedagogy = (viewer) =>
     (viewer?.roles || []).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r));
 
+// CP-3D — lector de stores con alcance de UNA request: la primera lectura de
+// cada store pasa por readJSON (caché TTL, sombra de identidad y fallbacks
+// intactos) y las siguientes reutilizan ese mismo resultado. Sin estado global:
+// cada llamada crea un Map nuevo que muere con la request.
+// `derived(key, compute)` memoiza, con el MISMO ciclo de vida, valores que son
+// función pura del snapshot (p. ej. los grupos normalizados).
+function createRequestStoreReader() {
+    const snapshot = new Map();
+    const derivedValues = new Map();
+    const readStore = (file) => {
+        if (!snapshot.has(file)) snapshot.set(file, readJSON(file));
+        return snapshot.get(file);
+    };
+    readStore.derived = (key, compute) => {
+        if (!derivedValues.has(key)) derivedValues.set(key, compute());
+        return derivedValues.get(key);
+    };
+    return readStore;
+}
+
 // --- CONTENT ROUTES ---
 // CHP-ACCESS-PEDAGOGY-01D-B: el listado aplica el MISMO predicate que el
 // preflight. Los lectores no ven material pedagógico independiente; mediador,
@@ -2741,9 +2761,13 @@ const viewerSeesPedagogy = (viewer) =>
 // La respuesta pasa a depender de la identidad: no-store (equipos compartidos).
 // CP-3A: la evaluación por título no registra una línea por decisión; se emite
 // una única línea resumen por request (solo contadores, sin ids ni rutas).
+// CP-3D: las N decisiones comparten UN snapshot de stores de esta request
+// (cada store se lee/parsea una vez, no una vez por título). Se crea aquí y
+// se descarta al terminar: nunca sobrevive a la request.
 async function catalogForViewer(items, viewer) {
     if (viewer.machine) return items;
     const userId = viewer.user?.id;
+    const readStore = createRequestStoreReader();
     const out = [];
     let allowedCount = 0;
     for (const item of items) {
@@ -2752,7 +2776,7 @@ async function catalogForViewer(items, viewer) {
             if (isPedagogyRestrictedItem(item)) {
                 allowed = viewerSeesPedagogy(viewer);
             } else {
-                const d = await decideContentAccess(userId, item.id, { logDecision: false });
+                const d = await decideContentAccess(userId, item.id, { logDecision: false, readStore });
                 allowed = d.status === 200 && d.body?.allowed === true;
             }
         }
@@ -2795,11 +2819,13 @@ async function authenticatedUserIdOf(req) {
 // extraída TAL CUAL del handler GET /api/content/:id/access para que /access y
 // /api/content/:id/epub compartan una única autoridad (sin duplicar reglas).
 // Devuelve { status, body } con exactamente las respuestas históricas de /access.
-async function decideContentAccess(userId, contentId, { logDecision = true } = {}) {
+async function decideContentAccess(userId, contentId, { logDecision = true, readStore = readJSON } = {}) {
     // CP-3A: `logDecision: false` silencia las líneas de decisión ([ACCESS],
     // [ACCESS_DECISION]) para la evaluación masiva del catálogo. Las líneas de
     // error/WARN se conservan. Mismo { status, body } con logging on/off.
     const say = logDecision ? log : () => {};
+    // CP-3D: `readStore` permite al catálogo reutilizar un snapshot de stores
+    // de UNA request (createRequestStoreReader). Default: readJSON, idéntico a hoy.
     // 1. Input guard
     if (!contentId || !userId) {
         return { status: 400, body: { allowed: false, reason: 'Parámetros incompletos.' } };
@@ -2807,7 +2833,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true } = {
 
     try {
         // 2. Verificar que el usuario existe
-        const users = readJSON(USERS_DB);
+        const users = readStore(USERS_DB);
         const user = users.find(u => u.id === userId);
         if (!user) {
             return { status: 403, body: { allowed: false, reason: 'Usuario no encontrado.' } };
@@ -2834,7 +2860,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true } = {
         }
 
         // 4. Verificar que el contenido existe
-        const contentList = readJSON(DB_FILE);
+        const contentList = readStore(DB_FILE);
         const content = contentList.find(c => c.id === contentId);
         if (!content) {
             return { status: 404, body: { allowed: false, reason: 'Contenido no encontrado.' } };
@@ -2881,7 +2907,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true } = {
         // Los datos de assignments viven en progress_db.json como progreso,
         // y en groups_db.json embebidos. Buscamos si el usuario tiene una asignación activa
         // que incluya este contentId en cualquier grupo del que es miembro.
-        const groups = readJSON(GROUPS_DB);
+        const groups = readStore(GROUPS_DB);
         const userGroups = groups.filter(g => {
             const members = g.studentIds || g.memberIds || [];
             const mediators = g.mediatorIds || (g.teacherId ? [g.teacherId] : []);
@@ -2903,7 +2929,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true } = {
         }
 
         // --- FASE E7: MOTOR DE ACCESO ESTRICTO POR SCOPES ---
-        const scopeDecision = canUserAccessContent(userId, contentId, content, { logDecision });
+        const scopeDecision = canUserAccessContent(userId, contentId, content, { logDecision, readStore });
         say(`[ACCESS_DECISION] User: ${userId} | Content: ${contentId} | Allowed: ${scopeDecision.allowed} | Reason: ${scopeDecision.reason}`, 'ACCESS_ENGINE');
         
         if (!scopeDecision.legacyFallback) {
@@ -2940,7 +2966,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true } = {
             let effectiveIds = [];
             if (Array.isArray(available)) effectiveIds = [...available];
             if (Array.isArray(collections) && collections.length > 0) {
-                const extra = resolveCollectionContentIds(collections);
+                const extra = resolveCollectionContentIds(collections, readStore);
                 effectiveIds = [...new Set([...effectiveIds, ...extra])];
             }
 
@@ -2962,7 +2988,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true } = {
         const schoolName = user.colegio || user.school || '';
         if (schoolName) {
             try {
-                const schoolConfigs = readJSON(SCHOOL_CONFIGS_DB);
+                const schoolConfigs = readStore(SCHOOL_CONFIGS_DB);
                 const schoolConfig = Array.isArray(schoolConfigs)
                     ? schoolConfigs.find(s => s.schoolName === schoolName)
                     : schoolConfigs[schoolName];
