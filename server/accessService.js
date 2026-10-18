@@ -515,15 +515,19 @@ export function withoutEditorialLocators(item) {
  *   ACCESS_DB: string,
  * }} deps
  */
-export function createAccessService({ readJSON, log, normalizeUser, normalizeGroup, USERS_DB, GROUPS_DB, ACCESS_DB, fallbackMode = 'open' }) {
+export function createAccessService({ readJSON, log: logFn, normalizeUser, normalizeGroup, USERS_DB, GROUPS_DB, ACCESS_DB, fallbackMode = 'open' }) {
 
     /**
      * Resuelve el catálogo efectivo de un usuario a través del Scope Engine.
      * Consolida reglas para user.id, grupos a los que pertenece, y su organización.
      *
+     * CP-3A: `logDecision: false` silencia sus líneas [ACCESS] (evaluación
+     * masiva del catálogo). El resultado es idéntico con logging on/off.
+     *
      * @returns {{ titleIds: string[], collectionIds: string[], appliedRules: string[], hasBroadAccess: boolean }}
      */
-    function resolveUserContentAccess(userId) {
+    function resolveUserContentAccess(userId, { logDecision = true } = {}) {
+        const log = logDecision ? logFn : () => {};
         const users = readJSON(USERS_DB);
         const rawUser = users.find(u => u.id === userId);
         if (!rawUser) {
@@ -590,10 +594,14 @@ export function createAccessService({ readJSON, log, normalizeUser, normalizeGro
      * Valida si un usuario tiene acceso a un contenido específico vía Scope Engine.
      * Si legacyFallback=true, el caller debe continuar con las políticas legacy de grupo/org.
      *
+     * CP-3A: `logDecision: false` silencia sus líneas [ACCESS] (y las de la
+     * resolución de scope). Misma decisión con logging on/off.
+     *
      * @returns {{ allowed: boolean, legacyFallback: boolean, reason: string }}
      */
-    function canUserAccessContent(userId, contentId, content) {
-        const scopeData = resolveUserContentAccess(userId);
+    function canUserAccessContent(userId, contentId, content, { logDecision = true } = {}) {
+        const log = logDecision ? logFn : () => {};
+        const scopeData = resolveUserContentAccess(userId, { logDecision });
 
         // Sin reglas activas: comportamiento según fallbackMode
         if (scopeData.appliedRules.length === 0) {

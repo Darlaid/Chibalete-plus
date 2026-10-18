@@ -2739,21 +2739,28 @@ const viewerSeesPedagogy = (viewer) =>
 // autorizador estricto de /uploads: pedagogía por rol, el resto por
 // decideContentAccess. La autoridad de máquina recibe el registro íntegro.
 // La respuesta pasa a depender de la identidad: no-store (equipos compartidos).
+// CP-3A: la evaluación por título no registra una línea por decisión; se emite
+// una única línea resumen por request (solo contadores, sin ids ni rutas).
 async function catalogForViewer(items, viewer) {
     if (viewer.machine) return items;
     const userId = viewer.user?.id;
     const out = [];
+    let allowedCount = 0;
     for (const item of items) {
         let allowed = false;
         if (userId && item && typeof item.id === 'string') {
             if (isPedagogyRestrictedItem(item)) {
                 allowed = viewerSeesPedagogy(viewer);
             } else {
-                const d = await decideContentAccess(userId, item.id);
+                const d = await decideContentAccess(userId, item.id, { logDecision: false });
                 allowed = d.status === 200 && d.body?.allowed === true;
             }
         }
+        if (allowed) allowedCount++;
         out.push(allowed ? item : withoutEditorialLocators(item));
+    }
+    if (userId) {
+        log(`[CATALOG_ACCESS_FILTER] user=${userId} total=${items.length} allowed=${allowedCount} filtered=${items.length - allowedCount}`, 'ACCESS');
     }
     return out;
 }
@@ -2788,7 +2795,11 @@ async function authenticatedUserIdOf(req) {
 // extraída TAL CUAL del handler GET /api/content/:id/access para que /access y
 // /api/content/:id/epub compartan una única autoridad (sin duplicar reglas).
 // Devuelve { status, body } con exactamente las respuestas históricas de /access.
-async function decideContentAccess(userId, contentId) {
+async function decideContentAccess(userId, contentId, { logDecision = true } = {}) {
+    // CP-3A: `logDecision: false` silencia las líneas de decisión ([ACCESS],
+    // [ACCESS_DECISION]) para la evaluación masiva del catálogo. Las líneas de
+    // error/WARN se conservan. Mismo { status, body } con logging on/off.
+    const say = logDecision ? log : () => {};
     // 1. Input guard
     if (!contentId || !userId) {
         return { status: 400, body: { allowed: false, reason: 'Parámetros incompletos.' } };
@@ -2818,7 +2829,7 @@ async function decideContentAccess(userId, contentId) {
         const privilegedAccess = privilegedContentAccessFor(user);
         const privilegedDecision = privilegedAccess ? privilegedAccess(contentId) : null;
         if (privilegedDecision?.via === 'ADMIN_ROLE') {
-            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ADMIN_ROLE`, 'ACCESS');
+            say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ADMIN_ROLE`, 'ACCESS');
             return { status: 200, body: { allowed: true, reason: 'Acceso administrativo total.' } };
         }
 
@@ -2844,15 +2855,15 @@ async function decideContentAccess(userId, contentId) {
         if (privilegedDecision) {
             const { via, school: mediatorSchool } = privilegedDecision;
             if (via === 'MEDIATOR_ORG') {
-                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
+                say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
                 return { status: 200, body: { allowed: true, reason: 'Acceso de mediador por catálogo institucional.' } };
             }
             if (via === 'MEDIATOR_ORG_RESTRICTION') {
-                log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
+                say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
                 return { status: 403, body: { allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' } };
             }
             // Sin restricción institucional activa → acceso total (legado para mediadores sin configuración)
-            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
+            say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
             return { status: 200, body: { allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' } };
         }
 
@@ -2862,7 +2873,7 @@ async function decideContentAccess(userId, contentId) {
         // fallback legacy. Los nodos de Experience (`standalone === false`) no
         // son PEDAGOGY_RESTRICTED, así que siguen su camino habitual.
         if (isPedagogyRestrictedItem(content)) {
-            log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via PEDAGOGY_RESTRICTED`, 'ACCESS');
+            say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via PEDAGOGY_RESTRICTED`, 'ACCESS');
             return { status: 403, body: { allowed: false, reason: 'Material pedagógico reservado a mediadores.' } };
         }
 
@@ -2887,13 +2898,13 @@ async function decideContentAccess(userId, contentId) {
         );
 
         if (hasAssignment) {
-            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ASSIGNMENT`, 'ACCESS');
+            say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ASSIGNMENT`, 'ACCESS');
             return { status: 200, body: { allowed: true, reason: 'Acceso por asignación pedagógica.' } };
         }
 
         // --- FASE E7: MOTOR DE ACCESO ESTRICTO POR SCOPES ---
-        const scopeDecision = canUserAccessContent(userId, contentId, content);
-        log(`[ACCESS_DECISION] User: ${userId} | Content: ${contentId} | Allowed: ${scopeDecision.allowed} | Reason: ${scopeDecision.reason}`, 'ACCESS_ENGINE');
+        const scopeDecision = canUserAccessContent(userId, contentId, content, { logDecision });
+        say(`[ACCESS_DECISION] User: ${userId} | Content: ${contentId} | Allowed: ${scopeDecision.allowed} | Reason: ${scopeDecision.reason}`, 'ACCESS_ENGINE');
         
         if (!scopeDecision.legacyFallback) {
             // El Scope Engine dictaminó en modo estricto.
@@ -2922,7 +2933,7 @@ async function decideContentAccess(userId, contentId) {
 
             if (available === 'all') {
                 // Shortcut: acceso total explícito desde cualquier grupo activo
-                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ALL (${g.id})`, 'ACCESS');
+                say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ALL (${g.id})`, 'ACCESS');
                 return { status: 200, body: { allowed: true, reason: 'Acceso total por grupo activo.' } };
             }
 
@@ -2960,7 +2971,7 @@ async function decideContentAccess(userId, contentId) {
                     const orgAccess = schoolConfig.availableContentIds;
                     if (isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
                         if (orgAccess === 'all') {
-                            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ORG_ALL (${schoolName})`, 'ACCESS');
+                            say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ORG_ALL (${schoolName})`, 'ACCESS');
                             return { status: 200, body: { allowed: true, reason: 'Acceso total por organización.' } };
                         }
                         if (Array.isArray(orgAccess) && orgAccess.length > 0) {
@@ -2984,25 +2995,25 @@ async function decideContentAccess(userId, contentId) {
         // 9. Veredicto final
         if (!hasAnyActiveGroupRule) {
             if (ACCESS_FALLBACK_MODE === 'restricted') {
-                log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via LEGACY_NO_RULES (restricted mode)`, 'ACCESS');
+                say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via LEGACY_NO_RULES (restricted mode)`, 'ACCESS');
                 return { status: 403, body: { allowed: false, reason: 'Acceso restringido: sin catálogo activo para este usuario.' } };
             }
-            log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via LEGACY_OPEN (no active rules)`, 'ACCESS');
+            say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via LEGACY_OPEN (no active rules)`, 'ACCESS');
             return { status: 200, body: { allowed: true, reason: 'Sin restricciones comerciales activas (modo legacy).' } };
         }
 
         if (unionAccess !== null && Array.isArray(unionAccess)) {
             if (unionAccess.includes(contentId)) {
-                log(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_CATALOG`, 'ACCESS');
+                say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_CATALOG`, 'ACCESS');
                 return { status: 200, body: { allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' } };
             } else {
-                log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via CATALOG_RESTRICTION`, 'ACCESS');
+                say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via CATALOG_RESTRICTION`, 'ACCESS');
                 return { status: 403, body: { allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' } };
             }
         }
 
         // Todos los grupos activos tenían bloqueo total ([]) → acceso denegado
-        log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via GROUP_BLOCK`, 'ACCESS');
+        say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via GROUP_BLOCK`, 'ACCESS');
         return { status: 403, body: { allowed: false, reason: 'Acceso bloqueado por reglas del grupo.' } };
 
     } catch (err) {
