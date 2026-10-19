@@ -1,6 +1,6 @@
 # CHP-CONTENT-PROTECTION-2026-01 — Política global de contenidos: solo lectura protegida (CP-4D)
 
-Fecha: 2026-10-19 · Local, sin deploy · Rama `chp/epub-mainfile-r1-release`
+Fecha: 2026-10-19 · Rama `chp/epub-mainfile-r1-release` · **Estado: DEPLOYED_PRODUCTION** (CP-4E, `73f45d6`, 2026-10-19 16:42–16:47Z; ver `CHP_CONTENT_PROTECTION_CP4E_ROLLOUT.md`)
 
 ```
 GLOBAL_CONTENT_POLICY:                 READ_ONLY_PROTECTED
@@ -83,6 +83,6 @@ Chibalete+ no tiene DRM comercial: ni Widevine, ni FairPlay, ni PlayReady. PDF.j
 - **Impresión:** solo el aviso; sin marca de agua.
 - **Administración:** el formulario ya no muestra el selector.
 
-## Pendiente para el rollout (CP-4E)
+## Estado
 
-Imágenes nuevas de API y front construidas desde el commit de esta unidad, y el mismo procedimiento de CP-4B: backups JIT, canario aislado, api_1 → api_2 → front, y smoke con sesiones.
+`DEPLOYED_PRODUCTION`: API y front `contentprotect-global-73f45d6` desde el 2026-10-19 (CP-4E). Rollback: `/root/chp-cp4e/ROLLBACK.txt`.
