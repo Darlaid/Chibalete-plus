@@ -20,6 +20,8 @@
  * Testeable en Node: el motor, el contenedor y el parser se inyectan.
  */
 
+import { attachExtractionFriction } from '../../utils/contentProtection.mjs';
+
 export class EpubScriptedContentError extends Error {
     constructor(reasons) {
         super('Este EPUB contiene scripts y no se puede abrir por seguridad.');
@@ -193,6 +195,8 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
             });
             // Las flechas dentro de la página del libro (iframe) también pasan página.
             created.addEventListener('load', (e) => {
+                // CP-4A: el texto vive en iframes; la fricción de copia se engancha a cada documento.
+                attachExtractionFriction(e.detail?.doc);
                 e.detail?.doc?.addEventListener?.('keydown', (ev) => {
                     if (ev.key === 'ArrowRight') { ev.preventDefault(); created.goRight?.(); }
                     else if (ev.key === 'ArrowLeft') { ev.preventDefault(); created.goLeft?.(); }

@@ -142,6 +142,8 @@ export const NodeMediaPlayer: React.FC<{ node: any; userId?: string }> = ({ node
                 ref={ref}
                 src={src}
                 controls
+                controlsList="nodownload"
+                onContextMenu={(e) => e.preventDefault()}
                 preload="metadata"
                 className="w-full max-w-full"
                 aria-label={`Audio: ${node.title}`}

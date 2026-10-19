@@ -7,6 +7,7 @@ import { useAccessCheck } from '../hooks/useAccessCheck';
 import PaginaDetalleLibro from '../pages/PaginaDetalleLibro';
 import VisorAudio from '../pages/VisorAudio';
 import VisorVideo from '../pages/VisorVideo';
+import ProtectedContentSurface from './ProtectedContentSurface';
 
 const ContentRouter: React.FC = () => {
     const { id } = useParams<{ id: string }>();
@@ -63,10 +64,19 @@ const ContentRouter: React.FC = () => {
         case 'articulo_pedagogico':
         case 'guia':
             return <PaginaDetalleLibro content={content} />;
+        // CP-4A: audio sin marca visual (no hay superficie que capturar).
         case 'podcast':
-            return <VisorAudio content={content} />;
+            return (
+                <ProtectedContentSurface watermark={false} viewer={{ id: user?.id, institution: user?.colegio }}>
+                    <VisorAudio content={content} />
+                </ProtectedContentSurface>
+            );
         case 'video':
-            return <VisorVideo content={content} />;
+            return (
+                <ProtectedContentSurface viewer={{ id: user?.id, institution: user?.colegio }}>
+                    <VisorVideo content={content} />
+                </ProtectedContentSurface>
+            );
         default:
             return <div className="p-4">Tipo de contenido no soportado.</div>;
     }

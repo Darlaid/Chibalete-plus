@@ -81,6 +81,8 @@ const VisorVideo: React.FC<{ content: Content }> = ({ content }) => {
                         <video
                             className="w-full h-full"
                             controls
+                            controlsList="nodownload"
+                            disablePictureInPicture
                             playsInline
                             preload="metadata"
                             src={content.url_recurso}

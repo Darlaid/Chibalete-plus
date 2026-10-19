@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Content } from '../types';
-import { Play, Pause, Download, ChevronLeft, UserPen, X } from 'lucide-react';
+import { Play, Pause, ChevronLeft, UserPen, X } from 'lucide-react';
 
 const VisorAudio: React.FC<{ content: Content }> = ({ content }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -44,12 +44,9 @@ const VisorAudio: React.FC<{ content: Content }> = ({ content }) => {
           {content.autor} <UserPen size={14} />
         </p>
 
-        <audio ref={audioRef} src={content.url_recurso} onEnded={() => setIsPlaying(false)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
+        <audio ref={audioRef} src={content.url_recurso} controlsList="nodownload" onEnded={() => setIsPlaying(false)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
 
         <div className="flex items-center justify-center space-x-6 my-8">
-          <button onClick={() => alert('Función de descarga no implementada.')} className="text-gray-500 hover:text-indigo-500 transition-colors" aria-label="Descargar podcast">
-            <Download size={24} />
-          </button>
           <button onClick={togglePlay} className="w-20 h-20 rounded-full bg-indigo-600 text-white flex items-center justify-center text-4xl shadow-lg hover:bg-indigo-700 transition-transform transform hover:scale-105 active:scale-95" aria-label={isPlaying ? 'Pausar' : 'Reproducir'}>
             {isPlaying ? <Pause size={40} /> : <Play size={40} className="ml-1" />}
           </button>

@@ -35,7 +35,7 @@ const GaleriaIlustraciones: React.FC<{ content: Content }> = ({ content }) => {
                         className="break-inside-avoid relative group overflow-hidden rounded-lg cursor-pointer border border-gray-800 hover:border-indigo-500 transition-all"
                         onClick={() => setSelectedImage(img)}
                     >
-                        <img src={img} alt={`Ilustración ${idx + 1}`} className="w-full h-auto transition-transform duration-500 group-hover:scale-105" />
+                        <img src={img} alt={`Ilustración ${idx + 1}`} draggable={false} className="w-full h-auto transition-transform duration-500 group-hover:scale-105" />
                         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
                             <ZoomIn className="text-white drop-shadow-md" size={32} />
                         </div>
@@ -55,6 +55,7 @@ const GaleriaIlustraciones: React.FC<{ content: Content }> = ({ content }) => {
                     <img
                         src={selectedImage}
                         alt="Full screen"
+                        draggable={false}
                         className="max-w-full max-h-full object-contain shadow-2xl"
                     />
                 </div>

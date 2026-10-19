@@ -7,6 +7,7 @@ import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import ProtectedRoute from './components/ProtectedRoute';
 import ContentRouter from './components/ContentRouter';
+import ProtectedContentSurface, { type ProtectedSurfaceMode } from './components/ProtectedContentSurface';
 import { dataService } from './services/dataService';
 import { useAccessCheck } from './hooks/useAccessCheck';
 import { getRoutePermission, rolesForLevel } from './config/routePermissions';
@@ -191,7 +192,10 @@ const AccessErrorView: React.FC<{ reason?: string; onRetry: () => void }> = ({ r
 // --- Fase Hardening E2: AccessWrapper unificado ---
 // Componente HOC que hace preflight real antes de pasar el contenido al visor.
 // El visor NUNCA se renderiza si el servidor no autoriza.
-const AccessWrapper: React.FC<{ children: (content: import('./types').Content) => React.ReactNode }> = ({ children }) => {
+const AccessWrapper: React.FC<{
+    children: (content: import('./types').Content) => React.ReactNode;
+    surfaceMode?: ProtectedSurfaceMode;
+}> = ({ children, surfaceMode = 'standard' }) => {
     const { id } = useParams();
     const { user } = useAuth();
     const content = dataService.getContenidoById(id || '');
@@ -221,8 +225,13 @@ const AccessWrapper: React.FC<{ children: (content: import('./types').Content) =
         return <AccessErrorView reason={access.reason} onRetry={access.retry} />;
     }
 
-    // Acceso concedido por el servidor → renderizar el visor
-    return <>{children(content)}</>;
+    // Acceso concedido por el servidor → renderizar el visor.
+    // CP-4A: superficie editorial (fricción + impresión + marca de agua).
+    return (
+        <ProtectedContentSurface mode={surfaceMode} viewer={{ id: user?.id, institution: user?.colegio }}>
+            {children(content)}
+        </ProtectedContentSurface>
+    );
 };
 
 // Wrappers específicos por tipo de visor — solo configuran qué componente renderizar
@@ -239,9 +248,14 @@ const TextWrapper = () => (
 // the access check in the background and shows a soft denial overlay if needed.
 const ImmersiveWrapper = () => {
     const { id } = useParams();
+    const { user } = useAuth();
     const content = dataService.getContenidoById(id || '');
     if (!content) return <Navigate to="/" replace />;
-    return <VisorInmersivo content={content} />;
+    return (
+        <ProtectedContentSurface viewer={{ id: user?.id, institution: user?.colegio }}>
+            <VisorInmersivo content={content} />
+        </ProtectedContentSurface>
+    );
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -317,7 +331,7 @@ const AlbumWrapper = () => (
 // Modo Accesible: replica el patrón bloqueante de PDF/Texto/Álbum.
 // El visor NUNCA renderiza contenido si el servidor no autoriza.
 const AccesibleWrapper = () => (
-    <AccessWrapper>{(content) => <VisorAccesible content={content} />}</AccessWrapper>
+    <AccessWrapper surfaceMode="accessible">{(content) => <VisorAccesible content={content} />}</AccessWrapper>
 );
 
 const GalleryWrapper = () => (
