@@ -6,7 +6,7 @@ Fecha: 2026-10-19 · Local, sin deploy · Rama `chp/epub-mainfile-r1-release`
 
 ```
 CP4A_EXTRACTION_DETERRENCE:      GREEN_LOCAL
-CP4_POLICY_DECISION_REQUIRED:    YES  (campo de política para contenido licenciado — §F)
+CP4_POLICY_DECISION_REQUIRED:    NO   (decidido e implementado en CP-4A2, ver CHP_CONTENT_PROTECTION_CP4A2.md)
 WEB_COPY_FRICTION:               GREEN_LOCAL
 WEB_PRINT_PROTECTION:            GREEN_LOCAL
 MEDIA_NATIVE_DOWNLOAD_UI:        REMOVED_LOCAL
@@ -20,9 +20,9 @@ ANDROID_WATERMARK:               NONE
 ANDROID_SCREENSHOT:              BLOCKED_BY_FLAG_SECURE
 WATERMARK_IDENTITY_DERIVATION:   REMOVED
 EXTERNAL_CONTENT_CLASSIFICATION: ABSENT
-EXTERNAL_CONTENT_POLICY:         NEEDS_DECISION (diseño cerrado, sin implementar)
-LICENSED_STRICT_PDF_ORIGINAL:    DENIED_BY_DESIGN — NOT_ENFORCED (requiere el campo)
-LICENSED_STRICT_EPUB_ORIGINAL:   DENIED_BY_DESIGN — NOT_ENFORCED (requiere el campo)
+EXTERNAL_CONTENT_POLICY:         DEFINED (CP-4A2)
+LICENSED_STRICT_PDF_ORIGINAL:    DENIED_SERVER_SIDE (CP-4A2)
+LICENSED_STRICT_EPUB_ORIGINAL:   DENIED_SERVER_SIDE (CP-4A2)
 ACCESSIBLE_COPY_POLICY:          ALLOWED_FOR_ACCESSIBILITY
 ACCESSIBILITY_REGRESSION:        ZERO
 PRODUCTION:                      UNCHANGED
@@ -91,7 +91,7 @@ Antes de CP-4A ninguna superficie tenía controles de copia, impresión, menú c
 - «Dueño» de upload (`uploadOwnership.js`): es el primer segmento de la ruta, para deduplicar. No tiene valor jurídico.
 - woo / b2c: proxy de la tienda sin relación con `content.id`. El entitlement es por usuario.
 
-## F. Modelo de política (propuesta; necesita aprobación)
+## F. Modelo de política (aprobado e implementado en CP-4A2)
 
 Un solo campo, opcional y compatible hacia atrás, en el registro de contenido:
 
@@ -240,7 +240,7 @@ Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50
 3. **Impresión neutralizada.** Imprimir o «Guardar como PDF» desde un lector produce una página con un aviso de contenido protegido, no el libro.
 4. **Copia trivial bloqueada** en los lectores estándar (copiar, cortar, menú contextual, arrastrar). En el Modo Accesible se mantiene por razones de accesibilidad.
 5. **En la app Android (LU) no se pueden capturar ni grabar** las pantallas de lectura, y la copia offline está cifrada en el dispositivo con una clave no exportable. Se borra al cerrar sesión o al confirmarse la revocación.
-6. **Política de originales por título** (cuando se active §F): para contenido licenciado en modo estricto, el PDF y el EPUB originales no se entregan a nadie salvo administración, con la restricción aplicada en el servidor y no solo ocultando botones.
+6. **Política de originales por título** (CP-4A2): en los títulos configurados como `licensed_strict`, Chibalete+ permite la lectura al usuario autorizado sin entregar el PDF ni el EPUB original. Ambos se bloquean en el servidor (403) aunque el usuario tenga derecho a leer el título, y la interfaz no ofrece esos modos.
 7. **Revocación efectiva:** al retirar un derecho, el acceso web deja de funcionar en la siguiente petición, y LU purga su copia cuando el servidor confirma la revocación.
 
 ## T. Qué no podemos prometer
@@ -271,9 +271,9 @@ Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50
 ## V. Gate
 
 ```
-EXTERNAL_CONTENT_POLICY:        NEEDS_DECISION
-LICENSED_STRICT_PDF_ORIGINAL:   DENIED_BY_DESIGN (sin implementar hasta aprobar el campo)
-LICENSED_STRICT_EPUB_ORIGINAL:  DENIED_BY_DESIGN (sin implementar hasta aprobar el campo)
+EXTERNAL_CONTENT_POLICY:        DEFINED (CP-4A2)
+LICENSED_STRICT_PDF_ORIGINAL:   DENIED_SERVER_SIDE (CP-4A2)
+LICENSED_STRICT_EPUB_ORIGINAL:  DENIED_SERVER_SIDE (CP-4A2)
 WEB_COPY_FRICTION:              GREEN_LOCAL
 WEB_PRINT_PROTECTION:           GREEN_LOCAL
 WATERMARK_POLICY:               PROHIBITED
@@ -313,3 +313,5 @@ Verificación (Chrome headless, API = imagen de producción `contentprotect-cp3d
 | Vídeo | 0 / 0 | no / no | bloqueados; `nodownload` + PiP deshabilitado | ídem |
 | Podcast | 0 / 0 | no / no | bloqueados; `nodownload` | ídem |
 | Detalle (sin superficie) | 0 / 0 | no / no | sin cambios | impresión normal (4 páginas) |
+
+> **CP-4A2 (2026-10-19):** la política de originales de §F–§H está implementada y verificada. Ver `docs/ops/CHP_CONTENT_PROTECTION_CP4A2.md`.
