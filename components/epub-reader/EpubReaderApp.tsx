@@ -221,7 +221,7 @@ const EpubReaderApp: React.FC = () => {
         <StatusCard icon={phase.kind === 'checking' ? <Loader2 className="animate-spin text-indigo-400" size={40} /> : <BookOpen className="text-indigo-400" size={40} />} title="Preparando edición EPUB…" actions={backButton}>
             {phase.kind === 'downloading' && (
                 <div className="mt-2">
-                    <div role="progressbar" aria-label="Descarga del libro" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined} aria-valuetext={pct == null ? 'Descargando' : `${pct}%`} className="h-2 rounded-full bg-white/10 overflow-hidden">
+                    <div role="progressbar" aria-label="Carga del libro" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined} aria-valuetext={pct == null ? 'Cargando' : `${pct}%`} className="h-2 rounded-full bg-white/10 overflow-hidden">
                         <div className={`h-full bg-gradient-to-r from-indigo-500 to-amber-400 ${pct == null ? 'w-1/3 animate-pulse' : ''}`} style={pct == null ? undefined : { width: `${pct}%` }} />
                     </div>
                     <p className="mt-2 text-xs font-mono text-amber-300">

@@ -1,5 +1,8 @@
 # CHP-CONTENT-PROTECTION-2026-01 — CP-4A2: política de originales para contenido licenciado
 
+> **`SUPERSEDED_BY_GLOBAL_POLICY` (CP-4D, 2026-10-19).** La política por título `contentProtectionPolicy` / `licensed_strict` se retiró del runtime: todos los contenidos reciben la misma protección de solo lectura. Ver `docs/ops/CHP_CONTENT_PROTECTION_GLOBAL_POLICY.md`. Documento histórico.
+
+
 Fecha: 2026-10-19 · Local, sin deploy · Rama `chp/epub-mainfile-r1-release` · Base `7d8bb72` (CP-4A + CP-4A1)
 
 ```

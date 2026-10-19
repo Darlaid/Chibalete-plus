@@ -113,7 +113,7 @@ const AttachEpubPanel: React.FC<{ contents: Content[] }> = ({ contents }) => {
                     )}
                     {phase.kind === 'done' && (
                         <p className="flex items-center gap-2 text-sm text-green-700 dark:text-green-400" role="status">
-                            <CheckCircle size={16} /> Edición EPUB añadida. La ficha ya muestra «Ver EPUB original».
+                            <CheckCircle size={16} /> Edición EPUB añadida. La ficha ya muestra «Leer EPUB».
                         </p>
                     )}
                     {!alreadyBlock && (

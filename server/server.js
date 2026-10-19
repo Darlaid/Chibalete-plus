@@ -87,13 +87,6 @@ import {
     UPLOAD_ASSET_DECISION,
     // CP-3 (R2) — catálogo sin localizadores editoriales de títulos sin acceso.
     withoutEditorialLocators,
-    // CP-4A2 — política de originales por título (licensed_strict).
-    parseContentProtectionPolicy,
-    isLicensedStrict,
-    isLicensedStrictOriginalPath,
-    withoutOriginalLocators,
-    nonOriginalReadingRepresentations,
-    LICENSED_STRICT_NO_READING_MESSAGE,
     // CHP-UI-PEDAGOGY-VISIBILITY-01 — decisión de rol compartida preflight ↔ my-catalog.
     createPrivilegedContentAccess,
 } from './accessService.js';
@@ -2774,8 +2767,6 @@ function createRequestStoreReader() {
 async function catalogForViewer(items, viewer) {
     if (viewer.machine) return items;
     const userId = viewer.user?.id;
-    // CP-4A2: decisión pura sobre el propio registro (sin lecturas de stores).
-    const keepOriginals = (viewer.roles || []).includes('administrador');
     const readStore = createRequestStoreReader();
     const out = [];
     let allowedCount = 0;
@@ -2790,7 +2781,7 @@ async function catalogForViewer(items, viewer) {
             }
         }
         if (allowed) allowedCount++;
-        out.push(allowed ? (keepOriginals ? item : withoutOriginalLocators(item)) : withoutEditorialLocators(item));
+        out.push(allowed ? item : withoutEditorialLocators(item));
     }
     if (userId) {
         log(`[CATALOG_ACCESS_FILTER] user=${userId} total=${items.length} allowed=${allowedCount} filtered=${items.length - allowedCount}`, 'ACCESS');
@@ -3116,17 +3107,6 @@ app.get('/api/content/:id/epub', async (req, res) => {
             return res.status(status).json({ error: decision.body?.reason || 'No tienes acceso a este contenido.' });
         }
 
-        // CP-4A2: con licensed_strict el lector autorizado no recibe el EPUB
-        // original (sí lo lee por las representaciones canónicas). Solo la
-        // administración, para gestionarlo.
-        if (isLicensedStrict(content)) {
-            const viewer = await resolveViewerPrincipal(req);
-            if (!(viewer.roles || []).includes('administrador')) {
-                log(`[EPUB_ORIGINAL] contentId=${contentId} user=${userId} → 403 LICENSED_STRICT_ORIGINAL`, 'ACCESS');
-                return res.status(403).json({ error: 'El archivo original de este título no está disponible.', code: 'original_not_licensed' });
-            }
-        }
-
         // La ruta sale SOLO del registro: dentro de /uploads/<contentId>/, .epub, regular.
         const url = content.epub_url;
         const rel = url.startsWith('/uploads/') ? url.slice('/uploads/'.length) : null;
@@ -3222,8 +3202,6 @@ app.get(UPLOADS_AUTHZ_PATH, async (req, res) => {
         // GET /api/content/:id/epub (autorizado) lo entrega. 403 (no 404):
         // auth_request solo propaga 401/403; cualquier otro código sería un 500.
         if (/\.epub$/i.test(normalized.path)) return res.status(403).end();
-        // CP-4A2: PDF original de un título licensed_strict → 403 también en legacy.
-        if (isLicensedStrictOriginalPath(normalized.path, readJSON(DB_FILE))) return res.status(403).end();
 
         // Solo la pedagogía independiente exige identidad. Todo lo demás
         // conserva EXACTAMENTE su comportamiento público actual.
@@ -4027,14 +4005,6 @@ app.post('/api/content', async (req, res) => {
              return res.status(400).json({ error: 'Faltan campos obligatorios de Metadata (id, titulo)' });
         }
 
-        // CP-4A2: contentProtectionPolicy. Valor desconocido → 400 (no se
-        // reinterpreta). Ausente en un update → se conserva el guardado (un
-        // cliente que no conoce el campo nunca degrada un título estricto).
-        const policy = parseContentProtectionPolicy(newContent.contentProtectionPolicy);
-        if (!policy.ok) return res.status(400).json({ error: policy.error, code: 'invalid_content_protection_policy' });
-        if (policy.value === undefined) delete newContent.contentProtectionPolicy;
-        else newContent.contentProtectionPolicy = policy.value;
-
         // 2. Validar album_data si está presente
         if (newContent.tipo === 'libro_album' && Array.isArray(newContent.album_data) && newContent.album_data.length > 0) {
             const albumError = validateAlbumData(newContent.album_data);
@@ -4085,17 +4055,6 @@ app.post('/api/content', async (req, res) => {
             newContent.texto_plano_url = canonicalTextUrlFor(newContent.id);
         }
 
-        // CP-4A2: gate de publicación. Un título licensed_strict debe poder
-        // leerse sin entregar el PDF/EPUB original. Se evalúa sobre el registro
-        // resultante (ya con la rendición canónica de un EPUB fuente).
-        if (newContent.contentProtectionPolicy === undefined && oldContent?.contentProtectionPolicy !== undefined) {
-            newContent.contentProtectionPolicy = oldContent.contentProtectionPolicy;
-        }
-        if (isLicensedStrict(newContent) && nonOriginalReadingRepresentations(newContent).length === 0) {
-            log(`[CONTENT_SAVE_REJECT] contentId=${newContent.id} reason=licensed_strict_without_reading`, 'WARN');
-            return res.status(422).json({ error: LICENSED_STRICT_NO_READING_MESSAGE, code: 'licensed_strict_requires_reading' });
-        }
-
         if (oldContent) {
             // Update existing
             if (newContent.texto_plano_url && newContent.texto_plano_url !== oldContent.texto_plano_url) {
@@ -4140,11 +4099,6 @@ app.post('/api/content', async (req, res) => {
                 const freshIdx = freshList.findIndex(c => c.id === newContent.id);
                 // 3C.3B-R1: defaults mínimos contra el registro vigente (dentro del lock).
                 applyContentDefaults(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
-                // CP-4A2: política ausente en el body → la del registro vigente.
-                if (newContent.contentProtectionPolicy === undefined && freshIdx >= 0
-                    && freshList[freshIdx].contentProtectionPolicy !== undefined) {
-                    newContent.contentProtectionPolicy = freshList[freshIdx].contentProtectionPolicy;
-                }
                 // 2B: artefacto canónico ANTES que content.json; si content.json
                 // no llega a escribirse, se repone el artefacto previo.
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
@@ -11936,15 +11890,6 @@ function dualWriteSingleEventToBackbone(eventName, ts, rest, userId) {
 // --- STATIC FILES ---
 // 3E.3: mismo bloqueo del EPUB fuente que el autorizador del edge.
 app.use('/uploads', (req, res, next) => (/\.epub$/i.test(req.path) ? res.status(403).end() : next()));
-// CP-4A2: en modo legacy Node tampoco sirve el PDF original de un título
-// licensed_strict (en estricto lo decide strictUploadVerdict, más abajo).
-if (!UPLOADS_AUTHZ_STRICT) {
-    app.use('/uploads', (req, res, next) => {
-        const normalized = normalizeUploadRequestPath(req.originalUrl);
-        if (normalized.ok && isLicensedStrictOriginalPath(normalized.path, readJSON(DB_FILE))) return res.status(403).end();
-        return next();
-    });
-}
 // CP-1: en modo estricto Node aplica el MISMO veredicto que el edge (ruta
 // paralela del contenedor front y desarrollo local sin edge).
 if (UPLOADS_AUTHZ_STRICT) {

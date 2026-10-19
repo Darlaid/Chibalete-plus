@@ -314,12 +314,6 @@ export function classifyUploadPath(uploadPath, contentList) {
  *
  * @returns {{ ok: true, path: string } | { ok: false, reason: string }}
  */
-/** CP-4A2 (modo legacy): ¿es la ruta el PDF original de algún título estricto? */
-export function isLicensedStrictOriginalPath(uploadPath, contentList) {
-    const list = Array.isArray(contentList) ? contentList : [];
-    return list.some(item => isLicensedStrict(item) && isOriginalPdfOf(item, uploadPath));
-}
-
 export function normalizeUploadRequestPath(rawUri) {
     if (typeof rawUri !== 'string' || rawUri.length === 0) return { ok: false, reason: 'EMPTY' };
 
@@ -467,24 +461,13 @@ export async function decideUploadAssetAccess(uploadPath, { contentList, publicP
     if (!viewer?.machine && !viewer?.user) return { decision: D.UNAUTHENTICATED, reason: 'NO_SESSION' };
     if (viewer.machine) return { decision: D.AUTHORIZED, reason: 'MACHINE' };
 
-    let strictOriginalOwner = null;
     for (const owner of asset.owners) {
-        // CP-4A2: un dueño licensed_strict no concede su PDF original a nadie
-        // salvo administración (gestión). Otro dueño standard sí puede.
-        if (!isAdmin) {
-            const item = contentList.find(c => c?.id === owner.id);
-            if (isLicensedStrict(item) && isOriginalPdfOf(item, uploadPath)) {
-                strictOriginalOwner ??= owner.id;
-                continue;
-            }
-        }
         // Pedagogía independiente: contrato vigente (rol), sin rediseño en CP-1.
         const allowed = owner.cls === 'PEDAGOGY_RESTRICTED'
             ? seesPedagogy(viewer)
             : await canAccessContent(viewer.user.id, owner.id);
         if (allowed) return { decision: D.AUTHORIZED, reason: 'CONTENT_ACCESS', contentId: owner.id };
     }
-    if (strictOriginalOwner) return { decision: D.FORBIDDEN, reason: 'LICENSED_STRICT_ORIGINAL', contentId: strictOriginalOwner };
     return { decision: D.FORBIDDEN, reason: 'NO_CONTENT_ACCESS', contentId: asset.owners[0].id };
 }
 
@@ -519,91 +502,6 @@ export function withoutEditorialLocators(item) {
     }
     return out;
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// CHP-CONTENT-PROTECTION-2026-01 CP-4A2 — POLÍTICA DE ORIGINALES POR TÍTULO
-//
-// `contentProtectionPolicy?: "standard" | "licensed_strict"` (ausente = standard).
-// Derecho a leer ≠ derecho a recibir el fichero original. Con licensed_strict
-// el lector autorizado sigue leyendo por las representaciones de Chibalete+
-// (texto canónico, Álbum, audio/vídeo), pero NO recibe:
-//   · el PDF original  = `url_recurso` del propio registro cuando es un .pdf
-//                        bajo /uploads/ (relación del catálogo, no un patrón global);
-//   · el EPUB original = `epub_url` (ya nunca sale por /uploads; solo por
-//                        GET /api/content/:id/epub, que también lo deniega).
-// Nada más: TXT/canónico, TTS, imágenes del Álbum, audio y vídeo no cambian.
-// ────────────────────────────────────────────────────────────────────────────
-
-export const CONTENT_PROTECTION_POLICIES = Object.freeze(['standard', 'licensed_strict']);
-
-/**
- * Escritura administrativa. `undefined` = el cliente no lo envió (el llamador
- * conserva el valor guardado); null/'' = standard; un valor desconocido se
- * RECHAZA, nunca se reinterpreta.
- * @returns {{ ok: true, value: 'standard'|'licensed_strict'|undefined } | { ok: false, error: string }}
- */
-export function parseContentProtectionPolicy(raw) {
-    if (raw === undefined) return { ok: true, value: undefined };
-    if (raw === null || raw === '') return { ok: true, value: 'standard' };
-    if (CONTENT_PROTECTION_POLICIES.includes(raw)) return { ok: true, value: raw };
-    return { ok: false, error: `contentProtectionPolicy inválido: se admite ${CONTENT_PROTECTION_POLICIES.join(' | ')}.` };
-}
-
-/**
- * Lectura. Ausente/null/''/'standard' → standard. Cualquier otro valor
- * guardado (solo posible fuera de la API) se trata como estricto: fail-closed.
- */
-export function isLicensedStrict(item) {
-    const v = item?.contentProtectionPolicy;
-    return !(v === undefined || v === null || v === '' || v === 'standard');
-}
-
-/** ¿Es `url_recurso` del registro un PDF original servido por /uploads? */
-function originalPdfPath(item) {
-    const p = canonicalUploadPath(item?.url_recurso);
-    return p && /\.pdf$/i.test(p) ? p : null;
-}
-
-/** ¿Es `uploadPath` (normalizada) el PDF original de `item`? */
-export function isOriginalPdfOf(item, uploadPath) {
-    const pdf = originalPdfPath(item);
-    return !!pdf && pdf === canonicalUploadPath(uploadPath, { decode: false });
-}
-
-/** Campos que localizan originales PDF/EPUB en el registro. */
-export function originalLocatorFields(item) {
-    const fields = [];
-    if (originalPdfPath(item)) fields.push('url_recurso');
-    if (typeof item?.epub_url === 'string' && item.epub_url) fields.push('epub_url');
-    return fields;
-}
-
-/** Copia sin localizadores de originales cuando el título es estricto. No muta. */
-export function withoutOriginalLocators(item) {
-    if (!item || typeof item !== 'object' || Array.isArray(item) || !isLicensedStrict(item)) return item;
-    const drop = originalLocatorFields(item);
-    if (drop.length === 0) return item;
-    const out = { ...item };
-    for (const f of drop) delete out[f];
-    return out;
-}
-
-/**
- * Representaciones de lectura que NO entregan el original (gate de publicación
- * de licensed_strict). Solo las que ya existen en el modelo:
- *   texto_plano_url (TXT o rendición canónica de un EPUB) · album_data con
- *   imágenes · url_recurso que no es un PDF (audio, vídeo, enlace externo).
- */
-export function nonOriginalReadingRepresentations(item) {
-    const out = [];
-    if (typeof item?.texto_plano_url === 'string' && item.texto_plano_url.trim()) out.push('texto_plano_url');
-    if (Array.isArray(item?.album_data) && item.album_data.some(p => typeof p?.imageUrl === 'string' && p.imageUrl.trim())) out.push('album_data');
-    if (typeof item?.url_recurso === 'string' && item.url_recurso.trim() && !/\.pdf(?:[?#]|$)/i.test(item.url_recurso.trim())) out.push('url_recurso');
-    return out;
-}
-
-export const LICENSED_STRICT_NO_READING_MESSAGE =
-    'Licencia estricta requiere una forma de lectura en Chibalete+ que no entregue el PDF ni el EPUB original (texto, álbum, audio o vídeo).';
 
 
 /**

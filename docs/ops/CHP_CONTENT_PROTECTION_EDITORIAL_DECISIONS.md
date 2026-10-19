@@ -1,5 +1,8 @@
 # CHP-CONTENT-PROTECTION-2026-01 — Matriz de decisión editorial de derechos (CP-4C1)
 
+> **`SUPERSEDED_BY_GLOBAL_POLICY` (CP-4D, 2026-10-19).** La clasificación STANDARD/LICENSED_STRICT dejó de ser necesaria tras la decisión editorial de aplicar la misma política de protección a todo el catálogo. Ver `docs/ops/CHP_CONTENT_PROTECTION_GLOBAL_POLICY.md`. Documento histórico: no se sigue completando.
+
+
 > **Complete únicamente POLÍTICA y FUENTE_DE_DECISIÓN.**
 >
 > **STANDARD** significa que Chibalete+ está autorizado a entregar los PDF/EPUB originales disponibles.

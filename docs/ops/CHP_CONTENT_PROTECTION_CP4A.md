@@ -240,7 +240,7 @@ Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50
 3. **Impresión neutralizada.** Imprimir o «Guardar como PDF» desde un lector produce una página con un aviso de contenido protegido, no el libro.
 4. **Copia trivial bloqueada** en los lectores estándar (copiar, cortar, menú contextual, arrastrar). En el Modo Accesible se mantiene por razones de accesibilidad.
 5. **En la app Android (LU) no se pueden capturar ni grabar** las pantallas de lectura, y la copia offline está cifrada en el dispositivo con una clave no exportable. Se borra al cerrar sesión o al confirmarse la revocación.
-6. **Política de originales por título** (CP-4A2): en los títulos configurados como `licensed_strict`, Chibalete+ permite la lectura al usuario autorizado sin entregar el PDF ni el EPUB original. Ambos se bloquean en el servidor (403) aunque el usuario tenga derecho a leer el título, y la interfaz no ofrece esos modos.
+6. **La misma protección para todo el catálogo** (CP-4D): sin importar editorial, autor o licencia, el lector autorizado lee en todos los modos disponibles («Leer en PDF», «Leer EPUB», Guiado, Accesible, Inmersivo, Álbum, audio y vídeo). Chibalete+ no ofrece descarga ni acceso público a los archivos. La antigua política por título (`licensed_strict`, CP-4A2) quedó sustituida.
 7. **Revocación efectiva:** al retirar un derecho, el acceso web deja de funcionar en la siguiente petición, y LU purga su copia cuando el servidor confirma la revocación.
 
 ## T. Qué no podemos prometer
@@ -315,3 +315,5 @@ Verificación (Chrome headless, API = imagen de producción `contentprotect-cp3d
 | Detalle (sin superficie) | 0 / 0 | no / no | sin cambios | impresión normal (4 páginas) |
 
 > **CP-4A2 (2026-10-19):** la política de originales de §F–§H está implementada y verificada. Ver `docs/ops/CHP_CONTENT_PROTECTION_CP4A2.md`.
+
+> **CP-4D (2026-10-19):** la política por título de CP-4A2 se sustituyó por la política global de solo lectura (`CHP_CONTENT_PROTECTION_GLOBAL_POLICY.md`).

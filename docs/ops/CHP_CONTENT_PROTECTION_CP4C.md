@@ -1,5 +1,8 @@
 # CHP-CONTENT-PROTECTION-2026-01 · CP-4C — Clasificación de títulos para `licensed_strict`
 
+> **`SUPERSEDED_BY_GLOBAL_POLICY` (CP-4D, 2026-10-19).** La clasificación STANDARD/LICENSED_STRICT dejó de ser necesaria tras la decisión editorial de aplicar la misma política de protección a todo el catálogo. Ver `docs/ops/CHP_CONTENT_PROTECTION_GLOBAL_POLICY.md`. Documento histórico: no se sigue completando.
+
+
 Fecha: 2026-10-19 · Producción, solo lectura · Rama `chp/epub-mainfile-r1-release`
 
 ## A. Veredicto

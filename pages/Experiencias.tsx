@@ -14,7 +14,7 @@ import { useAuth } from '../context/AuthContext';
 import { useAccessCheck } from '../hooks/useAccessCheck';
 // CHP-MOOK-CONTEXTUAL-READING-RETURN-01 — el origen del MOOK viaja por la URL.
 import { withMookContext, resolveReturnNode, MOOK_NODE_PARAM } from '../utils/mookReturn.mjs';
-import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, Download, ChevronLeft, ChevronRight } from 'lucide-react';
+import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export const NODE_ICON: Record<string, React.ReactNode> = {
     READING: <BookOpen size={16} />, VIDEO: <BookOpen size={16} />, AUDIO: <BookOpen size={16} />,
@@ -55,37 +55,6 @@ export const formatAudioDuration = (segundos: number | null | undefined): string
     if (min === 0) return `${seg} s`;
     if (seg === 0) return `${min} min`;
     return `${min} min ${seg} s`;
-};
-
-/** Nombre de archivo legible y seguro derivado del título del nodo. */
-export const transcriptFilename = (titulo: string): string => {
-    const base = String(titulo ?? '')
-        .normalize('NFD').replace(/[̀-ͯ]/g, '')   // sin diacríticos
-        .replace(/[^a-zA-Z0-9]+/g, '-')                     // sin separadores de ruta ni espacios
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 80)
-        .toLowerCase();
-    return `${base || 'transcripcion'}.txt`;
-};
-
-/**
- * Descarga la transcripción TAL CUAL (saltos de línea y marcas de voz
- * incluidos) como .txt UTF-8 generado en el cliente: sin endpoint, sin copia
- * en uploads y sin telemetría. El Object URL se libera tras usarlo.
- */
-export const downloadTranscript = (texto: string, titulo: string): void => {
-    const blob = new Blob([texto], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    try {
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = transcriptFilename(titulo);
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-    } finally {
-        URL.revokeObjectURL(url);
-    }
 };
 
 /**
@@ -280,20 +249,12 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
 
             {(node.type === 'VIDEO' || node.type === 'AUDIO') && node.config?.transcripcion && (
                 // ADR §17.4: la alternativa textual del medio debe ser accesible desde el nodo.
-                // La descarga vive FUERA del <details> para funcionar también con la
-                // transcripción contraída, y reutiliza exactamente `config.transcripcion`.
+                // CP-4D (política global de solo lectura): se lee en la página; sin descarga.
                 <div className="my-2 rounded-xl bg-gray-50 dark:bg-gray-900 p-3">
                     <details>
                         <summary className="text-sm font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer">Ver transcripción</summary>
                         <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 whitespace-pre-line">{node.config.transcripcion}</p>
                     </details>
-                    <button
-                        type="button"
-                        onClick={() => downloadTranscript(node.config.transcripcion, node.title)}
-                        className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-indigo-700 dark:text-indigo-300 hover:underline"
-                    >
-                        <Download size={14} aria-hidden /> Descargar transcripción
-                    </button>
                 </div>
             )}
 

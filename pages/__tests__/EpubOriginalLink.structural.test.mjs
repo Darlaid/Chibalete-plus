@@ -1,8 +1,9 @@
 /**
  * EpubOriginalLink.structural.test.mjs — CHP-CONTENT-CANONICAL-2026-01 3E.3.
- * «Ver EPUB original» en la ficha: solo con epub_url, a la derecha de
- * «Ver PDF Original» (acciones terciarias), lejos de Inmersivo/Guiado/Accesible,
- * y el enlace solo lleva el contentId. Sin red ni stores.
+ * «Leer EPUB» en la ficha: solo con epub_url, a la derecha de «Leer en PDF»
+ * (acciones terciarias), lejos de Inmersivo/Guiado/Accesible, y el enlace solo
+ * lleva el contentId. CP-4D: son modos de lectura, no «originales» que se
+ * entregan. Sin red ni stores.
  *
  *   node pages/__tests__/EpubOriginalLink.structural.test.mjs
  */
@@ -32,15 +33,16 @@ ok('readEpubContentId acepta ids válidos y rechaza basura', readEpubContentId('
 
 console.log('\n[ficha]');
 const tertiary = page.slice(page.indexOf('{/* Tertiary Actions Grid */}'), page.indexOf('{/* Tertiary Actions Grid */}') + 2500);
-const pdfAt = tertiary.indexOf('Ver PDF Original');
-const epubAt = tertiary.indexOf('Ver EPUB original');
-ok('«Ver EPUB original» vive en las acciones terciarias', epubAt > 0);
-ok('… a la derecha (después) de «Ver PDF Original»', pdfAt > 0 && epubAt > pdfAt);
+const pdfAt = tertiary.indexOf('Leer en PDF');
+const epubAt = tertiary.indexOf('Leer EPUB');
+ok('«Leer EPUB» vive en las acciones terciarias', epubAt > 0);
+ok('… a la derecha (después) de «Leer en PDF»', pdfAt > 0 && epubAt > pdfAt);
+ok('CP-4D: sin «Ver … original» (no se presenta como entrega del archivo)', !/Ver (PDF|EPUB) [Oo]riginal/.test(page));
 ok('… solo si hasEpubOriginal(content)', /\{hasEpubOriginal\(content\) && \(\s*<a href=\{epubReaderHref\(content\.id\)\}/.test(page));
 ok('… enlace con contentId, nunca epub_url', !/href=\{[^}]*epub_url/.test(page));
 const secondary = page.slice(page.indexOf('/leer/inmersivo/${content.id}`, \'inmersivo\''), page.indexOf('{/* Tertiary Actions Grid */}'));
 ok('no está junto a Inmersivo/Guiado/Accesible', secondary.length > 0 && !secondary.includes('EPUB'));
-ok('PDF original sin cambios', /<Book size=\{16\}\/> Ver PDF Original/.test(page) && /content\.tipo !== 'libro_album' && content\.url_recurso && \(/.test(page));
+ok('modo PDF: «Leer en PDF» con la misma condición', /<Book size=\{16\}\/> Leer en PDF/.test(page) && /content\.tipo !== 'libro_album' && content\.url_recurso && \(/.test(page));
 
 console.log(`\nEpubOriginalLink.structural — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

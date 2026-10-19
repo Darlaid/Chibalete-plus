@@ -4,7 +4,8 @@
  * Cierra las capacidades de audio pendientes del preflight:
  *   duración REAL (del elemento nativo, nunca persistida ni estimada),
  *   estados de reproducción anunciados sin confundir pausa con final,
- *   y descarga REAL de la transcripción (cliente, sin endpoint).
+ *   y la transcripción como alternativa textual en la página (CP-4D: sin
+ *   descarga, por la política global de solo lectura).
  *
  * Las funciones puras se extraen del .tsx y se evalúan; la conducta del
  * reproductor se ejerce con un doble de `HTMLAudioElement` que reproduce el
@@ -36,8 +37,6 @@ function extraer(nombre) {
     return cuerpo.trim().replace(/;$/, '');
 }
 const formatAudioDuration = eval(`(${extraer('formatAudioDuration')})`);
-const transcriptFilename = eval(`(${extraer('transcriptFilename')})`);
-const downloadTranscriptSrc = extraer('downloadTranscript');
 
 const tests = [];
 const test = (n, f) => tests.push([n, f]);
@@ -213,61 +212,22 @@ test('7. al terminar NO se inicia otra pieza (sin playlist ni «siguiente»)', (
     assert.ok(SRC.includes('No hay reproducción automática. Tú decides cuándo abrir la siguiente pieza.'));
 });
 
-// ── 8 a 10. Descarga de la transcripción ────────────────────────────────────
-test('8. la descarga contiene EXACTAMENTE la transcripción (voces y saltos incluidos)', () => {
-    const TRANSCRIPCION = 'VOZ 1: Yo estaba hablando…\nNARRACIÓN: ¿Cómo lo sabemos?\n\nVOZ 2: Mi mamá pregunta.\n';
-    const capturado = {};
-    const g = {
-        Blob: class { constructor(parts, opts) { capturado.partes = parts; capturado.opts = opts; } },
-        URL: { createObjectURL: () => 'blob:fake', revokeObjectURL: () => { } },
-        document: {
-            createElement: () => ({ click() { }, remove() { }, set href(v) { }, set download(v) { capturado.nombre = v; } }),
-            body: { appendChild() { } },
-        },
-    };
-    const fn = new Function('Blob', 'URL', 'document', 'transcriptFilename',
-        `return (${downloadTranscriptSrc});`)(g.Blob, g.URL, g.document, transcriptFilename);
-    fn(TRANSCRIPCION, 'A06. Me estás escuchando');
-
-    assert.equal(capturado.partes.length, 1);
-    assert.equal(capturado.partes[0], TRANSCRIPCION, 'byte a byte la misma transcripción');
-    assert.ok(capturado.partes[0].includes('VOZ 1:') && capturado.partes[0].includes('NARRACIÓN:'), 'voces conservadas');
-    assert.equal(capturado.partes[0].split('\n').length, TRANSCRIPCION.split('\n').length, 'saltos de línea conservados');
-    assert.equal(capturado.opts.type, 'text/plain;charset=utf-8', 'texto plano UTF-8');
+// ── 8 a 10. Transcripción: lectura en la página, sin descarga (CP-4D) ────────
+test('8. la transcripción se muestra en la página, TAL CUAL (voces y saltos)', () => {
+    const i = SRC.indexOf('Ver transcripción');
+    const bloque = SRC.slice(i - 400, i + 400);
+    assert.ok(/<details>/.test(bloque) && /<summary/.test(bloque), 'control nativo <details>/<summary>');
+    assert.ok(/whitespace-pre-line">\{node\.config\.transcripcion\}/.test(bloque), 'el texto completo, con saltos de línea');
 });
 
-test('9. el filename queda saneado, es comprensible y termina en .txt', () => {
-    assert.equal(transcriptFilename('A06. Me estás escuchando'), 'a06-me-estas-escuchando.txt');
-    assert.equal(transcriptFilename('A07.1. Si no posteo, desaparezco'), 'a07-1-si-no-posteo-desaparezco.txt');
-    assert.equal(transcriptFilename('A08. Día 1 — Una hora sin notificaciones'), 'a08-dia-1-una-hora-sin-notificaciones.txt');
-    // sin separadores de ruta ni caracteres peligrosos
-    for (const malicioso of ['../../etc/passwd', 'C:\\Windows\\system32', 'a/b\\c:d*e?f"g<h>i|j']) {
-        const f = transcriptFilename(malicioso);
-        assert.ok(!/[/\\:*?"<>|]/.test(f), `saneado: ${f}`);
-        assert.ok(f.endsWith('.txt'));
-    }
-    assert.equal(transcriptFilename(''), 'transcripcion.txt', 'título vacío tiene respaldo');
-    assert.equal(transcriptFilename('¿¡—…!?'), 'transcripcion.txt', 'título sin alfanuméricos tiene respaldo');
-    assert.ok(transcriptFilename('x'.repeat(300)).length <= 84, 'longitud acotada');
+test('9. CP-4D: no existe descarga de la transcripción (política global de solo lectura)', () => {
+    assert.ok(!SRC.includes('Descargar transcripción'), 'sin control «Descargar transcripción»');
+    assert.ok(!/downloadTranscript|transcriptFilename/.test(SRC), 'sin utilidades de descarga');
+    assert.ok(!/\.download\s*=|createObjectURL/.test(SRC), 'sin enlaces de descarga generados en el cliente');
 });
 
-test('10. el Object URL se revoca siempre (incluso si el click falla)', () => {
-    const eventos = [];
-    const Blob_ = class { constructor(p, o) { } };
-    const URL_ = { createObjectURL: () => { eventos.push('create'); return 'blob:x'; }, revokeObjectURL: (u) => eventos.push('revoke:' + u) };
-    const mkDoc = (clickFn) => ({
-        createElement: () => ({ click: clickFn, remove() { }, set href(v) { }, set download(v) { } }),
-        body: { appendChild() { } },
-    });
-    const build = (doc) => new Function('Blob', 'URL', 'document', 'transcriptFilename',
-        `return (${downloadTranscriptSrc});`)(Blob_, URL_, doc, transcriptFilename);
-
-    build(mkDoc(() => { }))('texto', 'titulo');
-    assert.deepEqual(eventos, ['create', 'revoke:blob:x'], 'se revoca tras usarlo');
-
-    eventos.length = 0;
-    assert.throws(() => build(mkDoc(() => { throw new Error('click bloqueado'); }))('texto', 'titulo'));
-    assert.ok(eventos.includes('revoke:blob:x'), 'el finally revoca aunque falle la descarga');
+test('10. la alternativa textual sigue presente para AUDIO y VIDEO', () => {
+    assert.ok(/node\.type === 'VIDEO' \|\| node\.type === 'AUDIO'\) && node\.config\?\.transcripcion/.test(SRC));
 });
 
 // ── 11 a 13. Renderer compartido, telemetría y gate ─────────────────────────
@@ -281,8 +241,8 @@ test('11. la preview usa el MISMO renderer (NodeShell → NodeMediaPlayer)', () 
     assert.equal((SRC.match(/<audio/g) || []).length, 1);
 });
 
-test('12. la descarga y la reproducción NO emiten analytics ni texto a eventos', () => {
-    const util = SRC.slice(SRC.indexOf('export const downloadTranscript'), SRC.indexOf('ESTAS-AQUI-01 — bitácora privada'));
+test('12. la reproducción NO emite analytics ni texto a eventos', () => {
+    const util = SRC.slice(SRC.indexOf('export const NodeMediaPlayer'), SRC.indexOf('ESTAS-AQUI-01 — bitácora privada'));
     for (const prohibido of ['analytics', 'trackEvent', 'emitEvent', 'sendBeacon', '/api/v1/events', 'eventTransport', 'fetch(']) {
         assert.ok(!util.includes(prohibido), `sin telemetría en el audio/descarga: ${prohibido}`);
     }
@@ -312,20 +272,15 @@ test('13. el gate TRANSCRIPTION_REQUIRED sigue intacto', () => {
 // ── Accesibilidad y microcopias ─────────────────────────────────────────────
 test('14. controles accesibles y microcopias exactas', () => {
     assert.ok(SRC.includes('Ver transcripción'), 'control «Ver transcripción»');
-    assert.ok(SRC.includes('Descargar transcripción'), 'control «Descargar transcripción»');
+    assert.ok(!SRC.includes('Descargar transcripción'), 'CP-4D: sin «Descargar transcripción»');
     assert.ok(/Este audio dura \$\{legible\}\. Si puedes, escucha una sola pieza a la vez\./.test(SRC),
         'microcopia de duración exacta');
     assert.ok(SRC.includes('Puedes continuar después. La pausa también forma parte del recorrido.'));
     assert.ok(SRC.includes('No hay reproducción automática. Tú decides cuándo abrir la siguiente pieza.'));
     assert.ok(/role="status" aria-live="polite"/.test(SRC), 'estados anunciados por aria-live');
     assert.ok(/aria-label=\{`Audio: \$\{node\.title\}`\}/.test(SRC), 'el audio tiene nombre accesible');
-    // El botón de descarga es un <button> nativo (operable por teclado).
-    const i = SRC.indexOf('Descargar transcripción');
-    const bloque = SRC.slice(i - 500, i);
-    assert.ok(/<button\s+type="button"/.test(bloque), 'la descarga es un button nativo');
-    // Y vive FUERA del <details>, para funcionar con la transcripción contraída.
-    const detallesFin = SRC.lastIndexOf('</details>', i);
-    assert.ok(detallesFin > 0 && detallesFin < i, 'el botón está fuera del <details> (funciona contraído)');
+    // La transcripción se abre con un control nativo operable por teclado.
+    assert.ok(/<summary[^>]*cursor-pointer">Ver transcripción<\/summary>/.test(SRC), '<summary> nativo');
 });
 
 let failed = 0;

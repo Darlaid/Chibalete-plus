@@ -424,9 +424,6 @@ export interface Content {
   // V4 (CHP-MOOK): false = pieza destinada a Experiencias, no se descubre como
   // obra independiente en Biblioteca. Ausente ⇒ true (cero migración).
   standalone?: boolean;
-  // CP-4A2: política de originales. Ausente = 'standard'. Solo administración la cambia.
-  // 'licensed_strict': se lee en Chibalete+ pero el PDF/EPUB original no se entrega.
-  contentProtectionPolicy?: 'standard' | 'licensed_strict';
 
   // New: Sections
   sectionIds?: string[];

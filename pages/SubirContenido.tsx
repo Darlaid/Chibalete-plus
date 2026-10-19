@@ -418,7 +418,6 @@ const SubirContenido: React.FC = () => {
             resourceURL: (content.tipo === 'video' && content.url_recurso) ? content.url_recurso : '',
             etiquetasString: content.etiquetas ? content.etiquetas.join(', ') : '',
             paraExperiencia: content.standalone === false,
-            contentProtectionPolicy: content.contentProtectionPolicy === 'licensed_strict' ? 'licensed_strict' : 'standard',
         });
 
         // Clear any validation errors from a previous editing session.
@@ -513,8 +512,6 @@ const SubirContenido: React.FC = () => {
         // CHP-MOOK-STUDIO-01 (UX C9): true ⇒ la pieza se guarda con standalone:false
         // (no se descubre como obra independiente en Biblioteca).
         paraExperiencia: false,
-        // CP-4A2: protección del contenido (originales PDF/EPUB).
-        contentProtectionPolicy: 'standard' as 'standard' | 'licensed_strict',
     });
 
     // Album Editor State
@@ -1074,8 +1071,6 @@ const SubirContenido: React.FC = () => {
                     // CHP-MOOK-STUDIO-01 (C9): ausente/true = obra independiente;
                     // false = pieza para Experiencias (Biblioteca no la descubre).
                     standalone: !mainContent.paraExperiencia,
-                    // CP-4A2: el servidor valida el valor y el gate de lectura.
-                    contentProtectionPolicy: mainContent.contentProtectionPolicy,
 
                     // Files: Use new URL if uploaded, else keep existing (from spread), else string fallback
                     portada_url: coverUrl || existingContent?.portada_url || '',
@@ -1274,8 +1269,7 @@ const SubirContenido: React.FC = () => {
                             setAlbumPages([]);
                             setMainContent({
                                 titulo: '', autor: '', biografia_autor: '', tipo: 'libro', descripcion: '', isCollection: false,
-                                coverFile: null, resourceFile: null, textoPlanoFile: null, textoInglesFile: null, textoPortuguesFile: null, ilustracionesFiles: [],
-                                contentProtectionPolicy: 'standard'
+                                coverFile: null, resourceFile: null, textoPlanoFile: null, textoInglesFile: null, textoPortuguesFile: null, ilustracionesFiles: []
                             });
                             setCreatedContentId(null);
                             setEditingId(null); // Reset Editing State
@@ -1552,27 +1546,6 @@ const SubirContenido: React.FC = () => {
                                 </div>
                             )}
                         </div>
-
-                        {mainContent.tipo !== 'memoria_club' && (
-                            <div className="mb-6">
-                                <label htmlFor="sc-proteccion" className="block text-sm font-medium mb-1">Protección del contenido</label>
-                                <select
-                                    id="sc-proteccion"
-                                    value={mainContent.contentProtectionPolicy}
-                                    onChange={e => setMainContent(prev => ({ ...prev, contentProtectionPolicy: e.target.value === 'licensed_strict' ? 'licensed_strict' : 'standard' }))}
-                                    aria-describedby="sc-proteccion-help"
-                                    className="w-full md:w-1/2 p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg"
-                                >
-                                    <option value="standard">Estándar</option>
-                                    <option value="licensed_strict">Licencia estricta</option>
-                                </select>
-                                <p id="sc-proteccion-help" className="text-xs text-gray-500 mt-1">
-                                    {mainContent.contentProtectionPolicy === 'licensed_strict'
-                                        ? 'Licencia estricta: permite la lectura en Chibalete+, pero bloquea la entrega de PDF y EPUB originales.'
-                                        : 'Estándar: permite las representaciones originales disponibles.'}
-                                </p>
-                            </div>
-                        )}
 
 
 

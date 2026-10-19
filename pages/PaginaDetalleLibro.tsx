@@ -418,7 +418,7 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                             <div className="flex gap-4 pt-4 border-t border-white/10">
                                 {content.tipo !== 'libro_album' && content.url_recurso && (
                                     <button onClick={() => goRead(`/leer/pdf/${content.id}`)} className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
-                                        <Book size={16}/> Ver PDF Original
+                                        <Book size={16}/> Leer en PDF
                                     </button>
                                 )}
                                 {/* CHP-CONTENT-CANONICAL-2026-01 3E.3: representación del original (no un modo
@@ -426,7 +426,7 @@ const PaginaDetalleLibro: React.FC<{ content: Content }> = ({ content }) => {
                                     pide el archivo a GET /api/content/:id/epub (autorizado). */}
                                 {hasEpubOriginal(content) && (
                                     <a href={epubReaderHref(content.id)} className="flex items-center text-sm text-gray-400 hover:text-white transition-colors gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
-                                        <BookOpen size={16}/> Ver EPUB original
+                                        <BookOpen size={16}/> Leer EPUB
                                     </a>
                                 )}
                                 {content.ilustraciones_url && content.ilustraciones_url.length > 0 && (
