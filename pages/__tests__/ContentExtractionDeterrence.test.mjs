@@ -160,5 +160,34 @@ ok('ningún noplaybackrate en el repo de visores',
 const gallery = read('components/GaleriaIlustraciones.tsx');
 ok('Galería: imágenes no arrastrables', (gallery.match(/draggable=\{false\}/g) || []).length === 2);
 
+section('[9] CP-4A1: 0 marca de agua por superficie (WATERMARK_POLICY: PROHIBITED)');
+// La superficie es visualmente neutra: un único <div display:contents> con los hijos.
+const surfaceJsx = surfaceCode.slice(surfaceCode.indexOf('return ('));
+ok('superficie: un único elemento propio', (surfaceJsx.match(/<[a-z]+[\s>]/g) || []).length === 1 && surfaceJsx.includes('{children}'));
+ok('superficie: sin svg, img, span, style ni texto visible propio', !/<(svg|img|span|style|p|i)\b/.test(surfaceJsx));
+const mounts = {
+    'A. Guiado': /<AccessWrapper>\{\(content\) => <VisorTexto/.test(app),
+    'B. Accesible': /<AccessWrapper surfaceMode="accessible">\{\(content\) => <VisorAccesible/.test(app),
+    'C. Inmersivo': /<ProtectedContentSurface>\s*<VisorInmersivo content/.test(app),
+    'D. PDF': /<AccessWrapper>\{\(content\) => <VisorPDF/.test(app),
+    'E. EPUB': /<ProtectedContentSurface>\s*<ChibaleteEpubReader/.test(epubApp),
+    'F. Álbum': /<AccessWrapper>\{\(content\) => <VisorAlbum/.test(app),
+    'F. Galería': /<AccessWrapper>\{\(content\) => <GaleriaIlustraciones/.test(app),
+    'G. Vídeo': /<ProtectedContentSurface>\s*<VisorVideo/.test(router),
+};
+for (const [k, v] of Object.entries(mounts)) ok(`${k}: montado sin props de marca ni datos de persona`, v);
+ok('AccessWrapper pasa solo el modo', /<ProtectedContentSurface mode=\{surfaceMode\}>/.test(accessWrapper));
+const runtimeFiles = ['App.tsx', 'components/ContentRouter.tsx', 'components/epub-reader/EpubReaderApp.tsx',
+    'components/epub-reader/foliateAdapter.mjs', 'components/GaleriaIlustraciones.tsx', 'pages/VisorAudio.tsx',
+    'pages/VisorVideo.tsx', 'pages/Experiencias.tsx', 'components/ProtectedContentSurface.tsx', 'utils/contentProtection.mjs'];
+const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+const offenders = runtimeFiles.filter((f) => /watermark|viewerMarker|data-chp-mark|chpMark|watermarkLabel|shortInstitution/i.test(strip(read(f))));
+ok('H/J. ningún archivo runtime de CP-4A deriva marcador ni monta overlay', offenders.length === 0, offenders.join(', '));
+ok('I. sin derivación de identidad (hash de cuenta) en el helper', !/0x811c9dc5|Math\.imul|colegio|institution/.test(helperCode));
+ok('K. impresión: aviso presente', PROTECTED_PRINT_CSS.includes('Contenido protegido en Chibalete+'));
+ok('K. impresión: sin marca (sin attr(), ::after ni fondo)', !/attr\(|::after|background-image|url\(/.test(PROTECTED_PRINT_CSS));
+ok('sin detección de capturas (PrintScreen, visibilitychange, blur, keydown)',
+    !/PrintScreen|visibilitychange|'blur'|keydown|keyup/.test(surfaceCode + helperCode));
+
 console.log(`\nContentExtractionDeterrence — ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);

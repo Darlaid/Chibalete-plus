@@ -10,13 +10,15 @@ CP4_POLICY_DECISION_REQUIRED:    YES  (campo de política para contenido licenci
 WEB_COPY_FRICTION:               GREEN_LOCAL
 WEB_PRINT_PROTECTION:            GREEN_LOCAL
 MEDIA_NATIVE_DOWNLOAD_UI:        REMOVED_LOCAL
-WATERMARK_POLICY:                PROHIBITED (decisión de producto, 2026-10-19)
-VISIBLE_WATERMARK_DURING_READING: NO
-WATERMARK_IN_PRINT:              NO
-WATERMARK_IN_SAVE_AS_PDF:        NO
-WEB_SCREENSHOT_WATERMARK:        NOT_TECHNICALLY_AVAILABLE_WITHOUT_VISIBLE_WATERMARK
+WATERMARK_POLICY:                PROHIBITED (decisión de producto definitiva, CP-4A1)
+VISIBLE_WATERMARK:               NONE
+PRINT_WATERMARK:                 NONE
+WEB_SCREENSHOT_ONLY_WATERMARK:   NOT_TECHNICALLY_AVAILABLE
+WEB_SCREENSHOT_TRACEABILITY:     NONE
 WEB_SCREENSHOT_PREVENTION:       NOT_RELIABLY_POSSIBLE
+ANDROID_WATERMARK:               NONE
 ANDROID_SCREENSHOT:              BLOCKED_BY_FLAG_SECURE
+WATERMARK_IDENTITY_DERIVATION:   REMOVED
 EXTERNAL_CONTENT_CLASSIFICATION: ABSENT
 EXTERNAL_CONTENT_POLICY:         NEEDS_DECISION (diseño cerrado, sin implementar)
 LICENSED_STRICT_PDF_ORIGINAL:    DENIED_BY_DESIGN — NOT_ENFORCED (requiere el campo)
@@ -28,7 +30,7 @@ PRODUCTION:                      UNCHANGED
 
 Se aplicó una condición de STOP del encargo (§32): **no hay forma fiable de identificar contenido externo**. Por eso la parte LICENSED_STRICT queda diseñada pero sin código, a la espera de que se apruebe el campo. Todo lo demás (fricción, impresión, media) es independiente de esa decisión y queda GREEN_LOCAL.
 
-Principio: lo que añade CP-4A es **FRICCIÓN**, no prevención. Sin marca de agua: la primera versión (`3258f78`) incluía una marca de agua visible con identificador de cuenta. Por decisión de producto (`WATERMARK_POLICY: PROHIBITED`) se retiró por completo, también de la impresión. Sin marca visible no hay trazabilidad de capturas web. La protección fuerte sigue estando en la autorización del servidor (CP-1/2/3), en la futura política de originales (§G/§H) y en FLAG_SECURE de LU.
+Principio: lo que añade CP-4A es **FRICCIÓN**, no prevención. **No se usan marcas de agua** (`WATERMARK_POLICY: PROHIBITED`): ni durante la lectura, ni en la impresión, ni en «Guardar como PDF», en ninguna superficie web ni en Android. Ver §L. La protección fuerte sigue estando en la autorización del servidor (CP-1/2/3), en la futura política de originales (§G/§H) y en FLAG_SECURE de LU.
 
 ## B. Baseline
 
@@ -124,7 +126,7 @@ Decisiones abiertas para la persona responsable:
 
 ## I. Copy / cut / drag
 
-Componente común `components/ProtectedContentSurface.tsx` + helper puro `utils/contentProtection.mjs`. Sin marca de agua.
+Componente común `components/ProtectedContentSurface.tsx` + helper puro `utils/contentProtection.mjs`. Es visualmente neutro: no renderiza ningún elemento visible propio.
 
 - Montaje:
   - `AccessWrapper` (PDF, Guiado, Álbum, Galería, Accesible), **después** del veredicto de `/access`.
@@ -151,7 +153,7 @@ Componente común `components/ProtectedContentSurface.tsx` + helper puro `utils/
 
 Mientras haya una superficie montada, `html[data-chp-protected]` está presente (con contador de montajes). Al desmontar se retira. Con `@media print`, `body > *` se oculta y `body::before` muestra **solo** «Contenido protegido en Chibalete+», sin marcador, identificador ni marca de agua. Sin atributo, la impresión no cambia.
 
-Chrome headless real, `Page.printToPDF` (= Guardar como PDF), con el texto extraído con `pdf-parse`. Verificado de nuevo tras retirar la marca de agua:
+Chrome headless real, `Page.printToPDF` (= Guardar como PDF), con el texto extraído con `pdf-parse`. Verificado de nuevo en CP-4A1:
 
 | Superficie | Pantalla | PDF impreso |
 |---|---|---|
@@ -168,25 +170,27 @@ La emulación `media: print` coincide con el PDF: página blanca con el aviso ce
 - **MOOK:** `controlsList="nodownload"` + menú contextual bloqueado en el `<audio controls>`. Los controles nativos se conservan. La descarga de la transcripción se mantiene (alternativa accesible, contenido propio).
 - Clasificación: FRICTION_ONLY. `nodownload` ≠ DRM.
 
-## L. Marca de agua
+## L. Marca de agua — política
 
-**`WATERMARK_POLICY: PROHIBITED`.** No hay marca de agua en la lectura, en la impresión ni en «Guardar como PDF», en ninguna superficie.
-- La versión inicial (`3258f78`: overlay SVG con institución, marcador seudónimo y fecha, y marcador en el PDF impreso) se retiró por completo.
-- `ProtectedContentSurface` ya no recibe datos de la persona: se retiraron la prop `viewer` y el estado `viewer` de EpubReaderApp.
-- El helper ya no genera etiquetas, marcadores ni baldosas.
-- Ratchet en `ContentExtractionDeterrence` [4]/[6]/[7]: sin `chp-watermark`, `backgroundImage`, `data-chp-mark`, `viewer` ni `watermark=`.
+**`WATERMARK_POLICY: PROHIBITED`.** No se usan marcas de agua. No hay ninguna durante la lectura, sobre imágenes, PDF, EPUB, vídeo, Álbum o Galería, ni en la impresión o en «Guardar como PDF». Tampoco en Accesible, Inmersivo o Guiado, ni en Android.
+
+La única variante que se consideró aceptable, una marca añadida **solo al archivo de una captura de pantalla**, no es técnicamente posible en la web: el navegador no recibe ningún evento fiable de captura del sistema operativo. No se intenta detectar capturas (PrintScreen, `visibilitychange`, `blur`, teclado, DevTools).
+
+`ProtectedContentSurface` no recibe datos de la persona y no deriva ningún identificador. `WATERMARK_IDENTITY_DERIVATION: REMOVED`. El test `ContentExtractionDeterrence` ([4], [6], [7] y [9]) lo fija como ratchet.
 
 ## M. Capturas de pantalla
 
 ```
-WEB_SCREENSHOT_PREVENTION:  NOT_RELIABLY_POSSIBLE
-WEB_SCREENSHOT_WATERMARK:   NOT_TECHNICALLY_AVAILABLE_WITHOUT_VISIBLE_WATERMARK
-ANDROID_SCREENSHOT:         BLOCKED_BY_FLAG_SECURE (ReaderScreen, GREEN_PRODUCTION)
-ANDROID_SCREEN_RECORDING:   BLOCKED
-ANDROID_RECENTS:            PROTECTED
+WEB_SCREENSHOT_PREVENTION:      NOT_RELIABLY_POSSIBLE
+WEB_SCREENSHOT_ONLY_WATERMARK:  NOT_TECHNICALLY_AVAILABLE
+WEB_SCREENSHOT_TRACEABILITY:    NONE
+ANDROID_SCREENSHOT:             BLOCKED_BY_FLAG_SECURE (ReaderScreen, GREEN_PRODUCTION)
+ANDROID_SCREEN_RECORDING:       BLOCKED_BY_FLAG_SECURE
+ANDROID_RECENTS:                PROTECTED
+ANDROID_WATERMARK:              NONE
 ```
 
-En la web, una captura de pantalla no lleva ninguna marca. LU no se modifica.
+La web no puede impedir capturas de pantalla ni añadir una marca solo a la captura. Android bloquea las capturas y la grabación con FLAG_SECURE. LU no se modifica.
 
 ## N. Accesibilidad
 
@@ -204,14 +208,14 @@ En la web, una captura de pantalla no lleva ninguna marca. LU no se modifica.
 
 ## O. Rendimiento
 
-Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50 16,7 ms, p95 16,8 ms y 0 tareas largas. Se midió con la versión que tenía marca de agua; sin overlay el coste solo puede bajar. La superficie es un `<div>` con `display: contents` y un efecto al montar, sin timers, observers ni canvas. Sin regresión.
+Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50 16,7 ms, p95 16,8 ms y 0 tareas largas. La superficie es un `<div>` con `display: contents` y un efecto al montar, sin timers, observers ni canvas. Sin regresión.
 
 ## P. Tests
 
 | Suite | Resultado | Clasificación |
 |---|---|---|
-| `ContentExtractionDeterrence` *(nueva, en `test:content-rmw`)* | 64 ✓ / 0 ✗ (tras retirar la marca; 76 en `3258f78`) | nueva |
-| `test:content-rmw` | verde (completo, tras retirar la marca); antes `contentStoreRmwConcurrency` falló una vez («nunca healthy») y dio 27/0 al repetir | flake de arranque, preexistente |
+| `ContentExtractionDeterrence` *(nueva, en `test:content-rmw`)* | 80 ✓ / 0 ✗ | nueva |
+| `test:content-rmw` | verde; `contentStoreRmwConcurrency` falló una vez («nunca healthy») y dio 27/0 al repetir | flake de arranque, preexistente |
 | `test:a11y-reader` | verde | — |
 | `test:mook` | verde (capa B: SKIP en win32, como siempre) | — |
 | `test:library` | `libraryInstitutionalPersonal`: «/api/content general NO cambia su política no-store» ✗ | **preexistente**: CP-3 puso `no-store` en `/api/content`; `server/` no cambia aquí |
@@ -233,7 +237,7 @@ Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50
 
 1. **Solo lee quien tiene derecho.** El servidor decide el acceso a cada título y a cada fichero (usuario → grupo → organización, con ventanas temporales). Sin sesión o sin derecho, los ficheros responden 401/403. El catálogo no revela la ubicación de títulos sin acceso.
 2. **Sin descarga desde la interfaz.** Los lectores no tienen botones de descarga, y los reproductores de audio y vídeo propios ocultan la descarga nativa y el Picture-in-Picture.
-3. **Impresión neutralizada.** Imprimir o «Guardar como PDF» desde un lector produce una página con un aviso y un identificador, no el libro.
+3. **Impresión neutralizada.** Imprimir o «Guardar como PDF» desde un lector produce una página con un aviso de contenido protegido, no el libro.
 4. **Copia trivial bloqueada** en los lectores estándar (copiar, cortar, menú contextual, arrastrar). En el Modo Accesible se mantiene por razones de accesibilidad.
 5. **En la app Android (LU) no se pueden capturar ni grabar** las pantallas de lectura, y la copia offline está cifrada en el dispositivo con una clave no exportable. Se borra al cerrar sesión o al confirmarse la revocación.
 6. **Política de originales por título** (cuando se active §F): para contenido licenciado en modo estricto, el PDF y el EPUB originales no se entregan a nadie salvo administración, con la restricción aplicada en el servidor y no solo ocultando botones.
@@ -242,11 +246,13 @@ Guiado, scroll programático de 2,5 s con requestAnimationFrame: 151 frames, p50
 ## T. Qué no podemos prometer
 
 1. **Que lo que se muestra no pueda copiarse.** Cualquier contenido que se muestra en pantalla llega al dispositivo. Con herramientas de desarrollador, extensiones, «Guardar página», OCR o la cámara de otro dispositivo se puede extraer. La fricción web solo impide la copia **trivial**.
-2. **Que no haya capturas de pantalla en la web, ni que se puedan rastrear.** Impedirlas no es técnicamente posible, y por política no se usa marca de agua, así que una captura web no lleva ningún identificador. En Android, FLAG_SECURE sí las bloquea.
-3. **DRM.** Hoy no hay Widevine, FairPlay ni PlayReady. El audio y el vídeo autorizados son ficheros completos que se pueden reconstruir. Un requisito de DRM exige una unidad aparte, probablemente con un proveedor gestionado.
-4. **Que el texto no llegue completo al navegador.** Las representaciones de Chibalete+ (Guiado, Accesible, Inmersivo) reciben el texto íntegro del libro para leerlo y narrarlo. «Estricto» significa no entregar **el fichero original de la editorial** (maquetación, PDF, EPUB), no que el texto sea inaccesible.
-5. **Bloqueo de copia en el Modo Accesible.** Se mantiene a propósito para no perjudicar a lectores con discapacidad.
-6. **Marca de agua, visible o forense,** en texto, imagen, audio o vídeo. No existe por decisión de producto.
+2. **Impedir capturas de pantalla en la web.** No es técnicamente posible. En Android, FLAG_SECURE sí las bloquea.
+3. **Insertar una marca solo en una captura del sistema.** El navegador no se entera de que se hizo una captura, así que no hay forma de marcar solo ese archivo. Una captura web no lleva ningún identificador.
+4. **Marcas de agua visibles durante la lectura.** No las usamos, por decisión de producto.
+5. **DRM.** Hoy no hay Widevine, FairPlay ni PlayReady. El audio y el vídeo autorizados son ficheros completos que se pueden reconstruir. Un requisito de DRM exige una unidad aparte, probablemente con un proveedor gestionado.
+6. **Que el texto no llegue completo al navegador.** Las representaciones de Chibalete+ (Guiado, Accesible, Inmersivo) reciben el texto íntegro del libro para leerlo y narrarlo. «Estricto» significa no entregar **el fichero original de la editorial** (maquetación, PDF, EPUB), no que el texto sea inaccesible.
+7. **Bloqueo de copia en el Modo Accesible.** Se mantiene a propósito para no perjudicar a lectores con discapacidad.
+8. **Marca forense** en texto, imagen, audio o vídeo. No existe.
 
 ## U. Deudas
 
@@ -270,10 +276,14 @@ LICENSED_STRICT_PDF_ORIGINAL:   DENIED_BY_DESIGN (sin implementar hasta aprobar 
 LICENSED_STRICT_EPUB_ORIGINAL:  DENIED_BY_DESIGN (sin implementar hasta aprobar el campo)
 WEB_COPY_FRICTION:              GREEN_LOCAL
 WEB_PRINT_PROTECTION:           GREEN_LOCAL
-WATERMARK_POLICY:               PROHIBITED (retirada y verificada)
-WEB_SCREENSHOT_WATERMARK:       NOT_TECHNICALLY_AVAILABLE_WITHOUT_VISIBLE_WATERMARK
-WEB_SCREENSHOT_PREVENTION:      NOT_RELIABLY_POSSIBLE
-ANDROID_SCREENSHOT:             BLOCKED_BY_FLAG_SECURE
+WATERMARK_POLICY:               PROHIBITED
+VISIBLE_WATERMARK:              NONE
+PRINT_WATERMARK:                NONE
+WEB_SCREENSHOT_ONLY_WATERMARK:  NOT_TECHNICALLY_AVAILABLE
+WEB_SCREENSHOT_TRACEABILITY:    NONE
+ANDROID_WATERMARK:              NONE
+COPY_DETERRENCE:                UNCHANGED
+PRINT_PROTECTION:               UNCHANGED
 ACCESSIBILITY_REGRESSION:       ZERO
 CP4A_READY_FOR_ROLLOUT_PLAN:    YES — para la disuasión (front). NO para LICENSED_STRICT.
 ```
@@ -281,3 +291,25 @@ CP4A_READY_FOR_ROLLOUT_PLAN:    YES — para la disuasión (front). NO para LICE
 ## W. Siguiente
 
 `CP-4B — PRODUCTION ROLLOUT OF EXTRACTION DETERRENCE` (solo imagen de front). En paralelo: decidir el campo de §F, que habilitaría una unidad de implementación del gate de originales.
+
+## CP-4A1 — Retirada completa de la marca de agua (2026-10-19)
+
+Decisión de producto definitiva: `WATERMARK_POLICY: PROHIBITED`.
+- La retirada en runtime entró en `39a8c1e`, sobre el candidato CP-4A `3258f78`.
+- CP-4A1 la cierra con ratchets explícitos por superficie y con esta documentación.
+- No se tocaron la autorización, CP-3, `/uploads` strict, la identidad, las sesiones, la entrega de PDF/EPUB, LU ni la fricción de copia, impresión y media.
+
+Verificación (Chrome headless, API = imagen de producción `contentprotect-cp3d-935a515`, fixture sintético):
+
+| Superficie | Overlays / nodos de marca | Marcador en `innerText` / AX tree | copy · cut · menú · drag | PDF impreso |
+|---|---|---|---|---|
+| Guiado | 0 / 0 | no / no | bloqueados | aviso, 0 texto, 0 marcador |
+| Accesible | 0 / 0 | no / no | **permitidos** | aviso, 0 texto, 0 marcador |
+| Inmersivo | 0 / 0 | no / no | bloqueados | ídem |
+| PDF | 0 / 0 | no / no | bloqueados | ídem |
+| EPUB | 0 / 0 | no / no | bloqueados (contenedor; iframes por `attachExtractionFriction`, sin cambios) | ídem |
+| Álbum | 0 / 0 | no / no | bloqueados | ídem |
+| Galería | 0 / 0 | no / no | bloqueados | ídem |
+| Vídeo | 0 / 0 | no / no | bloqueados; `nodownload` + PiP deshabilitado | ídem |
+| Podcast | 0 / 0 | no / no | bloqueados; `nodownload` | ídem |
+| Detalle (sin superficie) | 0 / 0 | no / no | sin cambios | impresión normal (4 páginas) |
