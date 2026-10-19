@@ -226,9 +226,9 @@ const AccessWrapper: React.FC<{
     }
 
     // Acceso concedido por el servidor → renderizar el visor.
-    // CP-4A: superficie editorial (fricción + impresión + marca de agua).
+    // CP-4A: superficie editorial (fricción de copia + impresión protegida).
     return (
-        <ProtectedContentSurface mode={surfaceMode} viewer={{ id: user?.id, institution: user?.colegio }}>
+        <ProtectedContentSurface mode={surfaceMode}>
             {children(content)}
         </ProtectedContentSurface>
     );
@@ -248,11 +248,10 @@ const TextWrapper = () => (
 // the access check in the background and shows a soft denial overlay if needed.
 const ImmersiveWrapper = () => {
     const { id } = useParams();
-    const { user } = useAuth();
     const content = dataService.getContenidoById(id || '');
     if (!content) return <Navigate to="/" replace />;
     return (
-        <ProtectedContentSurface viewer={{ id: user?.id, institution: user?.colegio }}>
+        <ProtectedContentSurface>
             <VisorInmersivo content={content} />
         </ProtectedContentSurface>
     );

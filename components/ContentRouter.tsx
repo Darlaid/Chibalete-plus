@@ -64,16 +64,16 @@ const ContentRouter: React.FC = () => {
         case 'articulo_pedagogico':
         case 'guia':
             return <PaginaDetalleLibro content={content} />;
-        // CP-4A: audio sin marca visual (no hay superficie que capturar).
+        // CP-4A: fricción de extracción + impresión protegida.
         case 'podcast':
             return (
-                <ProtectedContentSurface watermark={false} viewer={{ id: user?.id, institution: user?.colegio }}>
+                <ProtectedContentSurface>
                     <VisorAudio content={content} />
                 </ProtectedContentSurface>
             );
         case 'video':
             return (
-                <ProtectedContentSurface viewer={{ id: user?.id, institution: user?.colegio }}>
+                <ProtectedContentSurface>
                     <VisorVideo content={content} />
                 </ProtectedContentSurface>
             );

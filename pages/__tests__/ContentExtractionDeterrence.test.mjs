@@ -3,10 +3,10 @@
  * CHP-CONTENT-PROTECTION-2026-01 CP-4A.
  *
  * Unitario del helper `utils/contentProtection.mjs` (fricción de copia /
- * menú / arrastre, marca de agua, CSS de impresión) + ratchet estructural de
- * dónde se monta `ProtectedContentSurface` y de los atributos de media. El
- * comportamiento real (impresión, captura, árbol de accesibilidad) se
- * verificó en navegador.
+ * menú / arrastre, CSS de impresión) + ratchet estructural de dónde se monta
+ * `ProtectedContentSurface`, de los atributos de media y de la ausencia de
+ * marca de agua (WATERMARK_POLICY: PROHIBITED). El comportamiento real
+ * (impresión, árbol de accesibilidad) se verificó en navegador.
  *
  * Sin red. 0 lecturas y 0 escrituras de stores reales.
  *
@@ -23,10 +23,6 @@ import {
     interceptExtraction,
     shouldIntercept,
     surfacePolicy,
-    viewerMarker,
-    watermarkLabel,
-    watermarkOffset,
-    watermarkTileDataUri,
 } from '../../utils/contentProtection.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -95,35 +91,17 @@ section('[3] attachExtractionFriction (iframes de Foliate)');
     ok('doc ausente → no-op', typeof attachExtractionFriction(null) === 'function');
 }
 
-section('[4] Marca de agua: contenido y privacidad');
-{
-    const id = 'user-1712345678901-maria.perez@colegio.cl';
-    const mk = viewerMarker(id);
-    ok('marcador = 6 hex mayúsculas', /^[0-9A-F]{6}$/.test(mk), mk);
-    ok('marcador determinista (correlacionable recalculando sobre users_db)', viewerMarker(id) === mk);
-    ok('marcadores distintos para ids distintos', viewerMarker('u-a') !== viewerMarker('u-b'));
-    ok('sin id → neutro', viewerMarker(null) === '------');
-    const now = new Date(2026, 9, 18, 14, 37);
-    const label = watermarkLabel({ userId: id, institution: 'Colegio San Martín de Porres', now });
-    ok('formato «Chibalete+ · institución · marcador · dd/mm/aa»', label === `Chibalete+ · Colegio San Martín de Porres · ${mk} · 18/10/26`, label);
-    ok('no contiene el id, correo ni hora exacta', !label.includes('user-') && !label.includes('@') && !label.includes('14:37'));
-    const long = watermarkLabel({ userId: 'x', institution: 'Institución Educativa Particular Bilingüe del Valle Sur', now });
-    ok('institución larga abreviada (≤28)', long.split(' · ')[1].length <= 28, long);
-    ok('sin institución → se omite', watermarkLabel({ userId: 'x', now }).split(' · ').length === 3);
-    const tile = watermarkTileDataUri('Chibalete+ · <b>&"x"');
-    const svg = decodeURIComponent(tile.slice(tile.indexOf(',') + 1, -2));
-    ok('baldosa = data URI SVG', tile.startsWith('url("data:image/svg+xml'));
-    ok('texto escapado (sin inyección de marcado)', svg.includes('&lt;b&gt;&amp;&quot;x&quot;') && !svg.includes('<b>'));
-    ok('baldosa sin scripts ni recursos externos', !/script|href|xlink/i.test(svg));
-    ok('opacidad discreta', /fill-opacity="0\.(1|2)\d*"/.test(svg));
-    ok('offset determinista con rand inyectado', watermarkOffset(() => 0.5) === '190px 110px');
-}
+section('[4] Sin marca de agua (WATERMARK_POLICY: PROHIBITED)');
+const helper = read('utils/contentProtection.mjs');
+const helperCode = helper.replace(/\/\*[\s\S]*?\*\//g, '');
+ok('helper sin generadores de marca (label, marcador, baldosa)', !/watermark|viewerMarker|data-chp-mark|svg\+xml/i.test(helperCode));
+ok('impresión sin marcador', !PROTECTED_PRINT_CSS.includes('attr(') && !PROTECTED_PRINT_CSS.includes('data-chp-mark'));
 
 section('[5] CSS de impresión');
 ok('solo en @media print', PROTECTED_PRINT_CSS.trim().startsWith('@media print'));
 ok('oculta toda la página cuando hay superficie protegida', /html\[data-chp-protected\] body > \* \{ display: none !important; \}/.test(PROTECTED_PRINT_CSS));
 ok('muestra aviso «Contenido protegido en Chibalete+»', PROTECTED_PRINT_CSS.includes('content: "Contenido protegido en Chibalete+"'));
-ok('muestra marcador vía attr(data-chp-mark)', PROTECTED_PRINT_CSS.includes('attr(data-chp-mark)'));
+ok('solo el aviso (sin ::after con identificador)', !PROTECTED_PRINT_CSS.includes('::after'));
 ok('sin regla global (sin el atributo, la impresión no cambia)', !/(^|\n)\s*body\s*>/.test(PROTECTED_PRINT_CSS));
 
 section('[6] Componente ProtectedContentSurface');
@@ -134,8 +112,7 @@ ok('display: contents (no cambia layout)', surface.includes("display: 'contents'
 ok('copy / cut / contextmenu / dragstart locales (no globales)',
     ['onCopy', 'onCut', 'onContextMenu', 'onDragStart'].every((h) => surface.includes(`${h}={onExtraction}`))
     && !/(document|window)\.addEventListener\(\s*'(copy|cut|contextmenu|dragstart|keydown)'/.test(surface));
-ok('marca: aria-hidden + pointer-events none + fija', surface.includes('aria-hidden="true"') && surface.includes("pointerEvents: 'none'") && surface.includes("position: 'fixed'"));
-ok('marca sin texto en el DOM (fondo SVG)', surface.includes('backgroundImage: tile') && !/>\s*\{label\}\s*</.test(surface));
+ok('sin overlay ni marca de agua', !/chp-watermark|backgroundImage|position: 'fixed'|aria-hidden|data-chp-mark|watermark=|viewer/.test(surfaceCode));
 ok('sin timers, animación ni observers', !/setInterval|setTimeout|requestAnimationFrame|MutationObserver|ResizeObserver|animation/.test(surface));
 ok('no decide acceso, no carga contenido, no toca progreso',
     !/useAccessCheck|dataService|fetch\(|progress|\/access/.test(surfaceCode));
@@ -151,14 +128,14 @@ ok('la superficie va DESPUÉS del veredicto (denied/error retornan antes)',
 ok('Accesible usa surfaceMode="accessible"', /<AccessWrapper surfaceMode="accessible">\{\(content\) => <VisorAccesible/.test(app));
 ok('PDF/Guiado/Álbum/Galería con modo standard (default)',
     ['VisorPDF', 'VisorTexto', 'VisorAlbum', 'GaleriaIlustraciones'].every((v) => new RegExp(`<AccessWrapper>\\{\\(content\\) => <${v}`).test(app)));
-ok('Inmersivo envuelto', /<ProtectedContentSurface[^>]*>\s*<VisorInmersivo content/.test(app));
+ok('Inmersivo envuelto', /<ProtectedContentSurface>\s*<VisorInmersivo content/.test(app));
 const router = read('components/ContentRouter.tsx');
-ok('Podcast envuelto sin marca visual', /<ProtectedContentSurface watermark=\{false\}[^>]*>\s*<VisorAudio/.test(router));
-ok('Vídeo envuelto con marca', /<ProtectedContentSurface viewer=[^>]*>\s*<VisorVideo/.test(router));
+ok('Podcast envuelto', /<ProtectedContentSurface>\s*<VisorAudio/.test(router));
+ok('Vídeo envuelto', /<ProtectedContentSurface>\s*<VisorVideo/.test(router));
 ok('Detalle (metadata) NO envuelto', !/<ProtectedContentSurface[^>]*>\s*<PaginaDetalleLibro/.test(router));
 const epubApp = read('components/epub-reader/EpubReaderApp.tsx');
-ok('EPUB original envuelto', /<ProtectedContentSurface viewer=\{viewer\}>\s*<ChibaleteEpubReader/.test(epubApp));
-ok('EPUB: marca con colegio de /api/auth/me', epubApp.includes('institution: meJson?.colegio'));
+ok('EPUB original envuelto', /<ProtectedContentSurface>\s*<ChibaleteEpubReader/.test(epubApp));
+ok('ningún punto de montaje pasa datos de la persona', ![app, router, epubApp].some((f) => /<ProtectedContentSurface[^>]*(viewer|watermark)=/.test(f)));
 const foliate = read('components/epub-reader/foliateAdapter.mjs');
 ok('EPUB: fricción en cada iframe de Foliate', foliate.includes('attachExtractionFriction(e.detail?.doc)'));
 ok('Layout (páginas administrativas) NO monta superficie', !read('components/Layout.tsx').includes('ProtectedContentSurface'));

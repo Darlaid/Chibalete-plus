@@ -66,7 +66,6 @@ const EpubReaderApp: React.FC = () => {
     const dbg = useRef<Record<string, unknown>>({});
     const adapterRef = useRef<{ auditImages: () => Promise<unknown>; lastRelocateReason?: string | null } | null>(null);
     const userIdRef = useRef<string | null>(null);
-    const [viewer, setViewer] = useState<{ id: string | null; institution: string | null } | null>(null);
     const resumeRef = useRef<Promise<ResumeInfo | null> | null>(null);
     const saverRef = useRef<Saver | null>(null);
 
@@ -85,7 +84,6 @@ const EpubReaderApp: React.FC = () => {
                 if (!me.ok) { setPhase({ kind: 'error', code: 'auth' }); return; }
                 const meJson = await me.json().catch(() => null);
                 userIdRef.current = meJson?.id ?? meJson?.user?.id ?? null;
-                setViewer({ id: userIdRef.current, institution: meJson?.colegio ?? null });
 
                 t0.current = performance.now();
                 const res = await fetch(`/api/content/${encodeURIComponent(contentId)}/epub`, { credentials: 'same-origin', signal: ctrl.signal });
@@ -192,7 +190,7 @@ const EpubReaderApp: React.FC = () => {
 
     if (phase.kind === 'ready') {
         return (
-            <ProtectedContentSurface viewer={viewer}>
+            <ProtectedContentSurface>
                 <ChibaleteEpubReader
                     file={phase.file}
                     onBack={back}
