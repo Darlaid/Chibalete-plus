@@ -85,4 +85,4 @@ Chibalete+ no tiene DRM comercial: ni Widevine, ni FairPlay, ni PlayReady. PDF.j
 
 ## Estado
 
-`DEPLOYED_PRODUCTION`: API y front `contentprotect-global-73f45d6` desde el 2026-10-19 (CP-4E). Rollback: `/root/chp-cp4e/ROLLBACK.txt`.
+`DEPLOYED_PRODUCTION`: API `contentprotect-global-73f45d6` y front `contentprotect-final-cbc8e2d` (CP-4F, solo texto de ayuda admin). CP-4 cerrado: ver `CHP_CONTENT_PROTECTION_FINAL_AUDIT.md` y, para editoriales, `CHP_CONTENT_PROTECTION_PUBLISHER_EVIDENCE_PACK.md`.
