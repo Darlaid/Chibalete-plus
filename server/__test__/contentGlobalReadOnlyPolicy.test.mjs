@@ -197,6 +197,7 @@ try {
     const det = read('pages/PaginaDetalleLibro.tsx');
     ok('Detalle: «Leer en PDF» y «Leer EPUB» (modos de lectura)', det.includes('<Book size={16}/> Leer en PDF') && det.includes('<BookOpen size={16}/> Leer EPUB'));
     ok('Detalle: sin «Ver … original»', !/Ver (PDF|EPUB) [Oo]riginal/.test(det));
+    ok('ayuda admin EPUB ilustrado: nombra «Leer EPUB», no «Ver EPUB original»', read('utils/epubAdmin.mjs').includes('«Leer EPUB»') && !/Ver (PDF|EPUB) [Oo]riginal/.test(read('utils/epubAdmin.mjs')));
     const READER = ['pages/PaginaDetalleLibro.tsx', 'pages/VisorTexto.tsx', 'pages/VisorAccesible.tsx', 'pages/VisorInmersivo.tsx', 'pages/VisorPDF.tsx',
         'pages/VisorAlbum.tsx', 'pages/VisorAudio.tsx', 'pages/VisorVideo.tsx', 'components/GaleriaIlustraciones.tsx', 'pages/Experiencias.tsx',
         'components/ContentRouter.tsx', 'components/ReaderModeSelector.tsx', 'components/ImmersiveShell.tsx',

@@ -18,7 +18,7 @@ export const EPUB_BOOK_FLOWS = [
 export const EPUB_ALREADY_ATTACHED_MESSAGE = 'Este contenido ya tiene una edición EPUB.';
 export const EPUB_SCRIPTED_MESSAGE = 'Este EPUB contiene scripts y no se puede publicar por seguridad.';
 export const EPUB_NO_TEXT_MESSAGE = 'Este EPUB no contiene texto que Chibalete+ pueda convertir a sus modos de lectura.';
-export const ILLUSTRATED_KEEPS_ORIGINAL_MESSAGE = 'Se conservará la edición EPUB original y se habilitará su lector («Ver EPUB original»), además de los modos de lectura de Chibalete+.';
+export const ILLUSTRATED_KEEPS_ORIGINAL_MESSAGE = 'Se conservará la edición EPUB original y se habilitará su lector («Leer EPUB»), además de los modos de lectura de Chibalete+.';
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const decimalEs = (x) => (Math.round(x * 10) / 10).toFixed(1).replace('.', ',');
