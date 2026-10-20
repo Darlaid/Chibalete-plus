@@ -95,3 +95,7 @@ Sin deploy y sin tocar manifests ni mp3 de producción. OpenAI = 0 y Gemini = 0:
 ## Rollback lógico
 
 Revertir el commit restaura la GC.
+
+## Estado de rollout
+
+**NOT_DEPLOYED.** El intento 1 de IMM-TTS-02C (2026-10-20, 15:20–15:25Z) terminó en `ROLLED_BACK_PROCEDURAL_GATE_BREACH`: el smoke reanudó Inmersivo a mitad de chunk y provocó TTS por frase contra los proveedores. No fue una regresión del fix. Producción sigue en `acbfaee`. Ver `CHP_IMMERSIVE_TTS_ASSET_RETENTION_ROLLOUT_02C.md`, que incluye el runbook de smoke corregido.
