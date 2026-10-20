@@ -82,3 +82,7 @@ Revertir el commit restaura la publicación incondicional. No hay datos que migr
 - Huérfanos.
 - Las 2 PREEXISTING_FAILURE de Inmersivo.
 - Preexistente: en el `catch` exterior de `generateAudioForContent`, `chunks` está fuera de alcance (`ReferenceError` cuando hay `onProgress`). El llamador lo captura como `error_proveedor`. No se toca aquí.
+
+## Rollout (IMM-TTS-02, 2026-10-20) — GREEN_PRODUCTION
+
+`acbfaee` corre en producción en api_1 y api_2 (`chibalete/api:immersive-atomic-manifest-acbfaee`, `64b26f3c851a`). Front y LU no cambian. No hubo llamadas TTS reales y no se modificó ningún manifest ni ningún audio. Detalle en `CHP_IMMERSIVE_TTS_ATOMIC_MANIFEST_ROLLOUT_02.md`.
