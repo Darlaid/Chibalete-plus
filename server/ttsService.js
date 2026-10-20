@@ -94,6 +94,40 @@ const findCachedChunkAudio = (audioDir, text, language, voice) => {
     return null;
 };
 
+// --- MANIFEST_PUBLISH_CONTRACT (CHP-MAINT-IMMERSIVE-TTS-2026-10 IMM-TTS-01) ---
+// El manifest activo solo cambia cuando TODOS los chunks esperados de esta
+// versión quedaron resueltos. StartupEngine muestra el texto del manifest, así
+// que un candidato incompleto publicado = libro truncado en Inmersivo. Si el
+// candidato no pasa, se conserva el manifest anterior o, si no había, el lector
+// sigue con el TXT completo + TTS bajo demanda.
+export const validateManifestCandidate = (manifest, expectedChunks, audioDir, contentId) => {
+    const meta = manifest && manifest._meta;
+    if (!meta || meta.version !== 2 || meta.splitVersion !== 1) return { ok: false, reason: 'meta' };
+    if (meta.totalChunks !== expectedChunks.length) return { ok: false, reason: 'meta_total_chunks' };
+    const keys = Object.keys(manifest).filter(k => k !== '_meta');
+    if (keys.length !== expectedChunks.length) return { ok: false, reason: `entries ${keys.length}/${expectedChunks.length}` };
+    let sentenceStart = 0;
+    for (let i = 0; i < expectedChunks.length; i++) {
+        const e = manifest[i];
+        if (!e || e.index !== i) return { ok: false, reason: `index ${i}` };
+        if (e.text !== expectedChunks[i]) return { ok: false, reason: `text ${i}` };
+        if (!e.hash || e.hash !== generateHash(e.text, 'es', 'alloy', e.provider, e.model)) return { ok: false, reason: `hash ${i}` };
+        const fileName = chunkAudioFileName(e.hash, e.provider, e.model);
+        if (e.file !== `audio/${contentId}/${fileName}`) return { ok: false, reason: `file ${i}` };
+        try {
+            if (!(fs.statSync(path.join(audioDir, fileName)).size > 0)) return { ok: false, reason: `audio_empty ${i}` };
+        } catch {
+            return { ok: false, reason: `audio_missing ${i}` };
+        }
+        if (JSON.stringify(e.sentences) !== JSON.stringify(splitSentencesFromChunk(e.text)) || e.sentenceStart !== sentenceStart) {
+            return { ok: false, reason: `sentences ${i}` };
+        }
+        sentenceStart += e.sentences.length;
+    }
+    if (meta.totalSentences !== sentenceStart) return { ok: false, reason: 'meta_total_sentences' };
+    return { ok: true };
+};
+
 // Escritura atómica: temporal + rename, para que ningún lector vea un archivo a medias.
 const writeFileAtomic = (filePath, data) => {
     const tmpPath = `${filePath}.tmp-${process.pid}`;
@@ -296,13 +330,20 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
         // MANIFEST v2: Totalizar oraciones ahora que el loop está completo
         manifest._meta.totalSentences = globalSentenceIndex;
 
-        // Always ensure a final save at the very exit to guarantee consistency
-        saveManifest();
+        // Se publica solo un candidato completo y coherente (MANIFEST_PUBLISH_CONTRACT).
+        const publish = validateManifestCandidate(manifest, chunks, audioDir, contentId);
+        if (publish.ok) {
+            saveManifest();
+        } else {
+            log(`[TTS_MANIFEST_NOT_PUBLISHED] contentId=${contentId} reason=${publish.reason} previous_manifest_kept=${fs.existsSync(manifestPath)}`, "WARN");
+        }
 
         log(`[AI] Job completed. Created: ${createdCount}, Skipped: ${skippedCount}, Errors: ${errorCount}. Avg chunks: ${chunks.length}`, "INFO");
 
         // --- GARBAGE COLLECTION FOR ORPHAN AUDIO FILES ---
-        try {
+        // Solo tras publicar: si el job quedó incompleto no se borra nada, así el
+        // audio ya generado se reutiliza en el reintento.
+        if (publish.ok) try {
             log(`[TTS] Running audio garbage collection...`, "TTS");
             // Se conserva también el audio que referenciaba el manifest anterior: esta
             // pasada no borra audio que estaba publicado. Solo se borra, como antes,
@@ -333,6 +374,23 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
 
         if (circuitBreakerTripped) {
             return { success: false, abortedByProvider: true, error: "Job aborted strictly due to provider rejection (Quota/RateLimit/NotFound)." };
+        }
+
+        if (!publish.ok) {
+            // Fallo no sistémico (5xx, timeout, excepción del proveedor): antes se
+            // publicaba con huecos y el llamador lo marcaba `listo`.
+            const error = `Manifest no publicado (${publish.reason}): ${errorCount} chunk(s) sin audio`;
+            if (onProgress) {
+                onProgress({
+                    percentage: Math.round(((chunks.length - errorCount) / chunks.length) * 100),
+                    currentSentence: chunks.length - errorCount,
+                    totalSentences: chunks.length,
+                    status: 'error_proveedor',
+                    error,
+                    lastUpdated: new Date().toISOString()
+                });
+            }
+            return { success: false, incomplete: true, createdCount, errorCount, error };
         }
 
         return { success: true, createdCount, errorCount };

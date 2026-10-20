@@ -35,6 +35,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { generateHash, GEMINI_TTS_MODEL } from '../aiEngine.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..', '..');
 
@@ -100,15 +102,14 @@ function sembrar(id, frases) {
     fs.writeFileSync(path.join(P.uploads, rel), frases.join(' '));
     const audioDir = path.join(P.uploads, 'audio', id);
     fs.mkdirSync(audioDir, { recursive: true });
-    const manifest = {};
-    // La cache acierta POR INDICE: basta con que manifest[i].file exista y pese >0.
-    // Se siembran mas entradas de las necesarias; las sobrantes no se consultan.
-    for (let i = 0; i < 40; i++) {
-        const nombre = `chunk_${i}_gemini.mp3`;
-        fs.writeFileSync(path.join(audioDir, nombre), Buffer.from([0xff, 0xfb, 0x90, 0x00, i]));
-        manifest[i] = { text: '', file: `audio/${id}/${nombre}`, index: i, provider: 'gemini', model: 'gemini-2.5-flash-preview-tts' };
-    }
-    fs.writeFileSync(path.join(audioDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    // La cache acierta por IDENTIDAD (CANONICAL 1A): el mp3 del chunk se llama
+    // chunk_<generateHash(texto, es, alloy, provider, model)>_<provider>_<model>.mp3.
+    // Los textos sembrados (<800 chars) son UN chunk = las frases unidas.
+    // IMM-TTS-01: antes se sembraba la cache por indice, que ya no acierta; el job
+    // fallaba todos los chunks y aun asi terminaba en "listo" con 0 entradas.
+    const texto = frases.join(' ');
+    const hash = generateHash(texto, 'es', 'alloy', 'gemini', GEMINI_TTS_MODEL);
+    fs.writeFileSync(path.join(audioDir, `chunk_${hash}_gemini_${GEMINI_TTS_MODEL}.mp3`), Buffer.from([0xff, 0xfb, 0x90, 0x00]));
     return `/uploads/${rel}`;
 }
 

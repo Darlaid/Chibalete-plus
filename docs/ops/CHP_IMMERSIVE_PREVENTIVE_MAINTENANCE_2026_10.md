@@ -103,3 +103,12 @@ Ningún título supera el tope de 500 chunks. No hay archivos `.tmp-` a medias.
 ## Rollback
 
 No aplica: 0 escrituras. La evidencia queda en el VPS, en `/root/chp-immersive-2026-10/` (`audit.mjs`, `inventory.json`).
+
+## Seguimiento — IMM-TTS-01 (2026-10-20, GREEN_LOCAL, sin deploy)
+
+La causa raíz de los 2 títulos truncados (el job publicaba un manifest parcial al saltar el breaker o fallar un chunk) queda corregida en local. Ver `CHP_IMMERSIVE_TTS_ATOMIC_MANIFEST_01.md`.
+
+- Con el nuevo contrato, el manifest solo se publica completo y validado.
+- No hubo llamadas TTS reales y producción no cambió.
+- Los 3 títulos siguen sin reparar.
+- Orden siguiente: IMM-TTS-02 (rollout del fix) → créditos TTS → `retry` uno por uno.

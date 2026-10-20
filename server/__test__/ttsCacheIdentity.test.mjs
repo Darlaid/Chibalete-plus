@@ -246,8 +246,10 @@ console.log('\n[extra] circuit breaker: no expone entradas viejas ni borra audio
     const b = await f.run(textOf(['a', 'B2', 'c', 'd']));
     failWhen = null;
     ok('resultado abortedByProvider', b.result.abortedByProvider === true);
-    ok('chunk 1 (texto nuevo sin audio) ausente; 0, 2, 3 reutilizados', JSON.stringify(entries(b.manifest)) === '["0","2","3"]' && b.calls.length === 0);
-    ok('ninguna entrada expone el audio viejo del chunk 1', !JSON.stringify(b.manifest).includes(oldB));
+    // IMM-TTS-01: el candidato incompleto ["0","2","3"] ya NO se publica; sigue
+    // activo el manifest anterior, completo y coherente con su propio audio.
+    ok('manifest anterior intacto: no se publica el candidato incompleto', b.bytes === a.bytes && b.calls.length === 0);
+    ok('el audio del chunk 1 que referencia el manifest activo sigue en disco', fs.existsSync(path.join(f.audioDir, oldB)) && coherent(b.manifest));
     ok('audio de 2 y 3 sigue en disco', [2, 3].every(k => fs.existsSync(path.join(f.uploadDir, b.manifest[k].file))));
     const c = await f.run(textOf(['a', 'B2', 'c', 'd']));
     ok('reintento: solo se genera el chunk pendiente', c.calls.length === 1 && entries(c.manifest).length === 4 && coherent(c.manifest));
