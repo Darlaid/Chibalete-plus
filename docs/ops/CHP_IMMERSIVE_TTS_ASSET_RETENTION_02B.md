@@ -99,3 +99,5 @@ Revertir el commit restaura la GC.
 ## Estado de rollout
 
 **NOT_DEPLOYED.** El intento 1 de IMM-TTS-02C (2026-10-20, 15:20–15:25Z) terminó en `ROLLED_BACK_PROCEDURAL_GATE_BREACH`: el smoke reanudó Inmersivo a mitad de chunk y provocó TTS por frase contra los proveedores. No fue una regresión del fix. Producción sigue en `acbfaee`. Ver `CHP_IMMERSIVE_TTS_ASSET_RETENTION_ROLLOUT_02C.md`, que incluye el runbook de smoke corregido.
+
+**Actualización 2026-10-20 15:45Z: DEPLOYED_PRODUCTION.** `9c00d1c` (`chibalete/api:immersive-retention-9c00d1c`, `5bde24a6e4a6`) corre en api_1 y api_2 desde IMM-TTS-02C-R2 (GREEN_PRODUCTION), con 0 llamadas a proveedores y assets idénticos. Ver la sección R2 de `CHP_IMMERSIVE_TTS_ASSET_RETENTION_ROLLOUT_02C.md`.
