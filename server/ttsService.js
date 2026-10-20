@@ -174,16 +174,8 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
         }
 
         const manifestPath = path.join(audioDir, 'manifest.json');
-        // El manifest anterior solo se lee para no borrar su audio en la GC: la
-        // reutilización se decide por identidad, nunca por sus entradas.
-        let previousManifest = {};
-        if (fs.existsSync(manifestPath)) {
-            try {
-                previousManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-            } catch (e) {
-                previousManifest = {};
-            }
-        }
+        // La reutilización se decide por identidad, nunca por las entradas del
+        // manifest anterior, así que no hace falta leerlo.
 
         // Se construye un manifest NUEVO: ninguna entrada de la versión anterior
         // (texto distinto o índices sobrantes) sobrevive. Se publica una sola vez,
@@ -340,36 +332,22 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
 
         log(`[AI] Job completed. Created: ${createdCount}, Skipped: ${skippedCount}, Errors: ${errorCount}. Avg chunks: ${chunks.length}`, "INFO");
 
-        // --- GARBAGE COLLECTION FOR ORPHAN AUDIO FILES ---
-        // Solo tras publicar: si el job quedó incompleto no se borra nada, así el
-        // audio ya generado se reutiliza en el reintento.
-        if (publish.ok) try {
-            log(`[TTS] Running audio garbage collection...`, "TTS");
-            // Se conserva también el audio que referenciaba el manifest anterior: esta
-            // pasada no borra audio que estaba publicado. Solo se borra, como antes,
-            // el mp3 que no referencia ni el manifest nuevo ni el anterior.
-            const validFiles = new Set();
-            for (const source of [manifest, previousManifest]) {
-                for (const key of Object.keys(source)) {
-                    if (source[key] && source[key].file) {
-                        validFiles.add(path.basename(source[key].file));
-                    }
-                }
+        // --- TTS_ASSET_RETENTION_CONTRACT (IMM-TTS-02B) ---
+        // Ningún job borra, mueve ni trunca audio existente. Los mp3 que el
+        // manifest publicado no referencia (versiones anteriores, huérfanos) se
+        // CONSERVAN y solo se cuentan. Limpiarlos exige una unidad explícita con
+        // autorización humana.
+        let orphanAudioFiles = 0;
+        if (publish.ok) {
+            try {
+                const referenced = new Set(Object.keys(manifest)
+                    .filter(k => k !== '_meta')
+                    .map(k => path.basename(manifest[k].file)));
+                orphanAudioFiles = fs.readdirSync(audioDir).filter(f => f.endsWith('.mp3') && !referenced.has(f)).length;
+                if (orphanAudioFiles > 0) log(`[TTS_ORPHAN_AUDIO] contentId=${contentId} count=${orphanAudioFiles} action=retained`, "TTS");
+            } catch (e) {
+                log(`[TTS_ORPHAN_AUDIO] contentId=${contentId} detection skipped: ${e.message}`, "WARN");
             }
-
-            const allFiles = fs.readdirSync(audioDir);
-            let removedCount = 0;
-
-            for (const file of allFiles) {
-                if (file.endsWith('.mp3') && !validFiles.has(file)) {
-                    fs.unlinkSync(path.join(audioDir, file));
-                    log(`[TTS] Removed orphan audio file: ${file}`, "TTS");
-                    removedCount++;
-                }
-            }
-            log(`[TTS] Garbage collection completed. Removed ${removedCount} orphans.`, "TTS");
-        } catch (gcError) {
-            log(`[TTS] Garbage collection skipped due to error: ${gcError.message}`, "WARN");
         }
 
         if (circuitBreakerTripped) {
@@ -393,7 +371,7 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
             return { success: false, incomplete: true, createdCount, errorCount, error };
         }
 
-        return { success: true, createdCount, errorCount };
+        return { success: true, createdCount, errorCount, orphanAudioFiles };
 
     } catch (error) {
         log(`Fatal Error in TTS Generation: ${error.message}`, "ERROR");

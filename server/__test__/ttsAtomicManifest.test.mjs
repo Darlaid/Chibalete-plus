@@ -210,7 +210,8 @@ console.log('\n[ratchet] PARTIAL_MANIFEST_PUBLICATION: IMPOSSIBLE_BY_CONTRACT');
     ok('saveManifest() se invoca exactamente una vez', saves.length === 1, String(saves.length));
     ok('esa invocación está tras validateManifestCandidate', /validateManifestCandidate\([\s\S]{0,400}?if \(publish\.ok\)[\s\S]{0,120}?saveManifest\(\)/.test(src));
     ok('sin escrituras de manifest.json fuera de saveManifest', (src.match(/writeFileAtomic\(manifestPath/g) || []).length === 1);
-    ok('la GC de audio solo corre si se publicó', /if \(publish\.ok\)[\s\S]*GARBAGE COLLECTION/.test(src));
+    // IMM-TTS-02B: ya no hay GC; la detección de huérfanos (read-only) solo corre tras publicar.
+    ok('la detección de huérfanos solo corre si se publicó y no borra', /if \(publish\.ok\) \{[\s\S]{0,400}orphanAudioFiles = /.test(src) && !/unlinkSync\(/.test(src));
 }
 
 console.log('\n[atomicidad] no quedan temporales');

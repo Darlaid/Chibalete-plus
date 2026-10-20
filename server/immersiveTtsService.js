@@ -95,9 +95,9 @@ export async function getOrGenerateImmersiveAudio(text, opts = {}) {
         try {
             meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
         } catch {
-            // Sidecar corrupto → no rompe: lo descartamos y tratamos como miss.
+            // Sidecar corrupto → no rompe: se trata como miss y la regeneración lo
+            // reemplaza de forma atómica (IMM-TTS-02B: nunca se borra).
             log(`corrupt_cache hash=${hash} reason=sidecar_parse`, 'WARN');
-            try { fs.unlinkSync(metaPath); } catch { /* ya borrado */ }
             meta = null;
         }
     }
@@ -119,14 +119,13 @@ export async function getOrGenerateImmersiveAudio(text, opts = {}) {
                     hash,
                 };
             }
-            // Archivo de 0 bytes → corrupto: eliminar archivo + sidecar y regenerar.
+            // Archivo de 0 bytes → corrupto: se regenera y la publicación atómica
+            // lo reemplaza. No se borra nada (IMM-TTS-02B).
             log(`corrupt_cache hash=${hash} reason=zero_bytes`, 'WARN');
-            try { fs.unlinkSync(audioPath); } catch { /* ignore */ }
-            try { fs.unlinkSync(metaPath);  } catch { /* ignore */ }
         } else {
-            // Sidecar presente pero audio ausente: sidecar stale → limpiar y regenerar.
+            // Sidecar presente pero audio ausente: se regenera y el sidecar se
+            // reemplaza de forma atómica.
             log(`corrupt_cache hash=${hash} reason=missing_audio`, 'WARN');
-            try { fs.unlinkSync(metaPath); } catch { /* ignore */ }
         }
     }
 
@@ -150,10 +149,8 @@ export async function getOrGenerateImmersiveAudio(text, opts = {}) {
     fs.writeFileSync(tmpPath, buffer);
     fs.renameSync(tmpPath, audioPath);
 
-    // Limpiar un posible archivo stale de la extensión opuesta (p. ej. cambió el
-    // provider entre generaciones: .wav viejo cuando ahora generamos .mp3).
-    const otherPath = path.join(cacheDir, `${hash}.${ext === 'mp3' ? 'wav' : 'mp3'}`);
-    if (fs.existsSync(otherPath)) { try { fs.unlinkSync(otherPath); } catch { /* ignore */ } }
+    // Un archivo de la extensión opuesta (p. ej. .wav de otro provider) se
+    // CONSERVA: el sidecar decide qué audio se sirve (IMM-TTS-02B).
 
     const sidecar = {
         provider,
@@ -162,7 +159,9 @@ export async function getOrGenerateImmersiveAudio(text, opts = {}) {
         textHash:  hash,
         bytes:     buffer.length,
     };
-    fs.writeFileSync(metaPath, JSON.stringify(sidecar));
+    const metaTmpPath = `${metaPath}.tmp-${process.pid}`;
+    fs.writeFileSync(metaTmpPath, JSON.stringify(sidecar));
+    fs.renameSync(metaTmpPath, metaPath);
 
     log(`generated hash=${hash} provider=${provider} bytes=${buffer.length}`);
     return { buffer, mimeType, provider, cached: false, hash };

@@ -452,30 +452,11 @@ function recordTtsAbuse(userId) {
     _ttsUsage.set(userId, { ...prev, abuses: prev.abuses + 1 });
 }
 
-// --- ALBUM CACHE STARTUP GC ---
-// Limpiar archivos viejos al arrancar (no bloquea — solo I/O de listado de directorios).
-setImmediate(async () => {
-    try {
-        const result = await cleanupAlbumCache(30);
-        if (result.removed > 0) {
-            log(`[STARTUP] Album cache GC: removed=${result.removed} files bytes=${result.bytes}`);
-        }
-    } catch (e) {
-        log(`[STARTUP] Album cache GC failed: ${e.message}`, 'WARN');
-    }
-});
-
-// GC periódico: cada 24 horas mientras el proceso está vivo.
-setInterval(async () => {
-    try {
-        const result = await cleanupAlbumCache(30);
-        if (result.removed > 0) {
-            log(`[GC] Album cache: removed=${result.removed} files bytes=${result.bytes}`);
-        }
-    } catch (e) {
-        log(`[GC] Album cache failed: ${e.message}`, 'WARN');
-    }
-}, 24 * 60 * 60 * 1000).unref(); // .unref() — no bloquea cierre del proceso
+// --- ALBUM CACHE GC: SIN PROGRAMACIÓN AUTOMÁTICA (IMM-TTS-02B) ---
+// TTS_ASSET_RETENTION_CONTRACT: ningún proceso borra audio TTS de forma
+// automática. La GC al arrancar y la periódica (24 h, >30 días) se retiraron;
+// la limpieza solo ocurre por acción explícita de un administrador
+// (POST /api/admin/album-cache/gc, DELETE /api/admin/album-cache/:contentId).
 
 // --- AUTH MIDDLEWARE ---
 
