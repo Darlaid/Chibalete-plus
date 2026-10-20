@@ -34,3 +34,18 @@ Para cumplir §1 hace falta una de estas opciones, que requieren una decisión a
 - **c) Aceptar Gemini como fallback:** contradice §1; no se recomienda.
 
 **NEXT:** recargar créditos de OpenAI → elegir el mecanismo `OPENAI_ONLY` → repetir IMM-TTS-03.
+
+## R2 — EPHEMERAL OPENAI-ONLY REPAIR — intento 2026-10-20 15:58Z: STOP en el hard gate §1
+
+```
+IMMERSIVE_TTS_REPAIR:   STOP
+OPENAI_TTS_CAPACITY:    UNAVAILABLE
+EXECUTION_MODE:         EPHEMERAL_OPENAI_ONLY (aprobado; no se llegó a ejecutar)
+GEMINI_TTS_CALLS:       ZERO
+PRODUCTION_WRITES:      ZERO
+```
+
+- **Sonda mínima controlada** (`tts-1`, «Hola.», desde api_1, sin escribir a disco), a las 15:58:45Z: `429 credit_balance_exhausted` / `insufficient_quota`. Es el mismo resultado que el intento 1.
+- **Lo que no se ejecutó, por orden de la unidad:** las pruebas del contenedor efímero (§2–§3), el disk gate, los backups, el snapshot, el inventario y los jobs.
+- **Estado:** Cavafis, Odisea y Alicia siguen sin cambios.
+- **Precondición externa pendiente:** recargar créditos de OpenAI y repetir R2 desde §1.
