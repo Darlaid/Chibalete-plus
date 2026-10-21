@@ -134,7 +134,10 @@ jobs:
 
       # CHP-EDITORIAL-ROYALTIES-2026-01 F3-A1 — motor puro de episodios
       # económicos multimodo (T1–T19). Sin disco ni red.
+      # `!cancelled()`: se ejecuta aunque falle un paso anterior; ese fallo
+      # sigue marcando el job como failure (no es continue-on-error).
       - name: Royalties — episodios económicos multimodo (F3-A1)
+        if: ${{ !cancelled() }}
         run: npm run test:royalties
 
       # CHP-AI-RUNTIME-MODEL-COMPAT-01A — el runtime no puede volver a apuntar a
