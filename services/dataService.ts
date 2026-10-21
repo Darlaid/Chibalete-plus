@@ -1,6 +1,7 @@
 import type {
     User,
     Content,
+    Publisher,
     EpubInspection,
     ProgresoLectura,
     ReadingStatus,
@@ -5068,6 +5069,19 @@ class DataService {
             this.getGroupMediatorIds(g).includes(userId) || // FASE 2 COMPATIBILITY
             (user?.groupIds && user.groupIds.includes(g.id))
         );
+    }
+
+    // --- CHP-EDITORIAL-ROYALTIES F1-A: titulares (solo administración) ---
+    // null = no se pudo cargar: el formulario NO debe enviar publisherId y el
+    // servidor conserva la asociación guardada.
+    async getAdminPublishers(): Promise<Publisher[] | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/admin/publishers`, { credentials: 'include', cache: 'no-store' });
+            return res.ok ? res.json() : null;
+        } catch (e) {
+            console.error('Error fetching publishers:', e);
+            return null;
+        }
     }
 
     // --- CHP-LIB-01: BIBLIOTECA EDITORIAL (solo lectura; abrir contenido

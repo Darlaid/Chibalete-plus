@@ -77,6 +77,13 @@ SQLITE_STORES: tuple[SqliteStore, ...] = (
     # corrupta abortan antes de invocar restic. Nombre EXACTO, sin glob: los
     # sidecars `-wal`/`-shm` y cualquier vecino (`*.bak.*`, copias) no entran.
     SqliteStore("data-critical/events.archive.db", "CANON", reconstructible=False, required=False),
+    # --- CHP-EDITORIAL-ROYALTIES-2026-01 F1-A ---------------------------------
+    # Base economica unica (titulares; luego derechos, parametros y cierres).
+    # CANON y no reconstructible: los cierres seran inmutables. `required=False`
+    # mientras no exista en el host: el servidor la crea al arrancar en
+    # produccion, asi que el runner con esta entrada se despliega DESPUES de la
+    # API que la crea (recovery_point exige stores == declarados).
+    SqliteStore("data-critical/royalties.db", "CANON", reconstructible=False, required=False),
 )
 
 # --- JSON canonicos (inventario §2.2) ----------------------------------------

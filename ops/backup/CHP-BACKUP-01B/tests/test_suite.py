@@ -2349,8 +2349,9 @@ def test_id_inventory_path():
     # de la base no debe tumbar el backup de los otros 24 stores.
     assert store.required is False, store
 
-    # 6 = los 5 previos + data-critical/events.archive.db (EA01, opcional).
-    assert len(S.SQLITE_STORES) == 6, sqlite_paths
+    # 7 = los 5 previos + data-critical/events.archive.db (EA01, opcional)
+    # + data-critical/royalties.db (RY01, opcional).
+    assert len(S.SQLITE_STORES) == 7, sqlite_paths
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
 
 
@@ -3663,8 +3664,9 @@ def test_ea_inventory():
     assert not any(ch in ARCHIVE_LOGICAL_PATH for ch in "*?["), ARCHIVE_LOGICAL_PATH
     assert ARCHIVE_LOGICAL_PATH.startswith("data-critical/"), ARCHIVE_LOGICAL_PATH
     assert not os.path.isabs(ARCHIVE_LOGICAL_PATH)
-    # El resto del inventario SQLite no cambia: 4 obligatorios + identity.db + este.
-    assert len(S.SQLITE_STORES) == 6, sqlite_paths
+    # El resto del inventario SQLite no cambia: 4 obligatorios + identity.db +
+    # este + royalties.db (RY01).
+    assert len(S.SQLITE_STORES) == 7, sqlite_paths
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
     assert "data-critical/events.db" in sqlite_paths, sqlite_paths
 
@@ -3900,6 +3902,136 @@ def test_ea_empty_valid():
     assert entry is not None and entry["status"] == "included" and entry["integrity_result"] == "ok", entry
     assert _archive_entry(manifest, "stores_absent") is None
     assert _archive_logical_digest(origen)["count"] == 0
+
+
+# --------------------------------------------------------------------------
+# Casos RY01-RY04 — royalties.db (CHP-EDITORIAL-ROYALTIES-2026-01 F1-A)
+# --------------------------------------------------------------------------
+#
+# Base economica unica. SQLite CANON opcional (el servidor la crea al arrancar
+# en produccion). El fixture se construye con la MIGRACION REAL del repo, no con
+# un schema copiado: si la migracion cambia, el restore se prueba contra ella.
+
+ROYALTIES_LOGICAL_PATH = "data-critical/royalties.db"
+ROYALTIES_MIGRATION = os.path.join(
+    HERE, "..", "..", "..", "..", "server", "royalties", "migrations", "0001_publishers.sql")
+ROYALTIES_EXTRA_ROWS = (
+    ("pub-fx-0001", "editorial", "Editorial Ficticia S.A.S.", "Ficticia", "NIT-FX-1",
+     '["Sello FX"]', "active", "2026-10-21T00:00:00.000Z", "2026-10-21T00:00:00.000Z"),
+    ("pub-fx-0002", "tercero", "Titular Ficticio", None, None,
+     "[]", "inactive", "2026-10-21T00:00:00.000Z", "2026-10-21T00:00:00.000Z"),
+)
+
+
+def _build_royalties_db(base_dir: str) -> str:
+    """royalties.db sintetica: migracion real + _migrations + dos titulares ficticios, en WAL."""
+    path = os.path.join(base_dir, ROYALTIES_LOGICAL_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    raw = open(ROYALTIES_MIGRATION, encoding="utf-8").read()
+    up = raw.split("-- DOWN")[0].split("-- UP", 1)[1]
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS _migrations (version TEXT PRIMARY KEY,"
+        " applied_at TEXT NOT NULL DEFAULT (datetime('now')));" + up)
+    conn.execute("INSERT INTO _migrations(version, applied_at) VALUES ('0001_publishers', '2026-10-21 00:00:00')")
+    conn.executemany(
+        "INSERT INTO publishers (id, kind, legal_name, trade_name, tax_id, imprints, status, created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)", ROYALTIES_EXTRA_ROWS)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _royalties_logical_digest(path: str) -> dict:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT * FROM publishers ORDER BY id").fetchall()
+        return {
+            "integrity": conn.execute("PRAGMA integrity_check").fetchone()[0],
+            "schema": [r[0] for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")],
+            "migrations": [r[0] for r in conn.execute("SELECT version FROM _migrations ORDER BY version")],
+            "ids": [r[0] for r in rows],
+            "digest": hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        }
+    finally:
+        conn.close()
+
+
+def _royalties_entry(manifest, key="stores"):
+    for entry in manifest.get(key, []):
+        if entry["logical_path"] == ROYALTIES_LOGICAL_PATH:
+            return entry
+    return None
+
+
+@case("RY01", "royalties.db declarado una sola vez: SQLite CANON opcional, nombre exacto")
+def test_ry_inventory():
+    from chibalete_backup import stores as S
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+    declaradas = [p for p in sqlite_paths + json_paths if os.path.basename(p) == "royalties.db"]
+    assert declaradas == [ROYALTIES_LOGICAL_PATH], declaradas
+    store = next(s for s in S.SQLITE_STORES if s.logical_path == ROYALTIES_LOGICAL_PATH)
+    assert store.category == "CANON" and store.reconstructible is False and store.required is False, store
+    assert len(S.SQLITE_STORES) == 7, sqlite_paths
+    assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
+    assert os.path.isfile(ROYALTIES_MIGRATION), ROYALTIES_MIGRATION
+
+
+@case("RY02", "royalties.db ausente: backup ok, ausencia anotada y archivo NO creado")
+def test_ry_absent_tolerated():
+    env = Env("ry02")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    assert manifest["result"] == "ok", manifest["result"]
+    assert len(manifest["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    assert _royalties_entry(manifest) is None
+    ausente = _royalties_entry(manifest, "stores_absent")
+    assert ausente is not None and ausente["status"] == "absent_optional" and ausente["kind"] == "sqlite", ausente
+    assert not os.path.exists(os.path.join(env.base, ROYALTIES_LOGICAL_PATH))
+
+
+@case("RY03", "royalties.db presente: una entrada sqlite integra, fuente intacta, resto sin cambios")
+def test_ry_present_included():
+    env = Env("ry03")
+    origen = _build_royalties_db(env.base)
+    before = fixtures.snapshot_tree(env.base)
+    digest_before = _royalties_logical_digest(origen)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    assert manifest["result"] == "ok", manifest["result"]
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert paths.count(ROYALTIES_LOGICAL_PATH) == 1, paths
+    entry = _royalties_entry(manifest)
+    assert entry["kind"] == "sqlite" and entry["category"] == "CANON" and entry["status"] == "included", entry
+    assert entry["integrity_result"] == "ok" and entry["capture_method"] == "sqlite_online_backup_api", entry
+    assert entry["bytes"] > 0 and len(entry["sha256"]) == 64, entry
+    assert "aggregate_count" not in entry, entry
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+    assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "RY03")
+    assert _royalties_logical_digest(origen) == digest_before, "la fuente cambio logicamente"
+
+
+@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones y titulares identicos")
+def test_ry_restore_logical():
+    env = Env("ry04")
+    origen = _build_royalties_db(env.base)
+    esperado = _royalties_logical_digest(origen)
+    assert esperado["integrity"] == "ok", esperado
+    assert esperado["ids"] == ["pub-chibalete-editores", "pub-fx-0001", "pub-fx-0002"], esperado["ids"]
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    staged = _restore_staging(env)
+    restaurada = os.path.join(staged, "sqlite", "royalties.db")
+    assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "sqlite")))
+    obtenido = _royalties_logical_digest(restaurada)
+    assert obtenido == esperado, (obtenido, esperado)
 
 
 def main() -> int:

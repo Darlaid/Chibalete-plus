@@ -378,13 +378,17 @@ def test_protected_scope():
     # ampliar o REDUCIR el scope protegido sea siempre una decision consciente:
     # subirlo sin anadir el store correspondiente a la lista `must` de abajo
     # dejaria el guard contando cajas vacias.
-    ok("PROTECTED_DATA_SCOPE_UNCHANGED: 28 stores structured",
-       total == 28 and EXPECTED_STRUCTURED_STORES == 28, f"total={total}")
+    # 29 con data/library_db.json (V6 Etapa 11D, `62741be`: se declaro sin subir
+    # este ratchet, que quedo en rojo); 30 con data-critical/royalties.db
+    # (CHP-EDITORIAL-ROYALTIES-2026-01 F1-A). Ambos van en `must`.
+    ok("PROTECTED_DATA_SCOPE_UNCHANGED: 30 stores structured",
+       total == 30 and EXPECTED_STRUCTURED_STORES == 30, f"total={total}")
     paths = {s.logical_path for s in SQLITE_STORES} | {s.logical_path for s in JSON_STORES}
     for must in ("data-critical/usuarios_colegios_oro.json", "data/groups_db.json",
                  "data/access_db.json", "data/content.json", "identity/identity.db",
                  "data-critical/events.db", "data/progress.db", "data/mook_db.json",
-                 "data-critical/events.archive.db", "data/landing_banner.json"):
+                 "data-critical/events.archive.db", "data/landing_banner.json",
+                 "data/library_db.json", "data-critical/royalties.db"):
         ok(f"cubierto: {must}", must in paths)
     ok("data/ y data-critical/ presentes en el scope",
        any(p.startswith("data/") for p in paths)

@@ -424,6 +424,9 @@ export interface Content {
   // V4 (CHP-MOOK): false = pieza destinada a Experiencias, no se descubre como
   // obra independiente en Biblioteca. Ausente ⇒ true (cero migración).
   standalone?: boolean;
+  // CHP-EDITORIAL-ROYALTIES F1-A: editorial responsable (id de `publishers`).
+  // Ausente ⇒ sin asociación. No decide quién cobra (eso es la matriz de derechos).
+  publisherId?: string;
 
   // New: Sections
   sectionIds?: string[];
@@ -599,6 +602,23 @@ export interface Bookmark {
   id: string;
   nombre: string;
   imagen_url: string;
+}
+
+// CHP-EDITORIAL-ROYALTIES F1-A — titular (editorial o tercero). Solo administración.
+export interface Publisher {
+  id: string;
+  kind: 'editorial' | 'tercero';
+  legalName: string;
+  tradeName: string | null;
+  taxId: string | null;
+  imprints: string[];
+  contactName: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+  status: 'active' | 'inactive';
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Product {

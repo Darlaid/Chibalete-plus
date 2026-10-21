@@ -178,6 +178,7 @@ import {
     getEventById as getBackboneEventById,
 } from './eventsService.js';
 import { ulid, isValidUlid } from './ulid.js';
+import * as publishersStore from './royalties/publishersStore.mjs';
 import {
     aggregateBackboneMetrics,
     emptyBackboneMetrics,
@@ -1860,6 +1861,59 @@ app.delete('/api/library/editorial/references/:id', requireAdminAccess, async (r
     res.json({ ok: true });
 });
 // --- END CHP-LIB-01 --------------------------------------------------------
+
+// --- CHP-EDITORIAL-ROYALTIES-2026-01 F1-A: titulares (solo administración) ---
+// Lectura y escritura exclusivamente administrativas: los datos del titular
+// nunca llegan a lectores. Desactivar = PUT {status:'inactive'}; borrar solo
+// si ningún contenido lo referencia.
+const publisherActorOf = (req) => req.auth?.userId ?? req.headers['x-user-id'] ?? 'admin-secret';
+const sendPublisherError = (res, e, op) => {
+    if (e instanceof publishersStore.PublisherError) return res.status(e.status).json({ error: e.message, code: e.code });
+    log(`[PUBLISHERS] ${op} failed: ${e.message}`, 'ERROR');
+    return res.status(503).json({ error: 'Registro de titulares no disponible', code: 'publishers_unavailable' });
+};
+const publisherNoStore = (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+
+app.get('/api/admin/publishers', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try { res.json(publishersStore.listPublishers()); } catch (e) { sendPublisherError(res, e, 'list'); }
+});
+
+app.get('/api/admin/publishers/:id', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const pub = publishersStore.getPublisher(req.params.id);
+        if (!pub) return res.status(404).json({ error: 'Titular no encontrado', code: 'not_found' });
+        res.json(pub);
+    } catch (e) { sendPublisherError(res, e, 'get'); }
+});
+
+app.post('/api/admin/publishers', requireAdminAccess, (req, res) => {
+    try {
+        const pub = publishersStore.createPublisher(req.body);
+        writeAuditLog({ action: 'publisher_create', actor: publisherActorOf(req), details: { publisherId: pub.id, kind: pub.kind } });
+        log(`[PUBLISHERS] created: ${pub.id}`);
+        res.status(201).json(pub);
+    } catch (e) { sendPublisherError(res, e, 'create'); }
+});
+
+app.put('/api/admin/publishers/:id', requireAdminAccess, (req, res) => {
+    try {
+        const pub = publishersStore.updatePublisher(req.params.id, req.body);
+        writeAuditLog({ action: 'publisher_update', actor: publisherActorOf(req), details: { publisherId: pub.id, fields: Object.keys(req.body || {}).sort() } });
+        log(`[PUBLISHERS] updated: ${pub.id}`);
+        res.json(pub);
+    } catch (e) { sendPublisherError(res, e, 'update'); }
+});
+
+app.delete('/api/admin/publishers/:id', requireAdminAccess, (req, res) => {
+    try {
+        const referenceCount = readJSON(DB_FILE).filter((c) => c && c.publisherId === req.params.id).length;
+        publishersStore.deletePublisher(req.params.id, { referenceCount });
+        writeAuditLog({ action: 'publisher_delete', actor: publisherActorOf(req), details: { publisherId: req.params.id } });
+        log(`[PUBLISHERS] deleted: ${req.params.id}`);
+        res.json({ ok: true });
+    } catch (e) { sendPublisherError(res, e, 'delete'); }
+});
+// --- END CHP-EDITORIAL-ROYALTIES F1-A ----------------------------------------
 
 // --- CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-2: capas INSTITUTIONAL y PERSONAL -
 // Contrato: docs/adr/CHP_ADR_BIBLIOTECA.md (fórmula de visibilidad congelada).
@@ -3994,6 +4048,27 @@ app.post('/api/content', async (req, res) => {
             }
         }
 
+        // CHP-EDITORIAL-ROYALTIES F1-A: editorial responsable. Ausente ⇒ se
+        // arrastra la guardada (dentro del lock); null o '' ⇒ se quita; un id ⇒
+        // debe existir y, si cambia, estar activo.
+        const publisherIdSent = Object.prototype.hasOwnProperty.call(newContent, 'publisherId');
+        if (publisherIdSent && newContent.publisherId === '') newContent.publisherId = null;
+        if (publisherIdSent && newContent.publisherId !== null) {
+            const pid = newContent.publisherId;
+            let pub = null;
+            try {
+                pub = typeof pid === 'string' ? publishersStore.getPublisher(pid) : null;
+            } catch (e) {
+                log(`[PUBLISHERS] lookup failed on content save: ${e.message}`, 'ERROR');
+                return res.status(503).json({ error: 'Registro de titulares no disponible', code: 'publishers_unavailable' });
+            }
+            if (!pub) return res.status(400).json({ error: 'La editorial indicada no existe', code: 'unknown_publisher' });
+            const storedPid = readJSON(DB_FILE).find((c) => c.id === newContent.id)?.publisherId ?? null;
+            if (pub.status !== 'active' && storedPid !== pid) {
+                return res.status(400).json({ error: 'La editorial indicada está inactiva', code: 'inactive_publisher' });
+            }
+        }
+
         const saveActorId = req.headers['x-user-id'] ?? 'unknown';
 
         // Idempotency guard: si llegan dos requests idénticos en ráfaga (retry de red),
@@ -4080,6 +4155,14 @@ app.post('/api/content', async (req, res) => {
                 const freshIdx = freshList.findIndex(c => c.id === newContent.id);
                 // 3C.3B-R1: defaults mínimos contra el registro vigente (dentro del lock).
                 applyContentDefaults(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
+                // F1-A: sin publisherId en el cuerpo se conserva el guardado.
+                if (!publisherIdSent) {
+                    const storedPid = freshIdx >= 0 ? freshList[freshIdx].publisherId : undefined;
+                    if (storedPid) newContent.publisherId = storedPid;
+                    else delete newContent.publisherId;
+                } else if (newContent.publisherId === null) {
+                    delete newContent.publisherId;
+                }
                 // 2B: artefacto canónico ANTES que content.json; si content.json
                 // no llega a escribirse, se repone el artefacto previo.
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
@@ -11903,6 +11986,14 @@ if (IS_PROD) {
             res.status(404).json({ error: 'Not Found' });
         }
     });
+}
+
+// CHP-EDITORIAL-ROYALTIES F1-A: en producción royalties.db existe desde el
+// arranque (el inventario de respaldos la exige). Fuera de producción la
+// apertura es perezosa para que tests y desarrollo no creen la base real.
+if (process.env.NODE_ENV === 'production') {
+    try { publishersStore.getRoyaltiesDb((m) => log(m)); log(`[PUBLISHERS] royalties.db ready`); }
+    catch (e) { log(`[PUBLISHERS] royalties.db unavailable at boot: ${e.message}`, 'ERROR'); }
 }
 
 app.listen(PORT, '0.0.0.0', () => {

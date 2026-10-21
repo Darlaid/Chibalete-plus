@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { UploadCloud, FileImage, FileText, Film, Music, BookOpen, Plus, Trash, Link as LinkIcon, Layers, CheckCircle, Eye, Scan, Users, X, ChevronLeft, Edit2, AlertCircle, RefreshCw, AlertTriangle, Clock } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import * as analyticsService from '../services/analyticsService';
-import type { Content, AlbumRegion, AlbumReadingRoute, RegionAction, RegionActionType, AlbumMediaAsset, Section } from '../types';
+import type { Content, AlbumRegion, AlbumReadingRoute, RegionAction, RegionActionType, AlbumMediaAsset, Section, Publisher } from '../types';
 import { useNavigate } from 'react-router-dom';
 import { analizarIlustracionAlbum, sugerirEtiquetasThema } from '../services/geminiService';
 import { Sparkles } from 'lucide-react';
@@ -385,10 +385,15 @@ const SubirContenido: React.FC = () => {
             setExistingParents(content);
             setAvailableSections(sections);
         });
+        dataService.getAdminPublishers().then(setPublishers);
     }, []);
 
     const [selectedParentId, setSelectedParentId] = useState<string>('');
     const [editingId, setEditingId] = useState<string | null>(null); // New State for Editing
+    // CHP-EDITORIAL-ROYALTIES F1-A: editorial responsable. publishers === null ⇒
+    // la lista no cargó y el guardado omite publisherId (el servidor conserva el guardado).
+    const [publishers, setPublishers] = useState<Publisher[] | null>(null);
+    const [publisherId, setPublisherId] = useState<string>('');
     // 3F.1 — operación EPUB dentro de «Crear»: TXT/EPUB, EPUB ilustrado o añadir EPUB.
     // Ilustrado usa el MISMO pipeline EPUB; la diferencia es solo editorial/UI.
     const [bookFlow, setBookFlow] = useState<'text' | 'illustrated' | 'attach'>('text');
@@ -399,6 +404,7 @@ const SubirContenido: React.FC = () => {
     const handleEditContent = async (content: Content) => {
         setUploadMode('new'); // Reuse 'new' mode for editor
         setEditingId(content.id);
+        setPublisherId(content.publisherId || '');
 
         // Populate form with existing data
         setMainContent({
@@ -1105,6 +1111,9 @@ const SubirContenido: React.FC = () => {
 
                     // Pages count logic — preserve existing count on metadata-only updates
                     numero_paginas: mainContent.tipo === 'libro' ? 10 : (mainContent.tipo === 'libro_album' ? (albumPages.length > 0 ? albumPages.length : (existingContent?.numero_paginas || undefined)) : (existingContent?.numero_paginas || undefined)),
+
+                    // F1-A: solo si la lista cargó; '' = sin editorial (el servidor lo quita).
+                    ...(publishers !== null ? { publisherId } : {}),
                 };
 
                 // 3D.1: con EPUB se envía epub_url y NO texto_plano_url (lo fija el servidor).
@@ -1273,6 +1282,7 @@ const SubirContenido: React.FC = () => {
                             });
                             setCreatedContentId(null);
                             setEditingId(null); // Reset Editing State
+                            setPublisherId('');
                         }}
                         className="px-8 py-3 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 font-semibold transition-colors"
                     >
@@ -1603,6 +1613,19 @@ const SubirContenido: React.FC = () => {
                             <div className="mb-6">
                                 <label htmlFor="sc-biografia" className="block text-sm font-medium mb-1">Biografía del Autor (Opcional)</label>
                                 <textarea id="sc-biografia" name="biografia_autor" value={mainContent.biografia_autor} onChange={handleMainChange} rows={3} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg resize-none" placeholder="Escribe aquí una breve biografía del autor..."></textarea>
+                            </div>
+                        )}
+
+                        {mainContent.tipo !== 'memoria_club' && publishers !== null && (
+                            <div className="mb-6">
+                                <label htmlFor="sc-publisher" className="block text-sm font-medium mb-1">Editorial responsable (Opcional)</label>
+                                <select id="sc-publisher" value={publisherId} onChange={(e) => setPublisherId(e.target.value)} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
+                                    <option value="">Sin editorial asignada</option>
+                                    {publishers.filter((p) => p.status === 'active' || p.id === publisherId).map((p) => (
+                                        <option key={p.id} value={p.id}>{p.tradeName || p.legalName}{p.status !== 'active' ? ' (inactiva)' : ''}</option>
+                                    ))}
+                                </select>
+                                <p className="text-xs text-gray-500 mt-1">Asociación editorial para derechos y liquidaciones. No cambia el acceso ni los archivos.</p>
                             </div>
                         )}
 

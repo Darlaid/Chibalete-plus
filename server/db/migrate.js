@@ -31,9 +31,9 @@ function parseSql(raw) {
     return { up: up.trim(), down: down.trim() };
 }
 
-function listMigrations() {
-    if (!fs.existsSync(MIGRATIONS_DIR)) return [];
-    return fs.readdirSync(MIGRATIONS_DIR)
+function listMigrations(dir = MIGRATIONS_DIR) {
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir)
         .filter(f => /^\d{4}_.*\.sql$/.test(f))
         .sort();
 }
@@ -42,30 +42,34 @@ function listMigrations() {
  * Aplica todas las migraciones pendientes. Idempotente.
  * @param {import('better-sqlite3').Database} db
  * @param {(msg:string)=>void} [log]
- * @param {{ until?: string }} [opts]  `until` detiene la aplicación DESPUÉS de
- *        esa versión (inclusive). Permite fijar una base en una versión
- *        concreta —los tests del contrato v1 lo usan para seguir ejercitando
- *        v1 después de que exista v2—. Sin `until` se aplica todo.
+ * @param {{ until?: string, dir?: string, tag?: string }} [opts]  `until` detiene
+ *        la aplicación DESPUÉS de esa versión (inclusive). Permite fijar una base
+ *        en una versión concreta —los tests del contrato v1 lo usan para seguir
+ *        ejercitando v1 después de que exista v2—. Sin `until` se aplica todo.
+ *        `dir`/`tag` (CHP-EDITORIAL-ROYALTIES F1-A): otra base reutiliza este
+ *        runner con su propio directorio; sin ellos, identidad no cambia.
  * @returns {{ applied: string[], already: string[] }}
  */
 export function runMigrations(db, log = () => {}, opts = {}) {
+    const dir = opts.dir || MIGRATIONS_DIR;
+    const tag = opts.tag || 'identity-migrate';
     ensureMetaTable(db);
     const done = new Set(db.prepare('SELECT version FROM _migrations').all().map(r => r.version));
     const applied = [], already = [];
     let stop = false;
-    for (const file of listMigrations()) {
+    for (const file of listMigrations(dir)) {
         const version = file.replace(/\.sql$/, '');
         if (stop) break;
         if (opts.until && version === opts.until) stop = true;
         if (done.has(version)) { already.push(version); continue; }
-        const { up } = parseSql(fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8'));
+        const { up } = parseSql(fs.readFileSync(path.join(dir, file), 'utf8'));
         const tx = db.transaction(() => {
             db.exec(up);
             db.prepare('INSERT INTO _migrations(version) VALUES (?)').run(version);
         });
         tx();
         applied.push(version);
-        log(`[identity-migrate] applied ${version}`);
+        log(`[${tag}] applied ${version}`);
     }
     return { applied, already };
 }
