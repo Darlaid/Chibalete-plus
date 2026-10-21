@@ -132,6 +132,11 @@ jobs:
       - name: Contrato canónico de métricas (motor de referencia)
         run: npm run test:metric-contract
 
+      # CHP-EDITORIAL-ROYALTIES-2026-01 F3-A1 — motor puro de episodios
+      # económicos multimodo (T1–T19). Sin disco ni red.
+      - name: Royalties — episodios económicos multimodo (F3-A1)
+        run: npm run test:royalties
+
       # CHP-AI-RUNTIME-MODEL-COMPAT-01A — el runtime no puede volver a apuntar a
       # un modelo retirado. Sin red: los proveedores se inyectan con dobles.
       - name: Compatibilidad de modelos de IA (Gemini textual + breaker)
