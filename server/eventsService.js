@@ -419,6 +419,11 @@ export function getEventById(eventId) {
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
 
+/** Conexión compartida de events.db (F3-A2: la tabla `econ_events` vive en el mismo archivo). */
+export function getEventsDb() {
+    return getDb();
+}
+
 export function closeDb() {
     if (_db) {
         _db.close();

@@ -176,11 +176,14 @@ import {
     getBackboneEventsForMetrics,
     getBackboneEventStats,
     getEventById as getBackboneEventById,
+    getEventsDb,
 } from './eventsService.js';
 import { ulid, isValidUlid } from './ulid.js';
 import * as publishersStore from './royalties/publishersStore.mjs';
 import * as rightsStore from './royalties/rightsStore.mjs';
 import * as commercialClass from './royalties/commercialClass.mjs';
+import * as econEvents from './royalties/econEvents.mjs';
+import { ECON_TICK_EVENT } from './royalties/economicEpisodes.mjs';
 import {
     aggregateBackboneMetrics,
     emptyBackboneMetrics,
@@ -11849,7 +11852,48 @@ app.post('/api/events', requireEventsWriteAuth, (req, res) => {
 // dedupa por event_id UNIQUE en SQLite (atomic INSERT OR IGNORE), responde
 // contadores. Nunca rompe el batch entero por un evento malformed.
 // ---------------------------------------------------------------------------
-app.post('/api/v1/events', requireEventsWriteAuth, (req, res) => {
+// CHP-EDITORIAL-ROYALTIES F3-A2: ingesta de `econ_tick` (ECONOMIC_INGEST_MODE=on).
+// Identidad solo de la sesión firmada; contenido existente y accesible ahora;
+// atribución F2-B en el primer tick de la sesión. Persiste en `econ_events`
+// (events.db), fuera de las tablas que leen las métricas.
+async function ingestEconTicks(req, userId, items) {
+    const out = { accepted: 0, deduplicated: 0, rejected: 0, errors: [] };
+    const rejectAll = (list, code) => { for (const it of list) { out.rejected++; out.errors.push({ eventId: it?.eventId ?? null, error: `econ ${code}` }); } };
+    if (req.auth?.authMethod !== 'session' || req.auth.userId !== userId) { rejectAll(items, 'session_required'); return out; }
+    const now = Date.now();
+    const valid = [];
+    for (const it of items) {
+        const n = econEvents.normalizeEconTick(it, { userId, now });
+        if (n.ok) valid.push(n.tick); else rejectAll([it], n.code);
+    }
+    if (!valid.length) return out;
+    const user = readJSON(USERS_DB).find((u) => u && u.id === userId) || null;
+    const rules = readJSON(ACCESS_DB);
+    const appliedRuleIds = resolveUserContentAccess(userId, { logDecision: false }).appliedRules;
+    const internalUserIds = econEvents.internalUserIdsFromEnv();
+    const attributionByContent = new Map();
+    const denied = new Map();
+    for (const contentId of new Set(valid.map((t) => t.contentId))) {
+        const content = findCatalogContent(contentId);
+        if (!content) { denied.set(contentId, 'content_not_found'); continue; }
+        const d = await decideContentAccess(userId, contentId, { logDecision: false });
+        if (d.status !== 200 || d.body?.allowed !== true) { denied.set(contentId, 'access_denied'); continue; }
+        attributionByContent.set(contentId, commercialClass.resolveCommercialAttribution({ rules, appliedRuleIds, content, user, at: now, internalUserIds }));
+    }
+    const allowed = [];
+    for (const t of valid) {
+        if (denied.has(t.contentId)) rejectAll([t], denied.get(t.contentId)); else allowed.push(t);
+    }
+    if (!allowed.length) return out;
+    const r = econEvents.recordEconTicks(getEventsDb(), { userId, ticks: allowed, now, attributionByContent });
+    out.accepted += r.accepted;
+    out.deduplicated += r.deduplicated;
+    out.rejected += r.rejected;
+    for (const e of r.errors) out.errors.push({ eventId: e.eventId, error: `econ ${e.code}` });
+    return out;
+}
+
+app.post('/api/v1/events', requireEventsWriteAuth, async (req, res) => {
     try {
         const headerUserId = reqUserId(req);
         if (!headerUserId) {
@@ -11868,8 +11912,11 @@ app.post('/api/v1/events', requireEventsWriteAuth, (req, res) => {
         let deduplicated = 0;
         let rejected     = 0;
         const errors     = [];
+        const econOn     = econEvents.econIngestMode() === 'on';
+        const econItems  = [];
 
         for (const incoming of events) {
+            if (econOn && incoming?.event === ECON_TICK_EVENT) { econItems.push(incoming); continue; }
             // Si el cliente no envió eventId, generamos uno en backend.
             // Sprint 5A: marcar payload._source = 'native' por defecto. Si el
             // cliente ya viene con _source (por ejemplo replays internos) no
@@ -11914,6 +11961,15 @@ app.post('/api/v1/events', requireEventsWriteAuth, (req, res) => {
                 errors.push({ eventId: evt.eventId, error: 'insert failed' });
                 log(`[EVENTS_V1] insert error eventId=${evt.eventId}: ${e.message}`, 'WARN');
             }
+        }
+
+        if (econItems.length) {
+            const econ = await ingestEconTicks(req, headerUserId, econItems);
+            accepted += econ.accepted;
+            deduplicated += econ.deduplicated;
+            rejected += econ.rejected;
+            errors.push(...econ.errors);
+            log(`[ECON] econ_tick accepted=${econ.accepted} dedup=${econ.deduplicated} rejected=${econ.rejected}`, 'INFO');
         }
 
         log(`[EVENTS_V1] POST /api/v1/events accepted=${accepted} dedup=${deduplicated} rejected=${rejected}`, 'INFO');
