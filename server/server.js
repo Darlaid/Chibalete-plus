@@ -1364,6 +1364,10 @@ app.post('/api/access', requireAuth, async (req, res) => {
         // F2-B: la regla se reconstruye desde el cuerpo; su clasificación
         // comercial (y su historial) se arrastra desde la guardada.
         savedRule = commercialClass.carryCommercialFields(newRule, index > -1 ? rules[index] : null);
+        // F2-B gate: `b2c` (pedido, idempotencia, revocación) es del servidor:
+        // se arrastra el guardado y nunca se toma del cuerpo. Sin él, la
+        // revocación por reembolso de esa regla fallaba (idempotency_mismatch).
+        if (index > -1 && rules[index].b2c) savedRule = { ...savedRule, b2c: rules[index].b2c };
         if (index > -1) rules[index] = savedRule;
         else rules.push(savedRule);
         writeJSON(ACCESS_DB, rules);
