@@ -180,6 +180,7 @@ import {
 import { ulid, isValidUlid } from './ulid.js';
 import * as publishersStore from './royalties/publishersStore.mjs';
 import * as rightsStore from './royalties/rightsStore.mjs';
+import * as commercialClass from './royalties/commercialClass.mjs';
 import {
     aggregateBackboneMetrics,
     emptyBackboneMetrics,
@@ -1344,6 +1345,10 @@ app.post('/api/access', requireAuth, async (req, res) => {
         }
     }
 
+    // F2-B: la clasificación comercial solo cambia por su endpoint auditado.
+    try { commercialClass.assertNoCommercialFieldsInPayload(payload); }
+    catch (e) { return res.status(e.status).json({ error: e.message, code: e.code }); }
+
     const newRule = {
         id: payload.id || `access-${Date.now()}`,
         scope: payload.scope,
@@ -1353,15 +1358,19 @@ app.post('/api/access', requireAuth, async (req, res) => {
         expiresAt: parsedExpiresAt
     };
 
+    let savedRule = newRule;
     await mutateAccessRules((rules) => {
         const index = rules.findIndex(r => r.id === newRule.id);
-        if (index > -1) rules[index] = newRule;
-        else rules.push(newRule);
+        // F2-B: la regla se reconstruye desde el cuerpo; su clasificación
+        // comercial (y su historial) se arrastra desde la guardada.
+        savedRule = commercialClass.carryCommercialFields(newRule, index > -1 ? rules[index] : null);
+        if (index > -1) rules[index] = savedRule;
+        else rules.push(savedRule);
         writeJSON(ACCESS_DB, rules);
     });
     log(`Access Rule created/updated: ${newRule.id} (scope=${newRule.scope}, scopeId=${newRule.scopeId})`, 'ACCESS_ENGINE');
 
-    res.json(newRule);
+    res.json(savedRule);
 });
 
 app.get('/api/access/by-user/:userId', requireAuth, async (req, res) => {
@@ -1975,6 +1984,67 @@ app.post('/api/admin/rights/:contentId/versions', requireAdminAccess, (req, res)
     } catch (e) { sendPublisherError(res, e, 'rights_create'); }
 });
 // --- END CHP-EDITORIAL-ROYALTIES F2-A ----------------------------------------
+
+// --- CHP-EDITORIAL-ROYALTIES-2026-01 F2-B: clasificación comercial de reglas --
+// La clase vive en la propia regla de access_db.json; el motor de acceso no la
+// lee, así que no cambia ningún permiso. Solo administración la ve y la cambia,
+// regla por regla, con soporte (evidenceRef) y sin retroactividad.
+const sendCommercialError = (res, e, op) => {
+    if (e instanceof commercialClass.CommercialClassError) return res.status(e.status).json({ error: e.message, code: e.code });
+    log(`[COMMERCIAL_CLASS] ${op} failed: ${e.message}`, 'ERROR');
+    return res.status(500).json({ error: 'Error interno', code: 'internal_error' });
+};
+
+app.get('/api/admin/access/commercial-classes', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const rules = readJSON(ACCESS_DB);
+        const now = Date.now();
+        res.json((Array.isArray(rules) ? rules : []).filter(Boolean).map((r) => ({
+            id: r.id, scope: r.scope, scopeId: r.scopeId, expiresAt: r.expiresAt ?? null, b2c: !!r.b2c,
+            active: commercialClass.ruleActiveAt(r, now),
+            commercialClass: commercialClass.commercialClassAt(r, now),
+            economicallyEligible: commercialClass.ruleSupportsEconomicAttribution(r, now),
+            commercialClassHistory: Array.isArray(r.commercialClassHistory) ? r.commercialClassHistory : [],
+        })));
+    } catch (e) { sendCommercialError(res, e, 'list'); }
+});
+
+app.put('/api/admin/access/:ruleId/commercial-class', requireAdminAccess, async (req, res) => {
+    try {
+        const actor = publisherActorOf(req);
+        const result = await mutateAccessRules((rules) => {
+            const index = rules.findIndex((r) => r && r.id === req.params.ruleId);
+            if (index === -1) throw new commercialClass.CommercialClassError(404, 'rule_not_found', 'Regla no encontrada');
+            const out = commercialClass.applyClassification(rules[index], req.body, { actor });
+            if (out.changed) {
+                rules[index] = out.rule;
+                writeJSON(ACCESS_DB, rules);
+            }
+            return out;
+        });
+        if (result.changed) {
+            const last = result.rule.commercialClassHistory.at(-1);
+            writeAuditLog({ action: 'access_commercial_class_set', actor, details: { ruleId: result.rule.id, from: result.previous, to: last.commercialClass, since: last.since, evidenceRef: last.evidenceRef } });
+            log(`[COMMERCIAL_CLASS] ${result.rule.id}: ${result.previous} → ${last.commercialClass}`, 'ACCESS_ENGINE');
+        }
+        res.json({ changed: result.changed, previous: result.previous, commercialClass: commercialClass.commercialClassAt(result.rule), rule: { id: result.rule.id, commercialClassHistory: result.rule.commercialClassHistory ?? [] } });
+    } catch (e) { sendCommercialError(res, e, 'set'); }
+});
+
+// Vista previa del predicado que usará F3-A2 en session_start. Solo lectura.
+app.get('/api/admin/access/attribution', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const userId = String(req.query.userId || '');
+        const contentId = String(req.query.contentId || '');
+        if (!userId || !contentId) return res.status(400).json({ error: 'userId y contentId son obligatorios', code: 'invalid_query' });
+        const user = readJSON(USERS_DB).find((u) => u && u.id === userId) || null;
+        const content = findCatalogContent(contentId);
+        if (!user || !content) return res.status(404).json({ error: 'Usuario o contenido no encontrado', code: 'not_found' });
+        const access = resolveUserContentAccess(userId, { logDecision: false });
+        res.json({ userId, contentId, ...commercialClass.resolveCommercialAttribution({ rules: readJSON(ACCESS_DB), appliedRuleIds: access.appliedRules, content, user }) });
+    } catch (e) { sendCommercialError(res, e, 'attribution'); }
+});
+// --- END CHP-EDITORIAL-ROYALTIES F2-B ----------------------------------------
 
 // --- CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-2: capas INSTITUTIONAL y PERSONAL -
 // Contrato: docs/adr/CHP_ADR_BIBLIOTECA.md (fórmula de visibilidad congelada).
