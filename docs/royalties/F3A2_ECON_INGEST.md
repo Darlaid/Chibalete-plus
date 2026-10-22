@@ -86,6 +86,13 @@
 | `test:identity`, `test:b2c`, `test:memberships`, `test:content-rmw`, `typecheck:baseline` | Linux | verde |
 | `test:analytics` | Linux | 26 de 28 en verde. Dos fallas **preexistentes, idénticas en `7b1299e`**: `analyticsCanon` necesita `scripts/events-archive.mjs`, que no está versionado, y `AulaVivaGroupAnalytics` exige el hash de `StudentStatusPanel.tsx`. F3-A2 no toca `pages/` ni `components/` |
 
+**CI de GitHub (`c650b5e`):**
+- `identity-preflight`, que incluye `test:royalties` con las dos suites nuevas, salió en verde en el intento 2.
+- El intento 1 falló en `retireSyntheticCohort.test.mjs`: el servidor de la prueba arrancó, pero `/api/health` no respondió en 60 s.
+- En Linux, esa prueba pasa 4 de 4 veces con este árbol y también con la baseline; se trata como una intermitencia del runner.
+- `content-rmw`, image-integrity y gitleaks-head salieron en verde.
+- Los 5 jobs de `security` fallan igual que antes de F1-A.
+
 **Cobertura de los 19 casos pedidos:**
 
 | # | Caso | Dónde |
