@@ -179,6 +179,7 @@ import {
 } from './eventsService.js';
 import { ulid, isValidUlid } from './ulid.js';
 import * as publishersStore from './royalties/publishersStore.mjs';
+import * as rightsStore from './royalties/rightsStore.mjs';
 import {
     aggregateBackboneMetrics,
     emptyBackboneMetrics,
@@ -1915,6 +1916,66 @@ app.delete('/api/admin/publishers/:id', requireAdminAccess, (req, res) => {
 });
 // --- END CHP-EDITORIAL-ROYALTIES F1-A ----------------------------------------
 
+// --- CHP-EDITORIAL-ROYALTIES-2026-01 F2-A: derechos por obra -----------------
+// Registro solo de inserciones (rights_versions) y cumplimiento P15 detrás de
+// RIGHTS_ENFORCEMENT_MODE (off por defecto). Solo las obras con versiones
+// registradas quedan bajo régimen; las demás conservan su comportamiento.
+// Los datos contractuales solo salen por estas rutas de administración.
+// Auditoría de impacto: docs/royalties/F2A_IMPACT_AUDIT.md.
+const rightsGate = rightsStore.createRightsGate({ log });
+const isRightsExempt = (user) => {
+    const roles = Array.isArray(user?.roles) ? user.roles : (user?.rol ? [user.rol] : []);
+    return roles.includes('administrador');
+};
+const RIGHTS_DENIED_BODY = { error: 'Esta obra no tiene autorizado este uso.', code: 'RIGHTS_NOT_AUTHORIZED' };
+const findCatalogContent = (id) => readJSON(DB_FILE).find((c) => c && c.id === id) || null;
+// Guardia por capacidad para rutas cuyo contentId llega en params o body.
+// Sin contentId la ruta no es atribuible a una obra y sigue igual (ver §5 de
+// la auditoría de impacto).
+const rightsCapabilityGuard = (capability) => (req, res, next) => {
+    const contentId = req.params?.contentId ?? req.body?.contentId;
+    if (typeof contentId !== 'string' || !contentId) return next();
+    if (rightsGate(contentId, capability, { exempt: isRightsExempt(req.user) }).deny) return res.status(403).json(RIGHTS_DENIED_BODY);
+    return next();
+};
+
+app.get('/api/admin/rights/:contentId', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const content = findCatalogContent(req.params.contentId);
+        const versions = rightsStore.listRightsVersions(req.params.contentId);
+        if (!content && versions.length === 0) return res.status(404).json({ error: 'Obra no encontrada', code: 'not_found' });
+        const at = new Date();
+        res.json({
+            contentId: req.params.contentId,
+            publisherId: content?.publisherId ?? null,
+            enforcementMode: rightsStore.rightsEnforcementMode(),
+            effectiveVersionId: rightsStore.effectiveVersion(versions, at)?.id ?? null,
+            versions,
+        });
+    } catch (e) { sendPublisherError(res, e, 'rights_list'); }
+});
+
+app.get('/api/admin/rights/:contentId/eligibility', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const at = req.query.at ? new Date(String(req.query.at)) : new Date();
+        if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'Fecha inválida', code: 'invalid_at' });
+        const content = findCatalogContent(req.params.contentId);
+        res.json({ contentId: req.params.contentId, at: at.toISOString(), ...rightsStore.eligibilityFor(content, { at }) });
+    } catch (e) { sendPublisherError(res, e, 'rights_eligibility'); }
+});
+
+app.post('/api/admin/rights/:contentId/versions', requireAdminAccess, (req, res) => {
+    try {
+        const content = findCatalogContent(req.params.contentId);
+        const version = rightsStore.createRightsVersion(req.params.contentId, req.body, { content, actor: publisherActorOf(req) });
+        rightsGate.invalidate();
+        writeAuditLog({ action: 'rights_version_create', actor: publisherActorOf(req), details: { contentId: version.contentId, versionId: version.id, versionNo: version.versionNo } });
+        log(`[RIGHTS] version created: ${version.contentId} v${version.versionNo} (${version.id})`);
+        res.status(201).json(version);
+    } catch (e) { sendPublisherError(res, e, 'rights_create'); }
+});
+// --- END CHP-EDITORIAL-ROYALTIES F2-A ----------------------------------------
+
 // --- CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-2: capas INSTITUTIONAL y PERSONAL -
 // Contrato: docs/adr/CHP_ADR_BIBLIOTECA.md (fórmula de visibilidad congelada).
 //
@@ -2805,7 +2866,10 @@ async function catalogForViewer(items, viewer) {
     const readStore = createRequestStoreReader();
     const out = [];
     let allowedCount = 0;
+    const rightsExempt = isRightsExempt(viewer.user);
     for (const item of items) {
+        // F2-A (P15): sin cubierta y metadatos autorizados la obra no se lista.
+        if (item && typeof item.id === 'string' && rightsGate(item.id, 'cover_metadata', { exempt: rightsExempt, silent: true }).deny) continue;
         let allowed = false;
         if (userId && item && typeof item.id === 'string') {
             if (isPedagogyRestrictedItem(item)) {
@@ -2899,6 +2963,14 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         const content = contentList.find(c => c.id === contentId);
         if (!content) {
             return { status: 404, body: { allowed: false, reason: 'Contenido no encontrado.' } };
+        }
+
+        // F2-A (P15): una obra bajo régimen de derechos sin lectura autorizada
+        // no se sirve a nadie salvo administración (ya retornó arriba). Las
+        // obras sin versión de derechos no pasan por aquí con efecto.
+        if (rightsGate(contentId, 'subscription_reading', { silent: !logDecision }).deny) {
+            say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via RIGHTS_NOT_AUTHORIZED`, 'ACCESS');
+            return { status: 403, body: { allowed: false, errorCode: 'RIGHTS_NOT_AUTHORIZED', reason: 'Esta obra no está autorizada para lectura.' } };
         }
 
         // 5. Helper de vigencia temporal server-side (árbitro real de tiempo)
@@ -3212,6 +3284,23 @@ async function strictUploadVerdict(req, uploadPath) {
         },
     });
     const D = UPLOAD_ASSET_DECISION;
+    // F2-A (P15): la portada de una obra bajo régimen sin cubierta autorizada
+    // deja de ser pública, y su audio TTS pregenerado exige TTS autorizado.
+    // La lectura del resto de assets ya pasó por decideContentAccess.
+    const rightsExempt = !!viewer.machine || isRightsExempt(viewer.user);
+    if (verdict.decision === D.PUBLIC && !rightsExempt && rightsStore.rightsEnforcementMode() !== 'off') {
+        const coverOwners = readJSON(DB_FILE).filter(c => c && typeof c.portada_url === 'string'
+            && normalizeUploadRequestPath(c.portada_url).path === uploadPath);
+        if (coverOwners.some(c => rightsGate(c.id, 'cover_metadata').deny)) {
+            log(`[uploads-authz] RIGHTS_COVER contentId=${coverOwners[0].id} user=${viewer.user?.id ?? '-'}`, 'ACCESS');
+            return { status: 403 };
+        }
+    }
+    if (verdict.decision === D.AUTHORIZED && !rightsExempt && verdict.contentId
+        && uploadPath.startsWith('/uploads/audio/') && rightsGate(verdict.contentId, 'tts').deny) {
+        log(`[uploads-authz] RIGHTS_TTS contentId=${verdict.contentId} user=${viewer.user?.id ?? '-'}`, 'ACCESS');
+        return { status: 403 };
+    }
     if (verdict.decision === D.PUBLIC) return { status: 204, private: false };
     if (verdict.decision === D.AUTHORIZED) return { status: 204, private: true };
     if (verdict.decision === D.UNAUTHENTICATED) return { status: 401 };
@@ -4096,6 +4185,8 @@ app.post('/api/content', async (req, res) => {
         let shouldGenerateTTS = false;
 
         const oldContent = index >= 0 ? contentList[index] : null;
+        // F2-A (P15): sin TTS autorizado no se genera narración sintética.
+        const ttsDeniedByRights = rightsGate(newContent.id, 'tts').deny;
 
         // CHP-CONTENT-CANONICAL-2026-01 1B: la versión textual es autoridad del
         // servidor. Lo que mande el cliente se descarta; se resuelve en el lock.
@@ -4124,6 +4215,11 @@ app.post('/api/content', async (req, res) => {
             if (newContent.texto_plano_url) {
                 shouldGenerateTTS = true;
             }
+        }
+
+        if (shouldGenerateTTS && ttsDeniedByRights) {
+            log(`[RIGHTS] tts generation skipped contentId=${newContent.id}`, 'ACCESS');
+            shouldGenerateTTS = false;
         }
 
         // Apply Status
@@ -4169,7 +4265,7 @@ app.post('/api/content', async (req, res) => {
                 // 3C.2: en EPUB la URL del texto es fija; un texto nuevo se
                 // reconoce por su fingerprint (solo medios → mismo fingerprint → sin TTS).
                 if (newContent.epub_url && !isAttachedEpubEdition(newContent, freshIdx >= 0 ? freshList[freshIdx] : null)
-                    && !shouldGenerateTTS && newContent.contentFingerprint
+                    && !shouldGenerateTTS && !ttsDeniedByRights && newContent.contentFingerprint
                     && newContent.contentFingerprint !== (freshIdx >= 0 ? freshList[freshIdx].contentFingerprint ?? null : null)) {
                     shouldGenerateTTS = true;
                     newContent.status = 'disponible';
@@ -4873,7 +4969,9 @@ function buildOfflineAssignmentResponse(assignment) {
 app.get('/api/offline/assignment', requireUserAuth, (req, res) => {
     try {
         const userId = req.user.id;
-        const assignment = getOfflineAssignment(userId);
+        let assignment = getOfflineAssignment(userId);
+        // F2-A (P15): una obra sin offline autorizado se responde como ausente.
+        if (assignment && rightsGate(assignment.contentId, 'offline', { exempt: isRightsExempt(req.user) }).deny) assignment = null;
         log(`[OFFLINE] assignment_get userId=${userId} present=${!!assignment}`, 'ACCESS');
         res.json(buildOfflineAssignmentResponse(assignment));
     } catch (e) {
@@ -4904,6 +5002,11 @@ app.post('/api/offline/assignment',
             if (!access.allowed) {
                 log(`[OFFLINE] assignment_denied_access userId=${userId} contentId=${contentId} reason=${access.reason}`, 'ACCESS');
                 return res.status(403).json({ error: 'Sin acceso al contenido.', reason: access.reason });
+            }
+            // F2-A (P15): sin offline autorizado no se asigna para descarga.
+            if (rightsGate(contentId, 'offline', { exempt: isRightsExempt(req.user) }).deny) {
+                log(`[OFFLINE] assignment_denied_rights userId=${userId} contentId=${contentId}`, 'ACCESS');
+                return res.status(403).json({ error: 'Sin acceso al contenido.', reason: 'rights_not_authorized' });
             }
 
             // 3. Upsert atómico (reemplaza si difiere; idempotente si es el mismo).
@@ -8791,6 +8894,8 @@ app.post('/api/content/:id/retry', async (req, res) => {
 
         const content = contentList[index];
         if (!content.texto_plano_url) return res.status(400).json({ error: 'No text file linked' });
+        // F2-A (P15): sin TTS autorizado no se regenera narración sintética.
+        if (rightsGate(id, 'tts').deny) return res.status(403).json(RIGHTS_DENIED_BODY);
 
         // Guard: evitar encolar un segundo job si ya hay uno en curso.
         // ttsStatus='generando' significa que el queue ya tiene un job activo.
@@ -8946,7 +9051,7 @@ app.post('/api/tts', requireUserAuth, b2cEntitlementGuard, ttsUserLimiter, async
 //   provider: 'openai' | 'gemini' — usado por frontend para normalización de volumen.
 //   url es ruta estática — el frontend la asigna directamente a audio.src.
 // ---------------------------------------------------------------------------
-app.post('/api/album/tts', requireUserAuth, albumTtsUserLimiter, async (req, res) => {
+app.post('/api/album/tts', requireUserAuth, rightsCapabilityGuard('tts'), albumTtsUserLimiter, async (req, res) => {
     const { text, contentId } = req.body ?? {};
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -9193,7 +9298,7 @@ app.post('/api/admin/album-cache/gc', requireAdminAccess, async (req, res) => {
 });
 
 // --- LEO PEDAGOGICAL ENGINE (Fase 5 / D1) ---
-app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
+app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'companion', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -9243,7 +9348,7 @@ const leoMemoryOwnerDenied = (req, res) => {
     return true;
 };
 
-app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, (req, res) => {
+app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), (req, res) => {
     try {
         const { userId, contentId } = req.params;
         if (leoMemoryOwnerDenied(req, res)) return;
@@ -9270,7 +9375,7 @@ app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGua
     }
 });
 
-app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
+app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         if (leoMemoryOwnerDenied(req, res)) return;
@@ -9329,6 +9434,12 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
             safeUnlink(req.file.path);
             return res.status(400).json({ error: 'Faltan contentId o documentType en el formulario.' });
         }
+        // F2-A (P15): no se procesa con IA una obra sin IA autorizada (sin exención:
+        // la ingesta es procesamiento de la obra, no gestión).
+        if (rightsGate(contentId, 'ai_leo').deny) {
+            safeUnlink(req.file.path);
+            return res.status(403).json(RIGHTS_DENIED_BODY);
+        }
 
         const result = await ingestPedagogicalFile(req.file.path, req.file.originalname, contentId, documentType);
 
@@ -9351,7 +9462,7 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
 });
 
 // --- LEO CHAT (Fase 6 / D1) ---
-app.post('/api/leo/chat', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
+app.post('/api/leo/chat', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'chatbot', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -11173,7 +11284,10 @@ app.get('/api/content/my-catalog', libraryViewNoStore, requireUserAuth, (req, re
         // visibleCatalogForUser — UNA sola definición, compartida con las capas
         // INSTITUTIONAL/PERSONAL de Biblioteca, que intersectan exactamente
         // contra el mismo conjunto (sin replicar la regla de acceso).
-        const catalog = visibleCatalogForUser(req.user, readJSON(DB_FILE));
+        // F2-A (P15): sin cubierta y metadatos autorizados la obra no se lista.
+        const rightsExempt = isRightsExempt(req.user);
+        const catalog = visibleCatalogForUser(req.user, readJSON(DB_FILE))
+            .filter(item => !rightsGate(item?.id, 'cover_metadata', { exempt: rightsExempt, silent: true }).deny);
 
         res.json({
             success: true,

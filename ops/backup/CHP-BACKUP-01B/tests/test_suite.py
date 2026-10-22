@@ -3913,8 +3913,8 @@ def test_ea_empty_valid():
 # un schema copiado: si la migracion cambia, el restore se prueba contra ella.
 
 ROYALTIES_LOGICAL_PATH = "data-critical/royalties.db"
-ROYALTIES_MIGRATION = os.path.join(
-    HERE, "..", "..", "..", "..", "server", "royalties", "migrations", "0001_publishers.sql")
+ROYALTIES_MIGRATIONS_DIR = os.path.join(
+    HERE, "..", "..", "..", "..", "server", "royalties", "migrations")
 ROYALTIES_EXTRA_ROWS = (
     ("pub-fx-0001", "editorial", "Editorial Ficticia S.A.S.", "Ficticia", "NIT-FX-1",
      '["Sello FX"]', "active", "2026-10-21T00:00:00.000Z", "2026-10-21T00:00:00.000Z"),
@@ -3924,20 +3924,31 @@ ROYALTIES_EXTRA_ROWS = (
 
 
 def _build_royalties_db(base_dir: str) -> str:
-    """royalties.db sintetica: migracion real + _migrations + dos titulares ficticios, en WAL."""
+    """royalties.db sintetica: TODAS las migraciones reales en orden + _migrations
+    + dos titulares ficticios + una version de derechos (F2-A), en WAL."""
     path = os.path.join(base_dir, ROYALTIES_LOGICAL_PATH)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    raw = open(ROYALTIES_MIGRATION, encoding="utf-8").read()
-    up = raw.split("-- DOWN")[0].split("-- UP", 1)[1]
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS _migrations (version TEXT PRIMARY KEY,"
-        " applied_at TEXT NOT NULL DEFAULT (datetime('now')));" + up)
-    conn.execute("INSERT INTO _migrations(version, applied_at) VALUES ('0001_publishers', '2026-10-21 00:00:00')")
+        " applied_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    for name in sorted(f for f in os.listdir(ROYALTIES_MIGRATIONS_DIR) if f.endswith(".sql")):
+        raw = open(os.path.join(ROYALTIES_MIGRATIONS_DIR, name), encoding="utf-8").read()
+        conn.executescript(raw.split("-- DOWN")[0].split("-- UP", 1)[1])
+        conn.execute("INSERT INTO _migrations(version, applied_at) VALUES (?, '2026-10-21 00:00:00')", (name[:-4],))
     conn.executemany(
         "INSERT INTO publishers (id, kind, legal_name, trade_name, tax_id, imprints, status, created_at, updated_at)"
         " VALUES (?,?,?,?,?,?,?,?,?)", ROYALTIES_EXTRA_ROWS)
+    conn.execute(
+        "INSERT INTO rights_versions (id, content_id, version_no, publisher_id, act_ref, act_signed_on, valid_from,"
+        " valid_until, effective_at, legal_status, economic_status, settlement_class, alpha, expected_minutes, shares,"
+        " perm_subscription_reading, perm_tts, perm_ai_leo, perm_offline, perm_indexing, perm_promo_fragments,"
+        " perm_cover_metadata, notes, created_by, created_at)"
+        " VALUES ('rv-fx-0001', 'content-fx', 1, 'pub-fx-0001', 'ACTA-FX-1', '2026-10-01', '2026-10-01', NULL,"
+        " '2026-10-01T05:00:00.000Z', 'active', 'active', 'liquidable', 0.5, 120,"
+        " '[{\"publisherId\":\"pub-fx-0001\",\"shareBp\":10000}]', 1, 0, 0, 0, 1, 0, 1, NULL, 'fx',"
+        " '2026-10-21T00:00:00.000Z')")
     conn.commit()
     conn.close()
     return path
@@ -3954,6 +3965,10 @@ def _royalties_logical_digest(path: str) -> dict:
             "migrations": [r[0] for r in conn.execute("SELECT version FROM _migrations ORDER BY version")],
             "ids": [r[0] for r in rows],
             "digest": hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+            "rights": hashlib.sha256(json.dumps(
+                conn.execute("SELECT * FROM rights_versions ORDER BY id").fetchall(),
+                sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+            "rights_count": conn.execute("SELECT COUNT(*) FROM rights_versions").fetchone()[0],
         }
     finally:
         conn.close()
@@ -3977,7 +3992,7 @@ def test_ry_inventory():
     assert store.category == "CANON" and store.reconstructible is False and store.required is False, store
     assert len(S.SQLITE_STORES) == 7, sqlite_paths
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
-    assert os.path.isfile(ROYALTIES_MIGRATION), ROYALTIES_MIGRATION
+    assert os.path.isfile(os.path.join(ROYALTIES_MIGRATIONS_DIR, "0001_publishers.sql")), ROYALTIES_MIGRATIONS_DIR
 
 
 @case("RY02", "royalties.db ausente: backup ok, ausencia anotada y archivo NO creado")
@@ -4018,13 +4033,16 @@ def test_ry_present_included():
     assert _royalties_logical_digest(origen) == digest_before, "la fuente cambio logicamente"
 
 
-@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones y titulares identicos")
+@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones, titulares y derechos identicos")
 def test_ry_restore_logical():
     env = Env("ry04")
     origen = _build_royalties_db(env.base)
     esperado = _royalties_logical_digest(origen)
     assert esperado["integrity"] == "ok", esperado
     assert esperado["ids"] == ["pub-chibalete-editores", "pub-fx-0001", "pub-fx-0002"], esperado["ids"]
+    assert esperado["rights_count"] == 1, esperado
+    assert esperado["migrations"] == ["0001_publishers", "0002_rights_versions"], esperado["migrations"]
+    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 2, esperado["schema"]
     env.provision_repository()
     env.run("structured_backup.py", expect=0)
     staged = _restore_staging(env)
