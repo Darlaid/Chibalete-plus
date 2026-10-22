@@ -48,6 +48,7 @@ Estado final (16:20Z): api_1 y api_2 healthy, 0 reinicios, `content.json` sin ca
 - **Evidencia:** api_1, 15:56:47Z y 15:56:51Z, dos `POST /api/tts` → 503 para una sesión de lector. OpenAI: `429 You have no credits remaining`; Gemini (fallback): `429 quota exceeded`; breaker de OpenAI abierto 5 min. Son los únicos 5xx desde el despliegue.
 - **Atribución:** `/api/tts` no cambió en F2-A; el cumplimiento está en `off` y no se registró ninguna decisión de derechos. Es el agotamiento de créditos ya documentado en IMM-TTS-03.
 - **Alcance:** cualquier lectura que pida TTS bajo demanda (Modo Guiado con voz e Inmersivo en títulos sin audio pregenerado o al reanudar a mitad de chunk). El audio pregenerado y el resto de modos no se ven afectados.
+- **Ampliación (2026-10-22 17:00:48Z, api_2):** `POST /api/leo/recap` → 500 para una sesión de administración. Gemini respondió `503 high demand` y el fallback a OpenAI, `429 no credits`. Mientras OpenAI siga sin créditos, **Leo también falla cuando Gemini no está disponible**. Ajeno a F2-A/F2-B (`/api/leo/recap` no se modificó).
 - **Recuperación (fuera de esta unidad):** recargar créditos de OpenAI o ampliar la cuota de Gemini; comprobar con una única llamada mínima desde una réplica; confirmar que el breaker se cierra. No se cambiaron proveedores ni credenciales.
 
 ### 5.2 Disciplina de despliegue
