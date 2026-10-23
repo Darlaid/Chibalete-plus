@@ -75,7 +75,7 @@ ignoreUntil = 2026-10-21
 # element> declarativos, y no usa data router (cero RouterProvider,
 # createBrowserRouter, useLoaderData, useActionData, useFetcher, errorElement).
 # No hay RSC, SSR, server actions, Flight ni turbo-stream, y Dockerfile.front
-# sirve dist/ estático desde nginx:1.27-alpine, sin proceso Node en runtime: no
+# sirve dist/ estático desde nginx:1.30-alpine, sin proceso Node en runtime: no
 # existe servidor que pueda ejecutar acciones RSC. Esto NO afirma que la
 # vulnerabilidad no exista, sino que hoy no tiene ruta de explotación aquí.
 # La corrección real es migrar a react-router 8.3.0, lo que exige unidad propia:

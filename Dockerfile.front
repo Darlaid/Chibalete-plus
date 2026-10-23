@@ -34,7 +34,12 @@ COPY public/      ./public/
 RUN npm run build
 
 # ── Stage 2: serve ───────────────────────────────────────────
-FROM nginx:1.27-alpine AS runner
+# SEC-DEPS-02 Lote E — la rama 1.27 de nginx está cerrada: `nginx:1.27-alpine`
+# quedó congelado en Alpine 3.21.3 (2025-04-16) con 59 HIGH/CRITICAL de OS
+# (OpenSSL, libxml2, pcre2, curl, libexpat, musl…). 1.30 es la rama ESTABLE
+# vigente de la misma imagen oficial; nginx.prod.conf no usa directivas que
+# cambien entre ramas (validado con `nginx -t`). Pinneada por digest.
+FROM nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951 AS runner
 
 # Remove default nginx content
 RUN rm -rf /usr/share/nginx/html/*

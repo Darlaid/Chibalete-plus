@@ -237,3 +237,58 @@ Se ejecutaron en Windows con Node 20.18, en dos worktrees limpios **fuera de `%T
 **Dependencias nuevas de producción** (transitivas de OTel 2.x): `systeminformation`, `yaml`, `es-module-lexer` y `@types/oracledb`. Ninguna tiene advisories en OSV. Se retiran `uuid@9`, `shimmer`, `require-in-the-middle` 7, `resolve`, `acorn` y `whatwg-url@5`, entre otras.
 
 **Sin despliegue.** Producción sigue con `royalties-f3a2-145934b` (Sentry 8 / OTel 1.x, ambos inertes).
+
+## 8. Lote E ejecutado (2026-10-23, local + CI, sin despliegue)
+
+**Resultado:** las dos imágenes candidatas pasan Trivy image con **0 HIGH/CRITICAL**, con y sin `.trivyignore` (0 corregibles y 0 sin corrección). Antes: API 4 HIGH; front **59 HIGH/CRITICAL (2 CRITICAL)** que nunca se habían evaluado.
+
+### 8.1 Hallazgos de partida (imágenes de producción `secusers-a-2ec37f7`, Trivy 0.70.0)
+
+| Imagen | Base | Hallazgos | Causa |
+|---|---|---|---|
+| API | `node:20-alpine@fb4cd12c…` (Alpine 3.23.4) | `libssl3`/`libcrypto3` 3.5.6-r0: CVE-2026-14456 (fix 3.5.8-r0) y CVE-2026-45447 (fix 3.5.7-r0), HIGH | **Node 20 está en EOL upstream:** `node:20-alpine` no se republica desde 2026-04-15, así que no existe un digest corregido de esa familia |
+| front | `nginx:1.27-alpine` (Alpine 3.21.3, 2025-04-16) | 59: OpenSSL 3.3.3 (2 CRITICAL), libxml2, pcre2, curl, libexpat, libpng, musl, zlib, tiff, nghttp2, c-ares | la rama 1.27 de nginx está cerrada; `1.28-alpine` también quedó congelada (2026-03-24, OpenSSL 3.5.5) |
+
+El front no se evaluaba porque el job único escaneaba la API primero: si la API fallaba, el paso del front no corría. Además, el job tenía `continue-on-error`.
+
+### 8.2 Corrección
+
+- **`Dockerfile.api`:** misma base pinneada en builder y runtime (el ABI musl no cambia; `musl` sigue en 1.2.5-r23). El runtime exige `libssl3>=3.5.8-r0` y `libcrypto3>=3.5.8-r0` del repositorio de Alpine 3.23, que hoy instala 3.5.9-r0; si el repositorio no lo ofrece, el build falla. `node` no usa estas librerías: enlaza OpenSSL 3.0.19 de forma estática.
+- **`Dockerfile.front`:** `nginx:1.30-alpine@sha256:47928bf6…`, la rama estable vigente de la misma imagen oficial (nginx 1.30.6, Alpine 3.24.3, OpenSSL 3.5.9). El builder no se toca.
+- **`security.yml`:** `trivy-image` pasa a ser una matriz `[api, front]` con `fail-fast: false` y sin `continue-on-error`. Cada imagen se construye y se escanea en su propio job, y los dos resultados bloquean.
+- **No se migra a Node 22.** Es un cambio de versión mayor de runtime; queda registrado como deuda (§8.5).
+
+### 8.3 Verificación (local, Docker 29.4)
+
+- **Builds:** las dos imágenes se construyen desde un worktree limpio de `da916e9` con los cambios: API 860 MB, front 98,6 MB.
+- **Integridad:** `verify-image-integrity` da 51/0 sobre la imagen candidata y 28/0 en el contrato estático.
+- **Módulos nativos** (imagen de producción frente a candidata, resultados idénticos): `better-sqlite3` (SQLite 3.49.2 y WAL), `@napi-rs/canvas` (musl, PNG), `bcryptjs`, `crypto` y `tls`. Node v20.20.2 en los dos casos.
+- **Arranque en producción** con datos sintéticos en volúmenes temporales (`NODE_ENV=production`, `SESSION_AUTH_MODE=enforce`, secretos file-only 0400): `ready` 200 y `ECON ingest=off`. El smoke de credenciales de A-PROD da **25/25 en las dos imágenes**: sesión firmada, desactivar, reinvitar, política de contraseñas, `accept-invite` y protección 409 de la cuenta principal. 0 errores y 0 secretos en los logs.
+- **Front** (producción frente a candidata): `nginx -t` correcto. `nginx -T` es idéntico; el árbol servido tiene la misma huella SHA-256 (76 archivos). `/`, una ruta SPA, un asset y el proxy `/api/health/ready` hacia la API candidata responden 200.
+- **Batería de 45 suites** en `node:20-bookworm`, con `npm ci`, sobre la candidata y sobre `da916e9`: mismo código de salida en todas, y el bundle `dist/` es idéntico (76 archivos).
+  - **`royalties`** falló una vez en el baseline por el arnés («nunca healthy»). Después dio 3/3 en verde en los dos árboles.
+  - **`evidence`** e **`identity-preflight`** necesitan `git ls-files`. Se repitieron con un índice reconstruido (1341 archivos versionados, igual que el worktree real): `evidence` en verde; `identity-preflight` con 3207 ✓ en los dos árboles y el mismo único ✗ previo («/api/content general NO cambia su política no-store», ya registrado en §7.3).
+  - **Fallos previos idénticos en los dos árboles:** `analytics`, `verify:immersive` e `immersive-v2`.
+- **Trivy fs y config:** 0. Dockerfiles: 0 misconfiguraciones.
+
+### 8.4 Hallazgo nuevo fuera del lote — OSV en rojo
+
+- **Hallazgo:** `zod` 3.25.76 (dependencia directa y de `openai`), GHSA-mrhx-c7xc-m3w5 / CVE-2023-54404 (8.2), publicado en OSV el 2026-10-01. Es un agotamiento de memoria al validar arrays sin tope. La única corrección es `zod` 4.6.6, un cambio de versión mayor que toca los esquemas de validación del servidor, incluidos los de autenticación.
+- **No lo causa este lote:** el lockfile no cambia, y el baseline `da916e9` falla igual.
+- **Alcanzabilidad: baja.** Los tres `z.array` del servidor tienen tope (`.max(20/50/500)`), y `express.json` limita el cuerpo a 100 kB por defecto.
+- **Decisión pendiente:** migrar a `zod` 4 en una unidad propia, o una excepción con fecha y evidencia. No se añadió ninguna excepción.
+
+### 8.5 Deudas registradas
+
+- **Node 20 en EOL:** no habrá más digests de `node:20-alpine`. El próximo CVE de Node o de la base solo se podrá corregir migrando a Node 22 LTS (`node:22-alpine` existe, Alpine 3.24.3 y OpenSSL 3.5.9). Hay que probar `better-sqlite3` y `canvas`.
+- **Ignores obsoletos en `.trivyignore`:** CVE-2026-44902 y CVE-2026-59892 ya no aparecen en ningún escaneo tras el Lote D. Se pueden retirar en el Lote F o en una limpieza de configuración.
+- **Escaneo semanal bloqueante:** con `trivy-image` bloqueante, el cron semanal pondrá el gate en rojo cuando aparezca un CVE nuevo de la base. Es la señal buscada.
+
+### 8.6 Despliegue posterior (no ejecutado)
+
+- **Espacio:** la API candidata comparte con la de producción solo las 4 capas base. En el VPS costará unos 0,85 GB (≈0,7 GB descomprimidos + 0,15 GB de blob), más unos 0,1 GB del front y 0,17 GB de tars en `/root/chp-*`: **≈1,1 GB en total**. Disponible: 11,16 GB.
+- **Procedimiento** (el mismo de A-PROD):
+  1. Build local con tag `lote-e-<sha>`, `docker save | gzip`, sha256, `scp` y `docker load` en el VPS, con IDs verificados.
+  2. Tags `rollback-pre-lote-e` sobre `f2a3e5118108` (API) y `055537dbbdd1` (front), y backup del override.
+  3. Cambiar la línea 40 y recrear `api_1`, con gate. Después la línea 85 y `api_2`, con gate. Después la línea 130, `front` y reload del edge.
+- **Rollback:** volver a `rollback-pre-lote-e` por componente, o restaurar el `.bak` del override, y recrear solo ese servicio. No se tocan datos.

@@ -10,9 +10,10 @@ name: security
 #     pendiente como sprint aparte (ver docs/V4-SECURITY-AUDIT.md §9-§10).
 #   - OSV-Scanner (package-lock.json): vuln conocida sin ignore razonado → FAIL.
 #   - Trivy fs + config (código/deps/IaC): HIGH/CRITICAL con fix → FAIL (gate duro).
-#   - Trivy image (api/front): HIGH/CRITICAL → REPORTE no bloqueante
-#     (continue-on-error) — los CVEs de imagen base se ratchean en cadencia
-#     propia, no por push. Ver docs/V4-SECURITY-AUDIT.md §10.
+#   - Trivy image (api/front): HIGH/CRITICAL con fix → FAIL (gate duro),
+#     un job independiente por imagen (SEC-DEPS-02 Lote E). El cron semanal
+#     re-escanea: un CVE nuevo de imagen base pone el gate en rojo hasta que
+#     se ratchee la base.
 
 on:
   push:
@@ -134,12 +135,6 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore
 
-  # ── P0.2c — Trivy: imágenes Docker — REPORTE (no bloqueante) ────────────
-  # Las imágenes base (node:alpine / nginx:alpine) arrastran CVEs de paquetes
-  # OS que se parchean al ritmo del rebuild del base image upstream, no por
-  # push. Este job REPORTA esos findings (visibles, exit-code 1) pero NO
-  # bloquea el merge (continue-on-error): el gate duro de deps/código/IaC es
-  # el job `trivy`. El ratcheo del base image se hace en cadencia propia.
   # CHP-RELEASE-IMAGE-01A — gate DURO de completitud de la imagen API.
   #
   # A diferencia de `trivy-image` (que reporta deuda de la imagen base sin
@@ -178,31 +173,28 @@ jobs:
       - name: Build front image (Dockerfile.front real, gate bloqueante)
         run: docker build -f Dockerfile.front -t chibalete/front:integrity .
 
+  # ── P0.2c — Trivy: imágenes Docker — BLOQUEANTE, una imagen por job ──────
+  # SEC-DEPS-02 Lote E. Antes era un único job con `continue-on-error` donde
+  # el front se escaneaba DESPUÉS de la API: si la API fallaba, el front nunca
+  # se evaluaba (llegó a acumular 59 HIGH/CRITICAL sin verse). Ahora cada
+  # imagen es un job de la matriz con `fail-fast: false`: se construye y se
+  # escanea por su cuenta y su resultado cuenta aunque la otra falle.
   trivy-image:
     runs-on: ubuntu-latest
-    continue-on-error: true       # reporta CVEs de imagen base sin bloquear el workflow
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, front]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build api image (scan target)
-        run: docker build -f Dockerfile.api -t chibalete/api:ci .
-      - name: Trivy image — chibalete/api
+      - name: Build ${{ matrix.image }} image (scan target)
+        run: docker build -f Dockerfile.${{ matrix.image }} -t chibalete/${{ matrix.image }}:ci .
+      - name: Trivy image — chibalete/${{ matrix.image }}
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: chibalete/api:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          trivyignores: .trivyignore   # mismas supresiones auditadas que fs/config
-
-      - name: Build front image (scan target)
-        run: docker build -f Dockerfile.front -t chibalete/front:ci .
-      - name: Trivy image — chibalete/front (incluye nginx base)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: chibalete/front:ci
+          image-ref: chibalete/${{ matrix.image }}:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"

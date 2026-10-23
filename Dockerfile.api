@@ -63,7 +63,17 @@ RUN npm ci --omit=dev --no-audit --no-fund
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
 
 # dumb-init → manejo correcto de señales para PID 1.
-RUN apk add --no-cache dumb-init
+#
+# SEC-DEPS-02 Lote E — OpenSSL del sistema con piso de versión.
+# Node 20 llegó a EOL upstream y `node:20-alpine` no se republica desde
+# 2026-04-15: ningún digest de esta familia trae libssl3/libcrypto3 ≥ 3.5.8
+# (CVE-2026-14456, fix 3.5.8-r0; CVE-2026-45447, fix 3.5.7-r0). Se mantiene la
+# base pinneada (misma que el builder → ABI musl intacto; musl NO cambia) y se
+# exige el piso desde el repo de Alpine 3.23. Si el repo no lo ofrece, el build
+# FALLA: nunca se construye en silencio con la versión vulnerable.
+# `node` no usa estas libs (enlaza OpenSSL 3.0.x estático); solo las utilidades
+# del sistema de la imagen.
+RUN apk add --no-cache dumb-init 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0'
 
 WORKDIR /app
 
