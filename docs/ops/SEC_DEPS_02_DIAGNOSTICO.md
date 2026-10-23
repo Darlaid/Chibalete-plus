@@ -125,3 +125,43 @@ Orden sugerido: A y B primero (dejan `evidence-hardening` y `trivy` en verde), l
 - F3-A2 no cambió dependencias, imágenes base, configuración de escáneres ni workflows.
 
 Quedan **sin evaluar** dos subcontroles que el CI se salta: «Trivy config» y `trivy-image` del front. No afectan a F3-A2, que no tocó Dockerfiles, compose ni frontend, pero deben revisarse cuando se ejecute el lote B o el E.
+
+## 5. Lote B ejecutado (2026-10-23, `4d3a035`)
+
+Solo `package-lock.json`; `package.json`, los `overrides` y la entrada raíz del lockfile no cambian. Se eligió la **versión mínima que corrige** cada advisory. La excepción son `@grpc/grpc-js` y `brace-expansion`: los fija un `override` de rango (`^1.14.4`, `^5.0.9`), así que solo pueden avanzar con `npm update` y quedan en la última versión del rango.
+
+| Paquete | Antes → después | Advisories resueltos |
+|---|---|---|
+| `proxy-addr` | 2.0.7 → 2.0.8 | jqcg (CRITICAL) |
+| `multer` | 2.2.0 → 2.4.0 (2.5.0 se descartó: publicado el 2026-10-22) | 535w, qfvm, wc9g, 3pph, qvfw |
+| `qs` | 6.15.2 → 6.16.0 (+ `side-channel` 1.1.1, `side-channel-list` 1.0.1) | 4mjr, x5fp |
+| `ip-address` | 10.5.0 → 10.7.4 (mínima para rxp7) | 2vr4, h3mg, j6r3, rpw4, rxp7 |
+| `brace-expansion` | 5.0.9 → 5.0.12 | 6j4f, qhr7, q2hr |
+| `@grpc/grpc-js` | 1.14.4 → 1.14.6 | m9gg, f596 |
+| retirados con multer 2.4.0 | `concat-stream`, `buffer-from`, `typedarray`, `readable-stream@3` anidado | — |
+
+**Pruebas.** Se ejecutaron baseline (`9c65438`) y lote B en paralelo, en `node:20-bookworm` con `npm ci` y repositorio git:
+
+- `npm ci` y `npm ls` limpios.
+- Suites con **resultados idénticos** entre los dos árboles: identity-preflight, b2c, royalties, content-rmw, store, auth-reset, session-browser, evidence (`lint` y `test`), `typecheck:baseline`, `build`, las 26 suites de analytics, 9 suites de subida y 4 de authz/sesión.
+- Fallas preexistentes, iguales en la baseline:
+  - `test:analytics`: `analyticsCanon` y `AulaVivaGroupAnalytics`.
+  - `test:library`: la aserción «`/api/content` no es no-store» está desactualizada; esa suite no corre en CI.
+- **Prueba de comportamiento** (express + rate limit + multer):
+  - Sin cambios en `req.ip` con `trust proxy 1`, en las claves de `ipKeyGenerator` (IPv4, mapeadas, /56), en el parseo de query, en los 429 por IP ni en los códigos de error de multer.
+  - **Única diferencia:** 20 subidas abortadas dejaban 18 descriptores abiertos con multer 2.2.0 y ninguno con 2.4.0 (qfvm corregido).
+- **OSV reproducido** (API osv.dev + `osv-scanner.toml`): la baseline da 30 advisories / 44 filas, igual que el CI. El lote B da **12 advisories / 26 filas, ninguno nuevo**.
+
+**CI de `4d3a035`:**
+- En verde: `trivy` (fs **y config**, que se ejecutó por primera vez), `image-integrity`, `content-rmw`, `evidence-hardening` y `gitleaks-head`.
+- `trivy-image` sin hallazgos de Node; quedan los 4 de OpenSSL de Alpine (lote E).
+- `osv-scanner` con 26 filas: lotes C y D.
+- `gitleaks-history`: lote F.
+
+**Pendientes por lote:**
+- **C:** `vite` 6.4.3 (587h, 698v, 9jrq, r825, rq7h) y `source-map-js` 1.2.1 (68fv), solo desarrollo.
+- **D:** OTel (q7rr, 45rx, 8988, qqmp), `uuid` (w5hq) y `react-router` (qwww). Todos requieren un cambio de versión mayor o una decisión sobre sus excepciones.
+
+**Hueco de CI detectado (sin corregir, fuera del lote):** `identity-preflight.yml` no incluye `package-lock.json` en `paths`, de modo que un cambio solo de dependencias no ejecuta esa suite. Para este lote se cubrió con la ejecución local equivalente.
+
+**Imagen productiva:** al reconstruir la API, `node_modules` llevaría estas seis versiones. No hay cambio de código, Dockerfile ni imagen base. Hasta que se apruebe un despliegue, producción sigue con `royalties-f3a2-145934b` y las versiones anteriores.
