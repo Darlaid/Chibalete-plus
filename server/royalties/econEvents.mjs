@@ -90,6 +90,18 @@ export function ensureEconSchema(db) {
     `);
 }
 
+/**
+ * En producción el esquema existe desde el arranque, sea cual sea
+ * `ECONOMIC_INGEST_MODE`: la tabla queda vacía hasta que la ingesta se active,
+ * y así sus restricciones se pueden verificar y respaldar antes. Fuera de
+ * producción la creación sigue siendo perezosa. Devuelve si se creó.
+ */
+export function ensureEconSchemaAtBoot(getDb, env = process.env) {
+    if (env.NODE_ENV !== 'production') return false;
+    ensureEconSchema(getDb());
+    return true;
+}
+
 /** Id determinista de la atribución de una sesión técnica. */
 export function sessionStartEventId(userId, contentId, sessionId) {
     const h = crypto.createHash('sha256').update(`${userId}\u0000${contentId}\u0000${sessionId}`).digest('hex');

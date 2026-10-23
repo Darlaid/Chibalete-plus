@@ -12239,6 +12239,10 @@ if (process.env.NODE_ENV === 'production') {
     try { publishersStore.getRoyaltiesDb((m) => log(m)); log(`[PUBLISHERS] royalties.db ready`); }
     catch (e) { log(`[PUBLISHERS] royalties.db unavailable at boot: ${e.message}`, 'ERROR'); }
 }
+// F3-A2: esquema econ_events presente desde el arranque; la ingesta sigue
+// gobernada por ECONOMIC_INGEST_MODE (off por defecto).
+try { if (econEvents.ensureEconSchemaAtBoot(getEventsDb)) log(`[ECON] econ_events schema ready (ingest=${econEvents.econIngestMode()})`); }
+catch (e) { log(`[ECON] econ_events schema unavailable at boot: ${e.message}`, 'ERROR'); }
 
 app.listen(PORT, '0.0.0.0', () => {
     log(`Server running on port ${PORT}`);

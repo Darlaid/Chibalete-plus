@@ -307,6 +307,24 @@ section('[9] compatibilidad con la rotación de archivo');
     ok('econ_events no se rota ni expira (evidencia conservada)', econN === 1);
 }
 
+section('[10] esquema al arranque');
+{
+    const f = path.join(tmp, 'boot-events.db');
+    let opened = 0, conn = null;
+    const getDb = () => { opened++; return (conn ??= new Database(f)); };
+    ok('fuera de producción no abre ni crea nada', econ.ensureEconSchemaAtBoot(getDb, { NODE_ENV: 'test' }) === false && opened === 0 && !fs.existsSync(f));
+    const env = { NODE_ENV: 'production' };
+    ok('en producción crea el esquema con la ingesta apagada', econ.econIngestMode(env) === 'off' && econ.ensureEconSchemaAtBoot(getDb, env) === true);
+    ok('idempotente en un segundo arranque', econ.ensureEconSchemaAtBoot(getDb, env) === true);
+    conn.close();
+    const db = new Database(f);
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE tbl_name = 'econ_events' ORDER BY name").all().map((r) => r.name);
+    ok('tabla, índices y triggers append-only presentes',
+        ['econ_events', 'econ_events_no_delete', 'econ_events_no_update', 'idx_econ_server_ts', 'idx_econ_user_server_ts', 'ux_econ_session_event_ts'].every((n) => names.includes(n)), names.join(','));
+    ok('la tabla nace vacía', db.prepare('SELECT COUNT(*) n FROM econ_events').get().n === 0);
+    db.close();
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\neconEvents — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);
