@@ -136,7 +136,7 @@ OLD_LU_CAN_READ_WITHOUT_UPDATE: solo el libro ya descargado, offline (sin cambio
 
 ## L. Activación strict (15:16:07Z–15:16:32Z)
 
-- **Override:** `docker-compose.override.yml.bak-pre-strict-<ts>` (en `/root/chp-cp2/strict_ts`). Se añadió `UPLOADS_AUTHZ_MODE: "strict"` tras la línea 59 (api_1) y la 101 (api_2); el diff son exactamente 2 líneas y `docker compose config` sale OK.
+- **Override:** `docker-compose.override.yml.bak-pre-strict-<ts>` (en `/root/chp-cp2/strict_ts`). Se añadió `UPLOADS_AUTHZ_MODE: "strict"` tras la línea 59 (api_1) y la 101 (api_2); el diff son exactamente 2 líneas y `docker compose config -q >/dev/null` valida sin errores.
 - **Rolling:**
   - api_1 recreado → healthy → `[BOOT] …=strict` → smoke: TXT anónimo 401, portada 204;
   - api_2, lo mismo.

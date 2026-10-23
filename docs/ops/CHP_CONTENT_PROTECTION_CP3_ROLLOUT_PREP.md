@@ -32,7 +32,7 @@ PRODUCTION_CHANGE:         ZERO
 
 ## C. Estabilidad CP-2 (2026-10-17T15:16Z → 2026-10-18T15:16:42Z)
 
-Fuentes: `docker logs` de edge, api_1 y api_2; `docker inspect`; Alertmanager. Solo se usaron agregados.
+Fuentes: `docker logs` de edge, api_1 y api_2; metadatos de contenedor con `node scripts/security/safeOperationalEvidence.mjs container-summary`; Alertmanager. Solo se usaron agregados.
 
 | Métrica | Resultado | Observación |
 |---|---|---|

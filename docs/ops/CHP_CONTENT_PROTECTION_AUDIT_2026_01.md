@@ -421,7 +421,7 @@ Incluso tras las correcciones estructurales, la formulación defendible será **
 
 Solo lectura, con contenido de prueba o la cuenta propia del operador. Sin credenciales ajenas.
 
-1. **Baseline:** `docker ps --format '{{.Names}} {{.Image}}'`; `docker inspect` de los env `SESSION_AUTH_MODE`, `SESSION_LEGACY_ALLOW` y `ACCESS_FALLBACK_MODE` en api_1/api_2; `docker exec chibalete_edge nginx -T | sed -n '/location \^~ \/uploads/,/}/p'`, comparado con `ops/edge/nginx.conf`.
+1. **Baseline:** `docker ps --format '{{.Names}} {{.Image}}'`; `node scripts/security/safeOperationalEvidence.mjs environment-names chibalete_api_1 chibalete_api_2` para `SESSION_AUTH_MODE`, `SESSION_LEGACY_ALLOW` y `ACCESS_FALLBACK_MODE` (presencia de las tres; valor solo de las banderas publicables); `docker exec chibalete_edge nginx -T | sed -n '/location \^~ \/uploads/,/}/p'`, comparado con `ops/edge/nginx.conf`.
 2. **NO SESSION:** `curl -sI https://<dominio>/uploads/<id-no-pedagógico>/<archivo>.pdf|.txt|.mp3|.mp4` y `…/canonical/book.txt` de un título EPUB → se espera 200 + `public, immutable`.
 3. `curl -sI …/<x>.epub` → 403; `curl -s -o /dev/null -w '%{http_code}' https://<dominio>/api/content/<id>/epub` → 401; `curl -H 'x-user-id: <id-propio>' …/epub` → debe dar 401 en enforce.
 4. **AUTH WITHOUT ACCESS** (cuenta de prueba sin el título): `GET /api/content` → ¿lista `texto_plano_url`/`url_recurso` de títulos no asignados? `/epub` del título → 403.
