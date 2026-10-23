@@ -207,7 +207,7 @@ Solo `package-lock.json` (2 paquetes × version/resolved/integrity); `package.js
 | qqmp (MOD) | `instrumentation-{pg,mongoose,mysql,mysql2,knex,tedious,cassandra-driver}` | `auto-instrumentations-node` y `@sentry/node` v8 | pg 0.73, mongoose/mysql/mysql2 0.67, knex 0.65, tedious 0.40, cassandra 0.66, oracledb 0.46 | imagen API | No: Chibalete+ no usa ninguna de esas bases de datos | `auto-instrumentations-node` 0.79.0, la primera que trae las mínimas corregidas |
 | w5hq (MOD) | `uuid` 9.0.1 y 8.3.2 | `auto-instr` → `resource-detector-gcp` → `gaxios@6`; `autocannon` → `hyperid` (dev) | 11.1.1 | 9.0.1 sí; 8.3.2 solo dev | No: sin `buf` en v3/v5/v6; hyperid usa `crypto.randomUUID` en Node 20 | `uuid@9` desaparece con OTel 2.x; override `hyperid → uuid ^11.1.1` |
 
-**Producción, verificado en solo lectura con nombres de variables y sin valores** (`safeOperationalEvidence.mjs environment-names` sobre `docker inspect`): `api_1` tiene 32 variables, ninguna `OTEL_*`, `SENTRY_*`, `GLITCHTIP_*` ni `NODE_OPTIONS`. El comando del contenedor es `["node","server/server.js"]`, sin `--import otel.mjs`. OTel no se carga y Sentry se importa pero queda inerte.
+**Producción, verificado en solo lectura con nombres de variables y sin valores** (`safeOperationalEvidence.mjs environment-names` con `--from-file -`, sin persistir el JSON del contenedor): `api_1` tiene 32 variables, ninguna `OTEL_*`, `SENTRY_*`, `GLITCHTIP_*` ni `NODE_OPTIONS`. El comando del contenedor es `["node","server/server.js"]`, sin `--import otel.mjs`. OTel no se carga y Sentry se importa pero queda inerte.
 
 ### 7.2 Estrategia
 
