@@ -29,6 +29,7 @@ import * as experienceStore from './lib/experienceStore.js';
 // CHP-MOOK-COVER-UPLOAD-01A — contrato de la cubierta, compartido con el frontend.
 import { validateCover, extensionForMime, COVER_UPLOAD_MAX_BYTES } from './lib/coverPolicy.js';
 import { checkNewPassword, hashNewPassword } from './lib/passwordPolicy.js';
+import { isProtectedAdmin, wouldLeaveNoUsableAdmin, protectedUpdateViolation } from './lib/protectedAccounts.js';
 import {
     emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
     emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
@@ -5834,6 +5835,9 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     // password vacío/nulo no es un cambio (antes sobrescribía el hash con '').
     // Un password nuevo pasa la política y se hashea siempre en el servidor.
     stripServerOwnedCredentialFields(updates);
+    // Unidad A-PROD — para la cuenta protegida, solo ella misma o la autoridad
+    // de máquina (admin-secret file-only, recuperación operativa) fijan contraseña.
+    const canSetProtectedPassword = (req.auth?.userId === id) || (await isAdminRequest(req));
     if ('password' in updates && (updates.password === undefined || updates.password === null || updates.password === '')) {
         delete updates.password;
     }
@@ -5865,6 +5869,14 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
             oldRoles   = [...(users[index].roles || [])];
             const oldGroupIds = Array.isArray(users[index].groupIds) ? [...users[index].groupIds] : [];
             mergedUser = normalizeUser({ ...users[index], ...updates });
+            if (isProtectedAdmin(users[index])) {
+                const violation = protectedUpdateViolation(users[index], mergedUser, {
+                    passwordChanged: updates.password !== undefined,
+                    canSetPassword:  canSetProtectedPassword,
+                    isUserActive,
+                });
+                if (violation) { conflict = { conflict: 'protected', reason: violation }; return; }
+            }
             const newGroupIds = Array.isArray(mergedUser.groupIds) ? [...mergedUser.groupIds] : [];
 
             const { added, removed } = diffIds(oldGroupIds, newGroupIds);
@@ -5916,6 +5928,10 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
     }
     if (conflict?.conflict === 'not_found')    return res.status(404).json({ error: 'Usuario no encontrado' });
     if (conflict?.conflict === 'dup_email')    return res.status(409).json({ error: 'El nuevo email ya está en uso' });
+    if (conflict?.conflict === 'protected') {
+        log(`User update rechazado: cuenta protegida user=${id} motivo=${conflict.reason}`, 'ACCESS');
+        return res.status(409).json({ error: 'Cuenta administrativa protegida: no se puede desactivar, quitar el rol administrador, cambiar su email ni fijar su contraseña desde otra cuenta.', code: 'PROTECTED_ACCOUNT', reason: conflict.reason });
+    }
     if (conflict?.conflict === 'group') {
         if (conflict.error === GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND) {
             return res.status(400).json({
@@ -5986,6 +6002,10 @@ async function applyCredentialAction(req, res, action) {
     const conflict = await mutateUsers((users) => {
         const index = users.findIndex(u => u?.id === id);
         if (index === -1) return { conflict: 'not_found' };
+        // Unidad A-PROD — la cuenta principal nunca se reinvita ni se desactiva
+        // por esta vía, y ninguna acción puede dejar sin administrador utilizable.
+        if (isProtectedAdmin(users[index])) return { conflict: 'protected' };
+        if (wouldLeaveNoUsableAdmin(users, id, isUserActive)) return { conflict: 'last_admin' };
         const { password: _pw, inviteToken: _it, inviteExpiresAt: _ie, resetToken: _rt, resetExpiresAt: _re, ...rest } = users[index];
         previousStatus = rest.accountStatus || 'active';
         const next = reinvite
@@ -5998,6 +6018,13 @@ async function applyCredentialAction(req, res, action) {
         return null;
     });
     if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict?.conflict === 'protected') {
+        log(`User ${action} rechazado: cuenta protegida user=${id}`, 'ACCESS');
+        return res.status(409).json({ error: 'Cuenta administrativa protegida: no se puede reinvitar ni desactivar.', code: 'PROTECTED_ACCOUNT' });
+    }
+    if (conflict?.conflict === 'last_admin') {
+        return res.status(409).json({ error: 'No se puede dejar la plataforma sin otra cuenta administrativa activa.', code: 'LAST_ADMIN' });
+    }
 
     // credentialVersion ya invalida cualquier sesión viva; la revocación del
     // store es la segunda barrera (y libera las filas).
@@ -6041,6 +6068,8 @@ app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
             const groups = readCanonicalStoreForMutation(GROUPS_DB);
             const index  = users.findIndex(u => u.id === id);
             if (index === -1) { conflict = { conflict: 'not_found' }; return; }
+            // Unidad A-PROD — la cuenta administrativa principal no se elimina.
+            if (isProtectedAdmin(users[index])) { conflict = { conflict: 'protected' }; return; }
             deletedUser = users[index];
 
             detachedFromGroupIds = detachUserFromAllGroups(groups, id);
@@ -6051,6 +6080,10 @@ app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
         });
     }, 'groupsLock');
     if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict?.conflict === 'protected') {
+        log(`User delete rechazado: cuenta protegida user=${id}`, 'ACCESS');
+        return res.status(409).json({ error: 'Cuenta administrativa protegida: no se puede eliminar.', code: 'PROTECTED_ACCOUNT' });
+    }
 
     log(`User deleted: ${id} (detached from ${detachedFromGroupIds.length} groups)`, 'ACCESS');
     writeAuditLog({

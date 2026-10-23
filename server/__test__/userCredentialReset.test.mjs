@@ -35,9 +35,11 @@ const P = { users: tmp + '/u.json', groups: tmp + '/g.json', schools: tmp + '/s.
 fs.mkdirSync(P.uploads, { recursive: true });
 
 // Contraseñas sintéticas de fixture (no son credenciales reales).
-const PW = { ADM: 'Adm-fixture-77!', RDR: 'Rdr-fixture-12!', RDR2: 'Rdr2-fixture-34!', LEG: 'Legacy-plain-31', MED: 'Med-fixture-56!', NOID: 'Noid-plain-55', U1: 'U1-fixture-01!', U2: 'U2-fixture-02!', U3: 'U3-fixture-03!' };
+const PW = { PRIN: 'Prin-fixture-80!', ADM: 'Adm-fixture-77!', RDR: 'Rdr-fixture-12!', RDR2: 'Rdr2-fixture-34!', LEG: 'Legacy-plain-31', MED: 'Med-fixture-56!', NOID: 'Noid-plain-55', U1: 'U1-fixture-01!', U2: 'U2-fixture-02!', U3: 'U3-fixture-03!' };
 const H = (p) => bcrypt.hashSync(p, 4);
 const users = [
+    // Fixture con el email de la cuenta principal (store temporal, no productivo).
+    { id: 'PRIN', email: 'admin@chibaleteeditores.com', nombre_completo: 'Principal', password: H(PW.PRIN), roles: ['administrador'], accountStatus: 'active' },
     { id: 'ADM', email: 'adm@x.test', nombre_completo: 'Admin', password: H(PW.ADM), roles: ['administrador'], accountStatus: 'active' },
     { id: 'RDR', email: 'rdr@x.test', nombre_completo: 'Lectora', password: H(PW.RDR), roles: ['lector'], accountStatus: 'active', groupIds: ['g1'], nivel_lectura: 'Explorador', libros_leidos: 7 },
     { id: 'RDR2', email: 'rdr2@x.test', nombre_completo: 'Lector Dos', password: H(PW.RDR2), roles: ['lector'], accountStatus: 'active', groupIds: ['g1'] },
@@ -232,6 +234,32 @@ async function main() {
     const leak = (txt) => secretsSeen.filter(Boolean).some(t => txt.includes(t)) || pwValues.some(p => txt.includes(p));
     ok('auditoría sin tokens ni contraseñas', !leak(auditTxt));
     ok('log del servidor sin tokens ni contraseñas', !leak(serverLog));
+
+    console.log('\n[13] cuenta administrativa principal protegida');
+    const prinBefore = JSON.stringify(userById('PRIN'));
+    const codeOf = async (r) => (await r.json().catch(() => ({}))).code;
+    const rDis = await send('POST', '/api/users/PRIN/disable', admin);
+    ok('otro admin no puede desactivarla → 409 PROTECTED_ACCOUNT', rDis.status === 409 && (await codeOf(rDis)) === 'PROTECTED_ACCOUNT');
+    ok('ni reinvitarla → 409', (await send('POST', '/api/users/PRIN/reinvite', admin)).status === 409);
+    ok('PUT accountStatus=disabled → 409', (await send('PUT', '/api/users/PRIN', admin, { accountStatus: 'disabled' })).status === 409);
+    ok('PUT accountStatus=invited → 409', (await send('PUT', '/api/users/PRIN', admin, { accountStatus: 'invited' })).status === 409);
+    ok('PUT quitar rol administrador → 409', (await send('PUT', '/api/users/PRIN', admin, { roles: ['lector'] })).status === 409);
+    ok('PUT cambiar email → 409', (await send('PUT', '/api/users/PRIN', admin, { email: 'otra@x.test' })).status === 409);
+    ok('PUT fijar contraseña desde otra cuenta → 409', (await send('PUT', '/api/users/PRIN', admin, { password: 'Toma-Control-91!' })).status === 409);
+    ok('DELETE → 409', (await send('DELETE', '/api/users/PRIN', admin)).status === 409);
+    ok('tras todos los intentos el registro es idéntico', JSON.stringify(userById('PRIN')) === prinBefore);
+    ok('la contraseña de la principal sigue funcionando', (await login('admin@chibaleteeditores.com', PW.PRIN)).status === 200);
+    ok('editar su nombre sigue permitido', (await send('PUT', '/api/users/PRIN', admin, { nombre_completo: 'Principal Editorial' })).status === 200
+        && userById('PRIN').nombre_completo === 'Principal Editorial' && userById('PRIN').password === JSON.parse(prinBefore).password);
+
+    const prin = await loginCookie('admin@chibaleteeditores.com', PW.PRIN);
+    ok('la principal puede desactivar a otro administrador', (await send('POST', '/api/users/ADM/disable', prin)).status === 200);
+    ok('la sesión del administrador desactivado cae', (await me(admin)) === 401);
+    ok('la principal no puede desactivarse a sí misma', (await send('POST', '/api/users/PRIN/disable', prin)).status === 409);
+    ok('la principal sigue activa y con sesión válida', userById('PRIN').accountStatus === 'active' && (await me(prin)) === 200);
+    const selfPw = await send('PUT', '/api/users/PRIN', prin, { password: 'Prin-Propia-Nueva-82!' });
+    ok('la principal sí puede cambiar su propia contraseña (política aplicada)', selfPw.status === 200 && bcrypt.compareSync('Prin-Propia-Nueva-82!', userById('PRIN').password));
+    ok('y no con una predeterminada', (await send('PUT', '/api/users/PRIN', await loginCookie('admin@chibaleteeditores.com', 'Prin-Propia-Nueva-82!'), { password: 'chibalete123' })).status === 400);
 }
 
 main().then(() => {
