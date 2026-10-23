@@ -87,3 +87,24 @@ ignoreUntil = 2026-10-21
 id = "GHSA-qwww-vcr4-c8h2"
 reason = "Advisory limited to React Router RSC mode. Chibalete+ is a client-only SPA (ReactDOM.createRoot without hydration, HashRouter, declarative Routes/Route, no data router, loaders or actions) with no RSC, SSR or server actions, served as static assets by nginx, so the vulnerable path is not reachable in the deployed architecture. Not a claim that the flaw is absent. Fixing it requires migrating to react-router 8.3.0 in a dedicated unit: react-router-dom has no 8.x line, so 32 files must import react-router directly, plus React >=19.2.7 and Node >=22.22.0 in both Dockerfiles. Must be re-evaluated before the expiry date, and immediately if RSC, SSR or a data router is introduced."
 ignoreUntil = 2026-09-30
+
+# ── GHSA-mrhx-c7xc-m3w5 / CVE-2023-54404 — zod: issues sin tope en arrays (HIGH 8.2) ─
+# SEC-DEPS-02 / ZOD-01 (2026-10-23). zod 3.25.76 (directa; peer opcional de openai).
+# Un array inválido genera un issue por elemento; en zod 3 `.max()` NO corta
+# (registra too_big y sigue recorriendo). El único fix (4.6.6, PR #6652) es solo
+# v4, solo para colecciones con tope, y no existe 3.x corregida.
+# MITIGADO (verificado, server/__test__/zodAdvisoryExposure.test.mjs):
+#   - zod solo en 4 módulos: auth/offline/rum sin colecciones; los 4 z.array
+#     del registry de eventos no reciben entrada externa (group_updated y
+#     membership_moved sin emisor; Leo recorta a 50 strings ≤ 40 antes de validar;
+#     los eventos de lectura del cliente se reconstruyen con escalares).
+#   - Todo JSON entra por express.json (100 kB tras descomprimir; gzip 10 MB → 413).
+#   - Peor caso medido en rutas alcanzables con 100 kB adversariales: ≤ 2 issues, < 2 ms.
+# Revisión ANTICIPADA si cambia el advisory, si un esquema añade colecciones, si
+# un emisor de esos 4 eventos pasa a recibir datos del cliente, si sube el límite
+# de cuerpo o si se expone una ruta pública nueva con zod. Responsable: seguridad
+# técnica de Chibalete+. Evidencia: docs/ops/SEC_DEPS_02_DIAGNOSTICO.md §9.
+[[IgnoredVulns]]
+id = "GHSA-mrhx-c7xc-m3w5"
+reason = "Mitigated: no external input reaches a zod array schema (auth/offline/rum schemas have no collections; the 4 event-registry arrays are fed only by server code that clamps them to 50 short strings, or have no emitter) and every JSON body is capped at 100 kB after decompression. Worst case on reachable routes: <=2 issues. The only fix (zod 4.6.6) is v4-only; no patched 3.x exists. Guarded by server/__test__/zodAdvisoryExposure.test.mjs. Owner: Chibalete+ technical security. Review early if the advisory, schemas, emitters, body limit or public zod routes change."
+ignoreUntil = 2026-11-23

@@ -292,3 +292,65 @@ El front no se evaluaba porque el job único escaneaba la API primero: si la API
   2. Tags `rollback-pre-lote-e` sobre `f2a3e5118108` (API) y `055537dbbdd1` (front), y backup del override.
   3. Cambiar la línea 40 y recrear `api_1`, con gate. Después la línea 85 y `api_2`, con gate. Después la línea 130, `front` y reload del edge.
 - **Rollback:** volver a `rollback-pre-lote-e` por componente, o restaurar el `.bak` del override, y recrear solo ese servicio. No se tocan datos.
+
+## 9. ZOD-01 — evaluación de GHSA-mrhx-c7xc-m3w5 y excepción temporal (2026-10-23)
+
+**Decisión: GO para la excepción.** La mitigación es efectiva y queda fijada por una prueba de regresión que bloquea en CI. Caduca el **2026-11-23**.
+
+### 9.1 Alcance real del advisory
+
+- **Defecto:** un array inválido genera un issue por elemento, sin tope; con esquemas de elementos anchos se multiplica (PR #6475). En **zod 3, `.max()` no corta la validación:** registra `too_big` y sigue recorriendo (`v3/types.js`, `ZodArray._parse`). Medido: `z.array(z.string().max(40)).max(50)` con 51 000 números da 51 001 issues, ~207 ms y ~35 MB de heap por llamada.
+- **Corrección upstream:** solo en 4.6.6 (PR #6652, 2026-10-09). Aplica solo a **v4**, solo a colecciones **con** tope («Unbounded containers are unchanged»), y no existe ninguna 3.x corregida (3.25.76 es la última). Migrar a zod 4 manteniendo la API v3 no lo corregiría.
+- **Datos de origen:** OSV y GitHub coinciden: `< 4.6.6`; advisory actualizado el 2026-10-23 a las 18:26 UTC.
+
+### 9.2 Rutas y esquemas auditados
+
+| Módulo | Esquemas | Entrada | Colecciones |
+|---|---|---|---|
+| `schemas/auth.schema.js` | login, reset-request (×2 rutas), reset-confirm (×2) | pública, con rate limit **antes** de validar | ninguna; strings con `.max()` y `.strip()` |
+| `schemas/offline.schema.js` | `POST /api/offline/assignment` | autenticada | ninguna |
+| `observability/rum.js` | `POST /api/rum` | pública (`METRICS_ENABLED=1` en producción) | ninguna; enum, string y número |
+| `analytics/eventRegistry.js` | 79 eventos | **solo** desde el servidor | 4 `z.array` con `.max(20/500/50/50)` |
+
+- **Los 4 arrays no reciben entrada externa:**
+  - `group_updated` y `membership_moved` no tienen emisor.
+  - `leo_memory_updated` y `leo_profile_updated` solo los emite `leoBackboneEmitter`, que recorta a 50 strings de ≤ 40 caracteres antes de validar.
+  - Los eventos de lectura del cliente se mapean a nombres de lectura cerrados y se reconstruyen con escalares.
+- **Transitivas:** `openai` solo usa zod en helpers que el servidor no llama y en un conversor de esquemas. El front no usa zod.
+- **Cuerpo HTTP:** el único parser es `express.json` (global y 8 rutas de Aula Viva, autenticadas), con el límite por defecto de 100 kB **después de descomprimir**. El edge permite 100 MB, pero Express corta antes.
+
+### 9.3 Verificación
+
+- **Prueba de regresión** `server/__test__/zodAdvisoryExposure.test.mjs` (`npm run test:zod-exposure`, paso bloqueante de `identity-preflight`): **34/34**. Comprueba:
+  - el inventario de importadores;
+  - las colecciones y sus topes;
+  - los emisores y el recorte de Leo;
+  - los parsers sin `limit` propio, y 413 con 101 kB, con gzip que se expande a 10 MB y con deflate que se expande a 1 MB;
+  - el peor caso de los esquemas alcanzables con 100 kB adversariales: ≤ 2 issues y < 200 ms; medido, < 2 ms;
+  - la excepción: solo este id, caducidad ≤ 2026-11-23 y zod 3.25.76.
+
+  Si cambia cualquiera de esas condiciones, el CI se pone en rojo.
+- **Servidor real** (sandbox en modo producción con datos sintéticos, código idéntico a HEAD): **23/23**.
+  - Login válido, inválido, con tipos erróneos (400 con ≤ 20 detalles), con un array de 51 000 elementos no declarado (200, descartado), con 101 kB (413) y con gzip de 10 MB (413).
+  - Las 4 rutas de reset, incluido `email` como array de 51 000 elementos (400).
+  - Offline: sin sesión 401; inválidos 400; válido llega al handler.
+  - RUM: 204.
+  - Ráfaga de 40 cuerpos de ~100 kB: sin 5xx y `ready` sigue en 200. Memoria del contenedor estable (127 → 120 MiB), 0 errores y 0 secretos en los logs.
+  - El rate limit de login y reset devolvió 429 en una repetición: actúa antes de `zod`.
+- **Suites** (`node:20-bookworm`, `npm ci`): session-browser, auth-reset, credential-reset, b2c, evidence (test y lint), 2 de sesión, 3 de authz, uploads, Leo ownership, login `lastLoginAt` y 2 de eventos, todas en verde.
+  - `identity-preflight`: 3207 ✓, con el único fallo previo de `test:library`.
+  - `analyticsCanon`: el fallo previo de `scripts/events-archive.mjs`, que no está versionado.
+- **OSV:** con la excepción, 0 («Filtered 1»). **Sin ninguna configuración**, el único hallazgo del lockfile es este zod: la excepción no oculta nada más, y las excepciones caducadas no se renuevan.
+- **Trivy fs:** 0. Su base de datos aún no incluye este advisory; si lo incorpora, el job `trivy` se pondrá en rojo y habrá que tomar una decisión explícita en `.trivyignore`.
+
+### 9.4 Riesgo residual y revisión anticipada
+
+- **Riesgo residual:** CPU y heap proporcionales a 100 kB por petición en las rutas alcanzables, sin amplificación por issues.
+- **Revisar antes de la caducidad** si:
+  - cambia el advisory o aparece una 3.x corregida;
+  - un esquema añade colecciones;
+  - un emisor de esos 4 eventos pasa a recibir datos del cliente;
+  - se sube el límite de cuerpo;
+  - se expone una ruta pública nueva con zod.
+- **Responsable:** seguridad técnica de Chibalete+.
+- **Corrección definitiva** (unidad propia): migrar a zod ≥ 4.6.6 **y** a la API v4 en los 4 módulos, manteniendo los `.max()`.

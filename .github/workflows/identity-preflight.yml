@@ -32,6 +32,7 @@ on:
       - 'ecosystem.config.cjs'
       - 'package.json'
       - 'package-lock.json'
+      - 'osv-scanner.toml'
       - 'tsconfig.json'
       - '.github/workflows/identity-preflight.yml'
       - 'pages/**'
@@ -57,6 +58,7 @@ on:
       - 'ecosystem.config.cjs'
       - 'package.json'
       - 'package-lock.json'
+      - 'osv-scanner.toml'
       - 'tsconfig.json'
       - '.github/workflows/identity-preflight.yml'
       - 'pages/**'
@@ -133,6 +135,12 @@ jobs:
       # registros sin id. Servidor real en enforce, stores en temp.
       - name: Seguridad — reinvitación, desactivación y política de contraseñas
         run: npm run test:credential-reset
+
+      # SEC-DEPS-02 / ZOD-01 — condiciones que justifican la excepción temporal de
+      # OSV para GHSA-mrhx-c7xc-m3w5: ninguna entrada externa llega a un array de
+      # zod y todo cuerpo JSON queda en 100 kB. Si falla, la excepción deja de valer.
+      - name: Seguridad — exposición de zod (GHSA-mrhx-c7xc-m3w5)
+        run: npm run test:zod-exposure
 
       - name: Contrato de grupos y memberships (creación + edición)
         run: npm run test:memberships

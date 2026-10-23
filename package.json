@@ -53,6 +53,7 @@
     "test:session-browser": "node server/__test__/sessionBrowserCookieOnly.test.mjs",
     "test:auth-reset": "node server/__test__/resetRequestNoTokenDisclosure.test.mjs",
     "test:credential-reset": "node server/__test__/passwordPolicy.test.mjs && node server/__test__/protectedAccounts.test.mjs && node server/__test__/userCredentialReset.test.mjs && node pages/__tests__/AdminUsuariosCredentialActions.structural.test.mjs",
+    "test:zod-exposure": "node server/__test__/zodAdvisoryExposure.test.mjs",
     "test:b2c": "node server/__test__/b2cProvisioning.unit.test.mjs && node server/__test__/b2cEntitlement.unit.test.mjs && node server/__test__/b2cProvisioning.integration.test.mjs"
   },
   "dependencies": {
