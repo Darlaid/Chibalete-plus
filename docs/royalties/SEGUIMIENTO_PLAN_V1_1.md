@@ -9,7 +9,7 @@ El plan (`PLAN_GENERAL_V1_1.md`) está congelado; este documento solo registra e
 | 3 | F1-A | **En producción** (2026-10-22), G1/G9 | `F1A_PROD_EVIDENCE.md` (`0e97b32`) |
 | 4 | F2-A | **En producción con cumplimiento `off`** (2026-10-22), G2 parcial: registro y elegibilidad operativos; la activación de `enforce` queda bloqueada por los riesgos de `F2A_PROD_EVIDENCE.md` §6 | `F2A_IMPACT_AUDIT.md`, `F2A_PROD_EVIDENCE.md` |
 | 5 | F2-B | **En producción** (2026-10-22, `ffc563b`): clasificación comercial operativa; las 22 reglas siguen `unclassified` (0 elegibles) a la espera de aprobación individual (P9); defecto `b2c` de `POST /api/access` corregido | `F2B_COMMERCIAL_MATRIX.md`, `F2B_PROD_EVIDENCE.md` |
-| 6 | F3-A2 | **GREEN local, sin desplegar** (2026-10-22): ingesta de `econ_tick` y atribución F2-B en el primer tick, tabla `econ_events` (append-only) en `events.db`, flag `ECONOMIC_INGEST_MODE` apagado | `F3A2_ECON_INGEST.md` |
+| 6 | F3-A2 | **En producción con la ingesta apagada** (2026-10-23, `145934b`): ingesta de `econ_tick` y atribución F2-B en el primer tick; tabla `econ_events` (append-only) creada vacía en `events.db`; flag `ECONOMIC_INGEST_MODE` apagado | `F3A2_ECON_INGEST.md`, `F3A2_PROD_EVIDENCE.md` |
 | 7–14 | F3-A3 … F6-B | Pendientes | — |
 
 **Decisiones de negocio abiertas (no bloquearon F2-B):** P1, P4, P7, P9 (clasificación regla por regla), P11 (`DECISIONES_F0C.md` §4).
