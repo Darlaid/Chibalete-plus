@@ -165,3 +165,29 @@ Solo `package-lock.json`; `package.json`, los `overrides` y la entrada raíz del
 **Hueco de CI detectado (sin corregir, fuera del lote):** `identity-preflight.yml` no incluye `package-lock.json` en `paths`, de modo que un cambio solo de dependencias no ejecuta esa suite. Para este lote se cubrió con la ejecución local equivalente.
 
 **Imagen productiva:** al reconstruir la API, `node_modules` llevaría estas seis versiones. No hay cambio de código, Dockerfile ni imagen base. Hasta que se apruebe un despliegue, producción sigue con `royalties-f3a2-145934b` y las versiones anteriores.
+
+## 6. Lote C ejecutado (2026-10-23, `8eb03c7` + `e7daf66`)
+
+Solo `package-lock.json` (2 paquetes × version/resolved/integrity); `package.json` y `overrides` no cambian. Versión mínima que corrige; `vite` 6.4.5 se descartó (publicada el 2026-10-21).
+
+| Paquete | Directa / transitiva | Antes → después | Advisories resueltos |
+|---|---|---|---|
+| `vite` | directa (devDependency; también vía `@vitejs/plugin-react`) | 6.4.3 → 6.4.4 | 587h, 698v, 9jrq, r825, rq7h |
+| `source-map-js` | transitiva (`vite` → `postcss` 8.5.23, rango `^1.2.1`) | 1.2.1 → 1.2.2 | 68fv |
+
+**Alcance comprobado, no supuesto:**
+- `npm ls --omit=dev` no contiene `vite`, `postcss` ni `source-map-js`; el árbol productivo (517 entradas) es idéntico entre baseline y lote C, así que la imagen API (`npm ci --omit=dev`) no cambia.
+- Ningún archivo de `server/`, `utils/` o `engines/` importa estos paquetes; solo `vite.config.ts`.
+- `vite` 6.4.4 declara `node ^18 || ^20 || >=22`; `source-map-js` 1.2.2, `>=0.10`. Sin dependencias nuevas.
+- El build del front (`Dockerfile.front`) usa vite, pero el `dist/` resultante es **idéntico byte a byte** (76 archivos, SHA-256) entre los dos árboles.
+
+**Pruebas** (Windows, Node 20.18, dos worktrees limpios con `npm ci`, baseline `bbee011` y lote C):
+- `npm ci` y `npm ls` limpios en ambos (619 paquetes). El aviso EBADENGINE de `@vitejs/plugin-react` (pide Node ≥ 20.19) es local y previo.
+- Resultados iguales en verde: typecheck:baseline, build, b2c, memberships, content-rmw, session-browser, auth-reset, metric-contract, mook, store, evidence (`test` y `lint`), verify:deploy-config, image-integrity (test y contrato estático), 5 suites de subida y 7 de sesión/authz/eventos.
+- `royalties`: el arnés HTTP de `commercialClassHttp` es inestable en Windows en **los dos** árboles (baseline 1/5 «nunca healthy»; lote C 2/5: «nunca healthy» y la aserción de reloj `since >= t0`). Las demás ejecuciones dan 36 ✓ / 0 ✗ en ambos. El servidor no carga ningún paquete modificado.
+- `test:identity` y `verify-test-store-isolation`: una aserción falla igual en los dos árboles («ruta persistente fuera de temp → aborta»), porque los worktrees estaban dentro de `%TEMP%`. Es un artefacto del entorno local, no una regresión.
+- **OSV** (API osv.dev; todos los ignores de `osv-scanner.toml` están caducados): baseline 12 advisories / 26 filas → lote C **6 / 20**. Desaparecen exactamente los seis previstos y no aparece ninguno nuevo. Los restantes son del lote D: OTel (q7rr, 45rx, 8988, qqmp), `uuid` (w5hq) y `react-router` (qwww).
+
+**Hueco de CI corregido (`e7daf66`):** `identity-preflight.yml` añade `package-lock.json` a `paths` en `push` y `pull_request`. Solo cambia el filtro; los pasos y las condiciones de éxito quedan iguales.
+
+**Sin despliegue.** Producción sigue con `royalties-f3a2-145934b`.
