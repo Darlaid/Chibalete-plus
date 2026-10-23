@@ -22,7 +22,8 @@ if (ENABLED) {
         const { NodeSDK } = await import('@opentelemetry/sdk-node');
         const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-http');
         const { getNodeAutoInstrumentations } = await import('@opentelemetry/auto-instrumentations-node');
-        const { Resource } = await import('@opentelemetry/resources');
+        // OTel 2.x: la clase Resource ya no se exporta; se usa la factoría.
+        const { resourceFromAttributes } = await import('@opentelemetry/resources');
         const { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } = await import('@opentelemetry/semantic-conventions');
         const { ParentBasedSampler, TraceIdRatioBasedSampler } = await import('@opentelemetry/sdk-trace-base');
         // Propagación FIJADA a W3C (core 1.x). Ver bloque textMapPropagator.
@@ -33,8 +34,9 @@ if (ENABLED) {
         // El W3CBaggagePropagator 1.30.1 hace split del header `baggage` completo
         // SIN acotar longitud total, número de miembros ni tamaño por miembro
         // (las constantes W3C existen pero solo se usan al inyectar) → parsing no
-        // acotado. El fix oficial está en OTel 2.8+, inalcanzable mientras
-        // @sentry/node v8 fija OTel 1.x. Aquí envolvemos la EXTRACCIÓN con los
+        // acotado. El fix oficial está en OTel 2.8+, ya instalado desde
+        // SEC-DEPS-02 lote D (OTel 2.x + Sentry v10); el wrapper se conserva como
+        // defensa en profundidad. Aquí envolvemos la EXTRACCIÓN con los
         // mismos límites del spec W3C, medidos en bytes UTF-8, ANTES de split/join.
         // Header sobredimensionado o malformado → contexto SIN baggage, sin lanzar
         // ni registrar el contenido. La inyección y fields() se delegan intactos.
@@ -87,7 +89,7 @@ if (ENABLED) {
         const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://jaeger:4318';
 
         const sdk = new NodeSDK({
-            resource: new Resource({
+            resource: resourceFromAttributes({
                 [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'chibalete-api',
                 [ATTR_SERVICE_VERSION]: process.env.CHIBALETE_RELEASE || 'unknown',
                 'service.instance.id': process.env.HOSTNAME || 'local',

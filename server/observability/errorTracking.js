@@ -55,7 +55,7 @@ export function initErrorTracking() {
     }
 }
 
-/** Wirear DESPUÉS de definir las rutas. Noop sin DSN. @sentry/node v8 API. */
+/** Wirear DESPUÉS de definir las rutas. Noop sin DSN. @sentry/node v8–v10 API. */
 export function instrumentExpressErrors(app) {
     if (!ERROR_TRACKING_ENABLED) return;
     try { Sentry.setupExpressErrorHandler(app); } catch { /* noop defensivo */ }
