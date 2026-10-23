@@ -3,6 +3,8 @@
 **Fecha:** 2026-10-23 · **Base:** `d1b837b` · **Modo:** implementación local, pruebas y CI. **Sin despliegue.**
 **Alcance:** mecanismo de gestión de credenciales. Las ocho cuentas heredadas en texto plano **no se tocan** (Unidad B).
 
+> **Corrección (cierre de SEC-USERS-01):** las «ocho cuentas heredadas» y los administradores inventariados salían de `data/users_db.json`, una copia histórica que el servidor no usa. En el padrón canónico hay 0 contraseñas legibles y una sola cuenta administrativa activa. La Unidad B quedó **cancelada**. Ver `docs/ops/USERS_SOURCE_OF_TRUTH.md`.
+
 ## A. Auditoría del mecanismo previo
 
 | Punto | Antes | Riesgo |
@@ -82,7 +84,7 @@ Fallos previos con aserciones idénticas en los dos árboles:
 
 ## F. Riesgos pendientes
 
-- Las ocho cuentas heredadas siguen con contraseña legible hasta la Unidad B. Necesitan este mecanismo desplegado y la decisión cuenta por cuenta.
+- ~~Las ocho cuentas heredadas siguen con contraseña legible hasta la Unidad B.~~ Corregido: solo existen en la copia histórica `data/users_db.json` (riesgo de datos en reposo, no de login). Ver `USERS_SOURCE_OF_TRUTH.md` §4–§6.
 - El enlace de activación lo entrega el administrador por un canal seguro fuera de la plataforma; no hay correo saliente.
 - El token de invitación se guarda en `users_db.json`, como en el flujo de invitación existente. No se introdujo un almacén paralelo.
 - `invite-user` y `resend-invite` siguen limitadas al secreto de máquina (sin cambios).
@@ -90,7 +92,7 @@ Fallos previos con aserciones idénticas en los dos árboles:
 
 ## G. Unidad A-PROD — cuenta administrativa principal protegida
 
-Decisión de Dirección: `admin@chibaleteeditores.com` es la única cuenta administrativa que debe permanecer activa. En producción es `admin-super-1`: un único registro, `administrador`, activa, bcrypt.
+Decisión de Dirección: `admin@chibaleteeditores.com` es la única cuenta administrativa que debe permanecer activa. En producción es `user-1774362611303` (corregido: `admin-super-1` era el registro de la copia histórica): un único registro, `administrador`, activa, bcrypt.
 
 `server/lib/protectedAccounts.js` es una lista cerrada y aditiva. `PROTECTED_ADMIN_EMAILS` puede añadir emails, pero nunca retira la principal. No es un sistema de roles. Guardas en el servidor, evaluadas bajo el lock del padrón:
 

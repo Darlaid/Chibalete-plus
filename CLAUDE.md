@@ -211,7 +211,8 @@ Reglas:
 ### Backend (`/server/server.js`)
 
 Single-file Express app (~1,946 lines) with JSON flat-file databases in `/data/`:
-- `users_db.json`, `content.json`, `groups_db.json`, `progress_db.json`
+- `content.json`, `groups_db.json`, `progress_db.json`
+- **Usuarios:** el padrón canónico es `data-critical/usuarios_colegios_oro.json` (`USERS_DB`; en producción, el arranque aborta con cualquier otra ruta). `data/users_db.json` es una copia histórica `LEGACY_NON_CANONICAL`: no la uses para auditar usuarios ni credenciales. Ver `docs/ops/USERS_SOURCE_OF_TRUTH.md`.
 - `access_db.json` — scope-based access rules (E6 phase)
 - `leo_memory_db.json` — Leo AI session memory
 

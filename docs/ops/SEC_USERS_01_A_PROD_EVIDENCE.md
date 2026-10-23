@@ -53,7 +53,7 @@ El padrón canónico de producción es `USERS_DB=/app/data-critical/usuarios_col
 - La cuenta principal es `user-1774362611303`, no `admin-super-1`. Es la única cuenta administrativa real; las otras tres «administrativas» del inventario anterior no figuran en el padrón vivo.
 - La protección no se ve afectada, porque identifica la cuenta por email.
 
-La Unidad B debe replantearse sobre el padrón canónico. El riesgo restante de esas ocho contraseñas es **de datos en reposo** (la copia antigua y sus respaldos), no de inicio de sesión.
+La Unidad B quedó **cancelada** en el cierre (ver `docs/ops/USERS_SOURCE_OF_TRUTH.md`). El riesgo restante de esas ocho contraseñas es **de datos en reposo** (la copia antigua y sus respaldos), no de inicio de sesión.
 
 `deployment_guide.md` y `CLAUDE.md` describen el backend como un swap de bind mount de `server/`. En producción el código viaja en la imagen.
 
