@@ -28,6 +28,7 @@ import { mergeCanonicalProgress } from './lib/epubProgress.js';
 import * as experienceStore from './lib/experienceStore.js';
 // CHP-MOOK-COVER-UPLOAD-01A — contrato de la cubierta, compartido con el frontend.
 import { validateCover, extensionForMime, COVER_UPLOAD_MAX_BYTES } from './lib/coverPolicy.js';
+import { checkNewPassword, hashNewPassword } from './lib/passwordPolicy.js';
 import {
     emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
     emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
@@ -4618,6 +4619,15 @@ const hashPasswordIfNeeded = async (password) => {
     return await bcrypt.hash(password, 10);
 };
 
+// SEC-USERS-01 — campos de credencial que solo fija el servidor. Un cliente
+// (incluido un admin) no puede elegir su token de invitación/reset ni su
+// credentialVersion: se descartan del body en creación y edición.
+const SERVER_OWNED_CREDENTIAL_FIELDS = ['inviteToken', 'inviteExpiresAt', 'resetToken', 'resetExpiresAt', 'credentialVersion'];
+const stripServerOwnedCredentialFields = (obj) => {
+    for (const k of SERVER_OWNED_CREDENTIAL_FIELDS) delete obj[k];
+    return obj;
+};
+
 // --- PROGRESS SYNC HELPERS (Fase 3.2) ---
 const makeProgressKey = (userId, contentId) => `${userId}__${contentId}`;
 
@@ -5224,6 +5234,16 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
     const users = readCanonicalStoreForMutation(USERS_DB);
     const userIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
 
+    // SEC-USERS-01 — un registro sin id no es una identidad direccionable: no
+    // puede tener sesión firmada (sub = id) ni gestionarse desde Admin. Se
+    // rechaza con la misma respuesta genérica ANTES de comparar la contraseña,
+    // de modo que el login no escribe nada sobre él (ni lastLoginAt ni el
+    // auto-upgrade de hash).
+    if (userIndex !== -1 && !users[userIndex]?.id) {
+        log('Login rechazado: registro sin id', 'ACCESS');
+        return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
     if (userIndex !== -1) {
         const user = normalizeUser(users[userIndex]);
         let isValid = false;
@@ -5425,9 +5445,12 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
     if (password.length < 8) {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
     }
+    // SEC-USERS-01 — sin predeterminadas ni hashes aportados por el cliente.
+    const policy = checkNewPassword(password);
+    if (!policy.ok) return res.status(400).json({ error: policy.message, code: policy.code });
 
     // Hash BEFORE lock — async work must not run while holding the cross-process lock
-    const hashedPassword = await hashPasswordIfNeeded(password);
+    const hashedPassword = await hashNewPassword(password);
 
     // Lock: re-read -> validate token -> activate -> write (atomic across containers)
     let activated = null;
@@ -5626,9 +5649,12 @@ const handleResetConfirm = async (req, res) => {
     if (password.length < 8) {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
     }
+    // SEC-USERS-01 — sin predeterminadas ni hashes aportados por el cliente.
+    const policy = checkNewPassword(password);
+    if (!policy.ok) return res.status(400).json({ error: policy.message, code: policy.code });
 
     // Hash BEFORE lock — async work must not run while holding the cross-process lock
-    const hashedPassword = await hashPasswordIfNeeded(password);
+    const hashedPassword = await hashNewPassword(password);
 
     // Lock: re-read -> validate token -> apply new password -> write (atomic across containers)
     let updated = null;
@@ -5685,9 +5711,15 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
 
     const normalizedEmail = normalizeEmail(newUser.email);
 
+    // SEC-USERS-01 — tokens y credentialVersion los fija solo el servidor; la
+    // contraseña inicial no puede ser predeterminada ni un hash aportado.
+    stripServerOwnedCredentialFields(newUser);
+    const policy = checkNewPassword(newUser.password, { email: normalizedEmail });
+    if (!policy.ok) return res.status(400).json({ error: policy.message, code: policy.code });
+
     // Async work outside lock (hashing is slow, never hold lock during await)
     if (!newUser.id) newUser.id = `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    newUser.password = await hashPasswordIfNeeded(newUser.password);
+    newUser.password = await hashNewPassword(newUser.password);
     newUser.roles = normalizeRoles(newUser.roles);
     newUser.email = normalizedEmail;
     const VALID_ACCOUNT_STATUSES = ['active', 'invited', 'disabled'];
@@ -5797,8 +5829,19 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
 
     // Async work outside lock (never await while holding the cross-process lock)
     if (updates.roles)    updates.roles    = normalizeRoles(updates.roles);
-    if (updates.password) updates.password = await hashPasswordIfNeeded(updates.password);
     if (updates.email)    updates.email    = normalizeEmail(updates.email);
+    // SEC-USERS-01 — tokens/credentialVersion solo los fija el servidor. Un
+    // password vacío/nulo no es un cambio (antes sobrescribía el hash con '').
+    // Un password nuevo pasa la política y se hashea siempre en el servidor.
+    stripServerOwnedCredentialFields(updates);
+    if ('password' in updates && (updates.password === undefined || updates.password === null || updates.password === '')) {
+        delete updates.password;
+    }
+    if (updates.password !== undefined) {
+        const policy = checkNewPassword(updates.password, { email: updates.email });
+        if (!policy.ok) return res.status(400).json({ error: policy.message, code: policy.code });
+        updates.password = await hashNewPassword(updates.password);
+    }
 
     // Sprint 021 — drift bidireccional cerrado.
     // Si updates.groupIds llega, calculamos diff oldGroupIds vs newGroupIds y
@@ -5914,6 +5957,72 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
 
     res.json(sanitizeUserForClient(mergedUser));
 });
+
+// SEC-USERS-01 — REINVITAR / DESACTIVAR cuentas existentes (solo administración).
+//
+// Reinvitar: invalida la credencial (se elimina el hash), pone la cuenta en
+// 'invited' con un token nuevo de 32 bytes (48 h; un solo uso: accept-invite lo
+// consume) y revoca toda sesión (credentialVersion++). El titular elige su
+// contraseña en ActivarCuenta (/api/accept-invite).
+// Desactivar: accountStatus 'disabled', credencial y tokens pendientes
+// eliminados, sesiones revocadas. Solo un administrador la revierte, con una
+// nueva reinvitación.
+// En ambos casos id, roles, grupos, progreso y reglas de acceso quedan intactos.
+// El token sale UNA vez, dentro de activationUrl, en la respuesta al admin
+// (no-store); nunca va a logs ni a auditoría.
+const REINVITE_TTL_MS = 48 * 60 * 60 * 1000;
+async function applyCredentialAction(req, res, action) {
+    const { id } = req.params;
+    const actorId = req.auth?.userId || null;
+    // Un admin no puede bloquearse a sí mismo por error desde su propia sesión.
+    if (actorId && actorId === id) {
+        return res.status(409).json({ error: 'No puedes aplicar esta acción a tu propia cuenta' });
+    }
+    const reinvite = action === 'reinvite';
+    const inviteToken     = reinvite ? crypto.randomBytes(32).toString('hex') : null;
+    const inviteExpiresAt = reinvite ? Date.now() + REINVITE_TTL_MS : null;
+
+    let previousStatus = null;
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u?.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        const { password: _pw, inviteToken: _it, inviteExpiresAt: _ie, resetToken: _rt, resetExpiresAt: _re, ...rest } = users[index];
+        previousStatus = rest.accountStatus || 'active';
+        const next = reinvite
+            ? { ...rest, accountStatus: 'invited', inviteToken, inviteExpiresAt }
+            : { ...rest, accountStatus: 'disabled' };
+        next.accountStatusChangedAt = new Date().toISOString();
+        bumpCredentialVersion(next);
+        users[index] = next;
+        writeJSON(USERS_DB, users);
+        return null;
+    });
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    // credentialVersion ya invalida cualquier sesión viva; la revocación del
+    // store es la segunda barrera (y libera las filas).
+    try { sessionAuth.revokeAllUserSessions(id); authSessionRevoked.labels('credential_change').inc(); }
+    catch (e) { log(`[SESSION] revoke-on-${action} error: ${e.message}`, 'WARN'); }
+
+    log(`User ${reinvite ? 'reinvited' : 'disabled'}: user=${id}`, 'ACCESS');
+    writeAuditLog({
+        action:       reinvite ? 'reinvite_user' : 'disable_user',
+        targetUserId: id,
+        actor:        actorId || req.headers['x-user-id'] || null,
+        details:      { previousStatus },
+    });
+
+    res.set('Cache-Control', 'no-store');
+    if (reinvite) {
+        return res.status(200).json({
+            success: true, userId: id, accountStatus: 'invited', inviteExpiresAt,
+            activationUrl: `/#/activar?token=${inviteToken}`,
+        });
+    }
+    return res.status(200).json({ success: true, userId: id, accountStatus: 'disabled' });
+}
+app.post('/api/users/:id/reinvite', requireAdminAccess, (req, res) => applyCredentialAction(req, res, 'reinvite'));
+app.post('/api/users/:id/disable',  requireAdminAccess, (req, res) => applyCredentialAction(req, res, 'disable'));
 
 // DELETE USER
 app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {

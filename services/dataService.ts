@@ -1127,7 +1127,7 @@ class DataService {
                 const newUserObj = await this.createUser({
                     nombre_completo: (u.nombre_completo || u.nombre || '').trim(),
                     email: (u.email || '').trim().toLowerCase(),
-                    password: u.password || 'chibalete123',
+                    password: u.password || '', // SEC-USERS-01: sin predeterminada; el CSV ya exige contraseña por fila
                     colegio: canonicalColegio,
                     curso: (u.curso || '').trim(),
                     roles,
@@ -1181,7 +1181,7 @@ class DataService {
             nombre_usuario: userData.nombre_usuario || userData.email?.split('@')[0] || 'usuario',
             nombre_completo: userData.nombre_completo || 'Nuevo Usuario',
             email: userData.email || '',
-            password: userData.password || 'chibalete123',
+            password: userData.password || '', // SEC-USERS-01: el servidor rechaza predeterminadas y vacías
             colegio: userData.colegio,
             curso: userData.curso,
             avatar_url: userData.avatar_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(userData.nombre_completo || 'U')}&background=random`,
@@ -1262,6 +1262,34 @@ class DataService {
             this.users[idx] = updatedUser;
             this.saveState('users', this.users);
         }
+    }
+
+    // SEC-USERS-01 — reinvitar / desactivar una cuenta existente. El enlace de
+    // activación se devuelve al caller para mostrarlo una sola vez: nunca se
+    // guarda en this.users, en saveState ni en ningún almacenamiento local.
+    private async credentialAction(id: string, action: 'reinvite' | 'disable') {
+        const response = await fetch(`${this.apiUrl}/users/${encodeURIComponent(id)}/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...this.adminWriteHeaders },
+            cache: 'no-store',
+        });
+        const body = await response.json().catch(() => ({} as any));
+        if (!response.ok) throw new Error(body?.error || 'No se pudo completar la acción');
+        const idx = this.users.findIndex(u => u.id === id);
+        if (idx > -1) {
+            this.users[idx] = { ...this.users[idx], accountStatus: body.accountStatus } as User;
+            this.saveState('users', this.users);
+        }
+        return body as { accountStatus: string; activationUrl?: string; inviteExpiresAt?: number };
+    }
+
+    async reinviteUser(id: string): Promise<{ activationUrl: string; inviteExpiresAt: number }> {
+        const r = await this.credentialAction(id, 'reinvite');
+        return { activationUrl: r.activationUrl || '', inviteExpiresAt: r.inviteExpiresAt || 0 };
+    }
+
+    async disableUser(id: string): Promise<void> {
+        await this.credentialAction(id, 'disable');
     }
 
     async deleteUser(id: string) {

@@ -128,6 +128,12 @@ jobs:
       - name: Seguridad — el reset público no expone token ni existencia
         run: npm run test:auth-reset
 
+      # SEC-USERS-01 — reinvitar/desactivar cuentas existentes, política mínima
+      # de contraseñas (sin predeterminadas ni hashes del cliente) y rechazo de
+      # registros sin id. Servidor real en enforce, stores en temp.
+      - name: Seguridad — reinvitación, desactivación y política de contraseñas
+        run: npm run test:credential-reset
+
       - name: Contrato de grupos y memberships (creación + edición)
         run: npm run test:memberships
 

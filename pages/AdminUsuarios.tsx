@@ -56,6 +56,11 @@ const AdminUsuarios: React.FC = () => {
     // técnico crudo del backend; se muestra inline y traducido.
     const [userSaveMsg, setUserSaveMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
     const [isSavingUser, setIsSavingUser] = useState(false);
+    // SEC-USERS-01 — enlace de activación de una reinvitación: solo en memoria
+    // del componente, visible una vez y descartado al cerrar el modal.
+    const [credentialLink, setCredentialLink] = useState<string | null>(null);
+    const [isCredentialBusy, setIsCredentialBusy] = useState(false);
+    useEffect(() => { if (!isUserModalOpen) setCredentialLink(null); }, [isUserModalOpen]);
 
     const [isSchoolModalOpen, setIsSchoolModalOpen] = useState(false);
     const [schoolNameInput, setSchoolNameInput] = useState('');
@@ -331,7 +336,7 @@ const AdminUsuarios: React.FC = () => {
 
     // --- HANDLERS FOR USERS ---
     const handleCreateUser = () => {
-        setEditingUser({ nombre_completo: '', email: '', password: 'chibalete123', roles: ['lector'], colegio: selectedSchool, groupIds: [] });
+        setEditingUser({ nombre_completo: '', email: '', password: '', roles: ['lector'], colegio: selectedSchool, groupIds: [] });
         setUserSaveMsg(null);
         setIsUserModalOpen(true);
     };
@@ -368,9 +373,41 @@ const AdminUsuarios: React.FC = () => {
         }
     };
 
+    // SEC-USERS-01 — reinvitar o desactivar una cuenta existente. En ambos casos
+    // la contraseña actual deja de valer y se cierran sus sesiones.
+    const handleCredentialAction = async (action: 'reinvite' | 'disable') => {
+        if (!editingUser?.id) return;
+        const verbo = action === 'reinvite' ? 'reinvitar' : 'desactivar';
+        if (!confirm(`¿${verbo[0].toUpperCase()}${verbo.slice(1)} a ${editingUser.nombre_completo || 'este usuario'}? Su contraseña actual dejará de funcionar y se cerrarán sus sesiones.`)) return;
+        setIsCredentialBusy(true);
+        setUserSaveMsg(null);
+        setCredentialLink(null);
+        try {
+            if (action === 'reinvite') {
+                const { activationUrl } = await dataService.reinviteUser(editingUser.id);
+                setCredentialLink(new URL(activationUrl, window.location.origin).toString());
+                setEditingUser(prev => ({ ...prev!, accountStatus: 'invited' }));
+                setUserSaveMsg({ type: 'success', text: 'Cuenta reinvitada. Entrega el enlace al titular por un canal seguro.' });
+            } else {
+                await dataService.disableUser(editingUser.id);
+                setEditingUser(prev => ({ ...prev!, accountStatus: 'disabled' }));
+                setUserSaveMsg({ type: 'success', text: 'Cuenta desactivada. Para reactivarla, reinvítala.' });
+            }
+            if (selectedSchool) setSchoolUsers(dataService.getUsuariosByColegio(selectedSchool));
+        } catch (e) {
+            setUserSaveMsg({ type: 'error', text: (e as Error).message });
+        } finally {
+            setIsCredentialBusy(false);
+        }
+    };
+
     const handleSaveUser = async () => {
         if (!editingUser || !editingUser.nombre_completo || !editingUser.email) {
             setUserSaveMsg({ type: 'error', text: 'Nombre completo y email son obligatorios.' });
+            return;
+        }
+        if (!editingUser.id && !editingUser.password) {
+            setUserSaveMsg({ type: 'error', text: 'La contraseña inicial es obligatoria.' });
             return;
         }
 
@@ -1115,7 +1152,7 @@ const AdminUsuarios: React.FC = () => {
                                         onChange={e => setEditingUser(prev => ({ ...prev!, password: e.target.value }))}
                                         className="w-full p-2 border border-gray-300 rounded-lg dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
                                     />
-                                    <p className="text-xs text-gray-500 mt-1">Por defecto es 'chibalete123'</p>
+                                    <p className="text-xs text-gray-500 mt-1">Elige una contraseña única: no se aceptan contraseñas predeterminadas.</p>
                                 </div>
                             )}
 
@@ -1231,6 +1268,43 @@ const AdminUsuarios: React.FC = () => {
                                     >
                                         🛠 Probar Resolución de Accesos E6
                                     </button>
+                                </div>
+                            )}
+
+                            {editingUser?.id && (
+                                <div className="pt-4 border-t border-gray-200 dark:border-gray-700 space-y-2">
+                                    <p className="text-sm font-medium">
+                                        Acceso de la cuenta: <span className="font-mono">{editingUser.accountStatus || 'active'}</span>
+                                    </p>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleCredentialAction('reinvite')}
+                                            disabled={isCredentialBusy}
+                                            className="text-sm px-3 py-1.5 rounded font-medium border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                                        >
+                                            Reinvitar usuario
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleCredentialAction('disable')}
+                                            disabled={isCredentialBusy || editingUser.accountStatus === 'disabled'}
+                                            className="text-sm px-3 py-1.5 rounded font-medium border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                                        >
+                                            Desactivar usuario
+                                        </button>
+                                    </div>
+                                    {credentialLink && (
+                                        <div className="space-y-1">
+                                            <label className="block text-xs text-gray-500">Enlace de activación (se muestra solo ahora; caduca en 48 h)</label>
+                                            <div className="flex gap-2">
+                                                <input readOnly value={credentialLink} autoComplete="off" onFocus={e => e.currentTarget.select()}
+                                                    className="w-full p-2 border border-gray-300 rounded-lg dark:bg-gray-700 dark:border-gray-600 font-mono text-xs" />
+                                                <button type="button" onClick={() => navigator.clipboard?.writeText(credentialLink)}
+                                                    className="text-sm px-3 py-1.5 rounded font-medium border border-gray-300">Copiar</button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
