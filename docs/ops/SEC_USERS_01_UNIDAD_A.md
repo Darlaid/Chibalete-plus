@@ -87,3 +87,41 @@ Fallos previos con aserciones idénticas en los dos árboles:
 - El token de invitación se guarda en `users_db.json`, como en el flujo de invitación existente. No se introdujo un almacén paralelo.
 - `invite-user` y `resend-invite` siguen limitadas al secreto de máquina (sin cambios).
 - No se impide desactivar al último administrador distinto del actor.
+
+## G. Unidad A-PROD — cuenta administrativa principal protegida
+
+Decisión de Dirección: `admin@chibaleteeditores.com` es la única cuenta administrativa que debe permanecer activa. En producción es `admin-super-1`: un único registro, `administrador`, activa, bcrypt.
+
+`server/lib/protectedAccounts.js` es una lista cerrada y aditiva. `PROTECTED_ADMIN_EMAILS` puede añadir emails, pero nunca retira la principal. No es un sistema de roles. Guardas en el servidor, evaluadas bajo el lock del padrón:
+
+| Flujo | Sobre la cuenta principal |
+|---|---|
+| `POST /api/users/:id/reinvite` y `/disable` | 409 `PROTECTED_ACCOUNT`. Además, ninguna de las dos puede dejar la plataforma sin otra cuenta administrativa activa y con credencial (409 `LAST_ADMIN`) |
+| `PUT /api/users/:id` | 409 si deja la cuenta inactiva (`disabled` o `invited`), le quita `administrador`, cambia su email o fija su contraseña desde otra cuenta. Ella misma, o la autoridad de máquina (admin-secret file-only, vía de recuperación), sí puede cambiar su contraseña, con la política aplicada. Editar el nombre sigue permitido |
+| `DELETE /api/users/:id` | 409 |
+
+Las guardas de `PUT` y `DELETE` cubren flujos previos porque eran la vía obvia para saltarse la protección de los nuevos.
+
+Pruebas: `protectedAccounts.test.mjs` 22/0; bloque `[13]` de `userCredentialReset.test.mjs` (83/0 en total), que incluye la combinación «la principal desactiva a otro administrador y no puede desactivarse a sí misma». Gate completo en `node:20-bookworm`: mismo código de salida que `56d0e3b` en las 55 suites.
+
+## H. Procedimiento real de despliegue (corrige E)
+
+**Producción NO monta `server/`.** Los mounts de `api_1` son `data`, `data-critical`, `public/uploads`, `secrets` (ro), `identity`, `sessions` y `.deploy-info` (ro). El código del backend viaja **en la imagen**, como en F1-A…F3-A2. El swap de bind mount de `deployment_guide.md` no aplica.
+
+1. **Preflight:**
+   - estructurado nuevo y restauración aislada;
+   - etiquetar la imagen vigente como `chibalete/api:rollback-pre-secusers-a` y `chibalete/front:rollback-pre-secusers-a`;
+   - copiar `docker-compose.override.yml` a `.bak-pre-secusers-a-<ts>`.
+2. **Imágenes:**
+   - build local (Docker Desktop) de `Dockerfile.api` y `Dockerfile.front` con tag `secusers-a-<sha>`;
+   - `docker save | gzip`, copia al VPS, `sha256sum` y `docker load`.
+3. **`api_1`:**
+   - promoverla solo en su línea del override y recrear solo ese servicio;
+   - comprobar health/ready, sesión de administrador, `POST /api/users/<id-sintético>/reinvite` sobre una cuenta creada para la prueba, 409 sobre la principal y logs de `api_1`.
+4. **`api_2`:** lo mismo, en un paso aparte y después de leer el gate de `api_1`.
+5. **Frontend:** promover `chibalete_front` y hacer reload de `chibalete_edge`.
+6. **Smokes** de administrador, mediador y lector. Respaldo posterior y restauración aislada.
+
+El despliegue no ejecuta migraciones ni escribe usuarios: el diff solo añade rutas, guardas y política. Ningún usuario existente cambia al arrancar.
+
+**Rollback:** volver a las líneas `rollback-pre-secusers-a` del override (o restaurar el `.bak`) y recrear cada servicio. Los datos no requieren reversión.
