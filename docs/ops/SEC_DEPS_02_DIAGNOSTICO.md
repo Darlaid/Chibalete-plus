@@ -191,3 +191,49 @@ Solo `package-lock.json` (2 paquetes × version/resolved/integrity); `package.js
 **Hueco de CI corregido (`e7daf66`):** `identity-preflight.yml` añade `package-lock.json` a `paths` en `push` y `pull_request`. Solo cambia el filtro; los pasos y las condiciones de éxito quedan iguales.
 
 **Sin despliegue.** Producción sigue con `royalties-f3a2-145934b`.
+
+## 7. Lote D ejecutado (2026-10-23, `8cf2e83`)
+
+**Resultado:** OSV pasa de 6 advisories / 20 filas a **0 / 0**. No se renueva ninguna excepción; los cinco ignores caducados de `osv-scanner.toml` quedan sin efecto, porque ya no hay hallazgo que ignorar.
+
+### 7.1 Matriz
+
+| Advisory | Paquete / versión | Ruta | Mínima corregida | ¿Producción? | ¿Alcanzable? | Corrección aplicada |
+|---|---|---|---|---|---|---|
+| qwww (HIGH) | `react-router` 7.18.1 | `react-router-dom` → `react-router` (+ override) | **7.18.2** (línea 7.x) | bundle SPA | No: solo modo RSC; la SPA usa HashRouter sin RSC/SSR | parche 7.18.2; suelo del override `^7.18.2` |
+| q7rr (HIGH) | `exporter-prometheus` 0.57.2, `sdk-node` 0.57.2, `auto-instrumentations-node` 0.55.3 | `sdk-node` / directa | 0.217.0 / 0.75.0 | imagen API | No: el PrometheusExporter nunca se crea; OTel no se carga | OTel 2.10.0 / 0.221.0 |
+| 45rx (HIGH) | `propagator-jaeger` 1.30.1 | `sdk-node` → `sdk-trace-node` | 2.9.0 | imagen API | No: textMapPropagator fijado a W3C y OTel no se carga | → 2.10.0 |
+| 8988 (MOD) | `@opentelemetry/core` 1.30.1 | directa + `@sentry/node` v8 | 2.8.0 | imagen API | No: OTel off, Sentry sin DSN y extracción ya acotada en `otel.mjs` | → 2.10.0 |
+| qqmp (MOD) | `instrumentation-{pg,mongoose,mysql,mysql2,knex,tedious,cassandra-driver}` | `auto-instrumentations-node` y `@sentry/node` v8 | pg 0.73, mongoose/mysql/mysql2 0.67, knex 0.65, tedious 0.40, cassandra 0.66, oracledb 0.46 | imagen API | No: Chibalete+ no usa ninguna de esas bases de datos | `auto-instrumentations-node` 0.79.0, la primera que trae las mínimas corregidas |
+| w5hq (MOD) | `uuid` 9.0.1 y 8.3.2 | `auto-instr` → `resource-detector-gcp` → `gaxios@6`; `autocannon` → `hyperid` (dev) | 11.1.1 | 9.0.1 sí; 8.3.2 solo dev | No: sin `buf` en v3/v5/v6; hyperid usa `crypto.randomUUID` en Node 20 | `uuid@9` desaparece con OTel 2.x; override `hyperid → uuid ^11.1.1` |
+
+**Producción, verificado en solo lectura con nombres de variables y sin valores** (`safeOperationalEvidence.mjs environment-names` sobre `docker inspect`): `api_1` tiene 32 variables, ninguna `OTEL_*`, `SENTRY_*`, `GLITCHTIP_*` ni `NODE_OPTIONS`. El comando del contenedor es `["node","server/server.js"]`, sin `--import otel.mjs`. OTel no se carga y Sentry se importa pero queda inerte.
+
+### 7.2 Estrategia
+
+1. **Parche dentro de rango:** `react-router` 7.18.2. La excepción caducada afirmaba que solo había corrección en 8.3.0; desde el 2026-07-28 existe en la línea 7.x.
+2. **No hay parche en OTel 1.x** para q7rr, 45rx, 8988 ni qqmp. Además, `@sentry/node` v8 fija OTel 1.x (`core` 1.30.1 e instrumentaciones propias), así que retirar solo el OTel directo no basta.
+3. **Eliminar dependencias se descartó:** OTel (P2-A) y Sentry/GlitchTip (P2-D) son capacidades documentadas y activables, no código muerto.
+4. **Versión mayor delimitada:** `@sentry/node` 10.76.2 (publicada el 2026-10-08) ya no arrastra la colección de instrumentaciones 1.x; OTel queda en la línea 2.10.0 / 0.221.0 con `auto-instrumentations-node` 0.79.0. Se eligieron las versiones mínimas que corrigen y se descartaron OTel 3.0 / 0.300 (publicadas el 2026-10-20). El impacto se limita a dos módulos inertes en producción y a un cambio de API: `new Resource()` → `resourceFromAttributes()`.
+5. **`uuid` de desarrollo:** `autocannon` 8 sigue exigiendo `hyperid ^3`, que depende de `uuid ^8`. Se aplicó un override acotado a `hyperid` en vez de un override global.
+
+### 7.3 Pruebas
+
+Se ejecutaron en Windows con Node 20.18, en dos worktrees limpios **fuera de `%TEMP%`** con `npm ci`, en secuencia: baseline `4aa449c` (619 paquetes) y lote D (575).
+- **Mismo código de salida en las 43 suites:** typecheck, build, `test:identity-preflight` (3130 ✓ en ambos), session-browser, auth-reset, ai-model-compat, request-context, royalties, b2c, memberships, content-rmw, analytics, metrics-api, explicit-access, store, reading-runtime, a11y-reader, verify:immersive, immersive-v2, executor-semantic, evidence (`test` y `lint`), image-integrity (test y estático), realStoreGuard, 4 de Aula Viva, 3 de authz, 5 de eventos, 2 de sesión, 3 de subida y `otelPropagation` (26/0).
+- **Fallos previos, con aserciones idénticas en los dos árboles:**
+  - `test:library`: «/api/content general NO cambia su política no-store».
+  - `test:analytics`: 7 ✗ por un módulo ausente en el worktree.
+  - `verify:immersive`: `fetch /api/events incluye header x-user-id`.
+  - `immersive-v2`: un módulo ausente.
+- **Flaky:** `retireSyntheticCohort` dio una vez `server rc=0` en el lote D. Tras 3 repeticiones por árbol queda en 3/3 en verde en ambos, y la repetición completa de `identity-preflight` es idéntica al baseline.
+- **Bundle:** mismos 76 archivos y mismos bytes de JS. Solo cambian 2 caracteres, la versión `7.18.1` → `7.18.2` en `react-vendor`.
+- **Comportamiento**, con colectores locales falsos y sin red externa:
+  - Sentry v8 y v10 capturan el error de Express y redactan `authorization`, `cookie` y `x-admin-secret` en `request.headers`.
+  - OTel ON con ratio 1 exporta `/v1/traces` con el span HTTP en los dos árboles. Con `OTEL_PROPAGATORS=jaeger`, un `uber-trace-id` malformado y un baggage de 10 KB, la app responde 200.
+  - `hyperid` y `autocannon` con `uuid` 11.1.1: 8550 peticiones, 0 errores.
+- **Hallazgo previo (no es regresión, fuera del lote):** con DSN configurado, Sentry (v8 y v10) envía `request.cookies` ya parseado, y `beforeSend` solo redacta `request.headers.cookie`. Hoy no tiene efecto, porque producción no tiene DSN. Recomendación: redactar también `event.request.cookies` antes de activar GlitchTip.
+
+**Dependencias nuevas de producción** (transitivas de OTel 2.x): `systeminformation`, `yaml`, `es-module-lexer` y `@types/oracledb`. Ninguna tiene advisories en OSV. Se retiran `uuid@9`, `shimmer`, `require-in-the-middle` 7, `resolve`, `acorn` y `whatwg-url@5`, entre otras.
+
+**Sin despliegue.** Producción sigue con `royalties-f3a2-145934b` (Sentry 8 / OTel 1.x, ambos inertes).
