@@ -23,11 +23,13 @@ Ningún script operativo escribe en la copia histórica:
 ## 2. Cómo verificar qué almacén usa una réplica (sin exponer nada)
 
 ```bash
-# Ruta efectiva (es una ruta, no un secreto)
-ssh root@VPS 'docker exec chibalete_api_1 printenv USERS_DB'
-# Línea de arranque que la registra
+# Línea de arranque que registra la ruta efectiva del padrón
 ssh root@VPS 'docker logs chibalete_api_1 2>&1 | grep -m1 "USERS_DB"'
+# Desde dentro del proceso, imprimiendo SOLO esa ruta (sin volcar el entorno)
+ssh root@VPS 'docker exec -i chibalete_api_1 node -' <<< 'console.log(process.env.USERS_DB)'
 ```
+
+No uses volcados del entorno del contenedor para esto (los bloquea el ratchet de evidencia): materializan todos los valores.
 
 En cualquier script de auditoría que corra dentro del contenedor, lee **siempre** `process.env.USERS_DB`; nunca una ruta escrita a mano. Envía el script por stdin (`docker exec -i <c> node - < script.js`) e imprime solo recuentos, booleanos o ids técnicos: nunca contraseñas, hashes, tokens ni emails personales.
 
