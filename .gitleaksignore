@@ -53,3 +53,28 @@ f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:server/simulate_novelty.js:chibalete-ad
 f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:server/test_persistence_flow.js:chibalete-admin-secret:11
 f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:server/test_user_flow.js:chibalete-admin-secret:5
 f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:verify_pipeline.cjs:chibalete-admin-secret:9
+#
+# ── SEC-DEPS-02 / F1 (2026-10-24) ─────────────────────────────────────────────
+# Los 2 hallazgos que Lote F dejó abiertos: la MISMA cadena (1 sola aparición en
+# el archivo), detectada por dos reglas en la misma línea de un bundle minificado
+# de Studio Editor BI (producto ajeno) en el commit inicial f7f0c5c; retirado del
+# árbol en 91c6c64 y sin aparición en ningún archivo versionado de HEAD.
+# Clasificación (evidencia del repositorio, verificada en proceso sin imprimir
+# valores; docs/ops/SEC_DEPS_02_DIAGNOSTICO.md §11):
+#   · es el campo apiKey del objeto de configuración web de Firebase (junto a
+#     authDomain, projectId, storageBucket, messagingSenderId, appId y
+#     measurementId del proyecto studio-editor-bi) que el bundle pasa a la
+#     inicialización de la app de Firebase: identificador PÚBLICO de cliente;
+#   · no es una clave privada de cuenta de servicio ni una credencial
+#     administrativa: el archivo no contiene ningún marcador de clave privada ni
+#     de cuenta de servicio, y el SDK de IA del bundle se inicializa con un
+#     valor de relleno, no con esta cadena;
+#   · Chibalete+ no depende de ella: cero imports del SDK de Firebase, el build
+#     del front no recibe variables de Firebase y ni dist/ ni los .env locales
+#     la contienen.
+# Esto NO declara segura la configuración de Studio BI: sus restricciones de
+# clave y permisos de Firebase NO han sido auditados ni aprobados en este
+# proyecto (Lote F observó la clave SIN restricciones de aplicación ni de API).
+# Su tratamiento corresponde a una unidad independiente de Studio Editor BI.
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:studio-editor-bi/assets/index-CqLdlylq.js:gcp-api-key:1120
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:studio-editor-bi/assets/index-CqLdlylq.js:chibalete-gemini-key:1120

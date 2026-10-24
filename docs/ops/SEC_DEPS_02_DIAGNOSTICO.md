@@ -404,3 +404,68 @@ El front no se evaluaba porque el job único escaneaba la API primero: si la API
 `trivy` (fs) y `trivy-image (api)` pasaron a rojo el 2026-10-24 con la base de Trivy de las 01:18 UTC. La causa es **CVE-2023-54404**: es la alias CVE de GHSA-mrhx-c7xc-m3w5, la misma vulnerabilidad de zod aceptada en ZOD-01. Esa excepción solo cubre OSV. Extenderla a `.trivyignore` (misma caducidad, 2026-11-23) es decisión de Dirección y no se aplica en este lote.
 
 Los demás hallazgos locales de Trivy vienen de `deployment_package/` y `_prod_snapshot_/`, copias no versionadas que no están en el repositorio ni en el CI.
+
+## 11. F1 — cierre de Trivy y clasificación de los 2 hallazgos de Firebase (2026-10-24)
+
+**Base:** `30f7d28`. **Alcance:** solo el repositorio de Chibalete+. No se accedió a Firebase, Google Cloud ni Studio Editor BI; no se tocaron claves, permisos, historial, producción ni datos.
+
+### 11.1 Zod en Trivy — `CVE-2023-54404`
+
+- Es la alias CVE de GHSA-mrhx-c7xc-m3w5 (zod 3.25.76), ya aceptada en ZOD-01 (§9). Se añade a `.trivyignore` con la misma justificación y la misma caducidad: `CVE-2023-54404 exp:2026-11-23`.
+- A diferencia de las demás entradas del archivo, esta caducidad **es ejecutable**: con `exp:2026-10-01` Trivy 0.70.0 vuelve a reportarla (rc=1).
+- **Sin ocultar otras vulnerabilidades** (base de Trivy del 2026-10-24 13:07 UTC, archivos versionados):
+  - con el `.trivyignore` de `30f7d28`: rc=1 y un único hallazgo (`CVE-2023-54404`, zod 3.25.76, HIGH, `package-lock.json`);
+  - con el de F1: rc=0 y 0 hallazgos (vuln, misconfig y secret). `trivy config` también da rc=0.
+
+### 11.2 Clasificación de los dos hallazgos de Firebase
+
+Huellas: `f7f0c5c…:studio-editor-bi/assets/index-CqLdlylq.js:{gcp-api-key, chibalete-gemini-key}:1120`. Verificación dentro del proceso con `git show`; solo se imprimieron recuentos, nombres de propiedades y una huella SHA-256 truncada (`614ce8afb582`).
+
+| Comprobación | Evidencia del repositorio | Resultado |
+|---|---|---|
+| Mismo identificador | La línea 1120 tiene una sola cadena con forma de clave Google, que además es la única en todo el archivo. Las dos reglas disparan sobre ella. | ✅ un solo valor |
+| Configuración web de Firebase | La cadena es el `apiKey` de un objeto literal con `authDomain` (`studio-editor-bi.firebaseapp.com`), `projectId` (`studio-editor-bi`), `storageBucket`, `messagingSenderId`, `appId` y `measurementId`. El bundle lo pasa a la inicialización de la app de Firebase (`getApps().length>0 ? getApp() : initializeApp(cfg)`, minificado). | ✅ config web de cliente |
+| Origen | Bundle minificado de Studio Editor BI (`studio-editor-bi/assets/`), introducido en el commit inicial `f7f0c5c` y retirado en `91c6c64`. `studio-editor-bi/` está en `.gitignore`. Solo lo referencia el `docker-compose.yml` heredado de `f7f0c5c` (servicio `apps-spa-nginx`, montaje estático), que no es la topología de producción. | ✅ producto ajeno, histórico |
+| No es credencial privada ni administrativa | El archivo no contiene `private_key`, `BEGIN PRIVATE KEY`, `BEGIN RSA`, `client_email`, `service_account` ni `gserviceaccount.com`. El SDK de IA del bundle se inicializa con un valor de relleno de 18 caracteres (`dummy_key_for_init`), no con esta cadena. | ✅ identificador público |
+| Chibalete+ no depende de ella | Aparece en 0 de 1347 archivos versionados en HEAD, y en `dist/` y en los `.env*` locales tampoco. Hay 0 imports del SDK `firebase`: el paquete figura en `package.json`, pero no se usa. `Dockerfile.front` no declara `ARG`/`ENV`, y `.dockerignore` excluye `.env*`, así que el build de producción no recibe `VITE_FIREBASE_API_KEY`. La única mención en el código (`services/geminiService.ts:40`) es una comparación de diagnóstico. | ✅ sin dependencia |
+
+**Clasificación:** configuración pública de cliente de un producto ajeno (Studio Editor BI), en un bundle histórico. **No es** una credencial privada de servicio ni administrativa. No aplica el STOP.
+
+**Alcance de esta clasificación:**
+- No declara segura la configuración de Studio Editor BI.
+- Las restricciones de la clave y los permisos de Firebase **no han sido auditados ni aprobados en este proyecto**.
+- El sondeo de solo lectura de Lote F (§10.2) observó la clave sin restricción de aplicación ni de API. La corrección en consola que propone §10.2 sigue pendiente y pasa a una unidad independiente de Studio Editor BI.
+
+**Cambio de criterio respecto de §10.2:**
+- Lote F condicionaba la excepción a que la clave estuviera restringida.
+- F1 la condiciona a la **naturaleza** del valor (identificador público de un producto ajeno, sin dependencia de Chibalete+), por decisión de Dirección.
+- El riesgo de Studio BI no desaparece: sale del gate de Chibalete+.
+
+### 11.3 Excepciones aplicadas
+
+- En `.gitleaksignore` se añaden 2 huellas exactas, con la justificación anterior y sin reglas, rutas ni regex:
+  - `f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:studio-editor-bi/assets/index-CqLdlylq.js:gcp-api-key:1120`
+  - `f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:studio-editor-bi/assets/index-CqLdlylq.js:chibalete-gemini-key:1120`
+- En `.trivyignore`: `CVE-2023-54404 exp:2026-11-23`.
+
+### 11.4 Verificación local (gitleaks 8.21.2 y Trivy 0.70.0, las versiones del CI)
+
+- **gitleaks-history:**
+  - en un clon aislado con el `.gitleaksignore` de `30f7d28`: rc=1, con exactamente las 2 huellas anteriores;
+  - con el de F1: rc=0 y 0 hallazgos;
+  - en el repositorio de trabajo (466 commits): rc=0.
+- **gitleaks-head:** `gitleaks dir` sobre la exportación de los archivos versionados no da hallazgos fuera de `docs/**/*.md`. Los 18 que da están todos en `docs/**/*.md`, que la allowlist excluye con `/`; en Windows gitleaks informa las rutas con `\` y la allowlist no casa. Es un artefacto local y el gate autoritativo es el job Linux del CI.
+- **Detección de secretos nuevos:** se creó un repositorio aislado con los `.gitleaks.toml` y `.gitleaksignore` de F1 y valores aleatorios generados en ejecución (no se versionan). `detect` y `dir` dan rc=1 y detectan **7/7**:
+  - una config Firebase sintética en `studio-editor-bi/assets/index-CqLdlylq.js` **línea 1120**, el mismo archivo y línea que las huellas F1 (`gcp-api-key` y `chibalete-gemini-key`);
+  - otra clave en la línea 1121 del mismo archivo (las dos reglas);
+  - un secreto de administración en `ecosystem.config.cjs:8`;
+  - un `generic-api-key` en `adminSecretFile.test.js:44`;
+  - una clave OpenAI en un archivo nuevo.
+
+  La huella incluye el commit, así que la excepción no abre ningún hueco.
+- **Trivy fs y config:** ver 11.1.
+- **OSV, trivy-image (api/front), image-integrity, evidence-hardening y el resto del CI:** ver 11.5.
+
+### 11.5 CI
+
+Pendiente del run del commit de F1 (se completa en el commit de evidencia).

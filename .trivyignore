@@ -61,3 +61,19 @@ AVD-DS-0002
 # ejecutable; esta fecha es documental y exige revisión humana.
 # resp:Release Security Reviewer  rev:2026-09-30
 GHSA-qwww-vcr4-c8h2
+
+# ── CVE-2023-54404 — alias CVE de GHSA-mrhx-c7xc-m3w5 (zod 3.25.76, HIGH 8.2) ─
+# SEC-DEPS-02 / F1 (2026-10-24). Es la MISMA vulnerabilidad de zod aceptada en
+# ZOD-01 (osv-scanner.toml), que Trivy publica bajo su CVE desde la base del
+# 2026-10-24. Misma justificación: ninguna entrada externa llega a un esquema
+# z.array (auth/offline/rum sin colecciones; los 4 arrays del registry de
+# eventos solo reciben datos recortados por el servidor o no tienen emisor) y
+# todo JSON entra por express.json con 100 kB tras descomprimir; peor caso
+# medido en rutas alcanzables: <= 2 issues. El único fix (zod 4.6.6) es solo v4.
+# Fijado por server/__test__/zodAdvisoryExposure.test.mjs (bloqueante en
+# identity-preflight). Evidencia: docs/ops/SEC_DEPS_02_DIAGNOSTICO.md §9 y §11.
+# Misma caducidad que ZOD-01: `exp:` la aplica Trivy; pasada la fecha vuelve a
+# fallar. Revisión anticipada si cambia el advisory, los esquemas, los
+# emisores, el límite de cuerpo o las rutas públicas con zod.
+# resp:seguridad técnica de Chibalete+  rev:2026-11-23
+CVE-2023-54404 exp:2026-11-23
