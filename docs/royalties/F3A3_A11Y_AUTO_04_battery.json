@@ -1,0 +1,488 @@
+{
+  "results": [
+    {
+      "id": "A1",
+      "label": "lectura activa 5 min (interacción cada 20 s)",
+      "mode": "a11y",
+      "sent": 21,
+      "stored": 21,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000003"
+      ],
+      "pass": true
+    },
+    {
+      "id": "A5",
+      "label": "pestaña oculta de 2 a 4 min y retorno (6 min, interacción cada 20 s con la pestaña visible)",
+      "mode": "a11y",
+      "sent": 16,
+      "stored": 16,
+      "responses": [],
+      "secs": 195,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 195
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000004"
+      ],
+      "pass": true
+    },
+    {
+      "id": "A3",
+      "label": "lectura continua 10 min: una interacción y desplazamiento real cada 40 s",
+      "mode": "a11y",
+      "sent": 41,
+      "stored": 41,
+      "responses": [],
+      "secs": 585,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 585
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000002"
+      ],
+      "pass": true
+    },
+    {
+      "id": "A2",
+      "label": "lectura activa 10 min (interacción cada 20 s)",
+      "mode": "a11y",
+      "sent": 41,
+      "stored": 41,
+      "responses": [],
+      "secs": 585,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 585
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000001"
+      ],
+      "pass": true
+    },
+    {
+      "id": "A6",
+      "label": "sesión sin interacción inicial con desplazamientos reales, 4 min",
+      "mode": "a11y",
+      "sent": 0,
+      "stored": 0,
+      "responses": [],
+      "secs": 0,
+      "episodes": 0,
+      "qualified": 0,
+      "Q": 0,
+      "modeSeconds": [],
+      "sessions": [
+        "01J88201134900000000000104"
+      ],
+      "pass": true
+    },
+    {
+      "id": "A4",
+      "label": "una interacción y 5 min sin desplazamiento (lectura sin señales)",
+      "mode": "a11y",
+      "sent": 8,
+      "stored": 8,
+      "responses": [],
+      "secs": 105,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 105
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000087"
+      ],
+      "pass": true
+    },
+    {
+      "id": "E2",
+      "label": "lectura corta de 40 s",
+      "mode": "a11y",
+      "sent": 3,
+      "stored": 3,
+      "responses": [],
+      "secs": 30,
+      "episodes": 1,
+      "qualified": 0,
+      "Q": 0,
+      "modeSeconds": [
+        {
+          "a11y": 30
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000176"
+      ],
+      "pass": true
+    },
+    {
+      "id": "E3",
+      "label": "obra sin regla de acceso (denegación por defecto)",
+      "mode": "a11y",
+      "sent": 4,
+      "stored": 0,
+      "responses": [
+        "econ content_not_found"
+      ],
+      "secs": 0,
+      "episodes": 0,
+      "qualified": 0,
+      "Q": 0,
+      "modeSeconds": [],
+      "sessions": [
+        "01J88201134900000000000187"
+      ],
+      "pass": true
+    },
+    {
+      "id": "M-epub",
+      "label": "EPUB paginado: paso de página cada 30 s, 5 min",
+      "mode": "epub",
+      "sent": 21,
+      "stored": 21,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "epub": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000177"
+      ],
+      "pass": true
+    },
+    {
+      "id": "E1",
+      "label": "misma obra en dos modos: Accesible 3 min → Guiado 3 min",
+      "mode": "a11y→text",
+      "sent": 26,
+      "stored": 26,
+      "responses": [],
+      "secs": 330,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 165,
+          "text": 165
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000175",
+        "01J88201134900000000000230"
+      ],
+      "pass": true
+    },
+    {
+      "id": "M-pdf",
+      "label": "PDF: paso de página cada 30 s, 5 min",
+      "mode": "pdf",
+      "sent": 21,
+      "stored": 21,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "pdf": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000201"
+      ],
+      "pass": true
+    },
+    {
+      "id": "A7",
+      "label": "pausa de 3 min y retorno (interacción 0–2 min y 5–7 min)",
+      "mode": "a11y",
+      "sent": 23,
+      "stored": 23,
+      "responses": [],
+      "secs": 195,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 195
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000174"
+      ],
+      "pass": true
+    },
+    {
+      "id": "M-text",
+      "label": "Guiado con TTS: gesto y escucha 5 min, sin más interacción",
+      "mode": "text",
+      "sent": 20,
+      "stored": 20,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "text": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000285"
+      ],
+      "pass": true
+    },
+    {
+      "id": "M-album",
+      "label": "Libro-Álbum: gesto y narración de región 5 min",
+      "mode": "album",
+      "sent": 20,
+      "stored": 20,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "album": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000287"
+      ],
+      "pass": true
+    },
+    {
+      "id": "M-immersive",
+      "label": "Inmersivo: gesto y narración 5 min con la pestaña OCULTA",
+      "mode": "immersive",
+      "sent": 21,
+      "stored": 21,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "immersive": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000286"
+      ],
+      "pass": true
+    },
+    {
+      "id": "M-a11y",
+      "label": "Accesible: una interacción y desplazamiento real cada 40 s, 5 min",
+      "mode": "a11y",
+      "sent": 21,
+      "stored": 21,
+      "responses": [],
+      "secs": 285,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 285
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000288"
+      ],
+      "pass": true
+    },
+    {
+      "id": "B2",
+      "label": "desplazamiento propio del visor hace 1 s (ventana de 1,5 s), 4 min",
+      "mode": "a11y",
+      "sent": 8,
+      "stored": 8,
+      "responses": [],
+      "secs": 105,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 105
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000375"
+      ],
+      "pass": true
+    },
+    {
+      "id": "B1",
+      "label": "desplazamiento automático (auto-avance) 4 min tras una interacción",
+      "mode": "a11y",
+      "sent": 8,
+      "stored": 8,
+      "responses": [],
+      "secs": 105,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 105
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000374"
+      ],
+      "pass": true
+    },
+    {
+      "id": "B3",
+      "label": "avance menor que ¼ de pantalla cada 40 s, 4 min",
+      "mode": "a11y",
+      "sent": 8,
+      "stored": 8,
+      "responses": [],
+      "secs": 105,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 105
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000376"
+      ],
+      "pass": true
+    },
+    {
+      "id": "B4",
+      "label": "desplazamiento continuo cada 1 s, 4 min (tope: 1 señal cada 15 s)",
+      "mode": "a11y",
+      "sent": 17,
+      "stored": 17,
+      "responses": [],
+      "secs": 225,
+      "episodes": 1,
+      "qualified": 1,
+      "Q": 1,
+      "modeSeconds": [
+        {
+          "a11y": 225
+        }
+      ],
+      "sessions": [
+        "01J88201134900000000000377"
+      ],
+      "pass": true
+    }
+  ],
+  "checks": [
+    {
+      "label": "sin credenciales productivas en el entorno del servidor",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "todos los almacenes dentro del laboratorio",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "sin salida hacia producción",
+      "ok": true,
+      "detail": "EAI_AGAIN"
+    },
+    {
+      "label": "login de las dos cuentas sintéticas",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "equivalencia entre los 6 modos (misma lectura de 5 min, diferencia ≤ 30 s)",
+      "ok": true,
+      "detail": "285 / 285 / 285 / 285 / 285 / 285"
+    },
+    {
+      "label": "ningún tick económico de la obra del historial pedagógico",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "el historial pedagógico sintético no produce episodios",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "auto-avance: desbloqueado en la cuenta de avance, bloqueado en la normal",
+      "ok": true,
+      "detail": "7800000 / 0"
+    },
+    {
+      "label": "contrato intacto (rs-2026-01-v1: pausa 120, 45 s, tope 20 min, franja 15 s, 25 % BRD, reparto 30/70, 3 episodios/día) y umbral de 120 min",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "ingesta apagada: runtime-config \"off\" y ningún tick económico guardado",
+      "ok": true,
+      "detail": "200 {\"ok\":true,\"accepted\":0,\"deduplicated\":0,\"rejected\":1,\"errors\":[{\"eventId\":\"01J88201134900000000000447\",\"error\":\"schemaV"
+    },
+    {
+      "label": "parada limpia (puerto cerrado, sin procesos)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "ninguna escritura fuera del laboratorio",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "label": "sin errores de almacenamiento en el log",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "at": "2026-10-24T23:17:03.856Z"
+}

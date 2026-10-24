@@ -130,10 +130,10 @@ El núcleo real del cliente genera los ticks, el servidor real los valida y guar
 
 ```bash
 # X-1: apagar y volver a encender la ingesta del laboratorio
-docker exec chp-a11ylab sh -c "pkill -TERM -f 'a11yLab.mjs start'"
+docker exec chp-a11ylab sh -c "pkill -TERM -f '^node scripts/royalties/a11yLab.mjs start'; sleep 5"
 docker exec -d chp-a11ylab sh -c "node scripts/royalties/a11yLab.mjs start --dir /tmp/chp_a11ylab --ingest off > /tmp/lab_api.log 2>&1"
 #   … leer 2 min, comprobar http://localhost:5173/api/runtime-config → "off" y report sin sesiones nuevas …
-docker exec chp-a11ylab sh -c "pkill -TERM -f 'a11yLab.mjs start'"
+docker exec chp-a11ylab sh -c "pkill -TERM -f '^node scripts/royalties/a11yLab.mjs start'; sleep 5"
 docker exec -d chp-a11ylab sh -c "node scripts/royalties/a11yLab.mjs start --dir /tmp/chp_a11ylab > /tmp/lab_api.log 2>&1"
 ```
 
