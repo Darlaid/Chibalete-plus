@@ -200,15 +200,17 @@ try {
     const cfgOn = await (await fetch(`${b1}/api/runtime-config`)).json();
     const cfgOff = await (await fetch(`${b3}/api/runtime-config`)).json();
     ok('runtime-config: on / off según ECONOMIC_INGEST_MODE', cfgOn.economicIngest === 'on' && cfgOff.economicIngest === 'off' && 'mediaBaseUrl' in cfgOn);
-    // Lectura de RDR: 45 s en PDF y 45 s en Guiado, hace 5 min, con el núcleo del cliente.
+    // Lectura de RDR: 75 s en PDF y 75 s en Guiado, hace 5 min, con el núcleo
+    // del cliente. Ticks cada 30 s (como en segundo plano) para no rozar el
+    // límite de 12 ticks/usuario/min con los ticks de las secciones anteriores.
     const t0 = Date.now() - 5 * 60_000;
     const clientTicks = [];
     for (const [i, mode] of [['A', 'pdf'], ['B', 'text']].entries()) {
-        const from = t0 + i * 50_000;
+        const from = t0 + i * 80_000;
         const core = createEconomicTickCore({ mode: mode[1], contentId: 'content-c1', sessionId: `f3a3-${mode[0]}`, startedAt: from, visible: true });
-        for (let t = from + 1000; t <= from + 45_000; t += 1000) {
+        for (let t = from + 1000; t <= from + 75_000; t += 1000) {
             if ((t - from) % 10_000 === 0) core.humanSignal(t);
-            if ((t - from) % 15_000 === 0) { const e = core.tick(t, ulid()); if (e) clientTicks.push(e); }
+            if ((t - from) % 30_000 === 0 || t === from + 75_000) { const e = core.tick(t, ulid()); if (e) clientTicks.push(e); }
         }
     }
     r = await post(b1, clientTicks.filter((e) => e.mode === 'pdf'), { cookie: rdr });
