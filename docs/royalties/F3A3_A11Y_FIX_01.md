@@ -98,6 +98,8 @@ Evaluación del fallo de `content-rmw`:
 
 ### 5.1 Preparación (macOS o Linux en la misma red que los dispositivos)
 
+> **Desde Windows, usar el procedimiento con Docker de `F3A3_A11Y_LAB_02.md`** (copia limpia, prueba previa 19/19 y guía de dispositivos). El bloque de abajo solo vale en un árbol sin `.env`, `data/` ni `data-critical/`: `start` lo exige.
+
 ```bash
 LAB=$(mktemp -d)/chp_a11ylab          # dentro del directorio temporal del sistema
 node scripts/royalties/a11yLab.mjs seed  --dir "$LAB" --origin http://<IP-LAN>:5173
