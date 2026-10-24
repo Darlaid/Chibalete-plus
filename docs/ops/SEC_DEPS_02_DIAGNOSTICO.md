@@ -468,4 +468,28 @@ Huellas: `f7f0c5c…:studio-editor-bi/assets/index-CqLdlylq.js:{gcp-api-key, chi
 
 ### 11.5 CI
 
-Pendiente del run del commit de F1 (se completa en el commit de evidencia).
+Run del commit `f351f9a` (2026-10-24): **9/9 en verde** por primera vez en SEC-DEPS-02.
+
+| Job | Resultado |
+|---|---|
+| gitleaks-head | ✅ success |
+| gitleaks-history | ✅ success (antes en rojo desde el inicio de SEC-DEPS-02) |
+| evidence-hardening | ✅ success |
+| osv-scanner | ✅ success |
+| trivy (fs + config) | ✅ success |
+| trivy-image (api) | ✅ success |
+| trivy-image (front) | ✅ success |
+| image-integrity | ✅ success |
+| content-rmw | ✅ success |
+
+`identity-preflight` no se dispara, porque sus rutas no cambian en F1.
+
+Local: OSV 2.0.0 sin hallazgos (solo filtra GHSA-mrhx por ZOD-01), `lint:evidence` sin violaciones en 1110 archivos y `test:evidence` 41/0. Docker local no estaba disponible, así que trivy-image e image-integrity solo se verificaron en el CI.
+
+### 11.6 Veredicto
+
+**GREEN** para Chibalete+. Los gates de SEC-DEPS-02 están cerrados.
+
+Quedan dos pendientes, ambos fuera de este gate:
+- **Excepción zod (OSV + Trivy):** caduca el **2026-11-23** y hay que revisarla antes de esa fecha.
+- **Clave web de Studio Editor BI:** sigue **sin restricciones** (§10.2). Se registra para tratarla en una unidad independiente de Studio Editor BI. F1 no la declara segura.
