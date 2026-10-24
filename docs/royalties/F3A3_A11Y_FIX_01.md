@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-10-24 · **Base:** `2a5c29b` (F3-A3 GREEN_LOCAL+CI) · **Diagnóstico:** `F3A3_A11Y_DIAGNOSIS.md` (alternativa A, aprobada)
 **Modo:** implementación local y CI. **Sin despliegue.** `ECONOMIC_INGEST_MODE` y `RIGHTS_ENFORCEMENT_MODE` siguen apagados en producción.
-**Veredicto:** **YELLOW**, porque faltan las pruebas en dispositivo, que el criterio de la unidad exige. Lo automático (núcleo, integración, regresiones y build) está en verde; el CI, en §4.3.
+**Veredicto:** **YELLOW**, porque faltan las pruebas en dispositivo, que el criterio de la unidad exige. Lo automático (núcleo, integración, regresiones, build y CI, §4.3) está en verde.
 
 ## 1. Fiabilidad de la alternativa A por modo
 
@@ -92,7 +92,7 @@ Evaluación del fallo de `content-rmw`:
   - las tres pruebas de la suite que inspeccionan archivos cambiados (`contentGlobalReadOnlyPolicy`, `ClientContentProtection.structural` y `ContentExtractionDeterrence`) pasan en local con el árbol final;
   - las únicas que solo corren en Linux (`progressReadIdentity`, `uploadsAuthzStrict`, `catalogResourceLocators`, `catalogAccessLogNoise`, `catalogAccessPerformance`, que es de rendimiento) prueban endpoints del servidor, y esta unidad no cambia el servidor.
 - **Precedente:** el mismo paso falló el mismo día en `dc22e19`, con un diff ajeno a la suite, y pasó al relanzarlo sin cambios.
-- **Para cerrarlo:** relanzar el job desde GitHub (*Re-run failed jobs*) o leer su log. Hasta entonces, el CI de la unidad queda **pendiente de confirmar**.
+- **Confirmado como intermitencia:** en `77aa401` (solo documentación, mismo código que `44bc915`), `content-rmw` (run `40124833501`) y `security` (`40124833506`) pasaron sin relanzar nada. **CI de la unidad: GREEN.**
 
 ## 5. Pruebas con VoiceOver y TalkBack (pendientes, en dispositivo)
 
