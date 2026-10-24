@@ -12,7 +12,7 @@
  *   node scripts/royalties/a11yLab.mjs seed   --dir <lab> --origin http://<IP-LAN>:5173
  *       (<lab> dentro del directorio temporal del sistema: el servidor en modo
  *        test solo acepta un padrón temporal)
- *   node scripts/royalties/a11yLab.mjs start  --dir <lab>        (POSIX: clave de sesión 0400)
+ *   node scripts/royalties/a11yLab.mjs start  --dir <lab> [--ingest off]   (POSIX: clave de sesión 0400)
  *   node scripts/royalties/a11yLab.mjs report --dir <lab>        (solo lectura de econ_events)
  *
  * El frontend se sirve aparte con `npm run dev` (Vite escucha en 0.0.0.0 y
@@ -123,22 +123,40 @@ function start() {
     // Igual que econIngestHttp: en Windows la clave de sesión no puede ser
     // 0400/uid, el login no emite cookie y /api/v1/events responde 401.
     if (process.platform === 'win32') die('start requiere macOS o Linux (o WSL): la sesión firmada exige la clave 0400');
+    // server.js carga ../.env (dotenv): en una máquina de desarrollo trae
+    // credenciales reales. El laboratorio solo arranca desde un árbol limpio
+    // (p. ej. `git archive` dentro de un contenedor).
+    if (fs.existsSync(path.join(REPO, '.env'))) die('hay un .env en el repositorio: usa una copia limpia (git archive), ver F3A3_A11Y_LAB_02.md');
+    // Varios módulos (memoria de Leo, configuración LU) escriben en ../data con
+    // rutas fijas: con stores reales presentes el laboratorio no arranca.
+    for (const real of ['data', 'data-critical']) {
+        if (fs.existsSync(path.join(REPO, real))) die(`existe ${real}/ en el repositorio: usa una copia limpia (git archive), ver F3A3_A11Y_LAB_02.md`);
+    }
     const dir = labDir({ fresh: false });
     const P = paths(dir);
     const { origin } = JSON.parse(fs.readFileSync(P.config, 'utf8'));
+    const ingest = arg('ingest') ?? 'on';
+    if (!['on', 'off'].includes(ingest)) die('--ingest on|off');
+    // Entorno mínimo explícito: nada heredado salvo lo que necesita el proceso.
+    const keep = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ'].filter((k) => process.env[k]).map((k) => [k, process.env[k]]));
     const env = {
-        ...process.env, NODE_ENV: 'test', PORT: '3000', CHP_DATA_DIR: P.data,
+        ...keep, NODE_ENV: 'test', PORT: '3000', CHP_DATA_DIR: P.data,
         USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: P.schools, ACCESS_DB: P.access, CONTENT_DB: P.content,
         UPLOADS_ROOT: P.uploads, OFFLINE_ASSIGNMENT_DB_PATH: P.offline, USER_AUDIT_DB: P.audit,
         IDENTITY_DB: P.identity, IDENTITY_SQLITE_ENABLED: '1', IDENTITY_DUAL_WRITE: '1', IDENTITY_READ: 'json',
         SESSIONS_DB: P.sessions, SESSION_KEY_CURRENT_PATH: P.key, SESSION_AUTH_MODE: 'enforce',
         SESSION_ALLOWED_ORIGINS: `${origin},http://localhost:5173`, ALLOWED_ORIGINS: `${origin},http://localhost:5173`,
         ACCESS_FALLBACK_MODE: 'restricted', EVENTS_SQLITE_PATH: P.events, INSIGHTS_SQLITE_PATH: P.insights,
-        ROYALTIES_DB: P.royalties, ECONOMIC_INGEST_MODE: 'on',
+        ROYALTIES_DB: P.royalties, ECONOMIC_INGEST_MODE: ingest === 'on' ? 'on' : '',
+        PROGRESS_SQLITE_PATH: path.join(dir, 'progress.db'), LEO_EVIDENCE_DB: path.join(dir, 'leo_evidence.db'),
         OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
+        // Tienda: la URL remota es fija salvo en NODE_ENV=test; aquí no lleva a ninguna parte.
+        CHP_TEST_WOO_ORIGIN: 'http://127.0.0.1:9',
     };
-    console.log(`a11yLab: servidor de laboratorio en :3000 con ECONOMIC_INGEST_MODE=on (solo ${dir})`);
+    console.log(`a11yLab: servidor de laboratorio en :3000 con ECONOMIC_INGEST_MODE=${ingest} (solo ${dir})`);
     const child = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env, stdio: 'inherit' });
+    // Parar el laboratorio para también el servidor: sin procesos huérfanos.
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => child.kill(sig));
     child.on('exit', (code) => process.exit(code ?? 0));
 }
 
@@ -165,11 +183,18 @@ function report() {
     for (const [id, s] of sessions) {
         console.log(`  ${id}  ${s.mode.padEnd(9)} ${s.content.padEnd(10)} ${new Date(s.from).toISOString().slice(11, 19)}–${new Date(s.to).toISOString().slice(11, 19)}  ticks ${s.ticks}  con señal ${s.signals}  con audio ${s.audio}`);
     }
-    const res = computeEconomicEpisodes(rows, {
+    const engine = (rs) => computeEconomicEpisodes(rs, {
         ruleSet: RULE_SET_RS_2026_01_V1, eligibleContentIds: CONTENTS.map((c) => c.id),
         expectedMinutesByContent: Object.fromEntries(CONTENTS.map((c) => [c.id, Math.max(1, Math.round(c.words / RULE_SET_RS_2026_01_V1.proseWordsPerMinute))])),
-        excludedUsers: excludedUsersFromRows(rows), ...engineClockContext(),
+        excludedUsers: excludedUsersFromRows(rs), ...engineClockContext(),
     });
+    // Cada caso manual es una sesión: su tiempo aislado, con el mismo motor.
+    console.log('Acreditado por sesión (evaluación aislada de cada caso):');
+    for (const [id, s] of sessions) {
+        const own = engine(rows.filter((r) => r.session_id === id)).episodes.reduce((a, e) => a + e.activeSeconds, 0);
+        console.log(`  ${id}  ${s.mode.padEnd(9)} con ticks ≈ ${Math.round((s.to - s.from) / 1000)} s  acreditado ${own} s`);
+    }
+    const res = engine(rows);
     console.log('Episodios (motor F3-A1, rs-2026-01-v1):');
     for (const e of res.episodes) {
         console.log(`  ${e.contentId}  activos ${e.activeSeconds} s  por modo ${JSON.stringify(e.modeSeconds)}  cualificado ${e.qualified}${e.reasons?.length ? ` (${e.reasons.join(', ')})` : ''}`);
