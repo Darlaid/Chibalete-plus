@@ -128,6 +128,11 @@ dummy_text.txt
 # CHP-B2C-PROVISIONING-01 — sincronización del catálogo B2C a las reglas de suscripción (operacional, versionado).
 !/scripts/b2c/
 !/scripts/b2c/**
+# CHP-EDITORIAL-ROYALTIES-2026-01 F3-A3 A11Y-FIX-01 — laboratorio aislado (datos sintéticos en el
+# temporal del sistema) para las pruebas con VoiceOver/TalkBack. Solo ese archivo.
+!/scripts/royalties/
+/scripts/royalties/*
+!/scripts/royalties/a11yLab.mjs
 
 # Sprint 022 Fase 2B.5/2B.7/2B.8 — scripts operacionales canónicos.
 # Estos SÍ se versionan: son la autoridad operacional de backup, deploy
