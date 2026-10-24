@@ -8,6 +8,7 @@
 
 - HEAD `e04eaa6`, sincronizado con `origin/chp/epub-mainfile-r1-release`.
 - CI de `e04eaa6`: `security` ✓ y `content-rmw` ✓. `identity-preflight` no se dispara en commits solo de documentación; está en verde en `44bc915`, con el mismo código.
+- **CI de esta unidad (`7e22057`, código en `94f295e`):** `security` ✓ (`40131665742`), `content-rmw` ✓ (`40131665635`) e `identity-preflight` ✓ (`40131665648`).
 
 ## 2. Entorno elegido: Docker Desktop
 
