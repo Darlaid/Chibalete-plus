@@ -79,7 +79,20 @@ No se infiere VoiceOver, TalkBack ni ninguna otra tecnología de apoyo. No cambi
 
 ### 4.3 CI
 
-Se completa con el run del commit de A11Y-FIX-01.
+HEAD `44bc915` (el código está en `eb29090`; sus runs se cancelaron por concurrencia al publicar `44bc915`):
+
+| Workflow | Run | Resultado |
+|---|---|---|
+| `security` | `40124272700` | success |
+| `identity-preflight` | `40124272562` | **success** (incluye `test:royalties`: `economicTick` y la prueba HTTP [8] en Linux) |
+| `content-rmw` | `40124272709` | **failure** en el paso 7 (`test:content-rmw`), sin anotación concreta; los logs no se pueden leer sin credencial |
+
+Evaluación del fallo de `content-rmw`:
+- **Sin indicios de regresión, aunque no está demostrado:**
+  - las tres pruebas de la suite que inspeccionan archivos cambiados (`contentGlobalReadOnlyPolicy`, `ClientContentProtection.structural` y `ContentExtractionDeterrence`) pasan en local con el árbol final;
+  - las únicas que solo corren en Linux (`progressReadIdentity`, `uploadsAuthzStrict`, `catalogResourceLocators`, `catalogAccessLogNoise`, `catalogAccessPerformance`, que es de rendimiento) prueban endpoints del servidor, y esta unidad no cambia el servidor.
+- **Precedente:** el mismo paso falló el mismo día en `dc22e19`, con un diff ajeno a la suite, y pasó al relanzarlo sin cambios.
+- **Para cerrarlo:** relanzar el job desde GitHub (*Re-run failed jobs*) o leer su log. Hasta entonces, el CI de la unidad queda **pendiente de confirmar**.
 
 ## 5. Pruebas con VoiceOver y TalkBack (pendientes, en dispositivo)
 
