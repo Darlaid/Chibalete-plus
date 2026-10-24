@@ -31,6 +31,7 @@
  */
 
 import React from 'react';
+import { markProgrammaticScroll } from '../../hooks/useEconomicTick';
 import type { A11yBook } from '../../types/a11y';
 
 interface A11yTableOfContentsProps {
@@ -101,6 +102,7 @@ const A11yTableOfContents: React.FC<A11yTableOfContentsProps> = ({
         // Comportamiento legacy: focus + scroll local.
         const target = document.getElementById(targetId);
         if (!target) return;
+        markProgrammaticScroll(); // F3-A3: salto propio, no señal de lectura
         target.focus();
         target.scrollIntoView({ block: 'start' });
     };

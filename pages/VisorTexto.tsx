@@ -20,7 +20,7 @@ import * as analyticsService from '../services/analyticsService';
 // Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
 // Se ejecuta en paralelo a analyticsService.track legacy. NO reemplaza nada.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
-import { useEconomicTick } from '../hooks/useEconomicTick';
+import { useEconomicTick, markProgrammaticScroll } from '../hooks/useEconomicTick';
 // Sprint Modo accesible (experiencia) — overlay opt-in que solo aparece
 // cuando el contexto del Modo accesible está activo. Si no, render = null.
 import { VisorTextoAccesibleOverlay } from '../components/accesible/VisorTextoAccesibleOverlay';
@@ -339,7 +339,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                 // Resume logic
                 setTimeout(() => {
                     const scrollTarget = (scrollPct / 100) * document.body.scrollHeight;
-                    if (scrollTarget > 100) window.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+                    if (scrollTarget > 100) { markProgrammaticScroll(); window.scrollTo({ top: scrollTarget, behavior: 'smooth' }); }
                 }, 500); // Slight delay for render
 
                 // D/E: Resume toast — tell the user where we're picking up from.
@@ -425,6 +425,9 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         contentId: content.id,
         mode:      'text',
         getNarrationMedia: () => [audioRef.current],
+        // A11Y-FIX-01: el TTS no desplaza; los únicos saltos propios (reanudar,
+        // botones ↑/↓) se marcan con markProgrammaticScroll.
+        scrollSignal: { isAutoScrolling: () => false },
     });
 
     // Save Progress logic
@@ -929,10 +932,12 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     });
 
     const scrollUp = () => {
+        markProgrammaticScroll();
         window.scrollBy({ top: -window.innerHeight * 0.8, behavior: 'smooth' });
     };
 
     const scrollDown = () => {
+        markProgrammaticScroll();
         window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'smooth' });
     };
 

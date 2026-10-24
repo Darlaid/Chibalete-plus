@@ -3,6 +3,7 @@
 **Fecha:** 2026-10-24 · **HEAD auditado:** `dc22e19` · **Plan:** `PLAN_GENERAL_V1_1.md` §4.2, §4.6, unidad 7 (G4) · **Decisiones:** `DECISIONES_F0C.md` P3
 **Modo:** diagnóstico y propuesta. **No hay cambios de código.** La propuesta requiere aprobación expresa antes de implementarse, porque cambia qué cuenta como señal en la acreditación.
 **Estado de la accesibilidad:** **NO VERIFICADA.** Faltan todas las pruebas en dispositivo.
+**Seguimiento:** la alternativa A fue aprobada e implementada en `F3A3_A11Y_FIX_01.md` (YELLOW: faltan las pruebas en dispositivo).
 **CI de HEAD:** GREEN (`security`, `content-rmw` en el intento 2 e `identity-preflight` en el intento 3). Ver `F3A3_INSTRUMENTATION.md` §6.
 
 ## 1. Qué acredita hoy la actividad

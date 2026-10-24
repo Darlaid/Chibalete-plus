@@ -203,12 +203,17 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
 
     // F3-A3: medición económica (inerte si la ingesta está apagada). La
     // navegación accesible llega como teclado, click o foco de confianza; el
-    // auto-avance no es señal humana.
+    // auto-avance no es señal humana. A11Y-FIX-01: el avance de la ventana
+    // mantiene la continuidad (lectura con lector de pantalla), salvo con el
+    // auto-avance activo; los saltos propios se marcan en useA11yReaderNavigation.
+    const autoAdvanceActiveRef = useRef(false);
+    autoAdvanceActiveRef.current = autoAdvance.status === 'ACTIVE';
     useEconomicTick({
         enabled:   !!book,
         userId:    user?.id,
         contentId: id,
         mode:      'a11y',
+        scrollSignal: { isAutoScrolling: () => autoAdvanceActiveRef.current },
     });
 
     // CRR Fase 2 — observation bridge. Si el flag está OFF (default), este

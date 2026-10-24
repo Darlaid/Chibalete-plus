@@ -64,6 +64,7 @@ import type { A11yBook } from '../../types/a11y';
 import type { ReaderNavigationApi } from '../../hooks/useA11yReaderNavigation';
 import type { AutoAdvanceApi } from '../../hooks/useA11yAutoAdvance';
 import type { ReadingSettingsApi, ReadingLanguage } from '../../hooks/useA11yReadingSettings';
+import { markProgrammaticScroll } from '../../hooks/useEconomicTick';
 
 interface A11ySidebarProps {
     book: A11yBook | null;
@@ -132,11 +133,13 @@ const A11ySidebar: React.FC<A11ySidebarProps> = ({
                     `#${TOC_PANEL_ID} a`
                 );
                 if (firstLink) {
+                    markProgrammaticScroll(); // F3-A3: el foco puede desplazar
                     firstLink.focus();
                     return;
                 }
                 // Fallback: si no hay capítulos, dejamos foco en el botón
                 // (el skip link ya lo enfocó por su side-effect default).
+                markProgrammaticScroll();
                 document.getElementById('a11y-toc-toggle')?.focus();
             });
         };

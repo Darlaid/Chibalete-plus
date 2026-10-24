@@ -21,6 +21,7 @@
  */
 
 import React from 'react';
+import { markProgrammaticScroll } from '../../hooks/useEconomicTick';
 
 interface SkipTarget {
     id: string;
@@ -72,6 +73,7 @@ const A11ySkipLinks: React.FC = () => {
         }
         const target = document.getElementById(targetId);
         if (!target) return;
+        markProgrammaticScroll(); // F3-A3: salto propio, no señal de lectura
         target.focus();
         target.scrollIntoView({ block: 'start' });
     };

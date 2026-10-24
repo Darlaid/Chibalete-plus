@@ -38,6 +38,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { A11yBook } from '../types/a11y';
 import { findSegmentForParagraph, type ReadingSegment } from '../utils/readingSegments';
+import { markProgrammaticScroll } from './useEconomicTick';
 
 interface FlatParagraph {
     paragraphId: string;
@@ -185,6 +186,7 @@ function smoothScrollToElement(el: HTMLElement): void {
     const offset  = window.innerHeight * VIEWPORT_TOP_OFFSET_RATIO;
     const targetY = window.scrollY + rect.top - offset;
 
+    markProgrammaticScroll();
     window.scrollTo({
         top:      Math.max(0, targetY),
         behavior: prefersReduced ? 'auto' : 'smooth',
@@ -205,6 +207,7 @@ function focusElementById(id: string): void {
             el.focus({ preventScroll: true });
             smoothScrollToElement(el);
         } else {
+            markProgrammaticScroll();
             (el as HTMLElement).focus();
         }
     });

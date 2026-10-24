@@ -5,7 +5,7 @@ import ChibaleteEpubReader, { type EpubOpenInfo, type EpubRelocateState } from '
 import { contentDetailHref, readEpubContentId } from '../../utils/epubReaderLink.mjs';
 import { computeEpubFingerprint, createEpubProgressSaver, pickRestoreCfi } from './epubProgress.mjs';
 import { useEconomicTick } from '../../hooks/useEconomicTick';
-import { isEpubReaderRelocate } from '../../utils/economicTick.mjs';
+import { EPUB_SCROLL_RELOCATE_REASON, isEpubReaderRelocate } from '../../utils/economicTick.mjs';
 
 /**
  * CHP-CONTENT-CANONICAL-2026-01 3E.3 — app de la entrada productiva
@@ -73,7 +73,7 @@ const EpubReaderApp: React.FC = () => {
     // F3-A3: sesión económica nativa del lector EPUB (inerte si la ingesta está apagada).
     const [econUserId, setEconUserId] = useState<string | null>(null);
     const econActivityOffRef = useRef<(() => void) | null>(null);
-    const { markHumanSignal } = useEconomicTick({
+    const { markHumanSignal, markScrollProgress } = useEconomicTick({
         enabled:   phase.kind === 'ready',
         userId:    econUserId,
         contentId,
@@ -195,11 +195,14 @@ const EpubReaderApp: React.FC = () => {
         queueMicrotask(() => {
             const reason = adapterRef.current?.lastRelocateReason ?? null;
             saverRef.current?.onRelocate({ ...loc, reason });
-            // F3-A3: pasar página o navegar es señal humana; la re-maquetación ('anchor') no.
+            // F3-A3: pasar página es señal humana; la re-maquetación ('anchor') y
+            // la restauración al abrir ('navigation') no. El desplazamiento del
+            // modo continuo solo mantiene la continuidad (A11Y-FIX-01).
             if (isEpubReaderRelocate(reason)) markHumanSignal();
+            else if (reason === EPUB_SCROLL_RELOCATE_REASON && typeof loc.fraction === 'number') markScrollProgress(loc.fraction);
         });
         exposeDebug({ loc });
-    }, [exposeDebug, markHumanSignal]);
+    }, [exposeDebug, markHumanSignal, markScrollProgress]);
 
     const backButton = (
         <button type="button" onClick={back} className="flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">

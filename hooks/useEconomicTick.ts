@@ -19,8 +19,12 @@
  * y TalkBack llega como click) y foco (navegación por elementos con lector de
  * pantalla o teclado) — más `markHumanSignal()` para la navegación propia de un
  * visor que ocurre fuera de este documento (iframes del lector EPUB).
- * El scroll NO es señal: los visores lo provocan solos (auto-avance, sincronía
- * del inmersivo).
+ * El scroll NO es señal humana: los visores lo provocan solos (auto-avance,
+ * sincronía del inmersivo). A11Y-FIX-01: un visor que distingue sus
+ * desplazamientos propios puede activar `scrollSignal`; entonces el avance de
+ * la ventana cuenta como señal de CONTINUIDAD con las guardas del núcleo. Ese
+ * visor debe llamar a `markProgrammaticScroll()` antes de cada desplazamiento
+ * propio. El lector EPUB usa `markScrollProgress` (sus `relocate` de scroll).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -31,6 +35,7 @@ import {
     createTickBuffer,
     econIngestEnabled,
     serverClockOffset,
+    windowScrollObservation,
 } from '../utils/economicTick.mjs';
 
 export type EconomicTickMode = 'pdf' | 'text' | 'immersive' | 'a11y' | 'album' | 'epub';
@@ -42,11 +47,23 @@ export interface UseEconomicTickConfig {
     mode: EconomicTickMode;
     /** Medios de NARRACIÓN del visor (nunca ambiente ni efectos). */
     getNarrationMedia?: () => Array<HTMLMediaElement | null | undefined>;
+    /** Avance de la ventana como señal de continuidad (solo visores que marcan sus desplazamientos). */
+    scrollSignal?: { isAutoScrolling: () => boolean };
 }
 
 const ENDPOINT = '/api/v1/events';
 const SIGNAL_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click', 'focusin'] as const;
 const MEDIA_SAMPLE_MS = 1_000;
+
+// Último desplazamiento propio de un visor (reloj local). Solo una escritura:
+// con la ingesta apagada nadie lo lee.
+let programmaticScrollAt: number | null = null;
+let programmaticScrollPending = false;
+/** Llamar justo antes de cada `scrollTo`/`scrollBy`/`scrollIntoView` del visor. */
+export function markProgrammaticScroll(): void {
+    programmaticScrollAt = Date.now();
+    programmaticScrollPending = true;
+}
 
 // Una sola consulta por página: el flag y el reloj del servidor.
 let ingestModePromise: Promise<boolean> | null = null;
@@ -85,13 +102,17 @@ function postTicks(events: unknown[], keepalive: boolean): void {
     } catch { /* idem */ }
 }
 
-export function useEconomicTick(config: UseEconomicTickConfig): { markHumanSignal: () => void } {
+export function useEconomicTick(config: UseEconomicTickConfig): { markHumanSignal: () => void; markScrollProgress: (position: number) => void } {
     const { enabled, userId, contentId, mode } = config;
     const [ingestOn, setIngestOn] = useState(false);
     const [clockOffset, setClockOffset] = useState<number | null>(null);
     const mediaRef = useRef(config.getNarrationMedia);
     mediaRef.current = config.getNarrationMedia;
+    const scrollRef = useRef(config.scrollSignal);
+    scrollRef.current = config.scrollSignal;
+    const withScroll = !!config.scrollSignal;
     const signalRef = useRef<(() => void) | null>(null);
+    const scrollProgressRef = useRef<((position: number) => void) | null>(null);
 
     const wanted = enabled && !!userId && userId !== 'guest' && !!contentId;
 
@@ -127,9 +148,35 @@ export function useEconomicTick(config: UseEconomicTickConfig): { markHumanSigna
         };
         const onPageHide = () => { tick(); flush(true); };
 
+        // Desplazamiento de la ventana (no de paneles internos: sin captura).
+        const observeWindow = (auto: boolean) => {
+            const at = programmaticScrollAt;
+            core.scrollObserved(now(), {
+                ...windowScrollObservation({ scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, innerHeight: window.innerHeight }),
+                auto,
+                sinceProgrammaticMs: at === null ? null : Date.now() - at,
+                programmaticPending: programmaticScrollPending,
+            });
+        };
+        const onScroll = () => {
+            let auto = true;
+            try { auto = !!scrollRef.current?.isAutoScrolling(); } catch { /* ante la duda, automático */ }
+            observeWindow(auto);
+        };
+        const onScrollEnd = () => { programmaticScrollPending = false; };
+        scrollProgressRef.current = (position: number) => {
+            const at = programmaticScrollAt;
+            core.scrollObserved(now(), { position, sinceProgrammaticMs: at === null ? null : Date.now() - at, programmaticPending: programmaticScrollPending });
+        };
+
         for (const name of SIGNAL_EVENTS) document.addEventListener(name, onTrusted, { capture: true, passive: true });
         document.addEventListener('visibilitychange', onVisibility);
         window.addEventListener('pagehide', onPageHide);
+        if (withScroll) {
+            observeWindow(true); // posición de partida: lo ya desplazado no cuenta
+            window.addEventListener('scroll', onScroll, { passive: true });
+            window.addEventListener('scrollend', onScrollEnd);
+        }
 
         const tickTimer = window.setInterval(tick, ECON_TICK_PARAMS.tickIntervalMs);
         const flushTimer = window.setInterval(() => flush(false), ECON_TICK_PARAMS.flushIntervalMs);
@@ -157,13 +204,17 @@ export function useEconomicTick(config: UseEconomicTickConfig): { markHumanSigna
             for (const name of SIGNAL_EVENTS) document.removeEventListener(name, onTrusted, { capture: true });
             document.removeEventListener('visibilitychange', onVisibility);
             window.removeEventListener('pagehide', onPageHide);
+            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('scrollend', onScrollEnd);
             signalRef.current = null;
+            scrollProgressRef.current = null;
             // Tick final parcial (F3-A2 §3) y envío.
             tick();
             flush(true);
         };
-    }, [active, clockOffset, userId, contentId, mode]);
+    }, [active, clockOffset, userId, contentId, mode, withScroll]);
 
     const markHumanSignal = useCallback(() => { signalRef.current?.(); }, []);
-    return { markHumanSignal };
+    const markScrollProgress = useCallback((position: number) => { scrollProgressRef.current?.(position); }, []);
+    return { markHumanSignal, markScrollProgress };
 }

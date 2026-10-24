@@ -23,6 +23,12 @@
  *    iniciada por gesto si arrancó dentro de los 10 s siguientes a una señal
  *    humana; tras más de 2 min sin avance hace falta un gesto nuevo.
  *  - Sin señal, sin audio y sin cola acreditable ⇒ no se emite nada.
+ *  - Desplazamiento (A11Y-FIX-01, `F3A3_A11Y_DIAGNOSIS.md` §4.2): solo en los
+ *    visores que distinguen sus desplazamientos propios. Es una señal de
+ *    CONTINUIDAD: solo mantiene una lectura con señal vigente (≤ pausa), nunca
+ *    abre ni reanuda una. Exige avance real de la posición, ningún
+ *    desplazamiento automático ni propio reciente, pestaña visible y como
+ *    mucho una cada franja. No infiere ninguna tecnología de apoyo.
  */
 
 export const ECON_TICK_EVENT = 'econ_tick';
@@ -43,6 +49,10 @@ export const ECON_TICK_PARAMS = Object.freeze({
     maxRate: 4,
     maxBatch: 50,               // tope de lote de POST /api/v1/events
     maxBufferAgeMs: 540_000,    // < maxIngestDelayMs (10 min) del servidor
+    scrollMinIntervalMs: 15_000,     // ≤ 1 señal de desplazamiento por franja
+    programmaticScrollGuardMs: 1_500, // tras un desplazamiento propio del visor
+    programmaticScrollMaxMs: 5_000,   // tope si el navegador no emite `scrollend`
+    scrollMinAdvanceViewport: 0.25,   // avance mínimo: ¼ de pantalla
 });
 
 /**
@@ -72,12 +82,45 @@ export function createEconomicTickCore({ mode, contentId, sessionId, startedAt, 
     let lastAdvanceAt = null;
     let runGesture = false;
 
+    // Desplazamiento: posición máxima ya absorbida y última señal emitida.
+    let scrollBase = null;
+    let lastScrollSignalAt = null;
+
     const isRate = (r) => typeof r === 'number' && Number.isFinite(r) && r >= params.minRate && r <= params.maxRate;
+    const signalAt = (t) => {
+        lastSignalAt = t;
+        if (firstSignalSinceEmit === null) firstSignalSinceEmit = t;
+    };
 
     return {
-        humanSignal(t) {
-            lastSignalAt = t;
-            if (firstSignalSinceEmit === null) firstSignalSinceEmit = t;
+        humanSignal(t) { signalAt(t); },
+
+        /**
+         * Un desplazamiento observado. Devuelve true si cuenta como señal.
+         * @param {number} t
+         * @param {object} o
+         * @param {number} o.position      posición de lectura (crece al avanzar)
+         * @param {number} [o.minAdvance]  avance mínimo sobre la posición absorbida
+         * @param {boolean} [o.auto]       el visor está desplazando solo
+         * @param {number|null} [o.sinceProgrammaticMs] desde el último desplazamiento propio
+         * @param {boolean} [o.programmaticPending]     ese desplazamiento no ha terminado
+         */
+        scrollObserved(t, { position, minAdvance = 0, auto = false, sinceProgrammaticMs = null, programmaticPending = false }) {
+            if (!Number.isFinite(position)) return false;
+            const absorb = () => { scrollBase = scrollBase === null ? position : Math.max(scrollBase, position); return false; };
+            const own = sinceProgrammaticMs !== null && sinceProgrammaticMs >= 0
+                && (sinceProgrammaticMs <= params.programmaticScrollGuardMs
+                    || (programmaticPending && sinceProgrammaticMs <= params.programmaticScrollMaxMs));
+            if (!isVisible || auto || own || scrollBase === null) return absorb();
+            // Solo continuidad: sin señal vigente (≤ pausa) el avance no se acumula.
+            if (lastSignalAt === null || t - lastSignalAt > params.pauseMs) return absorb();
+            if (!(position > scrollBase) || position - scrollBase < minAdvance) return false;
+            // Tope por franja: el avance queda pendiente, no se pierde.
+            if (lastScrollSignalAt !== null && t - lastScrollSignalAt < params.scrollMinIntervalMs) return false;
+            scrollBase = position;
+            lastScrollSignalAt = t;
+            signalAt(t);
+            return true;
         },
 
         setVisible(v, t) {
@@ -196,8 +239,29 @@ export function econIngestEnabled(runtimeConfig) {
     return !!runtimeConfig && typeof runtimeConfig === 'object' && runtimeConfig.economicIngest === 'on';
 }
 
-/** Motivos de relocate del lector EPUB que son navegación del lector (3E.6). */
-export const EPUB_READER_RELOCATE_REASONS = Object.freeze(['page', 'snap', 'scroll', 'navigation']);
+/**
+ * Posición de lectura de un visor que desplaza la ventana: fracción del
+ * documento ya superada. Es estable ante re-maquetaciones (tamaño de letra,
+ * giro), que cambian los píxeles pero no la fracción.
+ */
+export function windowScrollObservation({ scrollY, scrollHeight, innerHeight }, params = ECON_TICK_PARAMS) {
+    const h = Math.max(1, scrollHeight || 0);
+    return {
+        position: Math.max(0, scrollY || 0) / h,
+        minAdvance: (params.scrollMinAdvanceViewport * Math.max(0, innerHeight || 0)) / h,
+    };
+}
+
+/**
+ * Motivos de relocate del lector EPUB (foliate) que son acción del lector:
+ * pasar página (`page`) y el gesto de arrastre (`snap`). `navigation` no,
+ * porque también la produce la restauración automática de la posición al
+ * abrir; ir a un capítulo desde el índice ya llega como click. `anchor` es
+ * re-maquetación. `scroll` (modo continuo) pasa por la regla de
+ * desplazamiento: foliate lo emite solo para desplazamientos que no son suyos.
+ */
+export const EPUB_READER_RELOCATE_REASONS = Object.freeze(['page', 'snap']);
+export const EPUB_SCROLL_RELOCATE_REASON = 'scroll';
 export function isEpubReaderRelocate(reason) {
     return EPUB_READER_RELOCATE_REASONS.includes(reason);
 }

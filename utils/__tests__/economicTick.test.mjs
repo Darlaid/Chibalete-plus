@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
     ECON_TICK_MODES, ECON_TICK_PARAMS, createEconomicTickCore, createTickBuffer,
-    econIngestEnabled, isEpubReaderRelocate, serverClockOffset,
+    econIngestEnabled, isEpubReaderRelocate, serverClockOffset, windowScrollObservation, EPUB_SCROLL_RELOCATE_REASON,
 } from '../economicTick.mjs';
 import { normalizeEconTick, engineClockContext } from '../../server/royalties/econEvents.mjs';
 import { computeEconomicEpisodes, RULE_SET_RS_2026_01_V1 } from '../../server/royalties/economicEpisodes.mjs';
@@ -32,8 +32,9 @@ const nextId = () => `01J${String(++seq).padStart(23, '0')}`;
  * `visible(t)`; `media(t)`: muestras de narración; `tickEvery(t)`: periodo
  * real del temporizador (los navegadores lo espacian en segundo plano).
  */
-function simulate({ mode, contentId = 'c1', sessionId, from, to, signals = () => false, visible = () => true, media = null, tickEvery = () => 15_000 }) {
+function simulate({ mode, contentId = 'c1', sessionId, from, to, signals = () => false, visible = () => true, media = null, tickEvery = () => 15_000, scroll = null, accepted = null }) {
     const core = createEconomicTickCore({ mode, contentId, sessionId, startedAt: from, visible: visible(from) });
+    if (scroll) core.scrollObserved(from, { position: 0, auto: true }); // posición de partida (como el hook)
     const out = [];
     let nextTick = from + tickEvery(from);
     let vis = visible(from);
@@ -42,6 +43,8 @@ function simulate({ mode, contentId = 'c1', sessionId, from, to, signals = () =>
         if (v !== vis) { core.setVisible(v, t); vis = v; }
         if (signals(t)) core.humanSignal(t);
         if (media) core.sampleMedia(t, media(t));
+        const so = scroll ? scroll(t) : null;
+        if (so && core.scrollObserved(t, so) && accepted) accepted.push(t);
         if (t >= nextTick) { const e = core.tick(t, nextId()); if (e) out.push(e); nextTick = t + tickEvery(t); }
     }
     const last = core.tick(to + 500, nextId()); // tick final parcial
@@ -213,7 +216,9 @@ console.log('\n[10] buffer, reloj, flag y señales del EPUB');
     ok('lote ≤ 50 y sin ticks que el servidor rechazaría por antigüedad', first.length === 50 && first.every((e) => e.clientTs >= T0) && b.size === 20);
     ok('offset de reloj del servidor', serverClockOffset(1000, 1200, 5100) === 4000 && serverClockOffset(1000, 900, 5) === 0 && serverClockOffset(1, 2, undefined) === 0);
     ok('flag: solo "on" explícito activa', econIngestEnabled({ economicIngest: 'on' }) && !econIngestEnabled({ economicIngest: 'off' }) && !econIngestEnabled({ mediaBaseUrl: '' }) && !econIngestEnabled(null));
-    ok('EPUB: navegación del lector sí, re-maquetación no', isEpubReaderRelocate('page') && isEpubReaderRelocate('navigation') && !isEpubReaderRelocate('anchor') && !isEpubReaderRelocate(null));
+    ok('EPUB: pasar página sí; re-maquetación y restauración al abrir no', isEpubReaderRelocate('page') && isEpubReaderRelocate('snap')
+        && !isEpubReaderRelocate('navigation') && !isEpubReaderRelocate('anchor') && !isEpubReaderRelocate(null));
+    ok('EPUB: el scroll continuo no es señal humana directa (pasa por la regla de desplazamiento)', !isEpubReaderRelocate('scroll') && EPUB_SCROLL_RELOCATE_REASON === 'scroll');
     let threw = false; try { createEconomicTickCore({ mode: 'lu', contentId: 'c', sessionId: 's', startedAt: 0, visible: true }); } catch { threw = true; }
     ok('modo fuera de V1 (LU) rechazado', threw);
     ok('parámetros alineados con el servidor y el rule_set', ECON_TICK_PARAMS.tickIntervalMs === RULE_SET_RS_2026_01_V1.slotSeconds * 1000
@@ -242,12 +247,139 @@ console.log('\n[11] instrumentación de los 6 modos (estructural)');
     const hook = read('hooks/useEconomicTick.ts');
     ok('hook: listeners y timers solo con la sesión activa (flag del servidor)', /const active = wanted && ingestOn && clockOffset !== null;/.test(hook)
         && /useEffect\(\(\) => \{\s*if \(!active \|\| !contentId\) return;[\s\S]*addEventListener/.test(hook));
-    ok('hook: solo eventos de confianza; el scroll no es señal', hook.includes('if (e.isTrusted) signal()') && !/'scroll'/.test(hook));
+    ok('hook: solo eventos de confianza; el scroll no es señal humana', hook.includes('if (e.isTrusted) signal()')
+        && !/SIGNAL_EVENTS = \[[^\]]*'scroll'/.test(hook));
     ok('hook: envío propio, sin emitir eventos de sesión del backbone', !/['"`][\w.]*session_(heartbeat|start|end)['"`]/.test(hook.replace(/^\s*(\/\/|\*).*$/gm, '')) && !hook.includes('useBackboneReadingSession('));
     ok('álbum: la narración es la región, no el ambiente', /get narrationElement\(\): HTMLAudioElement \{ return this\._region; \}/.test(read('utils/NarrativeAudioEngine.ts')));
     const adapter = read('components/epub-reader/foliateAdapter.mjs');
     ok('EPUB: el adaptador reenvía solo interacción de confianza de los iframes', /if \(ev\.isTrusted && !stale\(\)\) for \(const cb of activityListeners\) cb\(\);/.test(adapter));
     ok('servidor: runtime-config expone el modo de ingesta', /economicIngest: econEvents\.econIngestMode\(\)/.test(read('server/server.js')));
+}
+
+console.log('\n[12] A11Y-FIX-01 — desplazamiento como señal de continuidad');
+{
+    const MINADV = 0.02;
+    // Avance de la ventana cada `ms` a partir de `fromMs`: `step` de documento por salto.
+    const scrolling = ({ ms = 40_000, fromMs = 10_000, step = 0.05, until = Infinity, extra = {} } = {}) => {
+        let pos = 0;
+        return (t) => {
+            const dt = t - T0;
+            if (dt < fromMs || dt > until || (dt - fromMs) % ms !== 0) return null;
+            pos += step;
+            return { position: pos, minAdvance: MINADV, ...extra };
+        };
+    };
+    const click = (t) => t === T0 + 2_000;
+    const a11y = (o) => simulate({ mode: 'a11y', sessionId: `SC-${++seq}`, from: T0, to: T0 + 10 * MIN, signals: click, ...o });
+    const secs = (ev) => engine(serverRows(ev).rows).episodes.reduce((s, e) => s + e.activeSeconds, 0);
+
+    const base = secs(a11y({}));
+    ok('referencia: sin desplazamiento, la lectura continua se corta tras la pausa (≤ 120 s)', base <= 120, String(base));
+    const real = secs(a11y({ scroll: scrolling() }));
+    ok('desplazamiento real hacia adelante cada 40 s: se acreditan ≈ 10 min', real >= 570 && real <= 600, String(real));
+    const still = secs(a11y({ scroll: (t) => ((t - T0) % 40_000 === 0 ? { position: 0, minAdvance: MINADV } : null) }));
+    ok('sin avance de posición (oscilación o eventos sin movimiento): nada extra', still <= 120, String(still));
+    const back = secs(a11y({ scroll: scrolling({ step: -0.05 }) }));
+    ok('desplazamiento hacia atrás: nada extra', back <= 120, String(back));
+    const tiny = secs(a11y({ scroll: scrolling({ step: MINADV / 4, ms: 40_000 }) }));
+    ok('avance menor que ¼ de pantalla entre señales: no basta por sí solo', tiny <= 300, String(tiny));
+    const auto = secs(a11y({ scroll: scrolling({ extra: { auto: true } }) }));
+    ok('desplazamiento automático del visor (auto-avance): nada extra', auto <= 120, String(auto));
+
+    // Ventana de exclusión tras un desplazamiento propio.
+    const prog = (since, pending) => secs(a11y({ scroll: scrolling({ extra: { sinceProgrammaticMs: since, programmaticPending: pending } }) }));
+    ok('desplazamiento propio hace 1 s: excluido', prog(1_000, false) <= 120, String(prog(1_000, false)));
+    ok('desplazamiento propio hace 1,5 s exactos: excluido', prog(1_500, false) <= 120);
+    ok('desplazamiento propio hace 2 s y terminado: cuenta', prog(2_000, false) >= 570);
+    ok('desplazamiento propio hace 3 s todavía en curso (sin scrollend): excluido', prog(3_000, true) <= 120);
+    ok('desplazamiento propio hace 6 s: cuenta aunque el navegador no emita scrollend', prog(6_000, true) >= 570);
+
+    // Una señal por franja como mucho; el avance pendiente no se pierde.
+    const acc = [];
+    a11y({ scroll: scrolling({ ms: 1_000, step: 0.01 }), accepted: acc });
+    const gaps = acc.slice(1).map((t, i) => t - acc[i]);
+    ok('desplazamiento continuo: ≤ 1 señal cada 15 s', acc.length > 0 && gaps.every((g) => g >= 15_000), `${acc.length} señales, gaps ${gaps.slice(0, 3).join(',')}`);
+
+    // Solo continuidad: nunca abre ni reanuda una lectura.
+    const alone = a11y({ signals: () => false, scroll: scrolling() });
+    ok('solo desplazamiento, sin interacción previa: ningún tick, ningún episodio', alone.length === 0 && engine(serverRows(alone).rows).episodes.length === 0, String(alone.length));
+    const broken = secs(a11y({ scroll: scrolling({ fromMs: 160_000 }) }));
+    ok('tras más de 120 s sin señal, el desplazamiento no reanuda la acreditación', broken <= 120, String(broken));
+    const resumed = secs(a11y({ signals: (t) => t === T0 + 2_000 || t === T0 + 200_000, scroll: scrolling({ fromMs: 210_000 }) }));
+    // El clic aislado de t=2 s no se acredita (el motor exige pares ≤ 120 s o ser la última señal): 200 s → 600 s.
+    ok('con una interacción nueva, el desplazamiento vuelve a mantener la continuidad', resumed >= 380 && resumed <= 400, String(resumed));
+
+    // Visibilidad.
+    const hid = a11y({ visible: (t) => t - T0 < 60_000, scroll: scrolling() });
+    ok('pestaña oculta: sin vía visual aunque haya desplazamiento', secs(hid) <= 60, String(secs(hid)));
+    const coreV = createEconomicTickCore({ mode: 'a11y', contentId: 'c1', sessionId: 'V', startedAt: T0, visible: true });
+    coreV.scrollObserved(T0, { position: 0, auto: true });
+    coreV.humanSignal(T0 + 1_000);
+    coreV.setVisible(false, T0 + 2_000);
+    const hiddenAcc = coreV.scrollObserved(T0 + 3_000, { position: 0.5, minAdvance: MINADV });
+    coreV.setVisible(true, T0 + 4_000);
+    const afterAcc = coreV.scrollObserved(T0 + 20_000, { position: 0.51, minAdvance: MINADV });
+    ok('el avance con la pestaña oculta se absorbe y no se acredita al volver', !hiddenAcc && !afterAcc);
+
+    // Cambio de modo: la sesión nueva necesita su propia interacción.
+    const s1 = simulate({ mode: 'a11y', sessionId: 'MC-1', from: T0, to: T0 + 4 * MIN, signals: click, scroll: scrolling() });
+    const s2alone = simulate({ mode: 'text', sessionId: 'MC-2', from: T0 + 4 * MIN + 5_000, to: T0 + 8 * MIN, scroll: scrolling({ fromMs: 4 * MIN + 15_000 }) });
+    ok('al cambiar de modo, el desplazamiento solo no continúa la sesión nueva', s2alone.length === 0, String(s2alone.length));
+    const s2 = simulate({ mode: 'text', sessionId: 'MC-3', from: T0 + 4 * MIN + 5_000, to: T0 + 8 * MIN, signals: (t) => t === T0 + 4 * MIN + 6_000, scroll: scrolling({ fromMs: 4 * MIN + 15_000 }) });
+    const rmc = engine(serverRows([...s1, ...s2]).rows);
+    ok('con interacción al cambiar de modo: 1 episodio, Q = 1, minutos ≤ reales', rmc.episodes.length === 1 && rmc.works[0].Q === 1 && rmc.episodes[0].activeSeconds <= 8 * 60, JSON.stringify(rmc.episodes.map((e) => [e.activeSeconds, e.modeSeconds])));
+
+    // Sin doble conteo: desplazamiento + clics no suman sobre los clics.
+    const clicks = (t) => every(20_000, 3_000)(t);
+    const onlyClicks = secs(simulate({ mode: 'a11y', sessionId: 'DC-1', from: T0, to: T0 + 5 * MIN, signals: clicks }));
+    const both = secs(simulate({ mode: 'a11y', sessionId: 'DC-2', from: T0, to: T0 + 5 * MIN, signals: clicks, scroll: scrolling({ ms: 10_000 }) }));
+    ok('desplazamiento y clics a la vez: se unen, no se suman (≤ tiempo real)', both <= 300 && both - onlyClicks <= 15, `${onlyClicks} vs ${both}`);
+    const twoTabs = engine(serverRows([...a11y({ scroll: scrolling() }), ...simulate({ mode: 'text', sessionId: 'TAB2', from: T0, to: T0 + 10 * MIN, signals: click, scroll: scrolling() })]).rows);
+    ok('dos visores a la vez con desplazamiento: 1 episodio, ≤ 10 min', twoTabs.episodes.length === 1 && twoTabs.episodes[0].activeSeconds <= 600);
+
+    // Posición por fracción: estable ante re-maquetación.
+    const o1 = windowScrollObservation({ scrollY: 1000, scrollHeight: 10_000, innerHeight: 800 });
+    const o2 = windowScrollObservation({ scrollY: 2000, scrollHeight: 20_000, innerHeight: 800 });
+    ok('re-maquetación (letra al doble): la posición no avanza', o1.position === o2.position);
+    ok('avance mínimo = ¼ de pantalla', Math.abs(o1.minAdvance - 200 / 10_000) < 1e-12 && windowScrollObservation({ scrollY: 0, scrollHeight: 0, innerHeight: 0 }).position === 0);
+    ok('todos los ticks con desplazamiento pasan el validador', serverRows(a11y({ scroll: scrolling() })).rejected.length === 0);
+}
+
+console.log('\n[13] A11Y-FIX-01 — integración por visor (estructural)');
+{
+    const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
+    const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const hook = read('hooks/useEconomicTick.ts');
+    ok('hook: el listener de scroll solo existe con la sesión activa y si el visor lo pide', /if \(!active \|\| !contentId\) return;[\s\S]*if \(withScroll\) \{[\s\S]*addEventListener\('scroll', onScroll/.test(hook));
+    ok('hook: scroll de la ventana sin captura (no los paneles internos)', /addEventListener\('scroll', onScroll, \{ passive: true \}\)/.test(hook));
+    ok('hook: la posición de partida se absorbe como automática', /observeWindow\(true\); \/\/ posición de partida/.test(hook));
+    ok('hook: ante un error del visor, el desplazamiento se trata como automático', /let auto = true;\s*try \{ auto = !!scrollRef\.current\?\.isAutoScrolling\(\); \}/.test(hook));
+    const marker = hook.match(/export function markProgrammaticScroll\(\): void \{([\s\S]*?)\n\}/)?.[1] ?? '';
+    ok('markProgrammaticScroll: solo anota la hora (sin listeners, timers ni red)', marker.includes('Date.now()') && !/addEventListener|setTimeout|setInterval|fetch/.test(marker));
+
+    const call = (f) => (read(f).match(/useEconomicTick\(\{[\s\S]*?\}\);/g) || [])[0] || '';
+    ok('Accesible: desplazamiento activado salvo con el auto-avance activo', call('pages/VisorAccesible.tsx').includes('scrollSignal: { isAutoScrolling: () => autoAdvanceActiveRef.current }')
+        && read('pages/VisorAccesible.tsx').includes("autoAdvanceActiveRef.current = autoAdvance.status === 'ACTIVE';"));
+    ok('Guiado: desplazamiento activado (el TTS no desplaza)', call('pages/VisorTexto.tsx').includes('scrollSignal: { isAutoScrolling: () => false }'));
+    for (const f of ['pages/VisorPDF.tsx', 'pages/VisorInmersivo.tsx', 'pages/VisorAlbum.tsx', 'components/epub-reader/EpubReaderApp.tsx']) {
+        ok(`${f}: sin desplazamiento de ventana como señal`, !call(f).includes('scrollSignal'));
+    }
+    ok('Inmersivo y Álbum: la vía de escucha sigue intacta', call('pages/VisorInmersivo.tsx').includes('getNarrationMedia') && call('pages/VisorAlbum.tsx').includes('getNarrationMedia'));
+    const epub = read('components/epub-reader/EpubReaderApp.tsx');
+    ok('EPUB: el scroll continuo de foliate va a la regla de desplazamiento', /else if \(reason === EPUB_SCROLL_RELOCATE_REASON && typeof loc\.fraction === 'number'\) markScrollProgress\(loc\.fraction\);/.test(epub));
+
+    // Todo desplazamiento propio de los visores con la señal activa va marcado.
+    const SCROLLERS = ['hooks/useA11yReaderNavigation.ts', 'components/accesible/A11ySkipLinks.tsx', 'components/accesible/A11yTableOfContents.tsx',
+        'components/accesible/A11yReadingSettings.tsx', 'components/accesible/A11ySidebar.tsx', 'pages/VisorAccesible.tsx', 'pages/VisorTexto.tsx'];
+    for (const f of SCROLLERS) {
+        const lines = strip(read(f)).split('\n');
+        const isA11y = !f.endsWith('VisorTexto.tsx');
+        const re = isA11y ? /\.(scrollTo|scrollBy|scrollIntoView)\(|\.focus\(/ : /\.(scrollTo|scrollBy|scrollIntoView)\(/;
+        const unmarked = lines.map((l, i) => [l, i]).filter(([l]) => re.test(l) && !/preventScroll: true/.test(l))
+            .filter(([l, i]) => !lines.slice(Math.max(0, i - 4), i + 1).join('\n').includes('markProgrammaticScroll()'))
+            .map(([l, i]) => `${i + 1}: ${l.trim()}`);
+        ok(`${f}: todos los desplazamientos${isA11y ? ' y focos' : ''} propios marcados`, unmarked.length === 0, unmarked.join(' | '));
+    }
 }
 
 console.log(`\neconomicTick — ${pass} ✓, ${fail} ✗`);

@@ -33,6 +33,7 @@ import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { PixelButton } from './pixel/PixelButton';
 import { PIXEL_PANEL_CLASSES } from './pixel/PixelPanel';
+import { markProgrammaticScroll } from '../../hooks/useEconomicTick';
 import type {
     ReadingSettingsApi,
     FontFamily,
@@ -160,7 +161,7 @@ const A11yReadingSettings: React.FC<A11yReadingSettingsProps> = ({
         setOpen(false);
         // Devolver foco al trigger (patrón estándar dialog).
         // Esperamos al próximo frame por si el panel desmonta primero.
-        requestAnimationFrame(() => triggerRef.current?.focus());
+        requestAnimationFrame(() => { markProgrammaticScroll(); triggerRef.current?.focus(); });
     }, [setOpen]);
 
     const toggle = useCallback(() => setOpen(!open), [setOpen, open]);
@@ -204,6 +205,7 @@ const A11yReadingSettings: React.FC<A11yReadingSettingsProps> = ({
             const firstInput = panelRef.current?.querySelector<HTMLElement>(
                 'input, button, select, [tabindex]:not([tabindex="-1"])'
             );
+            markProgrammaticScroll();
             firstInput?.focus();
         });
     }, [open]);
