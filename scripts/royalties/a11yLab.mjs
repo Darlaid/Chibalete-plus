@@ -31,10 +31,24 @@ import { engineClockContext, excludedUsersFromRows } from '../../server/royaltie
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MARKER = 'CHP_A11Y_LAB';
-const LAB_USER = { id: 'LAB-LECTOR', email: 'lector@a11y-lab.test' };
+import { makeEpub, xhtml } from '../../server/__test__/helpers/epubFixture.mjs';
+
+const MARKER_TEXT = 'laboratorio sintético A11Y-FIX-01: se puede borrar entero\n';
+// Dos cuentas sintéticas: la segunda trae historial pedagógico de 2 h 10 min
+// para que el avance automático del Modo Accesible esté desbloqueado SIN tocar
+// el umbral real (120 min, `AUTO_ADVANCE_UNLOCK_MS`).
+const LAB_USERS = [
+    { id: 'LAB-LECTOR', email: 'lector@a11y-lab.test', nombre_completo: 'Lector de laboratorio', historyMs: 0 },
+    { id: 'LAB-AVANCE', email: 'lector-avance@a11y-lab.test', nombre_completo: 'Lector de laboratorio (avance automático)', historyMs: 130 * 60 * 1000 },
+];
+// Obra donde vive el historial: NO está en el catálogo ni en las reglas, así
+// que nunca es atribuible ni elegible; y el historial es pedagógico (`events`),
+// no económico (`econ_events`).
+const HISTORY_CONTENT_ID = 'lab-historial-sintetico';
 const CONTENTS = [
     { id: 'lab-largo', titulo: 'Laboratorio · texto largo', words: 4000 },
     { id: 'lab-corto', titulo: 'Laboratorio · cabe en pantalla', words: 70 },
+    { id: 'lab-epub', titulo: 'Laboratorio · EPUB', words: 4500, epub: true },
 ];
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -68,7 +82,7 @@ const paths = (dir) => ({
     identity: path.join(dir, 'identity.db'), uploads: path.join(dir, 'uploads'), offline: path.join(dir, 'offline.db'),
     sessions: path.join(dir, 'sessions.db'), key: path.join(dir, 'session_signing_key'), events: path.join(dir, 'events.db'),
     insights: path.join(dir, 'insights.db'), royalties: path.join(dir, 'rdb', 'royalties.db'), audit: path.join(dir, 'audit.json'),
-    data: path.join(dir, 'data'), config: path.join(dir, 'lab.json'),
+    data: path.join(dir, 'data'), config: path.join(dir, 'lab.json'), archive: path.join(dir, 'events.archive.db'),
 });
 
 // Texto sintético determinista: párrafos cortos, como un libro de lectura.
@@ -87,36 +101,76 @@ function syntheticText(words) {
     return out.join(' ').replace(/ \n\n /g, '\n\n');
 }
 
-function seed() {
+// EPUB sintético (3 capítulos del mismo generador de texto): paginable en
+// varias páginas por capítulo. Sin contenido editorial.
+function syntheticEpub(words) {
+    const per = Math.ceil(words / 3);
+    const docs = {};
+    for (let i = 1; i <= 3; i++) {
+        const paras = syntheticText(per).split('\n\n').map((p) => `<p>${p}</p>`).join('\n');
+        docs[`Text/cap${i}.xhtml`] = xhtml(`<h1>Capítulo ${i}</h1>\n${paras}`);
+    }
+    return makeEpub(docs);
+}
+
+async function seed() {
     const dir = labDir({ fresh: true });
     const origin = arg('origin');
     if (!origin || !/^https?:\/\/[^/]+$/.test(origin)) die('falta --origin http://<IP-LAN>:5173 (origen del navegador del dispositivo)');
     const P = paths(dir);
-    fs.mkdirSync(path.join(P.uploads, 'lab'), { recursive: true });
-    const password = crypto.randomBytes(9).toString('base64url');
-    fs.writeFileSync(P.users, JSON.stringify([{ ...LAB_USER, password: bcrypt.hashSync(password, 10), roles: ['lector'], accountStatus: 'active', nombre_completo: 'Lector de laboratorio' }], null, 2));
+    // Primero el marcador: si algo falla a mitad, el directorio sigue siendo reconocible como laboratorio.
+    fs.writeFileSync(path.join(dir, MARKER), MARKER_TEXT);
+    const passwords = {};
+    fs.writeFileSync(P.users, JSON.stringify(LAB_USERS.map((u) => {
+        passwords[u.email] = crypto.randomBytes(9).toString('base64url');
+        return { id: u.id, email: u.email, password: bcrypt.hashSync(passwords[u.email], 10), roles: ['lector'], accountStatus: 'active', nombre_completo: u.nombre_completo };
+    }), null, 2));
     for (const f of [P.groups, P.schools]) fs.writeFileSync(f, '[]');
     fs.writeFileSync(P.progress, JSON.stringify({ progressMap: {} }));
+    // Cada obra en /uploads/<id>/ (el endpoint del EPUB exige que la ruta sea de la propia obra).
     const content = CONTENTS.map((c) => {
-        fs.writeFileSync(path.join(P.uploads, 'lab', `${c.id}.txt`), syntheticText(c.words));
-        return { id: c.id, titulo: c.titulo, autor: 'Laboratorio', tipo: 'libro', editorial: 'Laboratorio', etiquetas: ['laboratorio'],
+        const up = path.join(P.uploads, c.id);
+        fs.mkdirSync(up, { recursive: true });
+        fs.writeFileSync(path.join(up, `${c.id}.txt`), syntheticText(c.words));
+        const rec = { id: c.id, titulo: c.titulo, autor: 'Laboratorio', tipo: 'libro', editorial: 'Laboratorio', etiquetas: ['laboratorio'],
             status: 'disponible', descripcion_corta: 'Obra sintética de laboratorio', publisherId: 'pub-laboratorio',
-            texto_plano_url: `/uploads/lab/${c.id}.txt` };
+            texto_plano_url: `/uploads/${c.id}/${c.id}.txt` };
+        if (c.epub) {
+            fs.writeFileSync(path.join(up, `${c.id}.epub`), syntheticEpub(c.words));
+            rec.epub_url = `/uploads/${c.id}/${c.id}.epub`;
+        }
+        return rec;
     });
     fs.writeFileSync(P.content, JSON.stringify(content, null, 2));
     const since = Date.now() - 60_000;
-    fs.writeFileSync(P.access, JSON.stringify([{
-        id: 'lab-regla-pagada', scope: 'user', scopeId: LAB_USER.id, titleIds: CONTENTS.map((c) => c.id), collectionIds: [], expiresAt: null,
+    fs.writeFileSync(P.access, JSON.stringify(LAB_USERS.map((u) => ({
+        id: `lab-regla-pagada-${u.id.toLowerCase()}`, scope: 'user', scopeId: u.id, titleIds: CONTENTS.map((c) => c.id), collectionIds: [], expiresAt: null,
         commercialClass: 'paid_b2c', commercialClassSince: since,
         commercialClassHistory: [{ commercialClass: 'paid_b2c', since, by: 'a11y-lab', evidenceRef: 'laboratorio-sintetico' }],
-    }], null, 2));
+    })), null, 2));
+    // Historial pedagógico sintético (sesiones cerradas) con el propio insertEvent
+    // del servidor, en el events.db DEL LABORATORIO.
+    process.env.EVENTS_SQLITE_PATH = P.events;
+    const events = await import('../../server/eventsService.js');
+    const t0 = Date.now() - 2 * 86_400_000;
+    for (const u of LAB_USERS.filter((x) => x.historyMs > 0)) {
+        const half = Math.round(u.historyMs / 2);
+        for (let s = 0; s < 2; s++) {
+            const sessionId = `lab-historial-${u.id.toLowerCase()}-${s + 1}`;
+            const base = { schemaVersion: 1, mode: 'a11y', userId: u.id, contentId: HISTORY_CONTENT_ID, sessionId };
+            events.insertEvent({ ...base, eventId: `${sessionId}-start`, event: 'reading_started', clientTs: t0 + s * 3 * 3_600_000 });
+            events.insertEvent({ ...base, eventId: `${sessionId}-end`, event: 'session_ended', clientTs: t0 + s * 3 * 3_600_000 + half, elapsedMs: half, payload: { totalMs: half } });
+        }
+    }
+    events.closeDb();
     fs.writeFileSync(P.key, crypto.randomBytes(48).toString('hex'));
     try { fs.chmodSync(P.key, 0o400); } catch { /* Windows: el servidor exige POSIX */ }
     fs.writeFileSync(P.config, JSON.stringify({ origin, createdAt: new Date().toISOString() }, null, 2));
-    fs.writeFileSync(path.join(dir, MARKER), 'laboratorio sintético A11Y-FIX-01: se puede borrar entero\n');
     console.log(`Laboratorio creado en ${dir}`);
-    console.log(`Cuenta: ${LAB_USER.email}  ·  contraseña: ${password}  (solo existe en este laboratorio)`);
-    console.log(`Obras: ${CONTENTS.map((c) => `${c.id} (${c.words} palabras)`).join(', ')}`);
+    for (const u of LAB_USERS) {
+        console.log(`Cuenta: ${u.email}  ·  contraseña: ${passwords[u.email]}  (${u.historyMs ? 'avance automático desbloqueado' : 'sin historial'}; solo existe en este laboratorio)`);
+    }
+    console.log(`Obras: ${CONTENTS.map((c) => `${c.id} (${c.words} palabras${c.epub ? ', EPUB' : ''})`).join(', ')}`);
 }
 
 function start() {
@@ -149,6 +203,7 @@ function start() {
         ACCESS_FALLBACK_MODE: 'restricted', EVENTS_SQLITE_PATH: P.events, INSIGHTS_SQLITE_PATH: P.insights,
         ROYALTIES_DB: P.royalties, ECONOMIC_INGEST_MODE: ingest === 'on' ? 'on' : '',
         PROGRESS_SQLITE_PATH: path.join(dir, 'progress.db'), LEO_EVIDENCE_DB: path.join(dir, 'leo_evidence.db'),
+        ARCHIVE_SQLITE_PATH: P.archive,
         OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
         // Tienda: la URL remota es fija salvo en NODE_ENV=test; aquí no lleva a ninguna parte.
         CHP_TEST_WOO_ORIGIN: 'http://127.0.0.1:9',
@@ -173,7 +228,7 @@ function report() {
     if (!rows.length) { console.log('econ_events vacía'); return; }
     const sessions = new Map();
     for (const r of rows.filter((x) => x.event === 'econ_tick')) {
-        const s = sessions.get(r.session_id) ?? { mode: r.mode, content: r.content_id, ticks: 0, signals: 0, audio: 0, from: r.client_ts, to: r.client_ts };
+        const s = sessions.get(r.session_id) ?? { user: r.user_id, mode: r.mode, content: r.content_id, ticks: 0, signals: 0, audio: 0, from: r.client_ts, to: r.client_ts };
         const p = JSON.parse(r.payload_json || '{}');
         s.ticks++; if (p.humanSignalAgoMs != null) s.signals++; if (p.audio?.playing) s.audio++;
         s.from = Math.min(s.from, r.client_ts); s.to = Math.max(s.to, r.client_ts);
@@ -181,7 +236,7 @@ function report() {
     }
     console.log('Sesiones técnicas (una por obra × modo × apertura):');
     for (const [id, s] of sessions) {
-        console.log(`  ${id}  ${s.mode.padEnd(9)} ${s.content.padEnd(10)} ${new Date(s.from).toISOString().slice(11, 19)}–${new Date(s.to).toISOString().slice(11, 19)}  ticks ${s.ticks}  con señal ${s.signals}  con audio ${s.audio}`);
+        console.log(`  ${id}  ${s.user.padEnd(10)} ${s.mode.padEnd(9)} ${s.content.padEnd(10)} ${new Date(s.from).toISOString().slice(11, 19)}–${new Date(s.to).toISOString().slice(11, 19)}  ticks ${s.ticks}  con señal ${s.signals}  con audio ${s.audio}`);
     }
     const engine = (rs) => computeEconomicEpisodes(rs, {
         ruleSet: RULE_SET_RS_2026_01_V1, eligibleContentIds: CONTENTS.map((c) => c.id),
@@ -192,7 +247,7 @@ function report() {
     console.log('Acreditado por sesión (evaluación aislada de cada caso):');
     for (const [id, s] of sessions) {
         const own = engine(rows.filter((r) => r.session_id === id)).episodes.reduce((a, e) => a + e.activeSeconds, 0);
-        console.log(`  ${id}  ${s.mode.padEnd(9)} con ticks ≈ ${Math.round((s.to - s.from) / 1000)} s  acreditado ${own} s`);
+        console.log(`  ${id}  ${s.user.padEnd(10)} ${s.mode.padEnd(9)} con ticks ≈ ${Math.round((s.to - s.from) / 1000)} s  acreditado ${own} s`);
     }
     const res = engine(rows);
     console.log('Episodios (motor F3-A1, rs-2026-01-v1):');
@@ -203,7 +258,7 @@ function report() {
     if (res.invalid?.length) console.log(`  descartados: ${res.invalid.length} (${[...new Set(res.invalid.map((x) => x.reason))].join(', ')})`);
 }
 
-if (cmd === 'seed') seed();
+if (cmd === 'seed') await seed();
 else if (cmd === 'start') start();
 else if (cmd === 'report') report();
 else die('uso: seed --dir <lab> --origin <url> | start --dir <lab> | report --dir <lab>');
