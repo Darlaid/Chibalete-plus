@@ -354,3 +354,53 @@ El front no se evaluaba porque el job único escaneaba la API primero: si la API
   - se expone una ruta pública nueva con zod.
 - **Responsable:** seguridad técnica de Chibalete+.
 - **Corrección definitiva** (unidad propia): migrar a zod ≥ 4.6.6 **y** a la API v4 en los 4 módulos, manteniendo los `.max()`.
+
+## 10. Lote F — secretos históricos de Gitleaks (2026-10-24)
+
+`gitleaks-history` reportaba 10 hallazgos, todos del historial y ninguno en el árbol (`gitleaks-head` en verde). Verificación dentro del proceso: valores por stdin, solo recuentos; nunca en argumentos ni en salidas.
+
+| # | Huella (commit:archivo:regla:línea) | Qué es | Decisión |
+|---|---|---|---|
+| 1–3 | `376f6dd…:server/__test__/adminSecretFile.test.js:generic-api-key:44-46` | fixtures sintéticas del test del lector de secretos | **ignorada por huella exacta** |
+| 4–8 | `f7f0c5c…:{ecosystem.config.cjs:8, server/simulate_novelty.js:7, server/test_persistence_flow.js:11, server/test_user_flow.js:5, verify_pipeline.cjs:9}:chibalete-admin-secret` | secreto de máquina anterior (2 valores) | **revocado** (≠ secreto vivo y ≠ entorno de los contenedores; 401 en ambas réplicas; re-confirmado hoy) → **ignorada por huella exacta** |
+| 9–10 | `f7f0c5c…:studio-editor-bi/assets/index-CqLdlylq.js:{gcp-api-key, chibalete-gemini-key}:1120` | clave de la config web de Firebase de Studio Editor BI | **NO ignorada** (ver 10.2) |
+
+### 10.1 Las ocho excepciones
+
+- Aplicadas en `.gitleaksignore` con justificación individual; sin reglas, rutas ni regex.
+- Tras aplicarlas, el historial deja exactamente los 2 hallazgos de Firebase. El árbol versionado da 0 hallazgos.
+- **Detección intacta:** en un repositorio aislado con estos `.gitleaks.toml` y `.gitleaksignore`, cinco secretos sintéticos nuevos se detectan tanto en `detect` como en `dir` (rc=1):
+  - uno en `ecosystem.config.cjs` línea 8, el mismo archivo y línea que una huella ignorada;
+  - uno en `adminSecretFile.test.js` línea 44, ídem;
+  - dos en el bundle de Studio línea 1120;
+  - uno de OpenAI en un archivo nuevo.
+
+  La huella incluye el commit, así que no abre huecos.
+
+### 10.2 Clave web de Firebase — evaluación (solo lectura)
+
+- **Proyecto:** `studio-editor-bi` (número de proyecto 515623025414).
+- **Qué es:** es la configuración web de Firebase (`apiKey` de `firebaseConfig`), pública por diseño. Es la misma clave que sirve hoy el bundle de Studio y aparece una sola vez en él. El SDK de Gemini del bundle usa un valor de relleno, así que no hay ninguna clave de IA expuesta. El backend de Studio no usa esta clave: trabaja con la cuenta de servicio vía Admin SDK.
+- **Datos:** las reglas del repositorio de Studio niegan todo por defecto; Storage niega todo al cliente; los datos van por `orgId` y scopes en los claims.
+- **En vivo, sin autenticación** (Firestore REST con la clave):
+  - `directory`, `editorials`, `orgs`, `users`, `sector_views_stub`, `contracts` y `monthlyPL` → 403;
+  - el listado de Storage (Firebase y GCS, bucket por defecto y `studio-editor-bi-documents`) → 403/401/400.
+- **Restricciones de la clave: AUSENTES.**
+  - Sin restricción de aplicación: Identity Toolkit responde 200 sin Referer y con un Referer ajeno.
+  - Sin restricción de API: una API ajena a Firebase (YouTube Data) responde `SERVICE_DISABLED`, no `API_KEY_SERVICE_BLOCKED`. Lo mismo ocurre con Gemini.
+  - Cualquier API que se habilite en el proyecto quedaría usable con esta clave desde cualquier origen.
+- **Riesgos:**
+  - Consumo no autorizado de cualquier API habilitada hoy o en el futuro (por ejemplo, si se activa Generative Language para Studio).
+  - Si el alta libre de cuentas (sign-up) está habilitada en Firebase Auth, cualquiera podría crear una cuenta y leer `directory`, `editorials`, `orgs` y `sector_views_stub`, que solo exigen `isLoggedIn()`. El estado del sign-up no es observable sin credenciales y no se probó, porque crearía cuentas.
+- **Conclusión:** identificador público sin las restricciones mínimas → **no se añade excepción** (gate YELLOW para estos 2 hallazgos).
+- **Corrección mínima** (consola de GCP/Firebase, por el titular del proyecto; sin cambios de código):
+  1. **Restricción de aplicación** — referentes HTTP: `https://studio.chibaleteeditores.com/*`, `https://studio-editor-bi.firebaseapp.com/*`, `https://studio-editor-bi.web.app/*` (más `http://localhost:*` solo si se desarrolla contra producción).
+  2. **Restricción de API** — solo Identity Toolkit API, Token Service API, Cloud Firestore API y, si se usan, Firebase Installations y Firebase App Check.
+  3. **Firebase Auth** → desactivar «crear cuentas (sign-up)» si las altas son solo administrativas.
+  4. Tras aplicarlo, re-sondear: Referer ajeno → `API_KEY_HTTP_REFERRER_BLOCKED`, API ajena → `API_KEY_SERVICE_BLOCKED`. Entonces se añaden las 2 huellas exactas como identificador público restringido.
+
+### 10.3 Hallazgo de CI fuera del lote
+
+`trivy` (fs) y `trivy-image (api)` pasaron a rojo el 2026-10-24 con la base de Trivy de las 01:18 UTC. La causa es **CVE-2023-54404**: es la alias CVE de GHSA-mrhx-c7xc-m3w5, la misma vulnerabilidad de zod aceptada en ZOD-01. Esa excepción solo cubre OSV. Extenderla a `.trivyignore` (misma caducidad, 2026-11-23) es decisión de Dirección y no se aplica en este lote.
+
+Los demás hallazgos locales de Trivy vienen de `deployment_package/` y `_prod_snapshot_/`, copias no versionadas que no están en el repositorio ni en el CI.

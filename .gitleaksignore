@@ -27,3 +27,29 @@
 # trabajo y rompería el gate duro — el archivo que silencia un hallazgo no puede
 # ser la causa del siguiente.
 234b5c4da366151dfe7b544164ee0ea71280bf30:server/__test__/mookCoverUpload01a.test.mjs:chibalete-admin-secret:228
+
+# ── SEC-DEPS-02 / LOTE F (2026-10-24) ─────────────────────────────────────────
+# Diez hallazgos de `gitleaks-history` analizados uno por uno. Ocho se ignoran
+# aquí por fingerprint exacto; los dos restantes (configuración web de Firebase
+# de Studio Editor BI, f7f0c5c index-CqLdlylq.js:1120) NO se ignoran en este
+# lote. Verificación hecha dentro del proceso, sin imprimir valores.
+#
+# Fixtures del test del lector de secretos (adminSecretFile.test.js, líneas
+# 44-46): cadenas sintéticas para probar el lector file-only; solo existen en
+# 376f6dd y en el commit que las retiró; no coinciden con ningún secreto vivo ni
+# con el entorno de ningún contenedor.
+376f6ddcdb93dc4a5ebcb6a72c86f98ccbcfcfe0:server/__test__/adminSecretFile.test.js:generic-api-key:44
+376f6ddcdb93dc4a5ebcb6a72c86f98ccbcfcfe0:server/__test__/adminSecretFile.test.js:generic-api-key:45
+376f6ddcdb93dc4a5ebcb6a72c86f98ccbcfcfe0:server/__test__/adminSecretFile.test.js:generic-api-key:46
+#
+# Secreto administrativo de máquina ANTERIOR, en el commit inicial f7f0c5c (dos
+# valores distintos: el de ecosystem.config.cjs y el de los otros cuatro
+# scripts). Revocado: ninguno coincide con el secreto vivo (file-only 0400) ni
+# con el entorno de los contenedores, y ambos reciben 401 en las dos réplicas
+# (Lote F, 2026-10-23; re-confirmado 2026-10-24 tras SEC-ACCOUNT-01). Ya no está
+# en el árbol.
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:ecosystem.config.cjs:chibalete-admin-secret:8
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:server/simulate_novelty.js:chibalete-admin-secret:7
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:server/test_persistence_flow.js:chibalete-admin-secret:11
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:server/test_user_flow.js:chibalete-admin-secret:5
+f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:verify_pipeline.cjs:chibalete-admin-secret:9
