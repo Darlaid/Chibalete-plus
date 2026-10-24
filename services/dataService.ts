@@ -216,6 +216,27 @@ class DataService {
     }
 
     /**
+     * SEC-ACCOUNT-01 — cambio de contraseña propia (Perfil → Seguridad). La
+     * identidad es la cookie de sesión; el servidor revoca todas las sesiones
+     * al aceptar, así que el caller debe cerrar la sesión local después.
+     * Nunca registra ni guarda los valores.
+     */
+    public async changeOwnPassword(currentPassword: string, newPassword: string, confirmPassword: string): Promise<{ ok: boolean; status: number; code?: string; error?: string }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/auth/change-password`, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+            });
+            const body = await res.json().catch(() => ({}));
+            return { ok: res.ok, status: res.status, code: body?.code, error: body?.error };
+        } catch {
+            return { ok: false, status: 0, error: 'No se pudo conectar con el servidor. Intenta nuevamente.' };
+        }
+    }
+
+    /**
      * Headers para operaciones de escritura que requieren rol administrador.
      * Usa x-user-id del usuario logueado — el backend valida el rol.
      * No embebe secretos en el bundle.

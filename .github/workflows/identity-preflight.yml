@@ -136,6 +136,13 @@ jobs:
       - name: Seguridad — reinvitación, desactivación y política de contraseñas
         run: npm run test:credential-reset
 
+      # SEC-ACCOUNT-01 — cambio de contraseña propia (Perfil → Seguridad): identidad
+      # solo por sesión, contraseña actual, política ≥ 12, credentialVersion++ y
+      # revocación entre DOS réplicas reales que comparten stores (temp), tope de
+      # intentos, concurrencia y ningún secreto en respuestas/logs/auditoría.
+      - name: Seguridad — cambio de contraseña propia (dos réplicas, enforce)
+        run: npm run test:self-password
+
       # SEC-DEPS-02 / ZOD-01 — condiciones que justifican la excepción temporal de
       # OSV para GHSA-mrhx-c7xc-m3w5: ninguna entrada externa llega a un array de
       # zod y todo cuerpo JSON queda en 100 kB. Si falla, la excepción deja de valer.

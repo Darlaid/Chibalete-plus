@@ -409,6 +409,28 @@ const resetConfirmLimiter = rateLimit({
     message: { error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' },
 });
 
+// SEC-ACCOUNT-01 — cambio de contraseña propia. Dos barreras: por IP (antes de
+// autenticar) y por cuenta, que solo cuenta contraseñas actuales incorrectas
+// (res.locals.pwFailure). Contadores en memoria por réplica: con 2 réplicas el
+// techo efectivo por cuenta es el doble, sigue acotado.
+const changePasswordIpLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: IS_PROD ? 20 : 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' },
+});
+const changePasswordAccountLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: IS_PROD ? 5 : 10,
+    keyGenerator: (req) => `chpw:${req.auth?.userId}`,
+    skipSuccessfulRequests: true,
+    requestWasSuccessful: (req, res) => res.locals.pwFailure !== true,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiados intentos con la contraseña actual. Intenta nuevamente en 15 minutos.', code: 'too_many_attempts' },
+});
+
 // --- TTS RATE LIMITER (per userId) ---
 // In-memory sliding window: Map<userId, number[]> of request timestamps.
 // Prevents a single user from spamming TTS, exhausting OpenAI quota or disk.
@@ -11489,6 +11511,89 @@ app.post('/api/auth/logout-all', requireUserAuth, async (req, res) => {
     // de progreso pendiente; el cliente limpia sus stores editoriales él mismo.
     res.set('Clear-Site-Data', '"cache"');
     res.json({ success: true });
+});
+
+// SEC-ACCOUNT-01 — CAMBIO DE CONTRASEÑA PROPIA (Perfil → Seguridad), todos los roles.
+// La identidad sale SOLO de la sesión firmada verificada: ni x-user-id ni un id
+// en el cuerpo. Exige la contraseña actual (bcrypt), aplica la política de
+// contraseñas nuevas con mínimo de 12, rechaza reutilizar la actual, hashea en el
+// servidor, credentialVersion++ y revoca TODAS las sesiones (incluida la actual).
+// Solo cambian password y credentialVersion (y se anula un reset pendiente): id,
+// roles, email, colegio, grupos, progreso y reglas de acceso quedan intactos.
+// La cuenta principal protegida puede usarlo: es su propia credencial.
+const SELF_PASSWORD_MIN_LENGTH = 12;
+const BCRYPT_MAX_BYTES = 72; // bcrypt ignora lo que pase de 72 bytes: se rechaza.
+const requireVerifiedSession = async (req, res, next) => {
+    if (!sessionIssuanceEnabled()) return res.status(403).json({ error: 'Requiere sesión firmada', code: 'session_required' });
+    const d = await sessionAuth.authenticate(req);
+    if (!d.ok || d.authMethod !== 'session' || !d.req_auth?.sessionId) {
+        try { authSessionFailure.labels(d.reason || 'session_required').inc(); } catch { /* noop */ }
+        return res.status(d.ok ? 401 : d.status).json({ error: 'No autorizado: se requiere sesión activa' });
+    }
+    req.auth = d.req_auth;
+    return next();
+};
+const isBcryptHash = (h) => typeof h === 'string' && /^\$2[aby]\$\d\d\$/.test(h);
+app.post('/api/auth/change-password', changePasswordIpLimiter, requireVerifiedSession, changePasswordAccountLimiter, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const userId = req.auth.userId;
+    const { currentPassword, newPassword, confirmPassword } = req.body || {};
+    const bad = (code, error) => res.status(400).json({ error, code });
+    if (typeof currentPassword !== 'string' || !currentPassword
+        || typeof newPassword !== 'string' || typeof confirmPassword !== 'string') {
+        return bad('invalid', 'Completa la contraseña actual, la nueva y su confirmación.');
+    }
+    if (newPassword !== confirmPassword) return bad('confirm_mismatch', 'La confirmación no coincide con la nueva contraseña.');
+    if (newPassword.length < SELF_PASSWORD_MIN_LENGTH) {
+        return bad('too_short', `La nueva contraseña debe tener al menos ${SELF_PASSWORD_MIN_LENGTH} caracteres.`);
+    }
+    if (Buffer.byteLength(newPassword, 'utf8') > BCRYPT_MAX_BYTES) return bad('too_long', 'La nueva contraseña es demasiado larga.');
+
+    // Async (bcrypt) fuera del lock; dentro solo se confirma que nada cambió.
+    let current;
+    try { current = readCanonicalStoreForMutation(USERS_DB).find(u => u?.id === userId); }
+    catch { return res.status(503).json({ error: 'Servicio no disponible. Intenta más tarde.' }); }
+    if (!current || !isUserActive(current) || !isBcryptHash(current.password)) {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+    const policy = checkNewPassword(newPassword, { email: current.email, minLength: SELF_PASSWORD_MIN_LENGTH });
+    if (!policy.ok) return bad(policy.code, policy.message);
+    if (!(await bcrypt.compare(currentPassword, current.password))) {
+        res.locals.pwFailure = true;
+        log(`Cambio de contraseña rechazado (actual incorrecta): user=${userId}`, 'ACCESS');
+        return bad('current_password_invalid', 'La contraseña actual no es correcta.');
+    }
+    if (newPassword === currentPassword || await bcrypt.compare(newPassword, current.password)) {
+        return bad('password_reused', 'La nueva contraseña debe ser distinta de la actual.');
+    }
+    const hashed = await hashNewPassword(newPassword);
+
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u?.id === userId);
+        if (index === -1 || !isUserActive(users[index])) return { conflict: 'gone' };
+        // Otro cambio de credencial ganó la carrera mientras se hasheaba.
+        if (users[index].password !== current.password
+            || credentialVersionOf(users[index]) !== credentialVersionOf(current)) return { conflict: 'concurrent' };
+        const { resetToken: _rt, resetExpiresAt: _re, ...rest } = users[index];
+        const next = { ...rest, password: hashed };
+        bumpCredentialVersion(next);
+        users[index] = next;
+        writeJSON(USERS_DB, users);
+        return null;
+    });
+    if (conflict?.conflict === 'gone') return res.status(401).json({ error: 'No autorizado' });
+    if (conflict?.conflict === 'concurrent') {
+        return res.status(409).json({ error: 'Tu contraseña cambió mientras se procesaba la solicitud. Inicia sesión de nuevo.', code: 'concurrent_change' });
+    }
+
+    try { sessionAuth.revokeAllUserSessions(userId); authSessionRevoked.labels('password_change').inc(); }
+    catch (e) { log(`[SESSION] revoke-on-password-change error: ${e.message}`, 'WARN'); }
+    log(`Contraseña propia cambiada: user=${userId}`, 'ACCESS');
+    writeAuditLog({ action: 'change_own_password', targetUserId: userId, actor: userId, details: {} });
+
+    res.clearCookie(SESSION_COOKIE, sessionCookieOptions({ isProd: IS_PROD }));
+    res.set('Clear-Site-Data', '"cache"');
+    return res.json({ success: true, reauthRequired: true });
 });
 
 // GET /api/content/my-catalog

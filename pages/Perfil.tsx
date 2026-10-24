@@ -8,6 +8,7 @@ import { Award, BookOpen, Heart, Users, Shield, Share2, Facebook, Linkedin, Inst
 import BookmarkManager from '../components/BookmarkManager';
 import StarRating from '../components/StarRating';
 import ClubFormModal from '../components/ClubFormModal';
+import PasswordChangeSection from '../components/PasswordChangeSection';
 
 const StatItem: React.FC<{ icon: React.ReactNode; value: number | string; label: string }> = ({ icon, value, label }) => (
     <div className="flex flex-col items-center text-center">
@@ -83,7 +84,7 @@ const Perfil: React.FC = () => {
     const { id } = useParams<{ id: string }>();
     const { user: currentUser, logout } = useAuth();
     const [user, setUser] = useState<User | null>(null);
-    const [activeTab, setActiveTab] = useState<'originales' | 'reseñas' | 'favoritos' | 'redes' | 'admin' | 'glosario'>('reseñas');
+    const [activeTab, setActiveTab] = useState<'originales' | 'reseñas' | 'favoritos' | 'redes' | 'admin' | 'glosario' | 'seguridad'>('reseñas');
     const [vocabWords, setVocabWords] = useState<string[]>([]);
     const [resenas, setResenas] = useState<{ review: Resena, content: Content }[]>([]);
     const [connectingPlatform, setConnectingPlatform] = useState<string | null>(null);
@@ -260,7 +261,7 @@ const Perfil: React.FC = () => {
     const userAge = calculateAge(user.fecha_nacimiento);
     const isOldEnough = userAge >= 15;
 
-    const TabButton: React.FC<{ tab: 'originales' | 'reseñas' | 'favoritos' | 'redes' | 'admin' | 'glosario', label: string }> = ({ tab, label }) => (
+    const TabButton: React.FC<{ tab: 'originales' | 'reseñas' | 'favoritos' | 'redes' | 'admin' | 'glosario' | 'seguridad', label: string }> = ({ tab, label }) => (
         <button
             onClick={() => setActiveTab(tab)}
             className={`px-4 py-2 font-semibold rounded-t-lg transition-colors whitespace-nowrap ${activeTab === tab ? 'border-b-2 border-indigo-500 text-indigo-600 dark:text-indigo-400' : 'text-gray-500 hover:text-gray-700'}`}
@@ -365,6 +366,7 @@ const Perfil: React.FC = () => {
                     <TabButton tab="favoritos" label="Favoritos" />
                     {isOwnProfile && <TabButton tab="glosario" label="Mi Glosario" />}
                     {isOwnProfile && <TabButton tab="redes" label="Redes Sociales" />}
+                    {isOwnProfile && <TabButton tab="seguridad" label="Seguridad" />}
                     {isOwnProfile && isAdmin && <TabButton tab="admin" label="Administración" />}
                 </nav>
             </div>
@@ -414,6 +416,9 @@ const Perfil: React.FC = () => {
                         )}
                     </div>
                 )}
+
+                {/* SEC-ACCOUNT-01 — cambio de contraseña propia, todos los roles */}
+                {activeTab === 'seguridad' && isOwnProfile && <PasswordChangeSection onChanged={logout} />}
 
                 {activeTab === 'redes' && isOwnProfile && (
                     <div className="space-y-4 max-w-2xl mx-auto md:mx-0">
