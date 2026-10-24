@@ -102,7 +102,21 @@ Con la ingesta apagada, el hook no hace nada, así que el producto no cambia. Co
 
 ## 6. CI
 
-Se completa con el run del commit de F3-A3 (`identity-preflight` ejecuta `test:royalties`, incluida la prueba HTTP en Linux).
+**GREEN en HEAD `dc22e19`** (2026-10-24):
+
+| Workflow | Run | Intento | Resultado |
+|---|---|---|---|
+| `security` | `40105502697` | 1 | success |
+| `content-rmw` | `40105502694` | 2 | success |
+| `identity-preflight` | `40105502703` | 3 | success (job `120952855671`, incluido el paso 15 «Royalties», que ejecuta `test:royalties` con la prueba HTTP [8] en Linux) |
+
+Cómo se llegó al verde:
+- **Intento 1 de `identity-preflight`:** cancelado por concurrencia. Al mismo tiempo se relanzó el run de `879a596` en el mismo grupo.
+- **Intento 2:** falló en el paso 7 (`test:identity`, «Canonicidad de la fuente de usuarios»), con *exit code 1* y sin anotación concreta. Los logs no se pueden leer sin credencial. **No es una regresión de F3-A3:** `test:identity` no incluye ninguna prueba de royalties, el diff entre `879a596` (verde) y `dc22e19` es un único fichero de prueba de royalties, y el intento 3, con el mismo árbol, pasó. En esta rama hay precedentes de verde en el segundo intento: `04f887f`, `c650b5e` y `879a596`. Se registra como **intermitencia previa de `test:identity` en CI**, sin dueño asignado.
+- **Intento 1 de `content-rmw`:** falló coincidiendo con los otros runs y pasó en el intento 2 sin cambios. Intermitencia; en local, sobre HEAD, también está en verde.
+- **En local, `test:identity` da 33 ✓ / 1 ✗.** Es el guard «el test no creó data-critical/usuarios_colegios_oro.json», que falla en la máquina de desarrollo porque el padrón real existe en el árbol. Es propio de este entorno; en el clon del CI no ocurre.
+
+Veredicto de la unidad: **GREEN_LOCAL+CI**. El gate del Plan (despliegue, VoiceOver/TalkBack y 1 episodio en producción) sigue pendiente; ver `F3A3_A11Y_DIAGNOSIS.md`.
 
 ## 7. Riesgos y condiciones para desplegar
 
