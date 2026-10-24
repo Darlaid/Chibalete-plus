@@ -27,6 +27,7 @@ import { resolveImmersiveResumePosition } from '../utils/immersiveResume.mjs';
 // Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
 // Convive con analyticsService.track / usePlaybackAnalytics / pbLog. NO los reemplaza.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
+import { useEconomicTick } from '../hooks/useEconomicTick';
 // Logger estructurado para auditoría del flujo inmersivo. OFF en prod por default;
 // activable runtime con localStorage.setItem('immersive_debug', '1').
 import { immersiveLog } from '../utils/immersiveLogger';
@@ -322,6 +323,16 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             totalSentences:       sentencesRef.current.length,
             playbackSpeed,
         }),
+    });
+
+    // F3-A3: medición económica (inerte si la ingesta está apagada). Solo
+    // observa la narración A/B; no participa en el playback.
+    useEconomicTick({
+        enabled:   !isHydrating && !!user?.id && !!content?.id && sentences.length > 1,
+        userId:    user?.id,
+        contentId: content.id,
+        mode:      'immersive',
+        getNarrationMedia: () => [pb.audioRefA.current, pb.audioRefB.current],
     });
 
     // Always-fresh trigger: ÚNICA puerta de salida hacia navegación cross-content.

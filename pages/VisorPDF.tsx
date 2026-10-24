@@ -8,6 +8,7 @@ import * as analyticsService from '../services/analyticsService';
 // Sprint Data Backbone — Fase 4B: paridad de sesión vía /api/v1/events.
 // Convive con analyticsService.track + startHeartbeat legacy. NO los reemplaza.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
+import { useEconomicTick } from '../hooks/useEconomicTick';
 import { Sun, Moon, ChevronLeft, ChevronRight, Loader2, Minus, Plus, Maximize, Minimize, Smartphone, Info, X, Tag, User } from 'lucide-react';
 import { useDevice } from '../hooks/useDevice';
 import MobileOrientationOverlay from '../components/MobileOrientationOverlay';
@@ -54,6 +55,14 @@ const VisorPDF: React.FC<{ content: Content }> = ({ content }) => {
             totalPages:  numPages,
             zoomLevel:   scale,
         }),
+    });
+
+    // F3-A3: medición económica (inerte si la ingesta está apagada).
+    useEconomicTick({
+        enabled:   !!user?.id && !!content?.id && numPages > 0,
+        userId:    user?.id,
+        contentId: content.id,
+        mode:      'pdf',
     });
 
     // -- Auto Fit Logic --

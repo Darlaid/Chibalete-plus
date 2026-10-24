@@ -37,6 +37,8 @@ export interface NarrativeAudioControls {
     replay:         () => void;
     /** Sync mute state from UI. */
     setMuted:       (muted: boolean) => void;
+    /** F3-A3: narration element, read-only, for economic listening measurement. */
+    getNarrationMedia: () => HTMLAudioElement | null;
     /**
      * Warm-up hint — primes the browser cache for an audio URL without playing it.
      * Call on page advance with the first audioUrl of the next page.
@@ -112,8 +114,11 @@ export function useNarrativeAudio(): NarrativeAudioControls {
         [],
     );
     const clearAudioFailed = useCallback(() => setAudioFailed(false), []);
+    // F3-A3: lectura del medio de narración para la medición económica.
+    const getNarrationMedia = useCallback(() => engineRef.current?.narrationElement ?? null, []);
 
     return {
+        getNarrationMedia,
         playAmbient,
         playRegion,
         stopRegion,

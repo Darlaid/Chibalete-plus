@@ -1537,7 +1537,9 @@ app.get('/api/server-time', (_req, res) => {
 // Solo expone valores no sensibles y mantiene fallback seguro si no hay env.
 app.get('/api/runtime-config', (_req, res) => {
     const mediaBaseUrl = (process.env.MEDIA_BASE_URL || '').trim().replace(/\/+$/, '');
-    res.json({ mediaBaseUrl });
+    // F3-A3: el cliente solo instrumenta `econ_tick` si la ingesta está
+    // encendida; con ECONOMIC_INGEST_MODE ausente ⇒ 'off' ⇒ sin emisión.
+    res.json({ mediaBaseUrl, economicIngest: econEvents.econIngestMode() });
 });
 
 // --- ROUTES ---

@@ -148,6 +148,10 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
     // close (p. ej. React StrictMode monta-desmonta-monta) no deja vistas huérfanas.
     let generation = 0;
     const relocateListeners = new Set();
+    // F3-A3: interacción de confianza dentro de las páginas (iframes), que no
+    // llega al documento del lector. Solo se notifica; no cambia nada más.
+    const activityListeners = new Set();
+    const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click', 'focusin'];
     // 3E.6: motivo del último relocate según el renderer de foliate ('page',
     // 'snap', 'scroll', 'navigation' = lector; 'anchor' = re-maquetación
     // automática, p. ej. al cargar imágenes). El renderer lo emite en el mismo
@@ -197,6 +201,11 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
             created.addEventListener('load', (e) => {
                 // CP-4A: el texto vive en iframes; la fricción de copia se engancha a cada documento.
                 attachExtractionFriction(e.detail?.doc);
+                for (const name of ACTIVITY_EVENTS) {
+                    e.detail?.doc?.addEventListener?.(name, (ev) => {
+                        if (ev.isTrusted && !stale()) for (const cb of activityListeners) cb();
+                    }, { capture: true, passive: true });
+                }
                 e.detail?.doc?.addEventListener?.('keydown', (ev) => {
                     if (ev.key === 'ArrowRight') { ev.preventDefault(); created.goRight?.(); }
                     else if (ev.key === 'ArrowLeft') { ev.preventDefault(); created.goLeft?.(); }
@@ -222,6 +231,7 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
         goTo(target) { return view?.goTo(target); },
         goToFraction(f) { return view?.goToFraction(f); },
         onRelocate(cb) { relocateListeners.add(cb); return () => relocateListeners.delete(cb); },
+        onActivity(cb) { activityListeners.add(cb); return () => activityListeners.delete(cb); },
         get layout() { return layout; },
         get lastRelocateReason() { return lastRelocateReason; },
         get isOpen() { return !!view; },

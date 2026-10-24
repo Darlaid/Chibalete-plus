@@ -15,6 +15,7 @@ import { createAlbumEmitter, generateSessionId } from '../services/analyticsServ
 // Sprint Data Backbone — Fase 4B: paridad de sesión vía /api/v1/events.
 // Convive con createAlbumEmitter legacy. NO lo reemplaza.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
+import { useEconomicTick } from '../hooks/useEconomicTick';
 import { useNarrativeAudio } from '../hooks/useNarrativeAudio';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, HelpCircle, Volume2, VolumeX, RotateCcw, Eye, EyeOff } from 'lucide-react';
 import confetti from 'canvas-confetti';
@@ -398,6 +399,16 @@ const VisorAlbum: React.FC<{ content: Content }> = ({ content }) => {
             currentSlide: pageIndex + 1,
             totalSlides:  albumData.length,
         }),
+    });
+
+    // F3-A3: medición económica (inerte si la ingesta está apagada). Solo la
+    // narración de regiones es escucha; el ambiente y los efectos no.
+    useEconomicTick({
+        enabled:   !!user?.id && !!content?.id && albumData.length > 0,
+        userId:    user?.id,
+        contentId: content.id,
+        mode:      'album',
+        getNarrationMedia: () => [audio.getNarrationMedia()],
     });
 
     // rereadContext: snapshot at mount — how many times the user has completed

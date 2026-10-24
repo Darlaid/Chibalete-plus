@@ -348,6 +348,9 @@ export class NarrativeAudioEngine {
 
     get muted(): boolean { return this._muted; }
 
+    /** F3-A3: medio de narración (solo lectura; medición económica de escucha). */
+    get narrationElement(): HTMLAudioElement { return this._region; }
+
     // ── Ambient ───────────────────────────────────────────────────────
 
     /**

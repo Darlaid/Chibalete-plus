@@ -12,6 +12,8 @@
  *   [6] flag apagado: respuesta idéntica a hoy y sin tabla nueva
  *   [7] regresión: eventos de producto, acceso y catálogo intactos; la tabla
  *       `events` no recibe filas económicas
+ *   [8] F3-A3: /api/runtime-config expone el flag; ticks generados por el
+ *       núcleo real del cliente (cambio de modo entre réplicas) → 1 episodio
  *
  * POSIX-only (clave de sesión 0400, mismo criterio que sessionIdentityIntegration).
  */
@@ -23,6 +25,9 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'node:url';
+import { createEconomicTickCore } from '../../../utils/economicTick.mjs';
+import { computeEconomicEpisodes, RULE_SET_RS_2026_01_V1 } from '../economicEpisodes.mjs';
+import { engineClockContext, excludedUsersFromRows } from '../econEvents.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 if (process.platform === 'win32') {
@@ -191,6 +196,27 @@ try {
     ok('acceso: c1 200 / c2 403', await get(b1, '/api/content/content-c1/access?userId=RDR', rdr) === 200 && await get(b1, '/api/content/content-c2/access?userId=RDR', rdr) === 403);
     ok('catálogo del lector 200', await get(b1, '/api/content', rdr) === 200);
     ok('auth/me 200', await get(b1, '/api/auth/me', rdr) === 200);
+    console.log('\n[8] F3-A3: flag público y ticks del cliente real');
+    const cfgOn = await (await fetch(`${b1}/api/runtime-config`)).json();
+    const cfgOff = await (await fetch(`${b3}/api/runtime-config`)).json();
+    ok('runtime-config: on / off según ECONOMIC_INGEST_MODE', cfgOn.economicIngest === 'on' && cfgOff.economicIngest === 'off' && 'mediaBaseUrl' in cfgOn);
+    // Lectura de RDR: 45 s en PDF y 45 s en Guiado, hace 5 min, con el núcleo del cliente.
+    const t0 = Date.now() - 5 * 60_000;
+    const clientTicks = [];
+    for (const [i, mode] of [['A', 'pdf'], ['B', 'text']].entries()) {
+        const from = t0 + i * 50_000;
+        const core = createEconomicTickCore({ mode: mode[1], contentId: 'content-c1', sessionId: `f3a3-${mode[0]}`, startedAt: from, visible: true });
+        for (let t = from + 1000; t <= from + 45_000; t += 1000) {
+            if ((t - from) % 10_000 === 0) core.humanSignal(t);
+            if ((t - from) % 15_000 === 0) { const e = core.tick(t, ulid()); if (e) clientTicks.push(e); }
+        }
+    }
+    r = await post(b1, clientTicks.filter((e) => e.mode === 'pdf'), { cookie: rdr });
+    const r2 = await post(b2, clientTicks.filter((e) => e.mode === 'text'), { cookie: rdr });
+    ok('ticks del cliente aceptados en las dos réplicas', r.body.rejected === 0 && r2.body.rejected === 0 && r.body.accepted + r2.body.accepted === clientTicks.length, JSON.stringify([r.body, r2.body]));
+    const f3 = econRows(P.events, "WHERE session_id LIKE 'f3a3-%'");
+    const res = computeEconomicEpisodes(f3, { ruleSet: RULE_SET_RS_2026_01_V1, eligibleContentIds: ['content-c1'], excludedUsers: excludedUsersFromRows(f3), ...engineClockContext() });
+    ok('motor: 1 episodio cualificado con los dos modos (regla pagada sintética)', res.episodes.length === 1 && res.episodes[0].qualified && Object.keys(res.episodes[0].modeSeconds).length === 2, JSON.stringify(res.episodes));
     ok('ninguna réplica cayó', api1.exitCode === null && api2.exitCode === null && api3.exitCode === null);
 } catch (e) {
     ok('arnés del servidor', false, e.stack || e.message);

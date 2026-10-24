@@ -20,6 +20,7 @@ import * as analyticsService from '../services/analyticsService';
 // Sprint Data Backbone — Fase 2: paridad de sesión vía /api/v1/events.
 // Se ejecuta en paralelo a analyticsService.track legacy. NO reemplaza nada.
 import { useBackboneReadingSession } from '../hooks/useBackboneReadingSession';
+import { useEconomicTick } from '../hooks/useEconomicTick';
 // Sprint Modo accesible (experiencia) — overlay opt-in que solo aparece
 // cuando el contexto del Modo accesible está activo. Si no, render = null.
 import { VisorTextoAccesibleOverlay } from '../components/accesible/VisorTextoAccesibleOverlay';
@@ -414,6 +415,16 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             sentenceCount: sentencesCountRef.current,
             offlineMode,
         }),
+    });
+
+    // F3-A3: medición económica (inerte si la ingesta está apagada). La
+    // narración TTS es la vía de escucha.
+    useEconomicTick({
+        enabled:   !loading && !!user?.id && !!text,
+        userId:    user?.id,
+        contentId: content.id,
+        mode:      'text',
+        getNarrationMedia: () => [audioRef.current],
     });
 
     // Save Progress logic

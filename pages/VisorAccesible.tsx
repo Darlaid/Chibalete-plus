@@ -44,6 +44,7 @@ import { useAuth } from '../context/AuthContext';
 import { parsePlainTextToA11yBook } from '../utils/a11yDocumentParser';
 import A11yShell from '../components/accesible/A11yShell';
 import { useA11yAnalytics } from '../hooks/useA11yAnalytics';
+import { useEconomicTick } from '../hooks/useEconomicTick';
 import { useA11yReaderNavigation } from '../hooks/useA11yReaderNavigation';
 import { useA11yAutoAdvance } from '../hooks/useA11yAutoAdvance';
 import { useA11yReadingSettings, type ReadingLanguage } from '../hooks/useA11yReadingSettings';
@@ -198,6 +199,16 @@ const VisorAccesible: React.FC<VisorAccesibleProps> = ({ content }) => {
     const analytics = useA11yAnalytics({
         userId:    user?.id,
         contentId: id,
+    });
+
+    // F3-A3: medición económica (inerte si la ingesta está apagada). La
+    // navegación accesible llega como teclado, click o foco de confianza; el
+    // auto-avance no es señal humana.
+    useEconomicTick({
+        enabled:   !!book,
+        userId:    user?.id,
+        contentId: id,
+        mode:      'a11y',
     });
 
     // CRR Fase 2 — observation bridge. Si el flag está OFF (default), este

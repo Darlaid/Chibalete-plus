@@ -4,6 +4,8 @@ import ProtectedContentSurface from '../ProtectedContentSurface';
 import ChibaleteEpubReader, { type EpubOpenInfo, type EpubRelocateState } from './ChibaleteEpubReader';
 import { contentDetailHref, readEpubContentId } from '../../utils/epubReaderLink.mjs';
 import { computeEpubFingerprint, createEpubProgressSaver, pickRestoreCfi } from './epubProgress.mjs';
+import { useEconomicTick } from '../../hooks/useEconomicTick';
+import { isEpubReaderRelocate } from '../../utils/economicTick.mjs';
 
 /**
  * CHP-CONTENT-CANONICAL-2026-01 3E.3 — app de la entrada productiva
@@ -68,6 +70,15 @@ const EpubReaderApp: React.FC = () => {
     const userIdRef = useRef<string | null>(null);
     const resumeRef = useRef<Promise<ResumeInfo | null> | null>(null);
     const saverRef = useRef<Saver | null>(null);
+    // F3-A3: sesión económica nativa del lector EPUB (inerte si la ingesta está apagada).
+    const [econUserId, setEconUserId] = useState<string | null>(null);
+    const econActivityOffRef = useRef<(() => void) | null>(null);
+    const { markHumanSignal } = useEconomicTick({
+        enabled:   phase.kind === 'ready',
+        userId:    econUserId,
+        contentId,
+        mode:      'epub',
+    });
 
     const exposeDebug = useCallback((patch: Record<string, unknown>) => {
         if (!debugEnabled()) return;
@@ -84,6 +95,7 @@ const EpubReaderApp: React.FC = () => {
                 if (!me.ok) { setPhase({ kind: 'error', code: 'auth' }); return; }
                 const meJson = await me.json().catch(() => null);
                 userIdRef.current = meJson?.id ?? meJson?.user?.id ?? null;
+                setEconUserId(userIdRef.current);
 
                 t0.current = performance.now();
                 const res = await fetch(`/api/content/${encodeURIComponent(contentId)}/epub`, { credentials: 'same-origin', signal: ctrl.signal });
@@ -140,6 +152,8 @@ const EpubReaderApp: React.FC = () => {
     // El libro ya está abierto: restaurar (si procede) y solo entonces armar el guardado.
     const onAdapter = useCallback((a: unknown) => {
         adapterRef.current = a as never;
+        econActivityOffRef.current?.();
+        econActivityOffRef.current = (a as { onActivity?: (cb: () => void) => () => void } | null)?.onActivity?.(markHumanSignal) ?? null;
         saverRef.current?.dispose();
         saverRef.current = null;
         if (!a || !contentId) return;
@@ -166,7 +180,7 @@ const EpubReaderApp: React.FC = () => {
             saver.arm();
             exposeDebug({ fingerprint: resume.fingerprint, restoredCfi: resume.cfi });
         })();
-    }, [contentId, exposeDebug]);
+    }, [contentId, exposeDebug, markHumanSignal]);
 
     const onOpened = useCallback((info: EpubOpenInfo) => {
         metrics.current = { ...metrics.current, navigableMs: Math.round(performance.now() - t0.current), heapMB: heapMB() };
@@ -178,9 +192,14 @@ const EpubReaderApp: React.FC = () => {
     }, [exposeDebug]);
     const onRelocate = useCallback((loc: EpubRelocateState) => {
         // El motivo (renderer) llega en el mismo dispatch, después de este callback.
-        queueMicrotask(() => saverRef.current?.onRelocate({ ...loc, reason: adapterRef.current?.lastRelocateReason ?? null }));
+        queueMicrotask(() => {
+            const reason = adapterRef.current?.lastRelocateReason ?? null;
+            saverRef.current?.onRelocate({ ...loc, reason });
+            // F3-A3: pasar página o navegar es señal humana; la re-maquetación ('anchor') no.
+            if (isEpubReaderRelocate(reason)) markHumanSignal();
+        });
         exposeDebug({ loc });
-    }, [exposeDebug]);
+    }, [exposeDebug, markHumanSignal]);
 
     const backButton = (
         <button type="button" onClick={back} className="flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
