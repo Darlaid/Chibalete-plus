@@ -493,3 +493,98 @@ Local: OSV 2.0.0 sin hallazgos (solo filtra GHSA-mrhx por ZOD-01), `lint:evidenc
 Quedan dos pendientes, ambos fuera de este gate:
 - **Excepción zod (OSV + Trivy):** caduca el **2026-11-23** y hay que revisarla antes de esa fecha.
 - **Clave web de Studio Editor BI:** sigue **sin restricciones** (§10.2). Se registra para tratarla en una unidad independiente de Studio Editor BI. F1 no la declara segura.
+
+## 12. Cierre final de SEC-DEPS-02 y gate para reanudar regalías (2026-10-24)
+
+**Veredicto: GREEN.** SEC-DEPS-02 queda cerrada. La seguridad no bloquea reanudar F3-A3, que no se inicia en esta unidad. Todas las comprobaciones fueron de solo lectura: sin despliegues, sin cambios de credenciales, sin limpieza Docker y sin escrituras en producción.
+
+### 12.1 Baseline
+
+- **Rama:** `chp/epub-mainfile-r1-release`. HEAD `2a5db47` = `origin`. El árbol está limpio en archivos versionados; solo hay carpetas de trabajo sin versionar.
+- **Producción frente a HEAD:** producción corre `selfpw-91634d2`. Entre `91634d2` y `2a5db47`, fuera de `docs/`, solo cambian `.gitleaksignore` y `.trivyignore`, que son configuración de escáneres y no se ejecutan. **Todo el código ejecutable de HEAD está en producción.**
+- **Unidades previas** (sin reabrir):
+
+| Unidad | Estado | Evidencia |
+|---|---|---|
+| SEC-ROOT-01 | GREEN, cerrada el 2026-10-23 | rotación de root confirmada por la titular |
+| SEC-USERS-01 | GREEN, cerrada | `USERS_SOURCE_OF_TRUTH.md`, `SEC_USERS_01_A_PROD_EVIDENCE.md` |
+| SEC-ACCOUNT-01 | GREEN, en producción el 2026-10-24 | `SEC_ACCOUNT_01_PROD_EVIDENCE.md` |
+| P0-ADMIN-01 | GREEN, resuelto el 2026-10-24 a las 02:22Z | cv 0→1; 0 de 12 candidatos del historial válidos; control positivo correcto |
+
+### 12.2 Lotes A–F (resultados sin cambios retrospectivos)
+
+| Lote | Commit | Resultado |
+|---|---|---|
+| A — frases de docs | `9c65438` | GREEN |
+| B — parches de lockfile | `4d3a035` | GREEN |
+| C — dependencias dev | `8eb03c7`, `e7daf66` | GREEN |
+| D — Sentry v10, OTel v2, react-router y uuid | `8cf2e83` | GREEN |
+| E — bases de imagen y `trivy-image` bloqueante | `b2f7065` | GREEN (en producción desde SEC-ACCOUNT-01) |
+| ZOD-01 — excepción de OSV | `04f887f` | GREEN, caduca el 2026-11-23 |
+| F — 8 huellas | `30f7d28` | YELLOW en su momento: dejó 2 hallazgos de Firebase abiertos |
+| F1 — alias Trivy de zod y 2 huellas de Firebase | `f351f9a`, `2a5db47` | GREEN |
+
+### 12.3 Los nueve controles
+
+Los runs de `f351f9a` y de `2a5db47` (HEAD) están **9/9 en verde**:
+
+| Control | Qué demuestra | Ámbito |
+|---|---|---|
+| gitleaks-head | ningún secreto en el árbol | código / CI |
+| gitleaks-history | historial sin hallazgos fuera de las 10 huellas exactas analizadas; canary 7/7 | código / CI |
+| evidence-hardening | ratchet sin violaciones y `test:evidence` 41/0 | código / CI |
+| osv-scanner | 0 advisories, salvo zod (excepción con fecha) | código / CI |
+| trivy (fs + config) | 0 HIGH/CRITICAL, salvo el alias de zod (con `exp:`) | código / CI |
+| trivy-image (api) | 0 HIGH/CRITICAL en la imagen API construida desde HEAD | código / CI |
+| trivy-image (front) | 0 HIGH/CRITICAL en la imagen front construida desde HEAD | código / CI |
+| image-integrity | la imagen API contiene el runtime completo, coincide con el lockfile y no lleva stores ni secretos | código / CI |
+| content-rmw | sin pérdida de escrituras entre réplicas | código / CI |
+
+### 12.4 Comprobaciones en producción (2026-10-24, 14:30–14:45Z, solo lectura)
+
+| Comprobación | Resultado observado |
+|---|---|
+| Imágenes | `api_1` y `api_2`: `chibalete/api:selfpw-91634d2` (`042eb8bf11a2`). `front`: `chibalete/front:selfpw-91634d2` (`368267b53bbf`). Los 4 contenedores (con `edge`) healthy y 0 reinicios. Override `aeb983ba…`, igual que en SEC-ACCOUNT-01. |
+| Correcciones de B y D en las dos réplicas | proxy-addr 2.0.8, multer 2.5.0, qs 6.16.1, body-parser 2.4.0, ip-address 10.7.4, brace-expansion 5.0.12, grpc-js 1.14.6, @sentry/node 10.76.2, OTel sdk-node 0.221.0 / core 2.10.0. `uuid` no está en el árbol de producción y `vite` tampoco (es dev). |
+| Correcciones de E | API: libssl3/libcrypto3 3.5.9-r0, musl 1.2.5-r23, node v20.20.2 (OpenSSL 3.0.19 estático). Front: nginx 1.30.6, libssl3 3.5.9-r0, brotli-libs 1.2.1-r0, curl 8.22.0, libxml2 2.13.9. |
+| Observabilidad inerte | 0 variables `OTEL_`/`SENTRY_`/`NODE_OPTIONS` en las dos réplicas. |
+| `SESSION_AUTH_MODE` | `enforce` en `api_1` y `api_2`. |
+| Flags de regalías | `ECONOMIC_INGEST_MODE` y `RIGHTS_ENFORCEMENT_MODE` **ausentes = off** en las dos réplicas. `econ_events` = 0 y `rights_versions` = 0. |
+| Salud | `/api/health` 200 en las dos réplicas. `/api/health/ready` 200 (2,6–3,3 s, la latencia ya conocida). Público: `/` 200, asset JS 200, health 200. `nginx -t` del edge correcto. |
+| Rechazo sin sesión | `POST /api/auth/change-password` 401; `PUT` sobre la cuenta principal 401; `/api/content` 401; las rutas admin probadas, 404. |
+| Cuenta administrativa | Padrón canónico `USERS_DB=/app/data-critical/usuarios_colegios_oro.json`: 649 reales, todas bcrypt, 0 sin contraseña; 21 sintéticas, todas `disabled`. **Una sola admin activa: la principal**, con `credentialVersion` 1 y bcrypt. `protectedAccounts.js` presente en la imagen. |
+| Almacenes | `quick_check` = ok en modo solo lectura en identity, sessions, progress, offline_assignments, events, insights y royalties (1 publisher). Los JSON parsean: content 109 (`9faaf68566e5`), groups 21 (`852c8f209765`), access 22 (`d4182a1d1152`). Las tres huellas coinciden con las registradas en F1-A, F2-B y SEC-USERS-01. |
+| Respaldos | Último `structured-backup` correcto el 2026-10-24 a las 12:02Z, con timer cada 6 h (siguiente a las 18:00Z). Último `uploads-backup` correcto a las 03:43Z. `backup-verify` correcto el 2026-10-18, semanal. `status.json` está desactualizado desde agosto (deuda conocida); el estado real sale de los manifiestos y de systemd. |
+| Rollback | Tags `rollback-pre-selfpw` (api `f2a3e5118108`, front `055537dbbdd1`) y `rollback-pre-secusers-a` presentes. Tarballs y `ROLLBACK.txt` en `/root/chp-selfpw` y `/root/chp-secusers-a`. |
+| Disco | `/` al 92 %: 9,5 GB libres de 106 GB; inodos al 30 %. |
+| Edge, últimas 24 h | 1 respuesta 502 y 1 `Connection reset by peer`: el 502 esporádico ya conocido. |
+
+**Qué está verificado y dónde:**
+- **Solo código y CI:** la ausencia de vulnerabilidades conocidas; los escáneres corren sobre lo que construye el CI.
+- **Producción:** que las imágenes y las versiones desplegadas son las corregidas, los flags, la salud, el padrón, la integridad de los almacenes, los respaldos y el rollback.
+- **No re-verificado hoy en producción:** el comportamiento funcional completo de change-password y la protección 409 de la principal. Se probaron con smokes sintéticos en SEC-ACCOUNT-01 (34/34 y 38/38) y la imagen no ha cambiado desde entonces.
+
+**Observación nueva, sin intervenir:** la respuesta HTML de `/` no lleva `Strict-Transport-Security`, `X-Content-Type-Options` ni `X-Frame-Options`; las respuestas `/api/*` sí. Es endurecimiento del front o del edge, no bloquea y no es una regresión de este saneamiento.
+
+### 12.5 Deudas independientes (no bloquean; registradas sin intervenir)
+
+| Deuda | Riesgo | Responsable | Acción / plazo |
+|---|---|---|---|
+| Excepción de zod (OSV + Trivy `exp:`) | bajo; mitigación fijada por test | seguridad técnica de Chibalete+ | revisar **antes del 2026-11-23**: migrar a zod 4 o renovar con evidencia |
+| Node 20 en EOL | medio a plazo: sin digests nuevos de la base | seguridad técnica + plataforma | unidad de migración a Node 22 LTS (probar `better-sqlite3` y `canvas`) |
+| 2 unidades systemd heredadas (`chibaleteplus-backend`, `-3002`) en `auto-restart`, ~129 000 reinicios cada una | bajo (ruido y CPU); no sirven tráfico | operación VPS | unidad autorizada para deshabilitarlas |
+| 502 esporádico edge↔API (keepalive de Node de 5 s, menor que el del edge) | bajo; 1 en 24 h | plataforma | ajustar `keepAliveTimeout` o el keepalive del upstream en una unidad propia |
+| Disco del VPS al 92 % (9,5 GB libres) | medio: respaldos y deploys necesitan margen | operación VPS | limpieza de imágenes en una unidad autorizada; vigilar antes del próximo deploy |
+| Logins de 381 B de septiembre desde 157.253/16 y 186.31/16, sin confirmar | bajo hoy: la credencial está rotada, las sesiones revocadas y hay 1 sola admin | titular de la cuenta | que la titular confirme si fueron suyos |
+| Copias históricas con credenciales ya revocadas (historial público de Git, `.env.bak` en `/opt/chibaleteplus`, copia `users_db.json` y respaldos) | bajo: todas inválidas (verificado) | operación + Dirección | destrucción segura de los `.env.bak` en una unidad aparte; el historial no se reescribe |
+| `status.json` del backup desactualizado | bajo (solo informativo) | operación | corregir el runner en una unidad aparte |
+
+La clave web de Firebase de Studio Editor BI **no forma parte de este gate**: pertenece al plan de seguridad de esa plataforma (§10.2 y §11.2).
+
+### 12.6 Decisión sobre F3-A3
+
+- **La seguridad no impide reanudar F3-A3.** No hay ningún secreto activo expuesto conocido. Los nueve controles están en verde. Producción ejecuta las correcciones con `enforce` y con los dos flags de regalías apagados. Los almacenes están íntegros y hay respaldo y rollback disponibles.
+- **Ninguna deuda de §12.5 bloquea por sí misma.** Dos condicionan la *planificación* de F3-A3, no su inicio:
+  - el disco: cualquier despliegue de F3-A3 debe medir el espacio libre en su preflight;
+  - la caducidad de zod del 2026-11-23: si F3-A3 añade esquemas zod con colecciones o rutas públicas nuevas con zod, hay que revisar la excepción en esa misma unidad.
+- **F3-A3 no se inicia aquí.** Necesita su propia instrucción, según el Plan General V1.1, que este cierre no modifica.
