@@ -382,5 +382,60 @@ console.log('\n[13] A11Y-FIX-01 — integración por visor (estructural)');
     }
 }
 
+console.log('\n[14] ECON-FOCUS-05 — el foco no es señal; el foco por código es desplazamiento propio');
+{
+    const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
+    const hook = read('hooks/useEconomicTick.ts');
+    const signals = (hook.match(/const SIGNAL_EVENTS = \[([^\]]*)\]/) || [])[1] || '';
+    ok('hook: solo eventos de ENTRADA (sin focusin)', signals.includes("'keydown'") && signals.includes("'click'") && !/focus/.test(signals), signals);
+    const adapterEvents = (read('components/epub-reader/foliateAdapter.mjs').match(/const ACTIVITY_EVENTS = \[([^\]]*)\]/) || [])[1] || '';
+    ok('EPUB: los iframes reenvían solo entrada (sin focusin)', adapterEvents.includes("'keydown'") && !/focus/.test(adapterEvents), adapterEvents);
+    ok('hook: la guarda de foco se instala con la sesión activa y se suelta al desmontar',
+        /if \(!active \|\| !contentId\) return;[\s\S]*const releaseFocusGuard = focusGuard\.acquire\(focusPrototypes\(\)\);[\s\S]*return \(\) => \{[\s\S]*releaseFocusGuard\(\);/.test(hook));
+    ok('hook: el foco por código marca desplazamiento propio', /const focusGuard = createFocusGuard\(markProgrammaticScroll\);/.test(hook));
+
+    const { createFocusGuard } = await import('../economicTick.mjs');
+    const calls = [];
+    const proto = { focus(x) { calls.push(['orig', this.id, x]); return 'ret'; } };
+    const svg = { focus() { calls.push(['svg', this.id]); } };
+    const original = proto.focus;
+    let marks = 0;
+    const guard = createFocusGuard(() => { marks++; calls.push(['mark']); });
+    const r1 = guard.acquire([proto, svg, null, {}]);
+    const r2 = guard.acquire([proto, svg]);
+    ok('guarda activa: focus() envuelto', proto.focus !== original && guard.active);
+    const out = proto.focus.call({ id: 'leo' }, { preventScroll: false });
+    ok('el aviso llega ANTES de enfocar y el foco original se ejecuta igual (this, argumentos, retorno)',
+        JSON.stringify(calls.slice(0, 2)) === JSON.stringify([['mark'], ['orig', 'leo', { preventScroll: false }]]) && out === 'ret');
+    svg.focus.call({ id: 's' });
+    ok('también SVGElement', marks === 2 && calls.at(-1)[0] === 'svg');
+    r1(); r1();
+    ok('con dos usuarios, soltar uno (dos veces) no restaura', proto.focus !== original && guard.active);
+    r2();
+    ok('al soltar el último se restaura el original', proto.focus === original && !guard.active);
+    const g2 = createFocusGuard(() => { throw new Error('x'); });
+    const rel = g2.acquire([proto]);
+    let threw = false; try { proto.focus.call({ id: 'z' }); } catch { threw = true; }
+    ok('un fallo de la medición nunca rompe el foco', !threw);
+    const theirs = function theirs() {};
+    proto.focus = theirs; rel();
+    ok('no pisa un envoltorio instalado después por otro código', proto.focus === theirs);
+    proto.focus = original;
+
+    // Núcleo: sin señales de entrada, un foco (que ya no llega como señal) no
+    // produce ticks; y el desplazamiento que provoque un foco por código se
+    // absorbe como propio (no prolonga una lectura en curso).
+    const core = createEconomicTickCore({ mode: 'text', contentId: 'c1', sessionId: 'F', startedAt: T0, visible: true });
+    core.scrollObserved(T0, { position: 0, auto: true });
+    const idle = [];
+    for (let t = T0 + 15_000; t <= T0 + 5 * MIN; t += 15_000) { const e = core.tick(t, nextId()); if (e) idle.push(e); }
+    ok('sesión sin entrada (Leo se abre solo y enfoca): 0 ticks', idle.length === 0);
+    const c2 = createEconomicTickCore({ mode: 'text', contentId: 'c1', sessionId: 'F2', startedAt: T0, visible: true });
+    c2.scrollObserved(T0, { position: 0, auto: true });
+    c2.humanSignal(T0 + 1_000);
+    const scrolledByFocus = c2.scrollObserved(T0 + 60_000, { position: 0.4, minAdvance: 0.02, sinceProgrammaticMs: 5, programmaticPending: true });
+    ok('el desplazamiento provocado por un foco por código no es señal', scrolledByFocus === false);
+}
+
 console.log(`\neconomicTick — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

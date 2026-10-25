@@ -151,7 +151,8 @@ export function createFoliateAdapter({ host, loadEngine = loadFoliateEngine, par
     // F3-A3: interacción de confianza dentro de las páginas (iframes), que no
     // llega al documento del lector. Solo se notifica; no cambia nada más.
     const activityListeners = new Set();
-    const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click', 'focusin'];
+    // ECON-FOCUS-05: solo ENTRADA (el foco también nace de un .focus() por código).
+    const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click'];
     // 3E.6: motivo del último relocate según el renderer de foliate ('page',
     // 'snap', 'scroll', 'navigation' = lector; 'anchor' = re-maquetación
     // automática, p. ej. al cargar imágenes). El renderer lo emite en el mismo

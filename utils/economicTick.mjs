@@ -15,9 +15,11 @@
  *  - Una ventana cubre desde el tick emitido anterior (o el inicio de la
  *    sesión) hasta ahora, con un máximo de 2 min.
  *  - `visible` solo si la pestaña estuvo visible TODA la ventana.
- *  - Señales humanas: solo las que el hook recibe de eventos de confianza
- *    (`isTrusted`) o de navegación iniciada por el lector. Ni la
- *    reproducción, ni el auto-avance, ni el scroll programático lo son.
+ *  - Señales humanas: solo las que el hook recibe de eventos de ENTRADA de
+ *    confianza (puntero, teclado, rueda, toque, click) o de navegación
+ *    iniciada por el lector. Ni la reproducción, ni el auto-avance, ni el
+ *    scroll programático, ni el foco lo son: un `focusin` también nace de un
+ *    `.focus()` por código con `isTrusted = true` (ECON-FOCUS-05).
  *  - Audio: solo el avance real del medio de narración, no silenciado, a una
  *    velocidad admitida; un salto (seek) no cuenta. La reproducción vale como
  *    iniciada por gesto si arrancó dentro de los 10 s siguientes a una señal
@@ -207,6 +209,46 @@ export function createEconomicTickCore({ mode, contentId, sessionId, startedAt, 
             resetWindow();
             return { eventId, event: ECON_TICK_EVENT, mode, contentId, sessionId, clientTs: Math.round(t), payload };
         },
+    };
+}
+
+/**
+ * ECON-FOCUS-05 — guarda del foco por código. Un `.focus()` (diálogos como
+ * Leo, restauraciones) dispara `focusin` con `isTrusted = true` y, si no se
+ * evita el desplazamiento, mueve la página. Ni lo uno ni lo otro es lectura:
+ * mientras haya una sesión económica activa, `focus()` queda envuelto para
+ * avisar ANTES de enfocar (el hook lo trata como desplazamiento propio).
+ * Con contador de usos; al soltar el último se restaura el original, salvo que
+ * otro código lo haya vuelto a sustituir después (no se pisa su envoltorio).
+ * @param {() => void} onProgrammaticFocus
+ */
+export function createFocusGuard(onProgrammaticFocus) {
+    let users = 0;
+    let restore = null;
+    return {
+        acquire(protos) {
+            if (users++ === 0) {
+                const saved = [];
+                for (const p of protos || []) {
+                    if (!p || typeof p.focus !== 'function') continue;
+                    const original = p.focus;
+                    const wrapped = function focus(...args) {
+                        try { onProgrammaticFocus(); } catch { /* la medición nunca rompe el foco */ }
+                        return original.apply(this, args);
+                    };
+                    p.focus = wrapped;
+                    saved.push([p, original, wrapped]);
+                }
+                restore = () => { for (const [p, original, wrapped] of saved) if (p.focus === wrapped) p.focus = original; };
+            }
+            let released = false;
+            return () => {
+                if (released) return;
+                released = true;
+                if (--users === 0) { restore?.(); restore = null; }
+            };
+        },
+        get active() { return users > 0; },
     };
 }
 

@@ -14,11 +14,17 @@
  * Aditivo: no toca `session_heartbeat`, el progreso ni ninguna métrica
  * pedagógica; usa su propio buffer y sus propios envíos.
  *
- * Señales humanas: eventos de confianza (`isTrusted`) en captura sobre
- * `document` — puntero, teclado, rueda, toque, click (la activación de VoiceOver
- * y TalkBack llega como click) y foco (navegación por elementos con lector de
- * pantalla o teclado) — más `markHumanSignal()` para la navegación propia de un
- * visor que ocurre fuera de este documento (iframes del lector EPUB).
+ * Señales humanas: eventos de ENTRADA de confianza (`isTrusted`) en captura sobre
+ * `document` — puntero, teclado (también la navegación con Tab y flechas),
+ * rueda, toque y click (la activación de VoiceOver y TalkBack llega como
+ * click) — más `markHumanSignal()` para la navegación propia de un visor que
+ * ocurre fuera de este documento (iframes del lector EPUB).
+ * ECON-FOCUS-05: el FOCO no es señal. Un `.focus()` por código (p. ej. el
+ * diálogo de Leo, que el Guiado y el Inmersivo abren solos) dispara `focusin`
+ * con `isTrusted = true`, y el navegador no permite distinguirlo del foco que
+ * mueve un lector de pantalla: se aplica la regla conservadora. Además, con la
+ * sesión activa `focus()` queda envuelto (createFocusGuard) para que el
+ * desplazamiento que provoque cuente como propio del visor.
  * El scroll NO es señal humana: los visores lo provocan solos (auto-avance,
  * sincronía del inmersivo). A11Y-FIX-01: un visor que distingue sus
  * desplazamientos propios puede activar `scrollSignal`; entonces el avance de
@@ -32,6 +38,7 @@ import { ulid } from '../utils/clientUlid';
 import {
     ECON_TICK_PARAMS,
     createEconomicTickCore,
+    createFocusGuard,
     createTickBuffer,
     econIngestEnabled,
     serverClockOffset,
@@ -52,7 +59,7 @@ export interface UseEconomicTickConfig {
 }
 
 const ENDPOINT = '/api/v1/events';
-const SIGNAL_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click', 'focusin'] as const;
+const SIGNAL_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click'] as const;
 const MEDIA_SAMPLE_MS = 1_000;
 
 // Último desplazamiento propio de un visor (reloj local). Solo una escritura:
@@ -64,6 +71,11 @@ export function markProgrammaticScroll(): void {
     programmaticScrollAt = Date.now();
     programmaticScrollPending = true;
 }
+
+// Foco por código = desplazamiento propio. Solo se instala con la sesión activa.
+const focusGuard = createFocusGuard(markProgrammaticScroll);
+const focusPrototypes = (): object[] => (typeof window === 'undefined' ? [] :
+    [window.HTMLElement?.prototype, window.SVGElement?.prototype].filter((p): p is HTMLElement | SVGElement => !!p));
 
 // Una sola consulta por página: el flag y el reloj del servidor.
 let ingestModePromise: Promise<boolean> | null = null;
@@ -169,6 +181,7 @@ export function useEconomicTick(config: UseEconomicTickConfig): { markHumanSigna
             core.scrollObserved(now(), { position, sinceProgrammaticMs: at === null ? null : Date.now() - at, programmaticPending: programmaticScrollPending });
         };
 
+        const releaseFocusGuard = focusGuard.acquire(focusPrototypes());
         for (const name of SIGNAL_EVENTS) document.addEventListener(name, onTrusted, { capture: true, passive: true });
         document.addEventListener('visibilitychange', onVisibility);
         window.addEventListener('pagehide', onPageHide);
@@ -206,6 +219,7 @@ export function useEconomicTick(config: UseEconomicTickConfig): { markHumanSigna
             window.removeEventListener('pagehide', onPageHide);
             window.removeEventListener('scroll', onScroll);
             window.removeEventListener('scrollend', onScrollEnd);
+            releaseFocusGuard();
             signalRef.current = null;
             scrollProgressRef.current = null;
             // Tick final parcial (F3-A2 §3) y envío.
