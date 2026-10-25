@@ -91,4 +91,4 @@ El navegador no permite distinguir un foco por código del foco que mueve un lec
 
 ## 8. CI
 
-Se completa con el run del commit.
+`ee75477` (código en `980397f`): `security` ✓ (`40148641507`), `content-rmw` ✓ (`40148641476`) e `identity-preflight` ✓ (`40148641480`), que ejecuta `test:royalties` con la prueba HTTP en Linux.
