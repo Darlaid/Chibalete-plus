@@ -119,7 +119,7 @@ El núcleo real del cliente genera los ticks, el servidor real los valida y guar
 |---|---|---|---|
 | **VO-1 / TB-1** «Leer todo», texto largo, 10 min | Abrir `lab-largo` en Accesible, doble toque en «Siguiente sección» y luego «Leer todo» sin tocar nada | ≥ 90 % de los 10 min si el lector desplaza la página; si no, ≤ 120 s, y se anota como limitación | Dispositivo |
 | **VO-2 / TB-2** texto que cabe en pantalla, 3 min | Abrir `lab-corto` en Accesible, doble toque en el texto y «Leer todo»; quedarse escuchando | ≤ 120 s (no hay desplazamiento): **confirma la limitación**, no es un fallo | Dispositivo |
-| **VO-3 / TB-3** navegación por elementos, 5 min | Deslizar un dedo a la derecha, elemento a elemento | ≥ 90 %. Anotar si se acredita sin desplazar (foco) | Dispositivo |
+| **VO-3 / TB-3** navegación por elementos, 5 min | Deslizar un dedo a la derecha, elemento a elemento | **Actualizado por ECON-FOCUS-05:** el foco ya no acredita. Acredita si la navegación desplaza la página o activa algo; si no, ≤ 120 s. Anotar qué ocurre (limitación de `F3A3_ECON_FOCUS_05.md` §7) | Dispositivo |
 | **VO-4 / TB-4** auto-avance, 5 min | **Actualizado en `F3A3_A11Y_LAB_03.md` §6.1** (cuenta `lector-avance@…` con el avance desbloqueado) | ≤ 120 s tras el último gesto | Dispositivo |
 | **VO-5 / TB-5** Guiado sin TTS, 5 min | `#/leer/texto/lab-largo`, «Leer todo» con el lector de pantalla | ≥ 90 % (igual que VO-1) | Dispositivo |
 | **VO-6 / TB-6** EPUB | **Actualizado en `F3A3_A11Y_LAB_03.md` §6.1** (`lab-epub` sintético; solo paginado: el producto no tiene modo continuo en EPUB) | Ver LAB-03 | Dispositivo |

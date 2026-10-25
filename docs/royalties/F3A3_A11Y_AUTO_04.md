@@ -2,6 +2,7 @@
 
 **Fecha:** 2026-10-24 · **Base:** `47d86d7` (CI 3/3 verde) · **Ejecutor:** `scripts/royalties/a11yLabBattery.mjs` · **Evidencia:** `F3A3_A11Y_AUTO_04_battery.json`
 **Modo:** laboratorio aislado (Docker, `--network none`) y Chrome real contra el laboratorio de dispositivos. Sin despliegue, sin producción y sin datos reales.
+**Estado posterior:** corregido en `F3A3_ECON_FOCUS_05.md` (GREEN_AUTO).
 **Veredicto:** **RED**, por una **acreditación ficticia verificada** en el navegador real (§5): las intervenciones automáticas de Leo en Guiado e Inmersivo ponen el foco por código y el hook lo cuenta como señal humana. El resto de la batería pasa: 20/20 escenarios, 13/13 comprobaciones y 7 de 8 pruebas de navegador.
 
 ## 1. Base y preflight
