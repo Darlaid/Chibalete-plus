@@ -44,7 +44,9 @@ section('[4/§20] LIBRARY_TABS: EXTENDED_NOT_REBUILT');
     const PREEXISTING = [
         ['biblioteca', 'Libros'],
         ['experiencias', 'Experiencias'],
-        ['editorial', 'Selección Chibalete'],
+        // F1-C (CATÁLOGOS-02): la pestaña `editorial` conserva su id y pasa de
+        // «Selección Chibalete» a «Editoriales» (cambio intencional, ver [20]).
+        ['editorial', 'Editoriales'],
         ['album', 'Libros Álbum'],
         ['lectura', 'Continuar Leyendo'],
         ['comunidad', 'Comunidad'],
@@ -73,7 +75,7 @@ section('[LIBRARY-VISIBILITY-01] LIBRARY_TAB_SET: 8');
     const EXPECTED = [
         ['biblioteca', 'Libros'], ['album', 'Libros Álbum'], ['experiencias', 'Experiencias'],
         ['personal', 'Mi biblioteca'], ['institucional', 'Biblioteca institucional'],
-        ['editorial', 'Selección Chibalete'], ['lectura', 'Continuar Leyendo'], ['comunidad', 'Comunidad'],
+        ['editorial', 'Editoriales'], ['lectura', 'Continuar Leyendo'], ['comunidad', 'Comunidad'],
     ];
     const tabs = [...pageCode.matchAll(/<TabButton tab="([^"]+)" label="([^"]+)"/g)].map(m => [m[1], m[2]]);
     ok('F · exactamente las 8 pestañas, en el orden vigente (Libros Álbum tras Libros)',
@@ -92,26 +94,33 @@ section('[LIBRARY-VISIBILITY-01] LIBRARY_TAB_SET: 8');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-section('[20] EDITORIAL_UI: UNCHANGED');
+section('[20] EDITORIAL_UI → «Editoriales» (F1-C / CATÁLOGOS-02)');
 {
-    ok('la rama editorial sigue existiendo intacta',
-        page.includes("if (activeTab === 'editorial')") && page.includes('EditorialBookCard'));
-    ok('sigue leyendo su propia fuente', page.includes('dataService.getEditorialLibrary()'));
-    ok('el cliente editorial no cambió de contrato',
+    // Antes: la capa EDITORIAL de CHP-LIB-01 («Selección Chibalete») con fuente y
+    // preflight propios. Ahora la pestaña es PRESENTACIÓN del conjunto autorizado
+    // de «Libros»; la curaduría CHP-LIB-01 se conserva en servidor y cliente.
+    ok('«Selección Chibalete» ya no se muestra', !pageCode.includes('Selección Chibalete'));
+    ok('la rama `editorial` sigue existiendo (mismo id de pestaña)', page.includes("if (activeTab === 'editorial')"));
+    const branch = pageCode.slice(pageCode.indexOf("if (activeTab === 'editorial')"), pageCode.indexOf("if (activeTab === 'comunidad')"));
+    ok('se alimenta del MISMO conjunto autorizado que «Libros» (miBiblioteca + filterHidden)',
+        branch.includes('groupBooksByPublisher(filterHidden(miBiblioteca), visiblePublishers)'));
+    ok('reutiliza la tarjeta y la ruta de apertura de «Libros» (renderSavable → ContentCard → /contenido/:id)',
+        branch.includes('renderSavable(') && !branch.includes('<Link'));
+    ok('sin fuente ni preflight propios: no lee la curaduría ni hace useAccessCheck',
+        !branch.includes('getEditorialLibrary') && !pageCode.includes('useAccessCheck') && !pageCode.includes('EditorialBookCard'));
+    ok('los nombres salen de my-catalog, no de endpoints administrativos',
+        pageCode.includes('setVisiblePublishers(dataService.getVisiblePublishers())') && !/admin\/publishers|getAdminPublishers/.test(pageCode));
+    ok('respeta la carga del motor de acceso', branch.includes('if (!accessReady) return <AccessLoadingSkeleton />'));
+    ok('el cliente de la curaduría CHP-LIB-01 no cambió de contrato (se conserva, sin vista)',
         client.includes("fetch(`${this.apiUrl}/library/editorial`, { credentials: 'include' })")
         && client.includes("{ layer: 'EDITORIAL', collections: [], unassigned: [] }"));
-    ok('§20 · el estado editorial NO se comparte con las capas nuevas',
-        pageCode.includes('const [editorial, setEditorial]')
-        && pageCode.includes('const [personal, setPersonal]')
-        && pageCode.includes('const [institutional, setInstitutional]'));
-    ok('§20 · el estado editorial tiene UN solo escritor, el suyo',
-        (pageCode.match(/setEditorial\(/g) || []).length === 1);
-    ok('§20 · y las capas nuevas tienen los suyos, separados',
-        (pageCode.match(/setPersonal\(/g) || []).length >= 1
-        && (pageCode.match(/setInstitutional\(/g) || []).length >= 1
-        && !pageCode.includes('setEditorial(personal') && !pageCode.includes('setPersonal(editorial'));
-    ok('§20 · el candado del preflight sigue siendo cosa de la capa editorial',
-        page.includes('useAccessCheck(book.id, userId)'));
+    ok('§20 · las capas personal e institucional conservan sus estados separados',
+        pageCode.includes('const [personal, setPersonal]') && pageCode.includes('const [institutional, setInstitutional]')
+        && !pageCode.includes('setVisiblePublishers(personal') && !pageCode.includes('setVisiblePublishers(institutional'));
+    ok('§20 · el estado de editoriales tiene UN solo escritor', (pageCode.match(/setVisiblePublishers\(/g) || []).length === 1);
+    ok('la agrupación vive en un módulo puro con test propio',
+        read('utils/libraryPublisherGroups.mjs').includes('export function groupBooksByPublisher')
+        && fs.existsSync(path.join(ROOT, 'utils/__tests__/libraryPublisherGroups.test.mjs')));
 }
 
 // ────────────────────────────────────────────────────────────────────────────

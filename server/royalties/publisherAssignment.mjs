@@ -53,6 +53,54 @@ export function resolvePublisherAssignment({ sent, value, next, stored, confirme
     return { publisherId: after, change: before === after ? null : { from: before, to: after } };
 }
 
+const imprintOrNull = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+/**
+ * F1-C (CATÁLOGOS-02): sello de la obra (`imprint`). Texto opcional validado
+ * contra `publishers.imprints` de la editorial resultante; no hay entidad de
+ * sellos (Plan V1.1 §3.2, V14-2).
+ *   sent        ¿el cuerpo trae la clave imprint?
+ *   value       su valor ('' y null = quitar)
+ *   stored      la ficha vigente (null si es alta)
+ *   publisherId la editorial que resulta de resolvePublisherAssignment
+ *   imprintsFor (pid) => sellos registrados; solo se consulta si hay que validar
+ * Solo se valida lo que cambia: un sello guardado se conserva aunque la
+ * editorial lo retire de su lista mientras la obra no cambie de editorial, así
+ * editar otros metadatos nunca obliga a tocarlo. Reasignar con un sello que no
+ * es de la nueva editorial se rechaza: nunca se borra en silencio.
+ */
+export function resolveImprint({ sent, value, stored, publisherId, imprintsFor }) {
+    if (sent && value !== null && value !== undefined && typeof value !== 'string') {
+        throw new PublisherError(400, 'imprint_invalid', 'El sello debe ser texto');
+    }
+    const before = imprintOrNull(stored?.imprint);
+    const after = sent ? imprintOrNull(value) : before;
+    if (!after) return { imprint: null };
+    const pid = pidOrNull(publisherId);
+    if (after === before && pid === pidOrNull(stored?.publisherId)) return { imprint: after };
+    if (!pid) throw new PublisherError(400, 'imprint_invalid', 'Un sello requiere editorial responsable');
+    const imprints = imprintsFor(pid);
+    if (!Array.isArray(imprints) || !imprints.includes(after)) {
+        throw new PublisherError(400, 'imprint_invalid', before && after === before
+            ? 'El sello de la obra no pertenece a la nueva editorial; elige uno de sus sellos o quítalo'
+            : 'El sello no pertenece a la editorial responsable');
+    }
+    return { imprint: after };
+}
+
+/**
+ * F1-C: proyección PÚBLICA de las editoriales para Biblioteca (my-catalog).
+ * Solo editoriales activas con al menos un libro en el conjunto ya autorizado,
+ * y solo id + nombre público: nunca NIT, contacto, notas ni datos económicos.
+ */
+export function publicPublishersForCatalog(catalogItems, publishers) {
+    const withBooks = new Set((catalogItems || []).filter(isBookContent).map((c) => pidOrNull(c.publisherId)).filter(Boolean));
+    return (publishers || [])
+        .filter((p) => p && p.status === 'active' && withBooks.has(p.id))
+        .map((p) => ({ id: p.id, name: p.tradeName || p.legalName }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+}
+
 /**
  * Ejecuta `writeContent` (la escritura de content.json) y anota el cambio en la
  * misma transacción de royalties.db: si `writeContent` lanza, no queda fila.

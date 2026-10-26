@@ -72,6 +72,27 @@ export function parseMyCatalogResponse(json) {
 }
 
 /**
+ * F1-C (CATÁLOGOS-02) — clave aditiva `publishers` de my-catalog: nombres
+ * públicos de las editoriales con libros en el conjunto autorizado. No decide
+ * nada: solo nombra bloques de la pestaña «Editoriales». Ilegible o ausente
+ * (servidor anterior) ⇒ [] (la pestaña queda vacía, el catálogo no cambia).
+ *
+ * @param {unknown} json cuerpo ya parseado de la respuesta
+ * @returns {{id: string, name: string}[]}
+ */
+export function parseMyCatalogPublishers(json) {
+    const list = json && typeof json === 'object' && Array.isArray(json.publishers) ? json.publishers : [];
+    const out = [];
+    const seen = new Set();
+    for (const p of list) {
+        if (!p || typeof p.id !== 'string' || !p.id || typeof p.name !== 'string' || !p.name || seen.has(p.id)) continue;
+        seen.add(p.id);
+        out.push({ id: p.id, name: p.name });
+    }
+    return out;
+}
+
+/**
  * Proyecta los ids autorizados sobre el catálogo canónico ya cacheado.
  *
  * Conserva el ORDEN DEL CATÁLOGO cacheado, no el de la respuesta, para que la

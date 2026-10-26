@@ -4293,10 +4293,20 @@ app.post('/api/content', async (req, res) => {
                 return res.status(400).json({ error: 'La editorial indicada está inactiva', code: 'inactive_publisher' });
             }
         }
+        // F1-C: sello (`imprint`) opcional, validado contra los sellos de la
+        // editorial resultante; ausente ⇒ se conserva el guardado (dentro del lock).
+        const imprintSent = Object.prototype.hasOwnProperty.call(newContent, 'imprint');
+        const imprintValue = newContent.imprint;
+        const imprintsFor = (pid) => publishersStore.getPublisher(pid)?.imprints ?? [];
         try {
-            publisherAssignment.resolvePublisherAssignment({
+            const storedForPublisher = readJSON(DB_FILE).find((c) => c.id === newContent.id) ?? null;
+            const preAssignment = publisherAssignment.resolvePublisherAssignment({
                 sent: publisherIdSent, value: newContent.publisherId, next: newContent,
-                stored: readJSON(DB_FILE).find((c) => c.id === newContent.id) ?? null, confirmed: publisherReassignConfirmed,
+                stored: storedForPublisher, confirmed: publisherReassignConfirmed,
+            });
+            publisherAssignment.resolveImprint({
+                sent: imprintSent, value: imprintValue, stored: storedForPublisher,
+                publisherId: preAssignment.publisherId, imprintsFor,
             });
         } catch (e) {
             if (!(e instanceof publishersStore.PublisherError)) throw e;
@@ -4406,6 +4416,12 @@ app.post('/api/content', async (req, res) => {
                 });
                 if (assignment.publisherId) newContent.publisherId = assignment.publisherId;
                 else delete newContent.publisherId;
+                const { imprint } = publisherAssignment.resolveImprint({
+                    sent: imprintSent, value: imprintValue, stored: freshIdx >= 0 ? freshList[freshIdx] : null,
+                    publisherId: assignment.publisherId, imprintsFor,
+                });
+                if (imprint) newContent.imprint = imprint;
+                else delete newContent.imprint;
                 // 2B: artefacto canónico ANTES que content.json; si content.json
                 // no llega a escribirse, se repone el artefacto previo.
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
@@ -11656,6 +11672,19 @@ app.post('/api/auth/change-password', changePasswordIpLimiter, requireVerifiedSe
     return res.json({ success: true, reauthRequired: true });
 });
 
+// F1-C: editoriales públicas de un conjunto ya autorizado. Un fallo del
+// registro de titulares no puede tumbar el catálogo: se responde sin nombres.
+function myCatalogPublishers(catalog) {
+    // Sin libros con editorial en el conjunto no hay nada que nombrar (ni se abre royalties.db).
+    if (!catalog.some((c) => publisherAssignment.isBookContent(c) && c.publisherId)) return [];
+    try {
+        return publisherAssignment.publicPublishersForCatalog(catalog, publishersStore.listPublishers());
+    } catch (e) {
+        log(`[PUBLISHERS] my-catalog publishers unavailable: ${e.message}`, 'WARN');
+        return [];
+    }
+}
+
 // GET /api/content/my-catalog
 // Devuelve solo el contenido accesible para el usuario autenticado.
 // LU no reimplementa lógica de permisos: consulta este endpoint.
@@ -11682,6 +11711,9 @@ app.get('/api/content/my-catalog', libraryViewNoStore, requireUserAuth, (req, re
                 coverImage: item.coverImage ?? item.portada ?? null,
                 collectionId: item.collectionId ?? null,
             })),
+            // F1-C (aditivo): nombres públicos de las editoriales con libros en
+            // ESTE conjunto; no cambia `catalog`. Sin registro de titulares → [].
+            publishers: myCatalogPublishers(catalog),
         });
     } catch (e) {
         log(`GET my-catalog error (userId=${req.user.id}): ${e.message}`, 'ERROR');

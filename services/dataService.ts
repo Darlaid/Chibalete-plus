@@ -65,6 +65,7 @@ import {
 import {
     MY_CATALOG_PATH,
     parseMyCatalogResponse,
+    parseMyCatalogPublishers,
     hydrateVisibleContent,
 } from '../utils/libraryCatalogSelection.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de la Tienda (WooCommerce vía servidor).
@@ -117,6 +118,8 @@ export interface LandingBannerSlide {
 class DataService {
     private users: User[] = [];
     private content: Content[] = [];
+    // F1-C: editoriales públicas de la última respuesta de my-catalog (pestaña «Editoriales»).
+    private visiblePublishers: { id: string; name: string }[] = [];
     private progress: ProgresoLectura[] = [];
     private reviews: Resena[] = [];
     private bookmarks: Bookmark[] = [];
@@ -2031,7 +2034,9 @@ class DataService {
         try {
             const res = await fetch(`${this.apiUrl}${MY_CATALOG_PATH}`, { credentials: 'include' });
             if (!res.ok) return null;
-            const ids = parseMyCatalogResponse(await res.json());
+            const json = await res.json();
+            const ids = parseMyCatalogResponse(json);
+            this.visiblePublishers = ids ? parseMyCatalogPublishers(json) : [];
             // La autoridad es la lista de ids; la metadata para dibujar sale del
             // catálogo canónico ya cacheado (ver libraryCatalogSelection.mjs).
             return hydrateVisibleContent(ids, this.content) as Content[] | null;
@@ -2039,6 +2044,11 @@ class DataService {
             console.error('Error fetching my-catalog:', e);
             return null;
         }
+    }
+
+    /** F1-C: nombres públicos de editoriales de la última lectura de my-catalog. */
+    getVisiblePublishers(): { id: string; name: string }[] {
+        return this.visiblePublishers;
     }
 
     // --- FASE 5: CATÁLOGO RESTRINGIDO ---

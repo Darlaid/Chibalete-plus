@@ -406,7 +406,9 @@ export interface Content {
   titulo: string;
   autor: string;
   biografia_autor?: string; // New field for Author Biography
-  editorial: "Chibalete" | "Aliada X" | "Comunidad" | string; // Changed to string to allow custom values
+  // Texto libre histórico. F1-C: ya no atribuye (Búsqueda y Biblioteca usan
+  // publisherId) y las fichas nuevas no lo reciben; las existentes lo conservan.
+  editorial?: "Chibalete" | "Aliada X" | "Comunidad" | string;
   descripcion_corta: string;
   portada_url: string;
   etiquetas: string[];
@@ -430,6 +432,9 @@ export interface Content {
   // F1-B: solo en la petición de guardado; confirma expresamente un cambio de
   // editorial responsable. El servidor no lo persiste.
   publisherReassignConfirmed?: boolean;
+  // F1-C: sello de la obra; uno de `imprints` de su editorial (validado en el
+  // servidor). Ausente ⇒ sin sello. Presentación, no identidad económica.
+  imprint?: string;
 
   // New: Sections
   sectionIds?: string[];

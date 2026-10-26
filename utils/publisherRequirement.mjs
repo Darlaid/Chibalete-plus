@@ -40,3 +40,22 @@ export function publisherFormBlock({ isBook, isUpdate, publishersLoaded, publish
 export function isPublisherReassignment({ isUpdate, publisherId, originalPublisherId = '' }) {
     return !!isUpdate && !!originalPublisherId && !!publisherId && publisherId !== originalPublisherId;
 }
+
+/**
+ * F1-C (CATÁLOGOS-02): motivo por el que el sello elegido no puede guardarse,
+ * o null. Espejo de `resolveImprint` del servidor (que decide igualmente):
+ * solo se valida lo que cambia; un sello guardado se conserva mientras la obra
+ * no cambie de editorial, aunque la editorial lo haya retirado de su lista.
+ *   publisherImprints  sellos registrados de la editorial seleccionada
+ */
+export function imprintFormBlock({ imprint = '', originalImprint = '', publisherId = '', originalPublisherId = '', publisherImprints = [] }) {
+    if (!imprint) return null;
+    if (imprint === originalImprint && publisherId === originalPublisherId) return null;
+    if (!publisherId) return 'Un sello requiere editorial responsable.';
+    if (!Array.isArray(publisherImprints) || !publisherImprints.includes(imprint)) {
+        return imprint === originalImprint
+            ? `El sello «${imprint}» no pertenece a la nueva editorial. Elige uno de sus sellos o «Sin sello».`
+            : 'El sello elegido no pertenece a la editorial responsable.';
+    }
+    return null;
+}

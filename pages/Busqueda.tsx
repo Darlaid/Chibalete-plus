@@ -5,22 +5,15 @@ import ContentCard from '../components/ContentCard';
 import type { Content } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { Search as SearchIcon } from 'lucide-react';
+import { groupSearchResults } from '../utils/libraryPublisherGroups.mjs';
 
-const SearchResults: React.FC<{ results: Content[] }> = ({ results }) => {
-    const chibaleteLibros = results.filter(c => c.editorial === 'Chibalete' && c.tipo === 'libro');
-    const chibaleteMedia = results.filter(c => c.editorial === 'Chibalete' && (c.tipo === 'video' || c.tipo === 'podcast'));
-    const aliadas = results.filter(c => c.editorial === 'Aliada X');
-    const comunidad = results.filter(c => c.editorial === 'Comunidad');
-
-    return (
-        <div className="space-y-8">
-            {chibaleteLibros.length > 0 && <SearchResultsGroup title="Libros del sello Chibalete" items={chibaleteLibros} />}
-            {chibaleteMedia.length > 0 && <SearchResultsGroup title="Videos y podcasts de Chibalete" items={chibaleteMedia} />}
-            {aliadas.length > 0 && <SearchResultsGroup title="Contenidos de editoriales aliadas" items={aliadas} />}
-            {comunidad.length > 0 && <SearchResultsGroup title="Obras de la comunidad de escritores" items={comunidad} />}
-        </div>
-    );
-};
+// F1-C (CATÁLOGOS-02): agrupación por editorial REAL (publisherId), no por el
+// texto libre `editorial`. Los resultados y su visibilidad no cambian.
+const SearchResults: React.FC<{ results: Content[]; publishers: { id: string; name: string }[] }> = ({ results, publishers }) => (
+    <div className="space-y-8">
+        {groupSearchResults(results, publishers).map(g => <SearchResultsGroup key={g.key} title={g.title} items={g.items as Content[]} />)}
+    </div>
+);
 
 const SearchResultsGroup: React.FC<{ title: string; items: Content[] }> = ({ title, items }) => (
     <section>
@@ -37,6 +30,11 @@ const Busqueda: React.FC = () => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Content[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
+  // F1-C: nombres públicos de editoriales (misma respuesta de my-catalog que Biblioteca).
+  const [publishers, setPublishers] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+      if (user) dataService.getMyCatalog().then(() => setPublishers(dataService.getVisiblePublishers()));
+  }, [user]);
 
   // Debounce Logic
   useEffect(() => {
@@ -95,7 +93,7 @@ const Busqueda: React.FC = () => {
         </div>
       )}
 
-      {hasSearched && results.length > 0 && <SearchResults results={results} />}
+      {hasSearched && results.length > 0 && <SearchResults results={results} publishers={publishers} />}
       {hasSearched && results.length === 0 && query.length > 2 && <p className="text-gray-500 text-center mt-8">No se encontraron resultados para "{query}".</p>}
 
     </div>

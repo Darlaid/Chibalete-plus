@@ -236,12 +236,16 @@ const AdminEditoriales: React.FC = () => {
                                     </td>
                                     <td className="p-3 text-gray-500">{p.imprints?.length ? p.imprints.join(', ') : '—'}</td>
                                     <td className="p-3">
-                                        <Link to={`/subir-contenido?editorial=${encodeURIComponent(p.id)}`} className="inline-flex items-center text-indigo-600 dark:text-indigo-400 hover:underline"
-                                            aria-label={`Ver los contenidos de ${p.tradeName || p.legalName}`}>
+                                        {/* F1-C: libros y recursos, cada uno a su catálogo filtrado (mismas reglas de conteo) */}
+                                        <Link to={`/subir-contenido?editorial=${encodeURIComponent(p.id)}&clase=libros`} className="inline-flex items-center text-indigo-600 dark:text-indigo-400 hover:underline"
+                                            aria-label={`Ver los libros de ${p.tradeName || p.legalName}`}>
                                             <BookOpen size={14} className="mr-1" aria-hidden="true" /> {p.bookCount ?? 0}
                                         </Link>
                                         {(p.contentCount ?? 0) > (p.bookCount ?? 0) && (
-                                            <div className="text-xs text-gray-400">+{(p.contentCount ?? 0) - (p.bookCount ?? 0)} recursos</div>
+                                            <Link to={`/subir-contenido?editorial=${encodeURIComponent(p.id)}&clase=recursos`} className="block text-xs text-gray-500 dark:text-gray-400 hover:underline"
+                                                aria-label={`Ver los recursos de ${p.tradeName || p.legalName}`}>
+                                                +{(p.contentCount ?? 0) - (p.bookCount ?? 0)} recursos
+                                            </Link>
                                         )}
                                     </td>
                                     <td className="p-3">

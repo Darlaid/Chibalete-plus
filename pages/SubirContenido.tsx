@@ -14,7 +14,8 @@ import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource, is
 import { EPUB_BOOK_FLOWS, ILLUSTRATED_KEEPS_ORIGINAL_MESSAGE } from '../utils/epubAdmin.mjs';
 import EpubInspectorCard from '../components/admin/EpubInspectorCard';
 import AttachEpubPanel from '../components/admin/AttachEpubPanel';
-import { isBookForm, publisherFormBlock, isPublisherReassignment } from '../utils/publisherRequirement.mjs';
+import { isBookForm, publisherFormBlock, isPublisherReassignment, imprintFormBlock } from '../utils/publisherRequirement.mjs';
+import { readCatalogFilters, filterCatalog, catalogFacets, NO_PUBLISHER, NO_IMPRINT, NO_STATUS } from '../utils/adminCatalogFilters.mjs';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -398,11 +399,17 @@ const SubirContenido: React.FC = () => {
     // F1-B: editorial guardada de la ficha en edición y confirmación expresa de cambio.
     const [originalPublisherId, setOriginalPublisherId] = useState<string>('');
     const [publisherReassignConfirmed, setPublisherReassignConfirmed] = useState(false);
+    // F1-C: sello de la obra ('' = sin sello) y el guardado de la ficha en edición.
+    const [imprint, setImprint] = useState<string>('');
+    const [originalImprint, setOriginalImprint] = useState<string>('');
     // F1-B: /subir-contenido?editorial=<id> abre la gestión filtrada por editorial
     // (?editorial=__sin_editorial__ = libros sin editorial, para regularizar).
     const [searchParams, setSearchParams] = useSearchParams();
     const editorialFilter = searchParams.get('editorial');
-    useEffect(() => { if (editorialFilter) setUploadMode('manage'); }, [editorialFilter]);
+    // F1-C: además ?clase=libros|recursos, ?sello= y ?estado= (presentación).
+    const catalogFilters = readCatalogFilters(searchParams);
+    const anyCatalogFilter = !!(catalogFilters.editorial || catalogFilters.clase || catalogFilters.sello || catalogFilters.estado);
+    useEffect(() => { if (anyCatalogFilter) setUploadMode('manage'); }, [anyCatalogFilter]);
     // 3F.1 — operación EPUB dentro de «Crear»: TXT/EPUB, EPUB ilustrado o añadir EPUB.
     // Ilustrado usa el MISMO pipeline EPUB; la diferencia es solo editorial/UI.
     const [bookFlow, setBookFlow] = useState<'text' | 'illustrated' | 'attach'>('text');
@@ -416,6 +423,8 @@ const SubirContenido: React.FC = () => {
         setPublisherId(content.publisherId || '');
         setOriginalPublisherId(content.publisherId || '');
         setPublisherReassignConfirmed(false);
+        setImprint(content.imprint || '');
+        setOriginalImprint(content.imprint || '');
 
         // Populate form with existing data
         setMainContent({
@@ -784,10 +793,20 @@ const SubirContenido: React.FC = () => {
         return p ? (p.tradeName || p.legalName) : id;
     };
     // Gestión filtrada por editorial (?editorial=); sin filtro, el catálogo completo.
-    const managedContents = !editorialFilter ? existingParents
-        : editorialFilter === '__sin_editorial__'
-            ? existingParents.filter(c => !c.publisherId && isBookForm(c.tipo))
-            : existingParents.filter(c => c.publisherId === editorialFilter);
+    // F1-C: + clase (libros/recursos), sello y estado; las opciones salen de la
+    // lista ya filtrada por editorial (y clase) para no ofrecer filtros vacíos.
+    const publisherScoped = filterCatalog(existingParents, { editorial: catalogFilters.editorial });
+    const catalogFacetsAll = catalogFacets(publisherScoped);
+    const catalogFacetsInClass = catalogFacets(filterCatalog(publisherScoped, { clase: catalogFilters.clase }));
+    const managedContents = filterCatalog(existingParents, catalogFilters);
+    const setCatalogFilter = (key: 'clase' | 'sello' | 'estado', value: string) => {
+        const next = new URLSearchParams(searchParams);
+        if (value) next.set(key, value); else next.delete(key);
+        if (key === 'clase') { next.delete('sello'); next.delete('estado'); }
+        setSearchParams(next);
+    };
+    const statusLabel = (v: string) => ({ disponible: 'Disponible', procesando: 'Procesando', error: 'Con error', [NO_STATUS]: 'Sin estado' } as Record<string, string>)[v] ?? v;
+    const selectedPublisherImprints = publishers?.find(p => p.id === publisherId)?.imprints ?? [];
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -948,8 +967,13 @@ const SubirContenido: React.FC = () => {
                     isUpdate, publishersLoaded: publishers !== null, publisherId, originalPublisherId,
                     reassignConfirmed: publisherReassignConfirmed,
                 });
-                if (publisherBlock) {
-                    setUploadError(publisherBlock);
+                // F1-C: el sello debe ser de la editorial (el servidor lo exige igualmente).
+                const imprintBlock = publishers !== null ? imprintFormBlock({
+                    imprint, originalImprint, publisherId, originalPublisherId,
+                    publisherImprints: publishers.find(p => p.id === publisherId)?.imprints ?? [],
+                }) : null;
+                if (publisherBlock || imprintBlock) {
+                    setUploadError(publisherBlock || imprintBlock);
                     setIsUploading(false);
                     submittingRef.current = false;
                     return;
@@ -1095,7 +1119,8 @@ const SubirContenido: React.FC = () => {
                     // Default / New Values
                     id: parentId,
                     tipo: mainContent.tipo as Content['tipo'],
-                    editorial: 'Chibalete',
+                    // F1-C: sin el texto fijo «Chibalete» en `editorial`; la atribución es
+                    // publisherId. Al editar, el spread conserva el texto histórico.
 
                     // Defaults that might be overwritten if spread below
                     metricas: { veces_leido: 0, calificacion_promedio: 0 },
@@ -1156,6 +1181,7 @@ const SubirContenido: React.FC = () => {
                     // F1-B: un cambio de editorial viaja con su confirmación expresa.
                     ...(publishers !== null ? {
                         publisherId,
+                        imprint, // F1-C: '' = sin sello
                         ...(isPublisherReassignment({ isUpdate, publisherId, originalPublisherId }) ? { publisherReassignConfirmed: true } : {}),
                     } : {}),
                 };
@@ -1186,7 +1212,6 @@ const SubirContenido: React.FC = () => {
                         tipo: mat.tipo === 'actividad' ? 'guia' : mat.tipo as any,
                         titulo: mat.titulo,
                         autor: mat.autor || mainContent.autor || 'Chibalete',
-                        editorial: 'Chibalete',
                         descripcion_corta: mat.descripcion || `Material complementario para ${mainContent.titulo}`,
                         portada_url: matCoverUrl,
                         url_recurso: matFileUrl,
@@ -1329,6 +1354,8 @@ const SubirContenido: React.FC = () => {
                             setPublisherId('');
                             setOriginalPublisherId('');
                             setPublisherReassignConfirmed(false);
+                            setImprint('');
+                            setOriginalImprint('');
                         }}
                         className="px-8 py-3 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 font-semibold transition-colors"
                     >
@@ -1451,14 +1478,47 @@ const SubirContenido: React.FC = () => {
                         {editorialFilter && (
                             <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
                                 <span className="px-3 py-1 rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-200 font-medium">
-                                    {editorialFilter === '__sin_editorial__' ? 'Libros sin editorial responsable' : `Editorial: ${publisherName(editorialFilter)}`} · {managedContents.length}
+                                    {editorialFilter === NO_PUBLISHER ? 'Libros sin editorial responsable' : `Editorial: ${publisherName(editorialFilter)}`} · {managedContents.length}
                                 </span>
                                 <button type="button" onClick={() => setSearchParams({})} className="text-indigo-600 dark:text-indigo-400 hover:underline">Quitar filtro</button>
                             </div>
                         )}
 
+                        {/* F1-C — filtros de presentación: no amplían permisos ni escriben */}
+                        <div className="mb-4 flex flex-wrap items-end gap-4 text-sm" role="group" aria-label="Filtros del catálogo">
+                            <div role="group" aria-label="Clase de contenido" className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+                                {([['', `Todos (${catalogFacetsAll.libros + catalogFacetsAll.recursos})`], ['libros', `Libros (${catalogFacetsAll.libros})`], ['recursos', `Recursos (${catalogFacetsAll.recursos})`]] as const).map(([value, label]) => (
+                                    <button key={value || 'todos'} type="button" aria-pressed={(catalogFilters.clase ?? '') === value}
+                                        onClick={() => setCatalogFilter('clase', value)}
+                                        className={`px-3 py-1.5 ${(catalogFilters.clase ?? '') === value ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}>
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                            {(catalogFacetsInClass.imprints.length > 1 || catalogFilters.sello) && (
+                                <label className="flex flex-col gap-1">
+                                    <span className="text-xs text-gray-500">Sello</span>
+                                    <select value={catalogFilters.sello ?? ''} onChange={(e) => setCatalogFilter('sello', e.target.value)}
+                                        className="p-1.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
+                                        <option value="">Todos los sellos</option>
+                                        {catalogFacetsInClass.imprints.map(v => <option key={v} value={v}>{v === NO_IMPRINT ? 'Sin sello' : v}</option>)}
+                                    </select>
+                                </label>
+                            )}
+                            {(catalogFacetsInClass.statuses.length > 1 || catalogFilters.estado) && (
+                                <label className="flex flex-col gap-1">
+                                    <span className="text-xs text-gray-500">Estado</span>
+                                    <select value={catalogFilters.estado ?? ''} onChange={(e) => setCatalogFilter('estado', e.target.value)}
+                                        className="p-1.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
+                                        <option value="">Todos los estados</option>
+                                        {catalogFacetsInClass.statuses.map(v => <option key={v} value={v}>{statusLabel(v)}</option>)}
+                                    </select>
+                                </label>
+                            )}
+                        </div>
+
                         {managedContents.length === 0 ? (
-                            <p className="text-gray-500">{editorialFilter ? 'No hay contenidos con este filtro.' : 'No hay contenidos registrados.'}</p>
+                            <p className="text-gray-500">{anyCatalogFilter ? 'No hay contenidos con este filtro.' : 'No hay contenidos registrados.'}</p>
                         ) : (
                             <div className="overflow-x-auto">
                                 <table className="w-full text-left text-sm">
@@ -1477,6 +1537,7 @@ const SubirContenido: React.FC = () => {
                                                 <td className="p-3 text-gray-500" title={content.tipo}>{getIcon(content.tipo)}</td>
                                                 <td className="p-3 font-medium text-gray-900 dark:text-gray-100">
                                                     {content.titulo}
+                                                    {content.imprint && <span className="ml-2 text-[10px] font-bold bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200 px-2 py-0.5 rounded-full align-middle">{content.imprint}</span>}
                                                     {content.standalone === false && <span className="ml-2 text-[10px] font-bold bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full align-middle">Para Experiencias</span>}
                                                 </td>
                                                 <td className="p-3 text-gray-500">{content.autor}</td>
@@ -1705,6 +1766,28 @@ const SubirContenido: React.FC = () => {
                                             El cambio queda auditado y no traslada derechos ni regalías ya causados.
                                         </span>
                                     </label>
+                                )}
+                                {/* F1-C — sello: uno de los registrados en la editorial (sin entidad de sellos) */}
+                                {(selectedPublisherImprints.length > 0 || imprint) && (
+                                    <div className="mt-4">
+                                        <label htmlFor="sc-imprint" className="block text-sm font-medium mb-1">Sello (Opcional)</label>
+                                        <select id="sc-imprint" value={imprint} onChange={(e) => setImprint(e.target.value)}
+                                            className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
+                                            <option value="">Sin sello</option>
+                                            {selectedPublisherImprints.map((s) => <option key={s} value={s}>{s}</option>)}
+                                            {imprint && !selectedPublisherImprints.includes(imprint) && (
+                                                <option value={imprint}>{imprint} (no registrado en esta editorial)</option>
+                                            )}
+                                        </select>
+                                        {imprint && !selectedPublisherImprints.includes(imprint) && (
+                                            <p className="text-xs text-amber-700 dark:text-amber-300 mt-1" role="status">
+                                                {publisherId === originalPublisherId && imprint === originalImprint
+                                                    ? 'La editorial ya no registra este sello; se conserva mientras no lo cambies.'
+                                                    : 'Este sello no pertenece a la editorial seleccionada: elige uno de sus sellos o «Sin sello» para poder guardar.'}
+                                            </p>
+                                        )}
+                                        <p className="text-xs text-gray-500 mt-1">Agrupa la obra en Biblioteca › Editoriales. No cambia el acceso ni los derechos.</p>
+                                    </div>
                                 )}
                             </div>
                         )}

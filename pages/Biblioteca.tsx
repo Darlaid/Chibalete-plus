@@ -5,8 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import ContentCard from '../components/ContentCard';
 import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, CommunityPost } from '../types';
-import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter, Lock, BookmarkCheck, BookmarkPlus } from 'lucide-react';
-import { useAccessCheck } from '../hooks/useAccessCheck';
+import { Search, ChevronLeft, ChevronRight, Users, Mail, Filter, BookmarkCheck, BookmarkPlus } from 'lucide-react';
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-1 — derivaciones de PRESENTACIÓN sobre
 // el conjunto que autoriza el servidor. Ninguna decide entitlement.
 import {
@@ -26,27 +25,10 @@ import {
     mayPresentInstitutionalManagement,
     libraryErrorText,
 } from '../utils/libraryLayers.mjs';
-
-// CHP-LIB-01 — card de la capa Editorial. El candado refleja el resultado del
-// preflight canónico /api/content/:id/access (Biblioteca no decide acceso);
-// abrir sigue pasando por la autorización existente del visor.
-const EditorialBookCard: React.FC<{ book: Content; userId?: string }> = ({ book, userId }) => {
-    const access = useAccessCheck(book.id, userId);
-    return (
-        <div className="relative">
-            <ContentCard content={book} />
-            {access.status === 'denied' && (
-                <div
-                    className="absolute top-2 right-2 bg-gray-900/75 text-white rounded-full p-2 shadow-md"
-                    title="Sin acceso — pídelo a tu mediador"
-                    aria-label="Sin acceso — pídelo a tu mediador"
-                >
-                    <Lock size={14} />
-                </div>
-            )}
-        </div>
-    );
-};
+// F1-C (CATÁLOGOS-02) — pestaña «Editoriales»: presentación sobre el conjunto
+// autorizado de «Libros» (sustituye a «Selección Chibalete»; los endpoints y
+// datos de la curaduría CHP-LIB-01 se conservan, sin vista de lectura).
+import { groupBooksByPublisher } from '../utils/libraryPublisherGroups.mjs';
 
 // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 §8 — acción discreta sobre la tarjeta
 // de la pestaña Libros. `savedMap` es estado DERIVADO de la última respuesta de
@@ -118,13 +100,9 @@ const Biblioteca: React.FC = () => {
     const [sections, setSections] = useState<any[]>([]);
     const [schoolConfig, setSchoolConfig] = useState<{ hiddenContentIds: string[] }>({ hiddenContentIds: [] });
 
-    // CHP-LIB-01 — capa Editorial (carga perezosa al activar la pestaña)
-    const [editorial, setEditorial] = useState<{ collections: any[]; unassigned: any[] } | null>(null);
-    useEffect(() => {
-        if (activeTab === 'editorial' && user && editorial === null) {
-            dataService.getEditorialLibrary().then(v => setEditorial({ collections: v.collections ?? [], unassigned: v.unassigned ?? [] }));
-        }
-    }, [activeTab, user, editorial]);
+    // F1-C — nombres públicos de las editoriales del conjunto autorizado
+    // (misma respuesta de my-catalog que alimenta «Libros»).
+    const [visiblePublishers, setVisiblePublishers] = useState<{ id: string; name: string }[]>([]);
 
     // CHP-V6-LIBRARY-INSTITUTIONAL-01 / 11B-3 — estado de las dos capas nuevas.
     // LOADING, EMPTY y ERROR son estados distintos (§24): `view === null` tras una
@@ -217,6 +195,7 @@ const Biblioteca: React.FC = () => {
                 // orden, tope): no deciden acceso.
                 setEnProgreso(gateProgressByVisible(prog, authorized) as typeof prog);
                 setMiBiblioteca(authorized);
+                setVisiblePublishers(dataService.getVisiblePublishers());
                 setLibrosAlbum(deriveAlbumFromVisible(authorized) as Content[]);
                 setCommunityPosts(posts);
                 setSections(secs.sort((a: any, b: any) => a.order - b.order));
@@ -392,46 +371,38 @@ const Biblioteca: React.FC = () => {
             );
         }
 
-        // CHP-LIB-01 — capa EDITORIAL: dos niveles máximo (colección → libro).
+        // F1-C (CATÁLOGOS-02) — «Editoriales»: los libros del MISMO conjunto
+        // autorizado de «Libros» (mismas fichas, mismos ids, misma tarjeta y
+        // ruta de apertura), agrupados por editorial y, si lo tienen, por sello.
+        // Sin fuente ni preflight propios: lo no autorizado no aparece.
         if (activeTab === 'editorial') {
-            if (!editorial) return <AccessLoadingSkeleton />;
-            const hiddenSet = new Set(schoolConfig.hiddenContentIds);
-            const visibleRefs = (refs: any[]) => refs.filter(r => r?.book && !hiddenSet.has(r.bookId));
-            const cols = editorial.collections
-                .map(c => ({ ...c, references: visibleRefs(c.references) }))
-                .filter(c => c.references.length > 0);
-            const unassigned = visibleRefs(editorial.unassigned);
-            if (cols.length === 0 && unassigned.length === 0) {
+            if (!accessReady) return <AccessLoadingSkeleton />;
+            const blocks = groupBooksByPublisher(filterHidden(miBiblioteca), visiblePublishers);
+            if (blocks.length === 0) {
                 return (
                     <div className="flex flex-col items-center justify-center py-20 text-gray-400">
                         <Filter size={48} className="mb-4 opacity-20" />
-                        <p>La selección editorial estará disponible pronto.</p>
+                        <p>Aún no hay libros de editoriales disponibles.</p>
                     </div>
                 );
             }
             return (
                 <div className="animate-in fade-in duration-500 space-y-12 mt-8">
-                    {cols.map(col => (
-                        <div key={col.id}>
-                            <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200">{col.name}</h3>
-                            {col.description && <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">{col.description}</p>}
-                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6 mt-4">
-                                {col.references.map((r: any) => (
-                                    <EditorialBookCard key={r.id} book={r.book} userId={user?.id} />
-                                ))}
-                            </div>
-                        </div>
+                    {blocks.map(block => (
+                        <section key={block.publisherId} aria-labelledby={`editorial-${block.publisherId}`}>
+                            <h3 id={`editorial-${block.publisherId}`} className="text-2xl font-bold text-gray-800 dark:text-gray-200">{block.name}</h3>
+                            {block.groups.map(group => (
+                                <div key={group.imprint ?? '__general__'} className="mt-6">
+                                    {(group.imprint !== null || block.groups.length > 1) && (
+                                        <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-4">{group.imprint ?? 'General'}</h4>
+                                    )}
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+                                        {group.books.map(content => renderSavable(content as Content))}
+                                    </div>
+                                </div>
+                            ))}
+                        </section>
                     ))}
-                    {unassigned.length > 0 && (
-                        <div>
-                            <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200 mb-4">Más de la selección</h3>
-                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
-                                {unassigned.map((r: any) => (
-                                    <EditorialBookCard key={r.id} book={r.book} userId={user?.id} />
-                                ))}
-                            </div>
-                        </div>
-                    )}
                 </div>
             );
         }
@@ -645,7 +616,7 @@ const Biblioteca: React.FC = () => {
                 <TabButton tab="experiencias" label="Experiencias" highlight={true} />
                 <TabButton tab="personal" label="Mi biblioteca" />
                 <TabButton tab="institucional" label="Biblioteca institucional" />
-                <TabButton tab="editorial" label="Selección Chibalete" />
+                <TabButton tab="editorial" label="Editoriales" />
                 <TabButton tab="lectura" label="Continuar Leyendo" />
                 <TabButton tab="comunidad" label="Comunidad" />
             </div>
