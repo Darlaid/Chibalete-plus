@@ -3,7 +3,7 @@
 **Fecha:** 2026-10-26 (UTC) · **Código desplegado:** `beb11e4` (HEAD `9c14bac` = `beb11e4` + docs) · **Plan:** `F1B_EDITORIALES_03.md` §F
 **Autorización:** desplegar F1-B exclusivamente; sin crear editoriales reales, sin reasignar libros, sin activar la ingesta económica.
 
-**Veredicto:** **YELLOW → pendiente solo de los smokes con sesión** (§F.2). Despliegue, migración, integridad, permisos anónimos, respaldo y restauración: GREEN.
+**Veredicto (cierre EDITORIALES-05, 2026-10-26 19:53Z):** **YELLOW justificado por un único control**: el rechazo en el servidor (403) con sesión real de mediador y lector no se observó en producción (§F.2, §K). Todo lo demás, incluida la verificación administrativa con sesión, está en GREEN; al observar ese 403 pasa a GREEN_PRODUCTIVO sin cambios en producción. Despliegue, migración, integridad, permisos anónimos, respaldo y restauración: GREEN.
 
 ---
 
@@ -59,9 +59,20 @@ Ventana de versiones mezcladas: 16:13:22–16:15:13 (≈ 2 min), con ediciones c
 
 `/api/content`, `/api/admin/publishers`, `?withCounts=1`, `/api/admin/publisher-audit`, `…/x/history` → 401; `x-user-id` falsificado → 401; `POST /api/admin/publishers` anónimo → 401.
 
-### F.2 Con sesión — PENDIENTE
+### F.2 Con sesión — GREEN salvo el 403 de mediador y lector (EDITORIALES-05)
 
-Requiere que la titular abra en Chrome las sesiones de administración, mediación y lectura (no se introducen credenciales reales). Pendiente: `/admin/editoriales` para administración con «Chibalete Editores» 52 libros + 57 recursos y sin banner; `GET /api/admin/publisher-audit` por HTTP con `missing []`; editor de un libro con la editorial preseleccionada, salir sin guardar; mediador y lector 403 y redirección.
+Sesiones abiertas por Dirección; no se introdujeron credenciales.
+
+| Control | Fuente | Resultado |
+|---|---|---|
+| `/admin/editoriales` con sesión administrativa | Dirección (Chrome) y verificación propia 19:52Z | Accesible; título «Editoriales — Chibalete+» |
+| Chibalete Editores activa, 52 libros + 57 recursos, sin aviso de regularización | Dirección y verificación propia | «52 de 52 libros con editorial responsable válida»; fila «52 · +57 recursos · Activa»; sin banner |
+| Formulario de edición y datos administrativos; guardado | Dirección (19:35:12Z) | `PUT /api/admin/publishers/pub-chibalete-editores` 200; `user_audit` `publisher_update` con actor = la cuenta administradora (no `admin-secret`); columnas cambiadas frente al respaldo POST: `contact_email`, `contact_name`, `contact_phone`, `imprints`, `tax_id`, `updated_at`. Estado, razón social y tipo sin cambios. Es completar datos de la editorial existente, no un alta ni una reasignación |
+| Opción «Editoriales» ausente del menú de mediación | Dirección (Chrome) | Ausente |
+| `GET /api/admin/publisher-audit` con sesión administrativa | Verificación propia 19:52Z | 200, `cache-control: no-store`; `books 52`, `booksWithPublisher 52`, `nonBooks 57`, **`missing []`**, **`unknown []`**, `byPublisher` Chibalete Editores 52/109 |
+| Enlace del conteo de libros al catálogo filtrado | Verificación propia | El «52» enlaza a `#/subir-contenido?editorial=pub-chibalete-editores`; el gestor muestra «Editorial: Chibalete Editores · 109» con «Quitar filtro» (el filtro es por editorial y abarca libros y recursos) |
+| Editorial preseleccionada al editar un libro, sin guardar | Verificación propia («La metamorfosis», `tipo libro`) | Etiqueta «Editorial responsable», `required`, valor `pub-chibalete-editores`; opciones: marcador deshabilitado «Selecciona una editorial…» + Chibalete Editores; sin «Sin editorial asignada»; sin casilla de reasignación. Se salió sin guardar: 0 `POST /api/content` en ambas réplicas desde 19:40Z y `content.json` `9faaf68566e513f0` |
+| 403 en rutas administrativas con sesión de mediador y lector | — | **PENDIENTE.** Dirección inició sesión con ambas cuentas (cambió solo `lastLoginAt`), pero Chrome solo conserva la sesión administrativa y los logs de las API no registran ninguna petición de esas sesiones a `/api/admin/publisher*`. No se sustituye por evidencia sintética; la cobertura automática (`publisherMandatoryHttp`, `publishersHttp`) sigue siendo solo de CI |
 
 ## G. Respaldo posterior y restauración aislada — GREEN
 
@@ -81,4 +92,11 @@ Este documento (ver §J para el cierre).
 
 ## J. Veredicto
 
-**YELLOW** hasta ejecutar §F.2. Si los smokes con sesión resultan como se espera, el veredicto pasa a **GREEN** sin más cambios en producción.
+**YELLOW justificado** (EDITORIALES-05). Único motivo: el 403 en el servidor con sesión real de mediador y lector no está observado en producción (§F.2); la ausencia del menú para mediación sí lo está, y el resto de controles están en GREEN. No bloquea F1-C / CATÁLOGOS-01 (auditoría). Pasa a **GREEN_PRODUCTIVO** con una sesión de cada rol que reciba 403 en `GET /api/admin/publisher-audit` y la redirección desde `#/admin/editoriales`, sin cambios en producción.
+
+## K. Cierre EDITORIALES-05 (2026-10-26 19:45–19:53Z, solo lecturas)
+
+- **Repo y CI:** HEAD `135da49` = origin; árbol limpio salvo carpetas no versionadas ajenas; `135da49`: security ✅, content-rmw ✅.
+- **Producción:** api_1, api_2 y front `editoriales-beb11e4`, healthy, 0 reinicios; edge healthy; público 200; `publisher-audit` anónimo 401; 0 errores en las API desde el despliegue; `ECONOMIC_INGEST_MODE` y `RIGHTS_ENFORCEMENT_MODE` ausentes (= off); disco 8,7 G libres (92 %).
+- **Huella** (`/root/chp-f1b/snapshot-05.json`) frente a `snapshot-final.json`: `content.json` `9faaf68566e513f0`, 109/109 con `pub-chibalete-editores`, 52 libros, 0 sin editorial, huella id→editorial `33f443b01ccd9847`; `royalties.db` `ok`, migraciones 0001–0003, **historial 0 filas** (sin reasignaciones), triggers append-only presentes, **0** `rights_versions`; `events.db` `ok`, **0** `econ_events`, 0 `econ_tick`; `access_db`, `groups_db`, `schools_db` idénticos. Única diferencia: el padrón, solo `lastLoginAt` de 3 cuentas (administración, mediación, lectura: los inicios de sesión de Dirección); 670 usuarios, 0 altas, 0 bajas.
+- **Única escritura posterior al despliegue:** la actualización de datos administrativos de Chibalete Editores por Dirección (§F.2).
