@@ -5,7 +5,7 @@
 **Fecha:** 2026-10-26 · **Rama:** `chp/epub-mainfile-r1-release` · **Base:** `84d7b30` · **Plan:** `PLAN_GENERAL_V1_1.md` (sin cambios)
 **Alcance:** implementación local y CI. **Sin despliegue**, sin cambios productivos, sin tocar `data/`, `data-critical/`, uploads ni Studio Editor BI.
 
-**Veredicto:** ver §J.
+**Veredicto:** **GREEN_LOCAL+CI** para el alcance F1-B (§J). `security` en rojo por un CVE de la imagen base nginx, ajeno a F1-B (§J.2).
 
 ---
 
@@ -99,7 +99,17 @@ La validación no depende del formulario: se probó por HTTP directo.
 
 ## G. Pruebas y CI
 
-Ver §J para cifras y enlaces de CI.
+**Local (Windows, 2026-10-26):**
+
+| Batería | Resultado |
+|---|---|
+| `npm run test:royalties` | rc 0 — publishersStore 32/32, publishersHttp 36/36, **publisherAssignment 62/62**, **publisherMandatoryHttp 62/62**, **AdminEditoriales.structural 21/21**, rightsStore 77/77, rightsHttp 50/50, commercialClass 58/58, commercialClassHttp 36/36 (+1 SKIP), econEvents 67/67, economicTick 120/120; `accessB2cPreservation` y `econIngestHttp` se omiten en Windows (POSIX) y corren en CI |
+| `npm run test:content-rmw` (32 suites) | todas en verde tras alinear el piloto de `contentCreationDefaults` con producción (ya tiene editorial desde F1-A); p. ej. canonicalBookIngestion 70/70, canonicalBookEpubIngestion 90/90, contentGlobalReadOnlyPolicy 39/39, adminEpubAttach 43/43, adminEpubUpload 13/13, contentCreationDefaults 18/18 |
+| `npm run typecheck:baseline` | sin regresiones (current == baseline) |
+| `npm run build` | OK |
+| `data-critical/royalties.db` real | no creada por ninguna suite |
+
+**CI sobre `eb21fee`:** `content-rmw` ✅ (run 40336410665) · `identity-preflight` ✅ (run 40336410529: `test:royalties` en Linux, incluidas las suites POSIX, typecheck, `test:mook`, build) · `security` ❌ (run 40336410776) solo en `trivy-image (front)`; ver §J.2.
 
 | Suite | Cubre |
 |---|---|
@@ -129,8 +139,31 @@ Brechas (documentadas, no resueltas en esta unidad):
 
 ## I. Commits publicados
 
-Ver mensaje final de la unidad (hashes en §J).
+| Commit | Contenido |
+|---|---|
+| `f43e231` | servidor: regla obligatoria, historial (migración 0003), rutas de censo/historial, `withCounts`, `epub-edition`, suites nuevas y actualizadas |
+| `639ea4d` | front: `/admin/editoriales`, formulario obligatorio, filtro por editorial, registro de suites en `test:royalties` |
+| `eb21fee` | este informe (pendiente de CI) y seguimiento |
+| (siguiente) | cierre del informe con CI |
+
+Rama `chp/epub-mainfile-r1-release`, publicada en `origin`. Sin despliegue.
 
 ## J. Veredicto
 
-Pendiente de CI — se completa al cierre.
+### J.1 GREEN_LOCAL+CI (alcance F1-B)
+
+- Todo libro nuevo exige una editorial válida y activa; el servidor lo valida sin depender del formulario.
+- Las asociaciones existentes se preservan: edición parcial conserva, retirada rechazada, reasignación solo confirmada; 105/105 fichas no tocadas idénticas byte a byte en el censo reproducido de producción.
+- Sin regresiones de derechos (versiones inmutables, `PUBLISHER_MISMATCH` conservado, sin traslado retroactivo) ni del catálogo (recursos con contrato F1-A, accesos/progreso/eventos intactos, lector sin datos del titular).
+- Gates funcionales de CI en verde: `content-rmw` e `identity-preflight`.
+
+### J.2 `security` rojo, ajeno a F1-B
+
+- `trivy-image (front)` falla por **CVE-2026-92392 (HIGH) en `curl`/`libcurl` 8.22.0-r0 → 8.23.0-r0** del Alpine 3.24 de la base `nginx:1.30-alpine@sha256:47928bf6…`.
+- Reproducido en local con Trivy 0.69.3 y la misma configuración (`HIGH,CRITICAL`, `--ignore-unfixed`, `.trivyignore`): la **imagen base sola** ya lo contiene; el job estaba verde en `84d7b30` (2026-10-25T01:03Z) porque el fix aún no figuraba en la base de datos de Trivy. F1-B no toca Dockerfiles, dependencias ni lockfile.
+- Bloquea cualquier despliegue del front, con o sin F1-B. Corrección propuesta para una unidad de seguridad aparte (mismo patrón que `brotli-libs` en SEC-ACCOUNT-01): `apk add --no-cache 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0'` en `Dockerfile.front` (y revisar `Dockerfile.api`). No aplicada aquí por el límite de alcance.
+- Imágenes locales creadas para la verificación (sin limpiar, por la regla de no hacer limpiezas Docker): `chibalete/front:f1b-local`, `aquasec/trivy:0.69.3`.
+
+### J.3 STOP
+
+Implementación local y CI terminadas. **No se despliega** ni se hace ningún cambio productivo: sin editoriales reales en producción, sin ingesta económica, sin F3-B, sin tocar parámetros (25 %, 30/70, tiempos, elegibilidad) ni Studio Editor BI. Tras desplegar (unidad autorizada aparte) hay que verificar en producción `GET /api/admin/publisher-audit` → `missing = []`, `unknown = []`, `booksWithPublisher = 52`, y que la migración 0003 se aplicó una sola vez en ambas réplicas.
