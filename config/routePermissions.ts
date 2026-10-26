@@ -275,6 +275,11 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     description: 'Configuración de recompensas y canje',
   },
   {
+    path: '/admin/editoriales',
+    access: 'admin',
+    description: 'Administración de editoriales responsables (F1-B)',
+  },
+  {
     path: '/admin/experiencias',
     access: 'admin',
     description: 'Gestión de experiencias gamificadas',

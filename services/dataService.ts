@@ -2,6 +2,7 @@ import type {
     User,
     Content,
     Publisher,
+    PublisherAudit,
     EpubInspection,
     ProgresoLectura,
     ReadingStatus,
@@ -5123,12 +5124,36 @@ class DataService {
     // --- CHP-EDITORIAL-ROYALTIES F1-A: titulares (solo administración) ---
     // null = no se pudo cargar: el formulario NO debe enviar publisherId y el
     // servidor conserva la asociación guardada.
-    async getAdminPublishers(): Promise<Publisher[] | null> {
+    async getAdminPublishers(opts: { withCounts?: boolean } = {}): Promise<Publisher[] | null> {
         try {
-            const res = await fetch(`${this.apiUrl}/admin/publishers`, { credentials: 'include', cache: 'no-store' });
+            const qs = opts.withCounts ? '?withCounts=1' : '';
+            const res = await fetch(`${this.apiUrl}/admin/publishers${qs}`, { credentials: 'include', cache: 'no-store' });
             return res.ok ? res.json() : null;
         } catch (e) {
             console.error('Error fetching publishers:', e);
+            return null;
+        }
+    }
+
+    // F1-B: alta y edición (activar/desactivar = status). Sin borrado desde la UI.
+    async savePublisher(id: string | null, body: Partial<Publisher>): Promise<Publisher> {
+        const res = await fetch(`${this.apiUrl}/admin/publishers${id ? `/${encodeURIComponent(id)}` : ''}`, {
+            method: id ? 'PUT' : 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Error ${res.status} al guardar la editorial`);
+        return data as Publisher;
+    }
+
+    async getPublisherAudit(): Promise<PublisherAudit | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/admin/publisher-audit`, { credentials: 'include', cache: 'no-store' });
+            return res.ok ? res.json() : null;
+        } catch (e) {
+            console.error('Error fetching publisher audit:', e);
             return null;
         }
     }

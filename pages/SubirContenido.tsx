@@ -4,7 +4,7 @@ import { UploadCloud, FileImage, FileText, Film, Music, BookOpen, Plus, Trash, L
 import { dataService } from '../services/dataService';
 import * as analyticsService from '../services/analyticsService';
 import type { Content, AlbumRegion, AlbumReadingRoute, RegionAction, RegionActionType, AlbumMediaAsset, Section, Publisher } from '../types';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { analizarIlustracionAlbum, sugerirEtiquetasThema } from '../services/geminiService';
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -14,6 +14,7 @@ import { isEpubFile, asEpubUploadFile, epubSourceBlockReason, withEpubSource, is
 import { EPUB_BOOK_FLOWS, ILLUSTRATED_KEEPS_ORIGINAL_MESSAGE } from '../utils/epubAdmin.mjs';
 import EpubInspectorCard from '../components/admin/EpubInspectorCard';
 import AttachEpubPanel from '../components/admin/AttachEpubPanel';
+import { isBookForm, publisherFormBlock, isPublisherReassignment } from '../utils/publisherRequirement.mjs';
 
 // Define types for the form state
 interface MaterialAdjunto {
@@ -394,6 +395,14 @@ const SubirContenido: React.FC = () => {
     // la lista no cargó y el guardado omite publisherId (el servidor conserva el guardado).
     const [publishers, setPublishers] = useState<Publisher[] | null>(null);
     const [publisherId, setPublisherId] = useState<string>('');
+    // F1-B: editorial guardada de la ficha en edición y confirmación expresa de cambio.
+    const [originalPublisherId, setOriginalPublisherId] = useState<string>('');
+    const [publisherReassignConfirmed, setPublisherReassignConfirmed] = useState(false);
+    // F1-B: /subir-contenido?editorial=<id> abre la gestión filtrada por editorial
+    // (?editorial=__sin_editorial__ = libros sin editorial, para regularizar).
+    const [searchParams, setSearchParams] = useSearchParams();
+    const editorialFilter = searchParams.get('editorial');
+    useEffect(() => { if (editorialFilter) setUploadMode('manage'); }, [editorialFilter]);
     // 3F.1 — operación EPUB dentro de «Crear»: TXT/EPUB, EPUB ilustrado o añadir EPUB.
     // Ilustrado usa el MISMO pipeline EPUB; la diferencia es solo editorial/UI.
     const [bookFlow, setBookFlow] = useState<'text' | 'illustrated' | 'attach'>('text');
@@ -405,6 +414,8 @@ const SubirContenido: React.FC = () => {
         setUploadMode('new'); // Reuse 'new' mode for editor
         setEditingId(content.id);
         setPublisherId(content.publisherId || '');
+        setOriginalPublisherId(content.publisherId || '');
+        setPublisherReassignConfirmed(false);
 
         // Populate form with existing data
         setMainContent({
@@ -764,6 +775,20 @@ const SubirContenido: React.FC = () => {
 
 
 
+    // F1-B: derivados de la editorial responsable para el formulario.
+    const editingRecord = editingId ? existingParents.find(c => c.id === editingId) : undefined;
+    const isBookNow = isBookForm(mainContent.tipo, { storedTipo: editingRecord?.tipo ?? null });
+    const publisherReassigning = isPublisherReassignment({ isUpdate: !!editingId, publisherId, originalPublisherId });
+    const publisherName = (id: string) => {
+        const p = publishers?.find(x => x.id === id);
+        return p ? (p.tradeName || p.legalName) : id;
+    };
+    // Gestión filtrada por editorial (?editorial=); sin filtro, el catálogo completo.
+    const managedContents = !editorialFilter ? existingParents
+        : editorialFilter === '__sin_editorial__'
+            ? existingParents.filter(c => !c.publisherId && isBookForm(c.tipo))
+            : existingParents.filter(c => c.publisherId === editorialFilter);
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
@@ -915,6 +940,20 @@ const SubirContenido: React.FC = () => {
                     return;
                 }
                 const epubSource = isEpubFile(mainContent.textoPlanoFile);
+
+                // F1-B: todo libro guarda con editorial responsable (el servidor lo exige igualmente).
+                const storedForPublisher = isUpdate ? existingParents.find(c => c.id === editingId) : undefined;
+                const publisherBlock = publisherFormBlock({
+                    isBook: isBookForm(mainContent.tipo, { storedTipo: storedForPublisher?.tipo ?? null }),
+                    isUpdate, publishersLoaded: publishers !== null, publisherId, originalPublisherId,
+                    reassignConfirmed: publisherReassignConfirmed,
+                });
+                if (publisherBlock) {
+                    setUploadError(publisherBlock);
+                    setIsUploading(false);
+                    submittingRef.current = false;
+                    return;
+                }
 
                 // Validation: Only strict if NEW. If UPDATE, files are optional.
                 // Cover: Required unless video/podcast. Resource: Required unless album/collection.
@@ -1112,8 +1151,13 @@ const SubirContenido: React.FC = () => {
                     // Pages count logic — preserve existing count on metadata-only updates
                     numero_paginas: mainContent.tipo === 'libro' ? 10 : (mainContent.tipo === 'libro_album' ? (albumPages.length > 0 ? albumPages.length : (existingContent?.numero_paginas || undefined)) : (existingContent?.numero_paginas || undefined)),
 
-                    // F1-A: solo si la lista cargó; '' = sin editorial (el servidor lo quita).
-                    ...(publishers !== null ? { publisherId } : {}),
+                    // F1-A: solo si la lista cargó; '' = sin editorial (el servidor lo quita
+                    // en recursos no bibliográficos y lo rechaza en libros).
+                    // F1-B: un cambio de editorial viaja con su confirmación expresa.
+                    ...(publishers !== null ? {
+                        publisherId,
+                        ...(isPublisherReassignment({ isUpdate, publisherId, originalPublisherId }) ? { publisherReassignConfirmed: true } : {}),
+                    } : {}),
                 };
 
                 // 3D.1: con EPUB se envía epub_url y NO texto_plano_url (lo fija el servidor).
@@ -1283,6 +1327,8 @@ const SubirContenido: React.FC = () => {
                             setCreatedContentId(null);
                             setEditingId(null); // Reset Editing State
                             setPublisherId('');
+                            setOriginalPublisherId('');
+                            setPublisherReassignConfirmed(false);
                         }}
                         className="px-8 py-3 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 font-semibold transition-colors"
                     >
@@ -1402,8 +1448,17 @@ const SubirContenido: React.FC = () => {
                     <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 animate-in slide-in-from-bottom-4">
                         <h2 className="text-xl font-bold mb-6 text-gray-800 dark:text-gray-200 border-b pb-4">Gestión de Contenidos</h2>
 
-                        {existingParents.length === 0 ? (
-                            <p className="text-gray-500">No hay contenidos registrados.</p>
+                        {editorialFilter && (
+                            <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
+                                <span className="px-3 py-1 rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-200 font-medium">
+                                    {editorialFilter === '__sin_editorial__' ? 'Libros sin editorial responsable' : `Editorial: ${publisherName(editorialFilter)}`} · {managedContents.length}
+                                </span>
+                                <button type="button" onClick={() => setSearchParams({})} className="text-indigo-600 dark:text-indigo-400 hover:underline">Quitar filtro</button>
+                            </div>
+                        )}
+
+                        {managedContents.length === 0 ? (
+                            <p className="text-gray-500">{editorialFilter ? 'No hay contenidos con este filtro.' : 'No hay contenidos registrados.'}</p>
                         ) : (
                             <div className="overflow-x-auto">
                                 <table className="w-full text-left text-sm">
@@ -1417,7 +1472,7 @@ const SubirContenido: React.FC = () => {
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                                        {existingParents.map(content => (
+                                        {managedContents.map(content => (
                                             <tr key={content.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                                                 <td className="p-3 text-gray-500" title={content.tipo}>{getIcon(content.tipo)}</td>
                                                 <td className="p-3 font-medium text-gray-900 dark:text-gray-100">
@@ -1616,16 +1671,41 @@ const SubirContenido: React.FC = () => {
                             </div>
                         )}
 
+                        {mainContent.tipo !== 'memoria_club' && publishers === null && isBookNow && (
+                            <div role="alert" className="mb-6 p-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-200 text-sm">
+                                {editingId
+                                    ? 'No se pudo cargar la lista de editoriales. Al guardar se conserva la editorial responsable actual.'
+                                    : 'No se pudo cargar la lista de editoriales. Un libro nuevo no puede publicarse sin su editorial responsable: recarga la página.'}
+                            </div>
+                        )}
+
                         {mainContent.tipo !== 'memoria_club' && publishers !== null && (
                             <div className="mb-6">
-                                <label htmlFor="sc-publisher" className="block text-sm font-medium mb-1">Editorial responsable (Opcional)</label>
-                                <select id="sc-publisher" value={publisherId} onChange={(e) => setPublisherId(e.target.value)} className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
-                                    <option value="">Sin editorial asignada</option>
+                                <label htmlFor="sc-publisher" className="block text-sm font-medium mb-1">
+                                    {isBookNow ? 'Editorial responsable' : 'Editorial responsable (Opcional)'}
+                                </label>
+                                <select id="sc-publisher" value={publisherId} required={isBookNow} aria-required={isBookNow}
+                                    onChange={(e) => { setPublisherId(e.target.value); setPublisherReassignConfirmed(false); }}
+                                    className="w-full p-2.5 bg-gray-50 dark:bg-gray-700/50 border border-gray-300 dark:border-gray-600 rounded-lg">
+                                    {isBookNow
+                                        ? <option value="" disabled>Selecciona una editorial…</option>
+                                        : <option value="">Sin editorial asignada</option>}
                                     {publishers.filter((p) => p.status === 'active' || p.id === publisherId).map((p) => (
                                         <option key={p.id} value={p.id}>{p.tradeName || p.legalName}{p.status !== 'active' ? ' (inactiva)' : ''}</option>
                                     ))}
                                 </select>
-                                <p className="text-xs text-gray-500 mt-1">Asociación editorial para derechos y liquidaciones. No cambia el acceso ni los archivos.</p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    {isBookNow ? 'Obligatoria para todo libro. ' : ''}Asociación editorial para trazabilidad, derechos y liquidaciones. No cambia el acceso ni los archivos, y por sí sola no acredita derechos económicos.
+                                </p>
+                                {publisherReassigning && (
+                                    <label className="mt-2 flex items-start gap-2 p-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-200 text-sm">
+                                        <input type="checkbox" checked={publisherReassignConfirmed} onChange={(e) => setPublisherReassignConfirmed(e.target.checked)} className="mt-0.5" />
+                                        <span>
+                                            Confirmo el cambio de editorial responsable de «{publisherName(originalPublisherId)}» a «{publisherName(publisherId)}».
+                                            El cambio queda auditado y no traslada derechos ni regalías ya causados.
+                                        </span>
+                                    </label>
+                                )}
                             </div>
                         )}
 

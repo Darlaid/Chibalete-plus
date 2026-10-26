@@ -7,7 +7,7 @@ import { isMediator, isAdmin, normalizeRoles } from '../utils/permissions';
 import {
     Home, Library, Search, User, LifeBuoy, Upload, LogOut, Users,
     PlayCircle, ShoppingBag, Gamepad2, GraduationCap, BarChart2,
-    Clock, Menu, X, NotebookPen, Package, Gift, Sparkles, Globe, Smartphone
+    Clock, Menu, X, NotebookPen, Package, Gift, Sparkles, Globe, Smartphone, Building2
 } from 'lucide-react';
 
 // Helper component for standard nav items with accessibility improvements
@@ -139,6 +139,7 @@ const Navbar: React.FC = () => {
             { to: '/admin/productos',    icon: <Package size={20} />,   label: 'Productos' },
             { to: '/admin/recompensas',  icon: <Gift size={20} />,      label: 'Recompensas' },
             { to: '/admin/usuarios',     icon: <Users size={20} />,     label: 'Usuarios' },
+            { to: '/admin/editoriales',  icon: <Building2 size={20} />, label: 'Editoriales' },
             { to: '/admin/experiencias', icon: <Sparkles size={20} />,  label: 'Paquetes (legacy)' },
         ] : []),
     ];
@@ -173,6 +174,7 @@ const Navbar: React.FC = () => {
             { to: '/subir-contenido',    icon: <Upload size={28} />,    label: 'Subir' },
             { to: '/admin-dashboard',    icon: <BarChart2 size={28} />, label: 'Panel Admin' },
             { to: '/admin/usuarios',     icon: <Users size={28} />,     label: 'Usuarios' },
+            { to: '/admin/editoriales',  icon: <Building2 size={28} />, label: 'Editoriales' },
             { to: '/admin/productos',    icon: <Package size={28} />,   label: 'Productos' },
             { to: '/admin/recompensas',  icon: <Gift size={28} />,      label: 'Recompensas' },
             { to: '/admin/experiencias', icon: <Sparkles size={28} />,  label: 'Paquetes (legacy)' },

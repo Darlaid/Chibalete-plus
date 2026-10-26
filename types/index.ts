@@ -427,6 +427,9 @@ export interface Content {
   // CHP-EDITORIAL-ROYALTIES F1-A: editorial responsable (id de `publishers`).
   // Ausente ⇒ sin asociación. No decide quién cobra (eso es la matriz de derechos).
   publisherId?: string;
+  // F1-B: solo en la petición de guardado; confirma expresamente un cambio de
+  // editorial responsable. El servidor no lo persiste.
+  publisherReassignConfirmed?: boolean;
 
   // New: Sections
   sectionIds?: string[];
@@ -619,6 +622,25 @@ export interface Publisher {
   notes: string | null;
   createdAt: string;
   updatedAt: string;
+  // F1-B: solo con GET /api/admin/publishers?withCounts=1.
+  bookCount?: number;
+  contentCount?: number;
+}
+
+// F1-B — censo de editorial obligatoria (GET /api/admin/publisher-audit).
+export interface PublisherAuditBook {
+  id: string;
+  titulo: string | null;
+  tipo: string | null;
+  publisherId: string | null;
+}
+export interface PublisherAudit {
+  books: number;
+  booksWithPublisher: number;
+  nonBooks: number;
+  missing: PublisherAuditBook[];
+  unknown: PublisherAuditBook[];
+  byPublisher: Record<string, { books: number; contents: number }>;
 }
 
 export interface Product {

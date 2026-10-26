@@ -90,6 +90,7 @@ const GaleriaIlustraciones = React.lazy(() => import('./components/GaleriaIlustr
 const Bitacora = React.lazy(() => import('./pages/Bitacora'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
 const AdminRecompensas = React.lazy(() => import('./pages/AdminRecompensas'));
+const AdminEditoriales = React.lazy(() => import('./pages/AdminEditoriales'));
 const AdminExperiencias = React.lazy(() => import('./pages/AdminExperiencias'));
 const Clubs = React.lazy(() => import('./pages/Clubs'));
 const ClubExterno = React.lazy(() => import('./pages/ClubExterno'));
@@ -488,6 +489,9 @@ const AppContent: React.FC = () => {
                 <Route path="/admin/recompensas" element={
                     <ProtectedRoute access={getRouteAccess('/admin/recompensas')}><Layout><AdminRecompensas /></Layout></ProtectedRoute>
                 } />
+                <Route path="/admin/editoriales" element={
+                    <ProtectedRoute access={getRouteAccess('/admin/editoriales')}><Layout><AdminEditoriales /></Layout></ProtectedRoute>
+                } />
                 <Route path="/admin/experiencias" element={
                     <ProtectedRoute access={getRouteAccess('/admin/experiencias')}><Layout><AdminExperiencias /></Layout></ProtectedRoute>
                 } />
@@ -513,6 +517,7 @@ const ROUTE_TITLES: ReadonlyArray<[RegExp, string]> = [
     [/^\/aula-viva\/operacional/, 'Aula Viva — Centro operativo'],
     [/^\/aula-viva/, 'Aula Viva'],
     [/^\/admin\/experiencias/, 'Paquetes (legacy)'],
+    [/^\/admin\/editoriales/, 'Editoriales'],
     [/^\/bienvenida/, 'Bienvenida'],
     [/^\/auth/, 'Acceso'],
 ];
