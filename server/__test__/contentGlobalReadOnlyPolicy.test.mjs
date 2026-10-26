@@ -93,7 +93,7 @@ function spawnApi(port, mode) {
         CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: path.join(tmp, 'schools.json'),
         ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: up, ACCESS_FALLBACK_MODE: 'restricted',
         PROGRESS_SQLITE_PATH: path.join(tmp, `progress-${port}.db`),
-        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), SESSION_AUTH_MODE: 'off',
+        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), ROYALTIES_DB: path.join(tmp, 'royalties.db'), SESSION_AUTH_MODE: 'off',
         OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
     };
     if (mode) env.UPLOADS_AUTHZ_MODE = mode; else delete env.UPLOADS_AUTHZ_MODE;
@@ -183,7 +183,7 @@ try {
 
     // ── [5] escritura administrativa ────────────────────────────────────────
     console.log('\n[5] escritura administrativa: el campo histórico es inerte');
-    const w1 = await S.post('/api/content', base('n-any', { contentProtectionPolicy: 'cualquier-cosa', url_recurso: U('c-own/libro.pdf') }), 'ADM');
+    const w1 = await S.post('/api/content', base('n-any', { contentProtectionPolicy: 'cualquier-cosa', url_recurso: U('c-own/libro.pdf'), publisherId: 'pub-chibalete-editores' /* F1-B */ }), 'ADM');
     ok('sin validación ni gate por política (200; no 400/422)', w1.status === 200, `${w1.status} ${JSON.stringify(w1.json)}`);
     ok('no administrador sigue 403', (await S.post('/api/content', base('n-la', {}), 'LA')).status === 403);
     ok('los registros existentes no se migran', byId(readContent(), 'c-legacy').contentProtectionPolicy === 'licensed_strict' && !('contentProtectionPolicy' in byId(readContent(), 'c-own')));

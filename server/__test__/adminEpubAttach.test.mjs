@@ -88,7 +88,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         ...process.env, NODE_ENV: 'test', PORT: String(PORT),
         CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: path.join(tmp, 'groups.json'), SCHOOLS_DB: path.join(tmp, 'schools.json'),
         ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: up, PROGRESS_SQLITE_PATH: path.join(tmp, 'progress.db'),
-        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), SESSION_AUTH_MODE: 'off',
+        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), ROYALTIES_DB: path.join(tmp, 'royalties.db'), SESSION_AUTH_MODE: 'off',
         OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
     },
 });
@@ -113,7 +113,9 @@ const post = async (p, body, headers = H) => {
     let json = null; try { json = await r.json(); } catch { /* */ }
     return { status: r.status, body: json };
 };
-const saveLikeUi = async (content) => { const r = await post('/api/content', content); await sleep(2100); return r; };
+// F1-B: todo libro se guarda con editorial responsable (royalties.db temporal).
+const withPublisher = (b) => (['libro', 'libro_album'].includes(b?.tipo) && !('publisherId' in b) ? { ...b, publisherId: 'pub-chibalete-editores' } : b);
+const saveLikeUi = async (content) => { const r = await post('/api/content', withPublisher(content)); await sleep(2100); return r; };
 const attach = (id, epub_url) => post(`/api/content/${id}/epub-edition`, { epub_url });
 const record = (id) => JSON.parse(fs.readFileSync(P.content, 'utf8')).find(c => c.id === id);
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');

@@ -36,8 +36,8 @@ try {
     ok('la primera apertura crea la base (y su directorio)', fs.existsSync(DB_PATH));
     ok('modo WAL', String(db.pragma('journal_mode', { simple: true })).toLowerCase() === 'wal');
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
-    // F2-A añade rights_versions (0002); ninguna otra tabla del Plan existe aún.
-    ok('solo _migrations + publishers + rights_versions', JSON.stringify(tables) === JSON.stringify(['_migrations', 'publishers', 'rights_versions']), tables.join(','));
+    // F2-A añade rights_versions (0002) y F1-B content_publisher_history (0003); ninguna otra tabla del Plan existe aún.
+    ok('solo _migrations + content_publisher_history + publishers + rights_versions', JSON.stringify(tables) === JSON.stringify(['_migrations', 'content_publisher_history', 'publishers', 'rights_versions']), tables.join(','));
     S.closeRoyaltiesDb();
 
     section('[2] migración idempotente');

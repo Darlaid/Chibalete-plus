@@ -182,6 +182,7 @@ import {
 } from './eventsService.js';
 import { ulid, isValidUlid } from './ulid.js';
 import * as publishersStore from './royalties/publishersStore.mjs';
+import * as publisherAssignment from './royalties/publisherAssignment.mjs';
 import * as rightsStore from './royalties/rightsStore.mjs';
 import * as commercialClass from './royalties/commercialClass.mjs';
 import * as econEvents from './royalties/econEvents.mjs';
@@ -1918,7 +1919,13 @@ const sendPublisherError = (res, e, op) => {
 const publisherNoStore = (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
 
 app.get('/api/admin/publishers', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
-    try { res.json(publishersStore.listPublishers()); } catch (e) { sendPublisherError(res, e, 'list'); }
+    try {
+        const list = publishersStore.listPublishers();
+        // F1-B: ?withCounts=1 añade libros y contenidos asociados (sin él, la respuesta de F1-A).
+        if (req.query.withCounts !== '1') return res.json(list);
+        const { byPublisher } = publisherAssignment.publisherCompliance(readJSON(DB_FILE), list);
+        res.json(list.map((p) => ({ ...p, bookCount: byPublisher[p.id]?.books ?? 0, contentCount: byPublisher[p.id]?.contents ?? 0 })));
+    } catch (e) { sendPublisherError(res, e, 'list'); }
 });
 
 app.get('/api/admin/publishers/:id', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
@@ -1949,12 +1956,31 @@ app.put('/api/admin/publishers/:id', requireAdminAccess, (req, res) => {
 
 app.delete('/api/admin/publishers/:id', requireAdminAccess, (req, res) => {
     try {
-        const referenceCount = readJSON(DB_FILE).filter((c) => c && c.publisherId === req.params.id).length;
+        // F1-B: el historial editorial también cuenta como referencia (trazabilidad).
+        const referenceCount = readJSON(DB_FILE).filter((c) => c && c.publisherId === req.params.id).length
+            + publisherAssignment.countPublisherHistoryRefs(req.params.id);
         publishersStore.deletePublisher(req.params.id, { referenceCount });
         writeAuditLog({ action: 'publisher_delete', actor: publisherActorOf(req), details: { publisherId: req.params.id } });
         log(`[PUBLISHERS] deleted: ${req.params.id}`);
         res.json({ ok: true });
     } catch (e) { sendPublisherError(res, e, 'delete'); }
+});
+
+// F1-B: censo de libros sin editorial (o con una inexistente) para regularizar,
+// e historial de editorial responsable de una obra. Solo lectura.
+app.get('/api/admin/publisher-audit', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        res.json(publisherAssignment.publisherCompliance(readJSON(DB_FILE), publishersStore.listPublishers()));
+    } catch (e) { sendPublisherError(res, e, 'audit'); }
+});
+
+app.get('/api/admin/publisher-audit/:contentId/history', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const content = findCatalogContent(req.params.contentId);
+        const history = publisherAssignment.listPublisherHistory(req.params.contentId);
+        if (!content && history.length === 0) return res.status(404).json({ error: 'Obra no encontrada', code: 'not_found' });
+        res.json({ contentId: req.params.contentId, publisherId: content?.publisherId ?? null, history });
+    } catch (e) { sendPublisherError(res, e, 'history'); }
 });
 // --- END CHP-EDITORIAL-ROYALTIES F1-A ----------------------------------------
 
@@ -4243,7 +4269,12 @@ app.post('/api/content', async (req, res) => {
         // CHP-EDITORIAL-ROYALTIES F1-A: editorial responsable. Ausente ⇒ se
         // arrastra la guardada (dentro del lock); null o '' ⇒ se quita; un id ⇒
         // debe existir y, si cambia, estar activo.
+        // F1-B: un libro no se guarda sin editorial y no puede perderla; cambiar
+        // la de una obra que ya tiene una exige publisherReassignConfirmed:true
+        // (que no se persiste). La decisión se repite dentro del lock.
         const publisherIdSent = Object.prototype.hasOwnProperty.call(newContent, 'publisherId');
+        const publisherReassignConfirmed = newContent.publisherReassignConfirmed === true;
+        delete newContent.publisherReassignConfirmed;
         if (publisherIdSent && newContent.publisherId === '') newContent.publisherId = null;
         if (publisherIdSent && newContent.publisherId !== null) {
             const pid = newContent.publisherId;
@@ -4259,6 +4290,16 @@ app.post('/api/content', async (req, res) => {
             if (pub.status !== 'active' && storedPid !== pid) {
                 return res.status(400).json({ error: 'La editorial indicada está inactiva', code: 'inactive_publisher' });
             }
+        }
+        try {
+            publisherAssignment.resolvePublisherAssignment({
+                sent: publisherIdSent, value: newContent.publisherId, next: newContent,
+                stored: readJSON(DB_FILE).find((c) => c.id === newContent.id) ?? null, confirmed: publisherReassignConfirmed,
+            });
+        } catch (e) {
+            if (!(e instanceof publishersStore.PublisherError)) throw e;
+            log(`[CONTENT_SAVE_REJECTED] contentId=${newContent.id} reason=${e.code}`, 'WARN');
+            return res.status(e.status).json({ error: e.message, code: e.code });
         }
 
         const saveActorId = req.headers['x-user-id'] ?? 'unknown';
@@ -4347,6 +4388,7 @@ app.post('/api/content', async (req, res) => {
         }
 
         // 2. Transaccionalidad / Rollback Crítico (atomic cross-container lock)
+        let publisherChangeRow = null;
         try {
             await withFileLock(DB_FILE, () => {
                 _jsonCache.delete(DB_FILE);
@@ -4355,13 +4397,13 @@ app.post('/api/content', async (req, res) => {
                 // 3C.3B-R1: defaults mínimos contra el registro vigente (dentro del lock).
                 applyContentDefaults(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
                 // F1-A: sin publisherId en el cuerpo se conserva el guardado.
-                if (!publisherIdSent) {
-                    const storedPid = freshIdx >= 0 ? freshList[freshIdx].publisherId : undefined;
-                    if (storedPid) newContent.publisherId = storedPid;
-                    else delete newContent.publisherId;
-                } else if (newContent.publisherId === null) {
-                    delete newContent.publisherId;
-                }
+                // F1-B: contra el registro vigente (dentro del lock) y con historial.
+                const assignment = publisherAssignment.resolvePublisherAssignment({
+                    sent: publisherIdSent, value: newContent.publisherId, next: newContent,
+                    stored: freshIdx >= 0 ? freshList[freshIdx] : null, confirmed: publisherReassignConfirmed,
+                });
+                if (assignment.publisherId) newContent.publisherId = assignment.publisherId;
+                else delete newContent.publisherId;
                 // 2B: artefacto canónico ANTES que content.json; si content.json
                 // no llega a escribirse, se repone el artefacto previo.
                 const undoCanonical = applyContentTextVersion(newContent, freshIdx >= 0 ? freshList[freshIdx] : null);
@@ -4380,7 +4422,11 @@ app.post('/api/content', async (req, res) => {
                     freshList.push(newContent);
                 }
                 try {
-                    writeJSON(DB_FILE, freshList);
+                    const persist = () => writeJSON(DB_FILE, freshList);
+                    if (assignment.change) {
+                        publisherChangeRow = publisherAssignment.recordPublisherChange(
+                            { contentId: newContent.id, change: assignment.change, actor: publisherActorOf(req) }, persist);
+                    } else persist();
                 } catch (e) {
                     if (undoCanonical) {
                         try { undoCanonical(); } catch (undoErr) { log(`[CANONICAL_UNDO_FAIL] contentId=${newContent.id} err=${undoErr.message}`, 'ERROR'); }
@@ -4392,7 +4438,7 @@ app.post('/api/content', async (req, res) => {
             // 2B fail-closed: el texto no pudo canonicalizarse. No se publica la
             // versión, no se encola TTS y no se tocan los archivos subidos (una
             // URL deduplicada puede pertenecer a otro contenido).
-            if (dbWriteErr instanceof CanonicalIngestionError) {
+            if (dbWriteErr instanceof CanonicalIngestionError || dbWriteErr instanceof publishersStore.PublisherError) {
                 log(`[CONTENT_SAVE_REJECTED] contentId=${newContent.id} actor=${saveActorId} reason=${dbWriteErr.code}`, 'WARN');
                 return res.status(dbWriteErr.status).json({ error: dbWriteErr.message, code: dbWriteErr.code });
             }
@@ -4426,6 +4472,11 @@ app.post('/api/content', async (req, res) => {
             syncNewContentToOrgAccessRules(newContent.id);
         }
 
+        if (publisherChangeRow) {
+            const { id: historyId, from, to, actor, changedAt } = publisherChangeRow;
+            writeAuditLog({ action: 'content_publisher_change', actor, details: { contentId: newContent.id, from, to, changedAt, historyId } });
+            log(`[PUBLISHERS] content publisher changed contentId=${newContent.id} from=${from} to=${to} actor=${actor}`, 'INFO');
+        }
         log(`[CONTENT_SAVE_SUCCESS] contentId=${newContent.id} actor=${saveActorId}`, 'SUCCESS');
         res.json({ success: true, content: newContent });
 
@@ -9064,6 +9115,7 @@ app.post('/api/schools/:name/config', requireAdminAccess, async (req, res) => {
 // Protegido por app.use('/api/content', requireAdminRole).
 // ────────────────────────────────────────────────────────────────────────────
 const EPUB_ALREADY_ATTACHED_MESSAGE = 'Este contenido ya tiene una edición EPUB.';
+const EPUB_PUBLISHER_REQUIRED_MESSAGE = 'Asigna una editorial responsable a la obra antes de añadir su edición EPUB.';
 
 /** Ruta absoluta de un .epub subido bajo /uploads/<contentId>/ (no canónico), o null. */
 const ownedEpubUploadPath = (contentId, url) => {
@@ -9083,6 +9135,8 @@ app.post('/api/content/:id/epub-edition', async (req, res) => {
         const current = readJSON(DB_FILE).find(c => c && c.id === contentId);
         if (!current) return res.status(404).json({ error: 'Contenido no encontrado.', code: 'content_not_found' });
         if (current.epub_url) return res.status(409).json({ error: EPUB_ALREADY_ATTACHED_MESSAGE, code: 'epub_already_attached' });
+        // F1-B: un libro sin editorial (excepción histórica) se regulariza antes de añadirle edición.
+        if (publisherAssignment.isBookContent(current) && !current.publisherId) return res.status(400).json({ error: EPUB_PUBLISHER_REQUIRED_MESSAGE, code: 'publisher_required' });
 
         const abs = ownedEpubUploadPath(contentId, epubUrl);
         if (!abs) {
@@ -9108,6 +9162,7 @@ app.post('/api/content/:id/epub-edition', async (req, res) => {
             const i = list.findIndex(c => c && c.id === contentId);
             if (i < 0) throw Object.assign(new Error('content_not_found'), { httpStatus: 404 });
             if (list[i].epub_url) throw Object.assign(new Error('epub_already_attached'), { httpStatus: 409 });
+            if (publisherAssignment.isBookContent(list[i]) && !list[i].publisherId) throw Object.assign(new Error('publisher_required'), { httpStatus: 400 });
             list[i] = { ...list[i], epub_url: epubUrl };
             writeJSON(DB_FILE, list);
             saved = list[i];
@@ -9119,6 +9174,7 @@ app.post('/api/content/:id/epub-edition', async (req, res) => {
     } catch (e) {
         if (e.httpStatus === 409) return res.status(409).json({ error: EPUB_ALREADY_ATTACHED_MESSAGE, code: 'epub_already_attached' });
         if (e.httpStatus === 404) return res.status(404).json({ error: 'Contenido no encontrado.', code: 'content_not_found' });
+        if (e.httpStatus === 400) return res.status(400).json({ error: EPUB_PUBLISHER_REQUIRED_MESSAGE, code: 'publisher_required' });
         log(`[EPUB_ATTACH_FAIL] contentId=${contentId} actor=${actorId} error=${e.message}`, 'ERROR');
         res.status(500).json({ error: 'No se pudo añadir la edición EPUB.' });
     }

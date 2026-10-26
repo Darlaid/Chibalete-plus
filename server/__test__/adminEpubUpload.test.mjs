@@ -48,7 +48,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         ...process.env, NODE_ENV: 'test', PORT: String(PORT),
         CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: path.join(tmp, 'groups.json'), SCHOOLS_DB: path.join(tmp, 'schools.json'),
         ACCESS_DB: path.join(tmp, 'access.json'), CONTENT_DB: P.content, UPLOADS_ROOT: up,
-        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), SESSION_AUTH_MODE: 'off',
+        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), ROYALTIES_DB: path.join(tmp, 'royalties.db'), SESSION_AUTH_MODE: 'off',
         OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
     },
 });
@@ -63,8 +63,10 @@ const uploadLikeUi = async (file, parentId) => {
     const r = await fetch(`${base}/api/upload?parentId=${encodeURIComponent(parentId)}`, { method: 'POST', headers: H, body: fd });
     return { status: r.status, body: await r.json() };
 };
+// F1-B: todo libro se guarda con editorial responsable (royalties.db temporal).
+const withPublisher = (b) => (['libro', 'libro_album'].includes(b?.tipo) && !('publisherId' in b) ? { ...b, publisherId: 'pub-chibalete-editores' } : b);
 const saveLikeUi = async (content) => {
-    const r = await fetch(`${base}/api/content`, { method: 'POST', headers: { ...H, 'content-type': 'application/json' }, body: JSON.stringify(content) });
+    const r = await fetch(`${base}/api/content`, { method: 'POST', headers: { ...H, 'content-type': 'application/json' }, body: JSON.stringify(withPublisher(content)) });
     const body = await r.json(); await sleep(2100);
     return { status: r.status, body };
 };

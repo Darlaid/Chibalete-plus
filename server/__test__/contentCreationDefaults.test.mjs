@@ -50,6 +50,7 @@ const PILOT_RECORD = {
     id: PILOT, titulo: 'Piloto (EPUB)', autor: 'Autora', tipo: 'libro', etiquetas: ['Filosofía'], epub_url: pilotEpubUrl,
     texto_plano_url: canonicalTextUrlFor(PILOT), status: 'disponible', ttsStatus: 'listo', contentFingerprint: FP, contentVersion: 1,
     canonicalBookUrl: canonicalBookUrlFor(PILOT), canonicalSchemaVersion: 1, canonicalFingerprint: FP,
+    publisherId: 'pub-chibalete-editores', // F1-A: el piloto productivo ya tiene editorial responsable
     processingStatus: { percentage: 100, status: 'completed' },
 };
 
@@ -67,7 +68,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         ...process.env, NODE_ENV: 'test', PORT: String(PORT),
         CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: path.join(tmp, 'groups.json'), SCHOOLS_DB: path.join(tmp, 'schools.json'),
         ACCESS_DB: path.join(tmp, 'access.json'), CONTENT_DB: P.content, UPLOADS_ROOT: up,
-        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), SESSION_AUTH_MODE: 'off',
+        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), ROYALTIES_DB: path.join(tmp, 'royalties.db'), SESSION_AUTH_MODE: 'off',
         OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
     },
 });
@@ -77,8 +78,10 @@ child.stderr.on('data', d => { boot += d; });
 
 const H = { 'content-type': 'application/json', 'x-user-id': 'ADM' };
 const rec = (id) => JSON.parse(fs.readFileSync(P.content, 'utf8')).find(c => c.id === id);
+// F1-B: todo libro se guarda con editorial responsable (royalties.db temporal).
+const withPublisher = (b) => (['libro', 'libro_album'].includes(b?.tipo) && !('publisherId' in b) ? { ...b, publisherId: 'pub-chibalete-editores' } : b);
 const save = async (body) => {
-    const r = await fetch(`${base}/api/content`, { method: 'POST', headers: H, body: JSON.stringify(body) });
+    const r = await fetch(`${base}/api/content`, { method: 'POST', headers: H, body: JSON.stringify(withPublisher(body)) });
     const j = await r.json();
     await sleep(2100); // ventana de idempotencia de 2 s por actor+id
     return { status: r.status, body: j };

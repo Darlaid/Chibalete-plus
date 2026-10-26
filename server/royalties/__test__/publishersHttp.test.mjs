@@ -4,8 +4,8 @@
  * server.js REAL contra stores, uploads y royalties.db TEMPORALES:
  *   [1] CRUD administrativo de titulares y rechazo de no autorizados
  *   [2] publisherId en POST /api/content: persiste, se conserva al editar sin
- *       reenviarlo, se valida, se quita explícitamente; contenidos sin
- *       publisherId siguen funcionando
+ *       reenviarlo, se valida; F1-B: un libro no se queda sin editorial y el
+ *       cambio exige confirmación (detalle en publisherMandatoryHttp.test.mjs)
  *   [3] el lector no recibe datos administrativos del titular
  *   [4] borrado protegido por referencias
  *   [5] accesos, progreso y eventos intactos; auditoría registrada
@@ -134,16 +134,17 @@ try {
     r = await saveContent({ ...C2, publisherId: ina.id });
     ok('asignar editorial inactiva → 400', r.status === 400 && r.body.code === 'inactive_publisher' && !('publisherId' in rec('content-c2')));
     r = await saveContent({ ...C2 });
-    ok('contenido sin publisherId sigue guardándose (transición)', r.status === 200 && !('publisherId' in rec('content-c2')));
+    ok('F1-B: libro sin publisherId → 400 publisher_required', r.status === 400 && r.body.code === 'publisher_required' && !('publisherId' in rec('content-c2')));
     r = await saveContent({ ...C2, publisherId: ext.id });
     ok('asignar editorial externa', r.status === 200 && rec('content-c2').publisherId === ext.id);
     r = await call('PUT', `/api/admin/publishers/${ext.id}`, 'ADM', { status: 'inactive' });
     r = await saveContent({ ...rec('content-c2'), titulo: 'Obra dos (editada)' });
     ok('editorial desactivada después: la asociación existente se conserva al editar', r.status === 200 && rec('content-c2').publisherId === ext.id);
     r = await saveContent({ ...rec('content-c1'), publisherId: '' });
-    ok('quitar explícitamente ("") → sin asociación', r.status === 200 && !('publisherId' in rec('content-c1')));
-    r = await saveContent({ ...rec('content-c1'), publisherId: 'pub-chibalete-editores' });
-    ok('reasignar', r.status === 200 && rec('content-c1').publisherId === 'pub-chibalete-editores');
+    ok('F1-B: quitar ("") a un libro → 400 publisher_removal_forbidden', r.status === 400 && r.body.code === 'publisher_removal_forbidden' && rec('content-c1').publisherId === 'pub-chibalete-editores');
+    const alt = (await call('POST', '/api/admin/publishers', 'ADM', { kind: 'editorial', legalName: 'Editorial Alterna' })).body;
+    r = await saveContent({ ...rec('content-c1'), publisherId: alt.id });
+    ok('F1-B: reasignar sin confirmación → 409', r.status === 409 && r.body.code === 'publisher_reassign_unconfirmed' && rec('content-c1').publisherId === 'pub-chibalete-editores');
     ok('contentId intactos', JSON.parse(fs.readFileSync(P.content, 'utf8')).map((c) => c.id).join(',') === 'content-c1,content-c2');
 
     console.log('\n[3] el lector no recibe datos administrativos');

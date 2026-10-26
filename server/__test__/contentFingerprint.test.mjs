@@ -102,7 +102,7 @@ const child = spawn(process.execPath, ['server/server.js'], {
         ...process.env, NODE_ENV: 'test', PORT: String(PORT),
         CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: P.schools,
         ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: up,
-        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), SESSION_AUTH_MODE: 'off',
+        USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), ROYALTIES_DB: path.join(tmp, 'royalties.db'), SESSION_AUTH_MODE: 'off',
         OPENAI_API_KEY: '', GEMINI_API_KEY: '',
     },
 });
@@ -112,8 +112,10 @@ child.stderr.on('data', d => { boot += d; });
 
 const H = { 'content-type': 'application/json', 'x-user-id': 'ADM' };
 const rec = (id) => JSON.parse(fs.readFileSync(P.content, 'utf8')).find(c => c.id === id);
+// F1-B: todo libro se guarda con editorial responsable (royalties.db temporal).
+const withPublisher = (b) => (['libro', 'libro_album'].includes(b?.tipo) && !('publisherId' in b) ? { ...b, publisherId: 'pub-chibalete-editores' } : b);
 const save = async (body) => {
-    const r = await fetch(`${base}/api/content`, { method: 'POST', headers: H, body: JSON.stringify(body) });
+    const r = await fetch(`${base}/api/content`, { method: 'POST', headers: H, body: JSON.stringify(withPublisher(body)) });
     const j = await r.json();
     await sleep(2100); // ventana de idempotencia de 2 s por actor+id
     return { status: r.status, body: j };
