@@ -45,7 +45,9 @@ FROM nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee178
 # Dockerfile.api, Lote E): CVE-2026-111497 en brotli-libs (fix 1.2.1-r0, repo de
 # Alpine 3.24). Si el repo no lo ofrece, el build FALLA en vez de construir en
 # silencio con la versión vulnerable.
-RUN apk add --no-cache 'brotli-libs>=1.2.1-r0'
+# SEC-FRONT-CURL-01 — mismo patrón: CVE-2026-92392 en curl/libcurl (fix
+# 8.23.0-r0, repo main de Alpine 3.24). Solo actualiza esos dos paquetes.
+RUN apk add --no-cache 'brotli-libs>=1.2.1-r0' 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0'
 
 # Remove default nginx content
 RUN rm -rf /usr/share/nginx/html/*
