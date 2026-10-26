@@ -1910,7 +1910,9 @@ app.delete('/api/library/editorial/references/:id', requireAdminAccess, async (r
 // Lectura y escritura exclusivamente administrativas: los datos del titular
 // nunca llegan a lectores. Desactivar = PUT {status:'inactive'}; borrar solo
 // si ningún contenido lo referencia.
-const publisherActorOf = (req) => req.auth?.userId ?? req.headers['x-user-id'] ?? 'admin-secret';
+// F1-B (EDITORIALES-03): requireAdminRole (/api/content) deja la identidad de
+// la sesión en req.user, no en req.auth; sin este paso el actor caía en 'admin-secret'.
+const publisherActorOf = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'] ?? 'admin-secret';
 const sendPublisherError = (res, e, op) => {
     if (e instanceof publishersStore.PublisherError) return res.status(e.status).json({ error: e.message, code: e.code });
     log(`[PUBLISHERS] ${op} failed: ${e.message}`, 'ERROR');
