@@ -3925,7 +3925,8 @@ ROYALTIES_EXTRA_ROWS = (
 
 def _build_royalties_db(base_dir: str) -> str:
     """royalties.db sintetica: TODAS las migraciones reales en orden + _migrations
-    + dos titulares ficticios + una version de derechos (F2-A), en WAL."""
+    + dos titulares ficticios + una version de derechos (F2-A) + un cambio de
+    editorial (F1-B, content_publisher_history), en WAL."""
     path = os.path.join(base_dir, ROYALTIES_LOGICAL_PATH)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
@@ -3949,6 +3950,9 @@ def _build_royalties_db(base_dir: str) -> str:
         " '2026-10-01T05:00:00.000Z', 'active', 'active', 'liquidable', 0.5, 120,"
         " '[{\"publisherId\":\"pub-fx-0001\",\"shareBp\":10000}]', 1, 0, 0, 0, 1, 0, 1, NULL, 'fx',"
         " '2026-10-21T00:00:00.000Z')")
+    conn.execute(
+        "INSERT INTO content_publisher_history (id, content_id, from_publisher_id, to_publisher_id, actor, changed_at)"
+        " VALUES ('cph-fx-0001', 'content-fx', 'pub-chibalete-editores', 'pub-fx-0001', 'fx', '2026-10-26T00:00:00.000Z')")
     conn.commit()
     conn.close()
     return path
@@ -3969,6 +3973,7 @@ def _royalties_logical_digest(path: str) -> dict:
                 conn.execute("SELECT * FROM rights_versions ORDER BY id").fetchall(),
                 sort_keys=True, default=str).encode("utf-8")).hexdigest(),
             "rights_count": conn.execute("SELECT COUNT(*) FROM rights_versions").fetchone()[0],
+            "history": conn.execute("SELECT * FROM content_publisher_history ORDER BY id").fetchall(),
         }
     finally:
         conn.close()
@@ -4033,7 +4038,7 @@ def test_ry_present_included():
     assert _royalties_logical_digest(origen) == digest_before, "la fuente cambio logicamente"
 
 
-@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones, titulares y derechos identicos")
+@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones, titulares, derechos e historial editorial identicos")
 def test_ry_restore_logical():
     env = Env("ry04")
     origen = _build_royalties_db(env.base)
@@ -4041,8 +4046,11 @@ def test_ry_restore_logical():
     assert esperado["integrity"] == "ok", esperado
     assert esperado["ids"] == ["pub-chibalete-editores", "pub-fx-0001", "pub-fx-0002"], esperado["ids"]
     assert esperado["rights_count"] == 1, esperado
-    assert esperado["migrations"] == ["0001_publishers", "0002_rights_versions"], esperado["migrations"]
-    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 2, esperado["schema"]
+    assert esperado["migrations"] == ["0001_publishers", "0002_rights_versions",
+                                      "0003_content_publisher_history"], esperado["migrations"]
+    # rights_versions (F2-A) y content_publisher_history (F1-B): 2 triggers append-only cada una
+    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 4, esperado["schema"]
+    assert len(esperado["history"]) == 1, esperado["history"]
     env.provision_repository()
     env.run("structured_backup.py", expect=0)
     staged = _restore_staging(env)
