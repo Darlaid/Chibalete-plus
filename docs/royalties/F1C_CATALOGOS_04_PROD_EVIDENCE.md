@@ -3,7 +3,7 @@
 **Fecha:** 2026-10-26 (UTC) · **Imágenes desplegadas:** `chibalete/api:catalogos-b3dd8a9` (`f8812c438bab`) y `chibalete/front:catalogos-b3dd8a9` (`a3fed246dd15`) · **Plan:** `F1C_CATALOGOS_03.md` §F
 **Autorización:** desplegar exclusivamente esas dos imágenes; sin modificar obras ni editoriales, sin migraciones, sin activar la ingesta económica ni el cumplimiento de derechos.
 
-**Veredicto:** **GREEN_PRODUCTIVO**. El control condicional con sesiones reales de mediación y lectura **no se ejecutó** (no había sesiones disponibles) y queda registrado aparte (§D.3), sin darlo por aprobado.
+**Veredicto:** **GREEN_PRODUCTIVO, cerrado.** El control con sesiones reales de mediación y lectura se observó en CATÁLOGOS-05 (§D.3 y §J).
 
 ---
 
@@ -68,7 +68,7 @@
 | `/admin/editoriales` | Sin banner de regularización. «52» → `clase=libros` (52 filas, «Libros (52)») y «+57 recursos» → `clase=recursos` (57 filas). Sin selector de sello (ninguna obra tiene sello) |
 | Editor de «La metamorfosis» (`libro`) | «Editorial responsable» obligatoria con Chibalete Editores preseleccionada; «Sello (Opcional)» en **«Sin sello»** con las opciones «Chibalete Editores» y «Estado Sólido»; sin avisos. **Se salió sin guardar**: 0 escrituras en ambas réplicas y `content.json` `9faaf685…` |
 
-### D.3 Mediación y lectura — NO EJECUTADO (registrado aparte)
+### D.3 Mediación y lectura — PENDIENTE en CATÁLOGOS-04 → **GREEN en CATÁLOGOS-05** (ver §J)
 
 Chrome solo tenía la sesión administrativa y no se introducen credenciales reales, así que **no se observó en producción** el 403 en `/api/admin/publishers` y `/api/admin/publisher-audit` ni la vista «Editoriales» con sesión de mediador o lector.
 
@@ -127,3 +127,23 @@ Este documento y el seguimiento (fila 3i), en el commit documental de esta unida
 - Ingesta y cumplimiento de derechos apagados.
 
 **Pendiente, sin inferirlo como aprobado:** los smokes con sesiones reales de mediación y lectura (§D.3).
+
+## J. CATÁLOGOS-05 — cierre de permisos autenticados (2026-10-26 21:41–21:48Z, solo lecturas)
+
+Preflight: api_1, api_2 y front `catalogos-b3dd8a9` healthy, 0 reinicios; huella igual al cierre de CATÁLOGOS-04.
+
+| Rol (sesión real abierta por la titular) | Comprobación | Resultado observado |
+|---|---|---|
+| Mediador | `GET /api/admin/publishers`, `?withCounts=1`, `/api/admin/publisher-audit`, `/api/admin/publisher-audit/x/history` | **403** en los cuatro (también en los logs del servidor, en ambas réplicas); el cuerpo no contiene datos de editoriales ni del censo |
+| Mediador | Biblioteca → «Editoriales» | Un bloque «Chibalete Editores» con **42 libros, todos dentro de su `my-catalog`** (109 ids, el catálogo de su organización) e iguales a los libros de su pestaña «Libros»; sin «Editoriales» en el menú |
+| Mediador | Apertura de un libro desde «Editoriales» | `#/contenido/content-1765751139919` («La metamorfosis») se abre; preflight `GET /api/content/:id/access?userId=` → **200 `allowed: true`** |
+| Mediador | `#/admin/editoriales` | Redirige a `#/` (Inicio); la página de administración no se renderiza |
+| Lector | Los mismos cuatro endpoints | **403** en los cuatro, sin datos en el cuerpo |
+| Lector | Biblioteca → «Editoriales» | Un bloque con **42 libros, todos dentro de su `my-catalog`** (89 ids) e iguales a los libros de su pestaña «Libros»; sin «Editoriales» en el menú |
+| Lector | Apertura de un libro | «La metamorfosis» se abre; preflight → **200 `allowed: true`** |
+| Lector | `#/admin/editoriales` | Redirige a `#/` |
+| Ambos | `my-catalog` | 200; claves `success`, `catalog`, `publishers`; filas con las 5 claves; `publishers` = solo `{ id, name }` de Chibalete Editores |
+
+**Integridad durante las pruebas (21:41–21:48Z):** `content.json` `9faaf68566e513f0` (109/109, 52 libros, 0 `imprint`), historial 0, 0 `rights_versions`, 0 `econ_events`, editorial sin cambios (`updated_at` 19:35:12Z). Las únicas escrituras en las API fueron `POST /api/auth/login` y `/logout`. El único cambio en los stores es `lastLoginAt` de las dos cuentas usadas (padrón: 670 usuarios, 0 altas, 0 bajas). 0 respuestas 5xx.
+
+**Veredicto CATÁLOGOS-05:** GREEN, observado en producción con sesiones reales de ambos roles. Queda **cerrado el control compartido de permisos de F1-B y F1-C**. Sin despliegues, cambios de permisos ni escrituras de datos.

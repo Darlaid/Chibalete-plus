@@ -3,7 +3,9 @@
 **Fecha:** 2026-10-26 (UTC) · **Código desplegado:** `beb11e4` (HEAD `9c14bac` = `beb11e4` + docs) · **Plan:** `F1B_EDITORIALES_03.md` §F
 **Autorización:** desplegar F1-B exclusivamente; sin crear editoriales reales, sin reasignar libros, sin activar la ingesta económica.
 
-**Veredicto (cierre EDITORIALES-05, 2026-10-26 19:53Z):** **YELLOW justificado por un único control**: el rechazo en el servidor (403) con sesión real de mediador y lector no se observó en producción (§F.2, §K). Todo lo demás, incluida la verificación administrativa con sesión, está en GREEN; al observar ese 403 pasa a GREEN_PRODUCTIVO sin cambios en producción. Despliegue, migración, integridad, permisos anónimos, respaldo y restauración: GREEN.
+**Veredicto vigente (F1-C / CATÁLOGOS-05, 2026-10-26 21:48Z):** **GREEN_PRODUCTIVO**: el 403 con sesión real de mediador y lector quedó observado en producción (§L).
+
+**Veredicto anterior (cierre EDITORIALES-05, 2026-10-26 19:53Z):** **YELLOW justificado por un único control**: el rechazo en el servidor (403) con sesión real de mediador y lector no se observó en producción (§F.2, §K). Todo lo demás, incluida la verificación administrativa con sesión, está en GREEN; al observar ese 403 pasa a GREEN_PRODUCTIVO sin cambios en producción. Despliegue, migración, integridad, permisos anónimos, respaldo y restauración: GREEN.
 
 ---
 
@@ -72,7 +74,7 @@ Sesiones abiertas por Dirección; no se introdujeron credenciales.
 | `GET /api/admin/publisher-audit` con sesión administrativa | Verificación propia 19:52Z | 200, `cache-control: no-store`; `books 52`, `booksWithPublisher 52`, `nonBooks 57`, **`missing []`**, **`unknown []`**, `byPublisher` Chibalete Editores 52/109 |
 | Enlace del conteo de libros al catálogo filtrado | Verificación propia | El «52» enlaza a `#/subir-contenido?editorial=pub-chibalete-editores`; el gestor muestra «Editorial: Chibalete Editores · 109» con «Quitar filtro» (el filtro es por editorial y abarca libros y recursos) |
 | Editorial preseleccionada al editar un libro, sin guardar | Verificación propia («La metamorfosis», `tipo libro`) | Etiqueta «Editorial responsable», `required`, valor `pub-chibalete-editores`; opciones: marcador deshabilitado «Selecciona una editorial…» + Chibalete Editores; sin «Sin editorial asignada»; sin casilla de reasignación. Se salió sin guardar: 0 `POST /api/content` en ambas réplicas desde 19:40Z y `content.json` `9faaf68566e513f0` |
-| 403 en rutas administrativas con sesión de mediador y lector | — | **PENDIENTE.** Dirección inició sesión con ambas cuentas (cambió solo `lastLoginAt`), pero Chrome solo conserva la sesión administrativa y los logs de las API no registran ninguna petición de esas sesiones a `/api/admin/publisher*`. No se sustituye por evidencia sintética; la cobertura automática (`publisherMandatoryHttp`, `publishersHttp`) sigue siendo solo de CI |
+| 403 en rutas administrativas con sesión de mediador y lector | Verificación propia con sesiones reales (CATÁLOGOS-05, 21:41–21:48Z) | **GREEN** (ver §L). Antes: **PENDIENTE.** Dirección inició sesión con ambas cuentas (cambió solo `lastLoginAt`), pero Chrome solo conserva la sesión administrativa y los logs de las API no registran ninguna petición de esas sesiones a `/api/admin/publisher*`. No se sustituye por evidencia sintética; la cobertura automática (`publisherMandatoryHttp`, `publishersHttp`) sigue siendo solo de CI |
 
 ## G. Respaldo posterior y restauración aislada — GREEN
 
@@ -100,3 +102,14 @@ Este documento (ver §J para el cierre).
 - **Producción:** api_1, api_2 y front `editoriales-beb11e4`, healthy, 0 reinicios; edge healthy; público 200; `publisher-audit` anónimo 401; 0 errores en las API desde el despliegue; `ECONOMIC_INGEST_MODE` y `RIGHTS_ENFORCEMENT_MODE` ausentes (= off); disco 8,7 G libres (92 %).
 - **Huella** (`/root/chp-f1b/snapshot-05.json`) frente a `snapshot-final.json`: `content.json` `9faaf68566e513f0`, 109/109 con `pub-chibalete-editores`, 52 libros, 0 sin editorial, huella id→editorial `33f443b01ccd9847`; `royalties.db` `ok`, migraciones 0001–0003, **historial 0 filas** (sin reasignaciones), triggers append-only presentes, **0** `rights_versions`; `events.db` `ok`, **0** `econ_events`, 0 `econ_tick`; `access_db`, `groups_db`, `schools_db` idénticos. Única diferencia: el padrón, solo `lastLoginAt` de 3 cuentas (administración, mediación, lectura: los inicios de sesión de Dirección); 670 usuarios, 0 altas, 0 bajas.
 - **Única escritura posterior al despliegue:** la actualización de datos administrativos de Chibalete Editores por Dirección (§F.2).
+
+## L. Cierre del control pendiente (F1-C / CATÁLOGOS-05, 2026-10-26)
+
+Con sesiones reales de mediador y lector abiertas por la titular, en producción (`catalogos-b3dd8a9`, que conserva las rutas y guardas de F1-B):
+- **403** en `/api/admin/publishers`, `?withCounts=1`, `/api/admin/publisher-audit` y `…/history`, para ambos roles, sin datos en el cuerpo.
+- `#/admin/editoriales` redirige a Inicio.
+- Sin «Editoriales» en el menú.
+
+Detalle en `F1C_CATALOGOS_04_PROD_EVIDENCE.md` §J. Sin escrituras: `content.json` `9faaf685…`, historial 0, 0 derechos, 0 `econ_events`.
+
+**Veredicto F1-B actualizado: GREEN_PRODUCTIVO** (sustituye al YELLOW de §J).
