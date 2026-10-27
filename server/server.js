@@ -186,7 +186,8 @@ import * as publisherAssignment from './royalties/publisherAssignment.mjs';
 import * as rightsStore from './royalties/rightsStore.mjs';
 import * as commercialClass from './royalties/commercialClass.mjs';
 import * as econEvents from './royalties/econEvents.mjs';
-import { ECON_TICK_EVENT } from './royalties/economicEpisodes.mjs';
+import { ECON_TICK_EVENT, RULE_SET_RS_2026_01_V1 } from './royalties/economicEpisodes.mjs';
+import * as periodPreview from './royalties/periodPreview.mjs';
 import {
     aggregateBackboneMetrics,
     emptyBackboneMetrics,
@@ -2045,6 +2046,48 @@ app.post('/api/admin/rights/:contentId/versions', requireAdminAccess, (req, res)
     } catch (e) { sendPublisherError(res, e, 'rights_create'); }
 });
 // --- END CHP-EDITORIAL-ROYALTIES F2-A ----------------------------------------
+
+// --- CHP-EDITORIAL-ROYALTIES-2026-01 V1.4 U2 · F3-B-01: vista previa mensual --
+// Solo lectura y PROVISIONAL: Q, R y S por obra con derechos evaluados en cada
+// episodio (server/royalties/periodPreview.mjs). No liquida, no cierra y no
+// escribe: si econ_events no existe no se crea, y el mes sale vacío.
+app.get('/api/admin/royalties/preview', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    const month = String(req.query.month || '');
+    let window;
+    try {
+        window = periodPreview.previewReadWindow(month, econEvents.engineClockContext());
+    } catch {
+        return res.status(400).json({ error: 'month debe tener la forma YYYY-MM', code: 'invalid_month' });
+    }
+    try {
+        const db = getEventsDb();
+        const hasTable = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(econEvents.ECON_EVENTS_TABLE);
+        const rows = hasTable ? econEvents.readEconRows(db, window) : [];
+        const contents = new Map(readJSON(DB_FILE).filter((c) => c && c.id).map((c) => [c.id, c]));
+        const versionsByContent = rightsStore.rightsIndex();
+        const workIds = new Set([...rows.map((r) => r.content_id), ...versionsByContent.keys()]);
+        const publisherHistoryByContent = new Map([...workIds].map((id) => [id, publisherAssignment.listPublisherHistory(id)]));
+        const publishersById = new Map(publishersStore.listPublishers().map((p) => [p.id, p]));
+        // Exclusiones (P7): las registradas en la atribución, la lista interna vigente y,
+        // con el padrón actual, administración y QA (isEconomicallyExcludedUser).
+        const excludedUsers = econEvents.excludedUsersFromRows(rows);
+        const internalUserIds = econEvents.internalUserIdsFromEnv();
+        const rowUserIds = new Set(rows.map((r) => r.user_id));
+        for (const u of readJSON(USERS_DB)) {
+            if (u && rowUserIds.has(u.id) && !excludedUsers.has(u.id) && commercialClass.isEconomicallyExcludedUser(u, { internalUserIds })) excludedUsers.set(u.id, 'current_user_excluded');
+        }
+        for (const id of internalUserIds) if (rowUserIds.has(id) && !excludedUsers.has(id)) excludedUsers.set(id, 'internal_p7');
+        res.json(periodPreview.computePeriodPreview({
+            rows, month, ruleSet: RULE_SET_RS_2026_01_V1, clock: econEvents.engineClockContext(),
+            contents, versionsByContent, publisherHistoryByContent, publishersById, excludedUsers,
+            readWindow: window, generatedAt: new Date().toISOString(),
+        }));
+    } catch (e) {
+        log(`[ROYALTIES_PREVIEW] ${month} failed: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error interno', code: 'internal_error' });
+    }
+});
+// --- END CHP-EDITORIAL-ROYALTIES V1.4 U2 --------------------------------------
 
 // --- CHP-EDITORIAL-ROYALTIES-2026-01 F2-B: clasificación comercial de reglas --
 // La clase vive en la propia regla de access_db.json; el motor de acceso no la
