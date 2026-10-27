@@ -1,7 +1,7 @@
 # CHP-EDITORIAL-ROYALTIES-2026-01 — V1.4 / U1 · DERECHOS-UI-01 · Interfaz de derechos por obra
 
 **Fecha:** 2026-10-27 · **Baseline:** `bce38cd` (= remoto, CI 9/9 en verde) · **Ruta crítica:** `OPERACION_01_RUTA_CRITICA.md` · **Plan:** `PLAN_GENERAL_V1_1.md` (F5-A «Obras y Derechos», adelantada)
-**Veredicto:** **GREEN_LOCAL** (CI pendiente del push; se anota en el seguimiento). Solo frontend sobre el contrato F2-A existente: sin cambios de servidor, migraciones, fórmulas, accesos ni datos. Sin despliegue.
+**Veredicto:** **GREEN_LOCAL+CI** (`f3e0256`: 10/10 check-runs en verde, incluidos `content-rmw` e `identity-preflight`). Solo frontend sobre el contrato F2-A existente: sin cambios de servidor, migraciones, fórmulas, accesos ni datos. Sin despliegue.
 
 ## A. Baseline y CI
 
@@ -110,8 +110,8 @@ Cliente: `dataService.getRights`, `getRightsEligibility` y `createRightsVersion`
 
 ## G. Commits
 
-Código, pruebas y este informe en un solo commit; ver el seguimiento (fila U1).
+`f3e0256`: código, pruebas e informe. CI 10/10 en verde. Este registro del CI va en un commit documental posterior.
 
 ## H. Veredicto
 
-**GREEN_LOCAL**, pendiente de confirmar el CI del push. Laboratorio `chp-u1lab` **detenido, no borrado** (datos sintéticos). No se despliega y no se inicia U2.
+**GREEN_LOCAL+CI**. Laboratorio `chp-u1lab` **detenido, no borrado** (datos sintéticos). No se despliega y no se inicia U2.
