@@ -134,3 +134,26 @@ Queda como **mejora opcional, no urgente**: `content.metricas?.…` en `PaginaDe
 **F. Corrección productiva:** no necesaria para continuar. Queda opcional el acceso seguro en `PaginaDetalleLibro.tsx` (además de `dataService.ts:145` de L-1).
 
 **G. Veredicto: READY.** La interfaz es estable en Chrome por la red local.
+
+## Reanudación (baseline `ae2c432`) · preflight 2026-10-27 00:51Z
+
+| Control | Resultado |
+|---|---|
+| HEAD = remoto | `ae2c432` |
+| CI | `security` ✅; `content-rmw` e `identity-preflight` en curso al hacer el preflight |
+| Laboratorio | `chp-a11ylab-a9ab21a` en marcha, sin reiniciar ni reconstruir; publicado en `127.0.0.1` y `192.168.0.3:5173` |
+| Red local | front 200, `/api/health` 200, `epub-reader.html` 200; `economicIngest: "on"` solo en el laboratorio |
+| Correcciones del laboratorio | complemento L-1 presente; las 3 obras con `metricas` (`content.json` `65ecdab8b76c73da`); `a11yLab.mjs` del contenedor = repositorio (md5 `f64b11ce2409`) |
+| Lectores | Accesible, Guiado y EPUB verificados sin errores en LAB-FIX-01 (Chrome) |
+| Aislamiento | sin `/app/data` ni `/app/data-critical`; eventos en `/tmp/chp_a11ylab` |
+| Intentos inválidos | 3 sesiones, todas anteriores a las 00:49Z: `01M5XBVK…`, `01M5XC04…`, `01M5XC0Z…` (episodio `lab-largo` de 120 s). Ninguna posterior |
+
+Criterio de separación: un caso solo cuenta las sesiones cuyo inicio cae entre la hora de inicio y la de fin que anota Dirección.
+
+## ACCESS-03-AUTO (2026-10-27 00:56–02:22Z)
+
+La cobertura automatizada de los 12 casos (Chrome real contra este laboratorio) está en `F3A3_ACCESS_03_AUTO.md`.
+
+- **Resultado:** 11 GREEN_AUTO, 1 YELLOW (DEF-1, submedición en Guiado tras abrir Leo a mano), 0 RED. **Veredicto: YELLOW_ACCESS.**
+- La matriz manual de 24 ejecuciones se reduce a **8 comprobaciones** (M-1…M-4 con VO y con TB), §F de ese documento.
+- Las filas VO/TB de §2 de este documento siguen «pendiente»: ningún caso se ha ejecutado con VoiceOver ni con TalkBack.
