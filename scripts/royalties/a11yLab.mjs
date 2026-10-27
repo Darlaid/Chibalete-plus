@@ -134,7 +134,10 @@ async function seed() {
         fs.writeFileSync(path.join(up, `${c.id}.txt`), syntheticText(c.words));
         const rec = { id: c.id, titulo: c.titulo, autor: 'Laboratorio', tipo: 'libro', editorial: 'Laboratorio', etiquetas: ['laboratorio'],
             status: 'disponible', descripcion_corta: 'Obra sintética de laboratorio', publisherId: 'pub-laboratorio',
-            texto_plano_url: `/uploads/${c.id}/${c.id}.txt` };
+            texto_plano_url: `/uploads/${c.id}/${c.id}.txt`,
+            // Los mismos defaults que applyContentDefaults (server.js) pone en todo POST /api/content;
+            // el seed escribe content.json directamente y sin ellos la ficha del libro falla.
+            publico_objetivo: 'todos', metricas: { veces_leido: 0, calificacion_promedio: 0 } };
         if (c.epub) {
             fs.writeFileSync(path.join(up, `${c.id}.epub`), syntheticEpub(c.words));
             rec.epub_url = `/uploads/${c.id}/${c.id}.epub`;

@@ -24,6 +24,9 @@ ok('seed en el temporal del sistema con marcador', fs.existsSync(path.join(L, 'C
 let refused = false;
 try { execFileSync(process.execPath, ['scripts/royalties/a11yLab.mjs', 'seed', '--dir', '/app/data/x', '--origin', 'http://a:1'], { cwd: '/app', stdio: 'pipe' }); } catch { refused = true; }
 ok('seed rechaza directorios fuera del temporal', refused);
+const seeded = JSON.parse(fs.readFileSync(path.join(L, 'content.json'), 'utf8'));
+ok('fichas sintéticas con los defaults del servidor (metricas, publico_objetivo)', seeded.length > 0 && seeded.every((c) =>
+    c.publico_objetivo === 'todos' && c.metricas?.veces_leido === 0 && c.metricas?.calificacion_promedio === 0));
 const srv = spawn(process.execPath, ['scripts/royalties/a11yLab.mjs', 'start', '--dir', L], { cwd: '/app', stdio: ['ignore', 'pipe', 'pipe'] });
 let log = ''; srv.stdout.on('data', (d) => log += d); srv.stderr.on('data', (d) => log += d);
 for (let i = 0; i < 120; i++) { try { if ((await fetch(`${API}/api/health`)).ok) break; } catch { /* arrancando */ } await sleep(500); }
