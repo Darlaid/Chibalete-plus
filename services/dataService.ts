@@ -6,6 +6,8 @@ import type {
     RightsRegistry,
     RightsEligibility,
     RightsVersion,
+    RoyaltyReport,
+    RoyaltyPeriodInput,
     EpubInspection,
     ProgresoLectura,
     ReadingStatus,
@@ -5169,6 +5171,43 @@ class DataService {
             console.error('Error fetching publisher audit:', e);
             return null;
         }
+    }
+
+    // --- CHP-EDITORIAL-ROYALTIES V1.4 U5: informes de regalías (solo administración).
+    // El servidor calcula y recupera todo; aquí solo se piden y se muestran.
+    royaltyReportUrl(params: Record<string, string>): string {
+        const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v));
+        return `${this.apiUrl}/admin/royalties/report?${q.toString()}`;
+    }
+
+    async getRoyaltyReport(params: Record<string, string>): Promise<RoyaltyReport> {
+        const res = await fetch(this.royaltyReportUrl(params), { credentials: 'include', cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw Object.assign(new Error(data.error || `Error ${res.status} al consultar el informe`), { code: data.code, status: res.status });
+        return data as RoyaltyReport;
+    }
+
+    async listRoyaltyPeriodInputs(period: string): Promise<RoyaltyPeriodInput[]> {
+        const res = await fetch(`${this.apiUrl}/admin/royalties/period-inputs?period=${encodeURIComponent(period)}`, { credentials: 'include', cache: 'no-store' });
+        return res.ok ? res.json() : [];
+    }
+
+    private async postRoyalties<T>(pathName: string, body: Record<string, unknown>): Promise<T> {
+        const res = await fetch(`${this.apiUrl}/admin/royalties/${pathName}`, {
+            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw Object.assign(new Error(data.error || `Error ${res.status}`), { code: data.code, status: res.status });
+        return data as T;
+    }
+
+    createRoyaltyPeriodInput(body: { period: string; grossCop: number; deductionsCop: number; supportRef: string }): Promise<RoyaltyPeriodInput> {
+        return this.postRoyalties<RoyaltyPeriodInput>('period-inputs', body);
+    }
+
+    // Solo cierres técnicos: el servidor rechaza cualquier otro modo.
+    createRoyaltyTechnicalClose(body: { month: string; periodInputId: string; confirmMonth: string }): Promise<{ id: string; period: string; snapshotSha256: string }> {
+        return this.postRoyalties('closes', body);
     }
 
     // --- U1 DERECHOS-UI-01: derechos por obra (F2-A, solo administración) ---

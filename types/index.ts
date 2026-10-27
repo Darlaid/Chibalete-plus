@@ -687,6 +687,107 @@ export interface RightsEligibility {
   versionId: string | null;
 }
 
+// CHP-EDITORIAL-ROYALTIES V1.4 U5 · REPORTES-01: informe de regalías tal como lo
+// entrega el servidor (server/royalties/royaltyReports.mjs). El navegador solo lo muestra.
+export type RoyaltyReportStatus = 'PROVISIONAL' | 'TECHNICAL' | 'OFFICIAL' | 'PROVISIONAL_INCOMPLETE' | 'PROVISIONAL_TECHNICAL' | 'DEFINITIVE';
+
+export interface RoyaltyReportWork {
+  contentId: string;
+  title: string | null;
+  responsiblePublisherId: string | null;
+  responsibleName: string | null;
+  Q: number;
+  R?: number | null;
+  S?: number;
+  montoObra: number | null;
+  status?: string | null;
+  retained: number;
+  pendingDecision: number;
+  beneficiaries: string[];
+}
+
+export interface RoyaltyReportHolder {
+  publisherId: string;
+  name: string;
+  presenceDays?: number | null;
+  base?: number;
+  variable?: number;
+  settledBase?: number;
+  settledVariable?: number;
+  settledTotal: number;
+  carriedIn: number;
+  adjustments: number;
+  payable: number;
+  retained: number;
+  paid: number;
+  transferredOut: number;
+  belowPayoutThreshold: boolean | null;
+}
+
+export interface RoyaltyReportMovement {
+  id: string;
+  period?: string;
+  kind: string;
+  source: string;
+  publisherId: string;
+  name: string;
+  amountCop: number;
+  targetPeriod: string | null;
+  reason: string;
+  ref: string | null;
+  createdAt: string;
+}
+
+export interface RoyaltyReportTotals {
+  brd: number;
+  payable: number;
+  retained: number;
+  paid: number;
+  transferredOut: number;
+  carriedIn: number;
+  netAdjustments: number;
+  pending: { versionSplit: number; alphaComplement: number; bgpWithoutHolders: number };
+  pendingTotal: number;
+}
+
+export interface RoyaltyReport {
+  kind: 'month' | 'quarter';
+  period: string;
+  status: RoyaltyReportStatus;
+  statusLabel: string;
+  notExigible: boolean;
+  source: 'preview' | 'simulation' | 'close' | 'quarter_closes';
+  reference: { kind: string; value: string };
+  closedAt?: string | null;
+  cutoff?: string;
+  ruleSetId?: string;
+  ruleSetIds?: string[];
+  scoreFormula: string | null;
+  poolFormula: string;
+  policies?: { D1?: { id: string; status: string; basis: string } } | null;
+  ins?: { periodInputId: string; grossCop: number; deductionsCop: number; insCop: number; supportRef: string } | null;
+  pools?: { brd: number; bgp: number; blc: number; blcToBgp: boolean; bgpEffective: number; blcEffective: number } | null;
+  months?: string[];
+  missingMonths?: string[];
+  works: RoyaltyReportWork[];
+  holders: RoyaltyReportHolder[];
+  totals: RoyaltyReportTotals | null;
+  movements: RoyaltyReportMovement[];
+  reconciliation: { ok: boolean };
+  filters?: { editorial: string | null; titular: string | null; obra: string | null } | null;
+  visibleTotals?: { holders: number; works: number; payable: number; retained: number; montoObra: number } | null;
+}
+
+export interface RoyaltyPeriodInput {
+  id: string;
+  period: string;
+  grossCop: number;
+  deductionsCop: number;
+  insCop: number;
+  supportRef: string;
+  createdAt: string;
+}
+
 export interface Product {
   id: string;
   nombre: string;

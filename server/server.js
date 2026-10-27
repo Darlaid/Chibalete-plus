@@ -188,6 +188,8 @@ import * as commercialClass from './royalties/commercialClass.mjs';
 import * as econEvents from './royalties/econEvents.mjs';
 import { ECON_TICK_EVENT, RULE_SET_RS_2026_01_V1 } from './royalties/economicEpisodes.mjs';
 import * as periodPreview from './royalties/periodPreview.mjs';
+import * as closesStore from './royalties/closesStore.mjs';
+import * as royaltyReports from './royalties/royaltyReports.mjs';
 import {
     aggregateBackboneMetrics,
     emptyBackboneMetrics,
@@ -2047,6 +2049,31 @@ app.post('/api/admin/rights/:contentId/versions', requireAdminAccess, (req, res)
 });
 // --- END CHP-EDITORIAL-ROYALTIES F2-A ----------------------------------------
 
+// Entradas autoritativas de U2 para un mes (eventos, catálogo, derechos, historial,
+// titulares y exclusiones), leídas en el servidor. Las comparten la vista previa,
+// la simulación, el cierre técnico y los informes (U5): el navegador nunca aporta
+// Q, R, S ni importes. No escribe: si econ_events no existe no se crea.
+function royaltiesPreviewInputs(month, window = periodPreview.previewReadWindow(month, econEvents.engineClockContext())) {
+    const db = getEventsDb();
+    const hasTable = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(econEvents.ECON_EVENTS_TABLE);
+    const rows = hasTable ? econEvents.readEconRows(db, window) : [];
+    const contents = new Map(readJSON(DB_FILE).filter((c) => c && c.id).map((c) => [c.id, c]));
+    const versionsByContent = rightsStore.rightsIndex();
+    const workIds = new Set([...rows.map((r) => r.content_id), ...versionsByContent.keys()]);
+    const publisherHistoryByContent = new Map([...workIds].map((id) => [id, publisherAssignment.listPublisherHistory(id)]));
+    const publishersById = new Map(publishersStore.listPublishers().map((p) => [p.id, p]));
+    // Exclusiones (P7): las registradas en la atribución, la lista interna vigente y,
+    // con el padrón actual, administración y QA (isEconomicallyExcludedUser).
+    const excludedUsers = econEvents.excludedUsersFromRows(rows);
+    const internalUserIds = econEvents.internalUserIdsFromEnv();
+    const rowUserIds = new Set(rows.map((r) => r.user_id));
+    for (const u of readJSON(USERS_DB)) {
+        if (u && rowUserIds.has(u.id) && !excludedUsers.has(u.id) && commercialClass.isEconomicallyExcludedUser(u, { internalUserIds })) excludedUsers.set(u.id, 'current_user_excluded');
+    }
+    for (const id of internalUserIds) if (rowUserIds.has(id) && !excludedUsers.has(id)) excludedUsers.set(id, 'internal_p7');
+    return { rows, contents, versionsByContent, publisherHistoryByContent, publishersById, excludedUsers, clock: econEvents.engineClockContext() };
+}
+
 // --- CHP-EDITORIAL-ROYALTIES-2026-01 V1.4 U2 · F3-B-01: vista previa mensual --
 // Solo lectura y PROVISIONAL: Q, R y S por obra con derechos evaluados en cada
 // episodio (server/royalties/periodPreview.mjs). No liquida, no cierra y no
@@ -2060,34 +2087,114 @@ app.get('/api/admin/royalties/preview', requireAdminAccess, requireAdminRead, pu
         return res.status(400).json({ error: 'month debe tener la forma YYYY-MM', code: 'invalid_month' });
     }
     try {
-        const db = getEventsDb();
-        const hasTable = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(econEvents.ECON_EVENTS_TABLE);
-        const rows = hasTable ? econEvents.readEconRows(db, window) : [];
-        const contents = new Map(readJSON(DB_FILE).filter((c) => c && c.id).map((c) => [c.id, c]));
-        const versionsByContent = rightsStore.rightsIndex();
-        const workIds = new Set([...rows.map((r) => r.content_id), ...versionsByContent.keys()]);
-        const publisherHistoryByContent = new Map([...workIds].map((id) => [id, publisherAssignment.listPublisherHistory(id)]));
-        const publishersById = new Map(publishersStore.listPublishers().map((p) => [p.id, p]));
-        // Exclusiones (P7): las registradas en la atribución, la lista interna vigente y,
-        // con el padrón actual, administración y QA (isEconomicallyExcludedUser).
-        const excludedUsers = econEvents.excludedUsersFromRows(rows);
-        const internalUserIds = econEvents.internalUserIdsFromEnv();
-        const rowUserIds = new Set(rows.map((r) => r.user_id));
-        for (const u of readJSON(USERS_DB)) {
-            if (u && rowUserIds.has(u.id) && !excludedUsers.has(u.id) && commercialClass.isEconomicallyExcludedUser(u, { internalUserIds })) excludedUsers.set(u.id, 'current_user_excluded');
-        }
-        for (const id of internalUserIds) if (rowUserIds.has(id) && !excludedUsers.has(id)) excludedUsers.set(id, 'internal_p7');
-        res.json(periodPreview.computePeriodPreview({
-            rows, month, ruleSet: RULE_SET_RS_2026_01_V1, clock: econEvents.engineClockContext(),
-            contents, versionsByContent, publisherHistoryByContent, publishersById, excludedUsers,
-            readWindow: window, generatedAt: new Date().toISOString(),
-        }));
+        const inputs = royaltiesPreviewInputs(month, window);
+        res.json(periodPreview.computePeriodPreview({ ...inputs, month, ruleSet: RULE_SET_RS_2026_01_V1, readWindow: window, generatedAt: new Date().toISOString() }));
     } catch (e) {
         log(`[ROYALTIES_PREVIEW] ${month} failed: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'Error interno', code: 'internal_error' });
     }
 });
 // --- END CHP-EDITORIAL-ROYALTIES V1.4 U2 --------------------------------------
+
+// --- CHP-EDITORIAL-ROYALTIES-2026-01 V1.4 U5 · REPORTES-01: informes -----------
+// Panel Admin «Informes». Todo lo calcula o recupera el servidor desde fuentes
+// autoritativas: cierre congelado (U4) si existe; si no, simulación U4 sin
+// guardar (U2 → U3) con el INS registrado; sin INS, solo la vista previa U2.
+// Pantalla, CSV y HTML salen del mismo informe, identificado por `reference`.
+// Escrituras habilitadas: solo INS con soporte y cierre TÉCNICO con confirmación.
+// Sin cierres oficiales, pagos ni asignación de pendientes desde aquí.
+const ROYALTY_MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const ROYALTY_QUARTER_RE = /^\d{4}-Q[1-4]$/;
+
+function buildRoyaltyReport(query) {
+    const month = query.month ? String(query.month) : null;
+    const quarter = query.quarter ? String(query.quarter) : null;
+    if (quarter) {
+        if (!ROYALTY_QUARTER_RE.test(quarter)) throw new publishersStore.PublisherError(400, 'invalid_quarter', 'quarter debe ser YYYY-Qn');
+        const q = closesStore.quarterSummary(quarter);
+        const closes = q.closes.map((c) => { const close = closesStore.getClose(c.period); return { close, movements: closesStore.listMovements(close.id) }; });
+        return royaltyReports.quarterReport(q, closes);
+    }
+    if (!month || !ROYALTY_MONTH_RE.test(month)) throw new publishersStore.PublisherError(400, 'invalid_month', 'month debe tener la forma YYYY-MM');
+    const close = closesStore.getClose(month);
+    if (close) {
+        return royaltyReports.monthReportFromSnapshot({ snapshot: close.snapshot, sha256: close.snapshotSha256, close,
+            ledger: closesStore.closeLedger(month), movements: closesStore.listMovements(close.id) });
+    }
+    const inputs = royaltiesPreviewInputs(month);
+    const periodInput = closesStore.listPeriodInputs(month).at(-1) || null;
+    if (!periodInput) {
+        const preview = periodPreview.computePeriodPreview({ ...inputs, month, ruleSet: RULE_SET_RS_2026_01_V1, generatedAt: null });
+        return royaltyReports.monthReportFromPreview(preview, [...inputs.publishersById.values()]);
+    }
+    const sim = closesStore.closeMonth({ ...inputs, month, mode: 'technical', ruleSet: RULE_SET_RS_2026_01_V1, periodInputId: periodInput.id },
+        { actor: 'report-simulation', simulate: true });
+    return royaltyReports.monthReportFromSnapshot({ snapshot: sim.snapshot, sha256: sim.snapshotSha256 });
+}
+
+app.get('/api/admin/royalties/report', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try {
+        const report = buildRoyaltyReport(req.query);
+        // El archivo exportado debe ser el mismo resultado que se vio en pantalla.
+        if (req.query.expectReference && req.query.expectReference !== report.reference.value) {
+            return res.status(409).json({ error: 'El resultado cambió desde que se mostró; vuelve a consultarlo', code: 'result_changed', reference: report.reference.value });
+        }
+        const filtered = royaltyReports.filterReport(report, { editorial: req.query.editorial || null, titular: req.query.titular || null, obra: req.query.obra || null });
+        const format = String(req.query.format || 'json');
+        const base = `regalias-${report.period}-${report.status.toLowerCase()}`;
+        res.set('X-Content-Type-Options', 'nosniff');
+        if (format === 'csv') {
+            res.set('Content-Type', 'text/csv; charset=utf-8');
+            res.set('Content-Disposition', `attachment; filename="${base}.csv"`);
+            return res.send(royaltyReports.reportToCsv(filtered));
+        }
+        if (format === 'html') {
+            res.set('Content-Type', 'text/html; charset=utf-8');
+            res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+            return res.send(royaltyReports.reportToHtml(filtered));
+        }
+        res.json(filtered);
+    } catch (e) {
+        if (e instanceof publishersStore.PublisherError) return res.status(e.status).json({ error: e.message, code: e.code });
+        log(`[ROYALTIES_REPORT] failed: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: 'Error interno', code: 'internal_error' });
+    }
+});
+
+app.get('/api/admin/royalties/closes', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    try { res.json(closesStore.listCloses()); } catch (e) { sendPublisherError(res, e, 'closes_list'); }
+});
+
+app.get('/api/admin/royalties/period-inputs', requireAdminAccess, requireAdminRead, publisherNoStore, (req, res) => {
+    const period = String(req.query.period || '');
+    if (!ROYALTY_MONTH_RE.test(period)) return res.status(400).json({ error: 'period debe ser YYYY-MM', code: 'invalid_period' });
+    try { res.json(closesStore.listPeriodInputs(period)); } catch (e) { sendPublisherError(res, e, 'period_inputs_list'); }
+});
+
+app.post('/api/admin/royalties/period-inputs', requireAdminAccess, publisherNoStore, (req, res) => {
+    try {
+        const { period, grossCop, deductionsCop, supportRef, notes } = req.body || {};
+        if (closesStore.getClose(String(period || ''))) return res.status(409).json({ error: 'El periodo ya está cerrado', code: 'close_exists' });
+        const input = closesStore.recordPeriodInput({ period, grossCop, deductionsCop, supportRef, notes: notes ?? null }, { actor: publisherActorOf(req) });
+        writeAuditLog({ action: 'royalties_period_input_create', actor: publisherActorOf(req), details: { id: input.id, period: input.period, insCop: input.insCop } });
+        res.status(201).json(input);
+    } catch (e) { sendPublisherError(res, e, 'period_input_create'); }
+});
+
+app.post('/api/admin/royalties/closes', requireAdminAccess, publisherNoStore, (req, res) => {
+    try {
+        const { month, periodInputId, confirmMonth, mode = 'technical' } = req.body || {};
+        if (mode !== 'technical') return res.status(400).json({ error: 'Solo se habilitan cierres técnicos', code: 'official_not_enabled' });
+        if (!ROYALTY_MONTH_RE.test(String(month || ''))) return res.status(400).json({ error: 'month debe ser YYYY-MM', code: 'invalid_month' });
+        if (confirmMonth !== month) return res.status(400).json({ error: 'Confirma el cierre escribiendo el periodo', code: 'confirmation_required' });
+        const close = closesStore.closeMonth({ ...royaltiesPreviewInputs(month), month, mode: 'technical', ruleSet: RULE_SET_RS_2026_01_V1, periodInputId },
+            { actor: publisherActorOf(req) });
+        writeAuditLog({ action: 'royalties_close_technical', actor: publisherActorOf(req), details: { closeId: close.id, period: close.period, sha256: close.snapshotSha256 } });
+        log(`[ROYALTIES_CLOSE] technical ${close.period} ${close.snapshotSha256.slice(0, 12)}`);
+        res.status(201).json({ id: close.id, period: close.period, mode: close.mode, snapshotSha256: close.snapshotSha256, createdAt: close.createdAt });
+    } catch (e) { sendPublisherError(res, e, 'close_create'); }
+});
+// --- END CHP-EDITORIAL-ROYALTIES V1.4 U5 --------------------------------------
 
 // --- CHP-EDITORIAL-ROYALTIES-2026-01 F2-B: clasificación comercial de reglas --
 // La clase vive en la propia regla de access_db.json; el motor de acceso no la

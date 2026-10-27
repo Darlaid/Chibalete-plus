@@ -1,0 +1,321 @@
+/**
+ * InformesRegalias — CHP-EDITORIAL-ROYALTIES-2026-01 V1.4 U5 · REPORTES-01.
+ *
+ * Pestaña «Informes» del Panel Admin. Muestra el informe que calcula el
+ * servidor (vista previa U2, simulación U3/U4 o cierre congelado U4) y el
+ * acumulado trimestral. El navegador nunca calcula importes: los filtros y las
+ * exportaciones se piden al servidor sobre el mismo resultado (`reference`).
+ *
+ * Operaciones habilitadas: registrar el INS con su soporte y crear un cierre
+ * TÉCNICO con confirmación expresa. Sin cierres oficiales, pagos ni asignación
+ * de pendientes (requieren autorización posterior).
+ */
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, CheckCircle, FileDown, Loader2, Lock, Printer, RefreshCw, Scale } from 'lucide-react';
+import { dataService } from '../../services/dataService';
+import type { RoyaltyPeriodInput, RoyaltyReport } from '../../types';
+
+const cop = (n: number | null | undefined) => (n == null ? '—' : `$ ${Number(n).toLocaleString('es-CO')}`);
+const dec = (n: number | null | undefined, d = 3) => (n == null ? '—' : Number(n).toFixed(d));
+const bogotaMonth = () => new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 7);
+const quarterOf = (month: string) => `${month.slice(0, 4)}-Q${Math.floor((Number(month.slice(5, 7)) - 1) / 3) + 1}`;
+
+const STATUS_STYLE: Record<string, string> = {
+    PROVISIONAL: 'bg-amber-100 text-amber-800 border-amber-300',
+    PROVISIONAL_INCOMPLETE: 'bg-amber-100 text-amber-800 border-amber-300',
+    PROVISIONAL_TECHNICAL: 'bg-sky-100 text-sky-800 border-sky-300',
+    TECHNICAL: 'bg-sky-100 text-sky-800 border-sky-300',
+    OFFICIAL: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+    DEFINITIVE: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+};
+const SOURCE_LABEL: Record<string, string> = {
+    preview: 'Vista previa (sin INS registrado)', simulation: 'Simulación sin guardar', close: 'Cierre congelado', quarter_closes: 'Suma de cierres mensuales',
+};
+
+const Card: React.FC<{ label: string; value: string; hint?: string }> = ({ label, value, hint }) => (
+    <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+        <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">{label}</p>
+        <p className="text-2xl font-bold mt-1 text-gray-800 dark:text-white tabular-nums">{value}</p>
+        {hint && <p className="text-xs text-gray-500 mt-1">{hint}</p>}
+    </div>
+);
+
+const th = 'px-3 py-2 text-left text-xs font-bold text-gray-600 dark:text-gray-300 uppercase';
+const td = 'px-3 py-2 text-sm text-gray-800 dark:text-gray-100';
+const tdn = `${td} text-right tabular-nums`;
+
+const InformesRegalias: React.FC = () => {
+    const [view, setView] = useState<'month' | 'quarter'>('month');
+    const [month, setMonth] = useState(bogotaMonth());
+    const [quarter, setQuarter] = useState(quarterOf(bogotaMonth()));
+    const [filters, setFilters] = useState({ editorial: '', titular: '', obra: '' });
+    const [report, setReport] = useState<RoyaltyReport | null>(null);
+    const [options, setOptions] = useState<RoyaltyReport | null>(null);
+    const [inputs, setInputs] = useState<RoyaltyPeriodInput[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [notice, setNotice] = useState<string | null>(null);
+    const [insForm, setInsForm] = useState({ grossCop: '', deductionsCop: '0', supportRef: '' });
+    const [confirmMonth, setConfirmMonth] = useState('');
+    const [busy, setBusy] = useState(false);
+    const errorRef = useRef<HTMLDivElement>(null);
+
+    const periodParams = useMemo(() => (view === 'month' ? { month } : { quarter }), [view, month, quarter]);
+
+    const load = useCallback(async () => {
+        setLoading(true); setError(null);
+        try {
+            const unfiltered = await dataService.getRoyaltyReport(periodParams);
+            setOptions(unfiltered);
+            const hasFilters = !!(filters.editorial || filters.titular || filters.obra);
+            setReport(hasFilters ? await dataService.getRoyaltyReport({ ...periodParams, ...filters }) : unfiltered);
+            setInputs(view === 'month' ? await dataService.listRoyaltyPeriodInputs(month) : []);
+        } catch (e: any) {
+            setReport(null); setError(e.message || 'No se pudo cargar el informe');
+        } finally { setLoading(false); }
+    }, [periodParams, filters, view, month]);
+
+    useEffect(() => { load(); }, [load]);
+    useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
+    useEffect(() => { setFilters({ editorial: '', titular: '', obra: '' }); setNotice(null); setConfirmMonth(''); }, [view, month, quarter]);
+
+    const editorialOptions = useMemo(() => {
+        const m = new Map<string, string>();
+        options?.works.forEach((w) => { if (w.responsiblePublisherId) m.set(w.responsiblePublisherId, w.responsibleName || w.responsiblePublisherId); });
+        return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    }, [options]);
+    const titularOptions = useMemo(() => (options?.holders || []).map((h) => [h.publisherId, h.name] as const).sort((a, b) => a[1].localeCompare(b[1])), [options]);
+    const obraOptions = useMemo(() => (options?.works || []).map((w) => [w.contentId, w.title || w.contentId] as const), [options]);
+
+    const exportUrl = (format: 'csv' | 'html') => (report
+        ? dataService.royaltyReportUrl({ ...periodParams, ...filters, format, expectReference: report.reference.value }) : '#');
+
+    const submitIns = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setBusy(true); setError(null); setNotice(null);
+        try {
+            const gross = Number(insForm.grossCop), ded = Number(insForm.deductionsCop);
+            if (!Number.isInteger(gross) || !Number.isInteger(ded) || gross < 0 || ded < 0) throw new Error('Recaudo y deducciones deben ser pesos enteros ≥ 0');
+            const created = await dataService.createRoyaltyPeriodInput({ period: month, grossCop: gross, deductionsCop: ded, supportRef: insForm.supportRef.trim() });
+            setNotice(`INS registrado: ${cop(created.insCop)} (soporte ${created.supportRef}).`);
+            setInsForm({ grossCop: '', deductionsCop: '0', supportRef: '' });
+            await load();
+        } catch (err: any) { setError(err.message); } finally { setBusy(false); }
+    };
+
+    const latestInput = inputs[inputs.length - 1] || null;
+    const canClose = view === 'month' && report?.source === 'simulation' && !!latestInput;
+    const submitClose = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!latestInput || confirmMonth !== month) return;
+        setBusy(true); setError(null); setNotice(null);
+        try {
+            const c = await dataService.createRoyaltyTechnicalClose({ month, periodInputId: latestInput.id, confirmMonth });
+            setNotice(`Cierre técnico ${c.period} registrado (sha256 ${c.snapshotSha256.slice(0, 12)}…). No autoriza pagos.`);
+            setConfirmMonth('');
+            await load();
+        } catch (err: any) { setError(err.message); } finally { setBusy(false); }
+    };
+
+    const r = report;
+    return (
+        <div className="animate-in fade-in space-y-6">
+            <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-wrap items-end gap-4">
+                <div role="group" aria-label="Tipo de informe" className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-600">
+                    {(['month', 'quarter'] as const).map((v) => (
+                        <button key={v} type="button" aria-pressed={view === v} onClick={() => setView(v)}
+                            className={`px-4 py-2 text-sm font-bold ${view === v ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}>
+                            {v === 'month' ? 'Mensual' : 'Trimestral'}
+                        </button>
+                    ))}
+                </div>
+                {view === 'month' ? (
+                    <label className="text-sm font-bold text-gray-700 dark:text-gray-200 flex flex-col">Mes
+                        <input type="month" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} className="mt-1 bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-medium" />
+                    </label>
+                ) : (
+                    <label className="text-sm font-bold text-gray-700 dark:text-gray-200 flex flex-col">Trimestre
+                        <span className="flex gap-2 mt-1">
+                            <input type="number" aria-label="Año" min={2026} max={2100} value={quarter.slice(0, 4)}
+                                onChange={(e) => /^\d{4}$/.test(e.target.value) && setQuarter(`${e.target.value}${quarter.slice(4)}`)} className="w-24 bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-medium" />
+                            <select aria-label="Trimestre del año" value={quarter.slice(5)} onChange={(e) => setQuarter(`${quarter.slice(0, 4)}-${e.target.value}`)} className="bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-medium">
+                                {['Q1', 'Q2', 'Q3', 'Q4'].map((q) => <option key={q} value={q}>{q}</option>)}
+                            </select>
+                        </span>
+                    </label>
+                )}
+                <label className="text-sm font-bold text-gray-700 dark:text-gray-200 flex flex-col">Editorial
+                    <select value={filters.editorial} onChange={(e) => setFilters({ ...filters, editorial: e.target.value })} className="mt-1 bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-medium max-w-[14rem]">
+                        <option value="">Todas</option>
+                        {editorialOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
+                    </select>
+                </label>
+                <label className="text-sm font-bold text-gray-700 dark:text-gray-200 flex flex-col">Titular
+                    <select value={filters.titular} onChange={(e) => setFilters({ ...filters, titular: e.target.value })} className="mt-1 bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-medium max-w-[14rem]">
+                        <option value="">Todos</option>
+                        {titularOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
+                    </select>
+                </label>
+                <label className="text-sm font-bold text-gray-700 dark:text-gray-200 flex flex-col">Obra
+                    <select value={filters.obra} onChange={(e) => setFilters({ ...filters, obra: e.target.value })} className="mt-1 bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-medium max-w-[14rem]">
+                        <option value="">Todas</option>
+                        {obraOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
+                    </select>
+                </label>
+                <button type="button" onClick={load} disabled={loading} className="px-4 py-2 bg-indigo-50 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 rounded-lg text-sm font-bold flex items-center">
+                    <RefreshCw size={16} className="mr-2" /> Actualizar
+                </button>
+            </div>
+
+            {error && (
+                <div ref={errorRef} tabIndex={-1} role="alert" className="p-3 rounded-lg border border-red-300 bg-red-50 text-red-800 text-sm font-medium">{error}</div>
+            )}
+            <div aria-live="polite">{notice && <div className="p-3 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-800 text-sm font-medium">{notice}</div>}</div>
+
+            {loading && !r && <div className="flex justify-center p-10"><Loader2 size={32} className="animate-spin text-indigo-600" aria-label="Cargando informe" /></div>}
+
+            {r && (
+                <>
+                    <section aria-labelledby="inf-estado" className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                            <h2 id="inf-estado" className="text-xl font-bold text-gray-900 dark:text-white flex items-center"><Scale className="mr-2" size={20} /> Regalías {r.period}</h2>
+                            <span className={`px-3 py-1 rounded-full border text-xs font-extrabold ${STATUS_STYLE[r.status] || ''}`}>{r.statusLabel}</span>
+                            <span className="text-xs text-gray-500">{SOURCE_LABEL[r.source]}</span>
+                            <span className={`text-xs font-bold flex items-center ${r.reconciliation.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                                {r.reconciliation.ok ? <CheckCircle size={14} className="mr-1" /> : <AlertTriangle size={14} className="mr-1" />}
+                                {r.reconciliation.ok ? 'Conciliado al peso' : 'Conciliación fallida'}
+                            </span>
+                        </div>
+                        {r.notExigible && (
+                            <p className="p-2 border-2 border-red-600 text-red-700 font-extrabold text-sm rounded">PROVISIONAL — NO EXIGIBLE. No constituye liquidación ni obligación de pago.</p>
+                        )}
+                        <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+                            <div className="flex gap-2"><dt className="font-bold text-gray-600">Referencia</dt><dd className="font-mono text-xs break-all" title={r.reference.value}>{r.reference.kind}: {r.reference.value}</dd></div>
+                            {r.ruleSetId && <div className="flex gap-2"><dt className="font-bold text-gray-600">Rule set</dt><dd>{r.ruleSetId}</dd></div>}
+                            {r.cutoff && <div className="flex gap-2"><dt className="font-bold text-gray-600">Corte</dt><dd>{r.cutoff}</dd></div>}
+                            {r.closedAt && <div className="flex gap-2"><dt className="font-bold text-gray-600">Cierre registrado</dt><dd>{r.closedAt}</dd></div>}
+                            {r.policies?.D1 && <div className="flex gap-2"><dt className="font-bold text-gray-600">D1</dt><dd>{r.policies.D1.id} ({r.policies.D1.status}): {r.policies.D1.basis}</dd></div>}
+                            {r.kind === 'quarter' && <div className="flex gap-2"><dt className="font-bold text-gray-600">Meses faltantes</dt><dd>{r.missingMonths?.length ? r.missingMonths.join(', ') : 'ninguno'}</dd></div>}
+                            <div className="flex gap-2 md:col-span-2"><dt className="font-bold text-gray-600">Fórmula S</dt><dd className="font-mono text-xs">{r.scoreFormula}</dd></div>
+                        </dl>
+                        <div className="flex flex-wrap gap-2 pt-1">
+                            <a href={exportUrl('csv')} download className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold flex items-center"><FileDown size={16} className="mr-2" /> Exportar CSV (Excel)</a>
+                            <a href={exportUrl('html')} target="_blank" rel="noopener" className="px-4 py-2 bg-indigo-50 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 rounded-lg text-sm font-bold flex items-center"><Printer size={16} className="mr-2" /> Versión imprimible (PDF)</a>
+                        </div>
+                    </section>
+
+                    {r.kind === 'month' && (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <Card label="INS" value={r.ins ? cop(r.ins.insCop) : 'Sin INS'} hint={r.ins ? `Soporte: ${r.ins.supportRef}` : 'Registra el INS para simular importes'} />
+                            <Card label="Bolsa de derechos 25 %" value={r.pools ? cop(r.pools.brd) : '—'} />
+                            <Card label="Presencia 30 %" value={r.pools ? cop(r.pools.bgp) : '—'} hint={r.pools?.blcToBgp ? 'Σ S = 0: la BLC pasa a la presencia' : undefined} />
+                            <Card label="Lectura cualificada 70 %" value={r.pools ? cop(r.pools.blc) : '—'} />
+                        </div>
+                    )}
+                    {r.totals && (
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                            {r.kind === 'quarter' && <Card label="BRD acumulada" value={cop(r.totals.brd)} />}
+                            <Card label="Cobrable" value={cop(r.totals.payable)} />
+                            <Card label="Retenido" value={cop(r.totals.retained)} hint="No cobrable hasta su liberación" />
+                            <Card label="Pagado registrado" value={cop(r.totals.paid)} />
+                            <Card label="Pendiente (no cobrable)" value={cop(r.totals.pendingTotal)}
+                                hint={`D1 ${cop(r.totals.pending.versionSplit)} · D4 ${cop(r.totals.pending.alphaComplement)} · D5 ${cop(r.totals.pending.bgpWithoutHolders)}`} />
+                        </div>
+                    )}
+                    {r.filters && r.visibleTotals && (
+                        <p className="text-sm text-gray-600 dark:text-gray-300">Filtro aplicado: {r.visibleTotals.works} obras y {r.visibleTotals.holders} titulares visibles; cobrable visible {cop(r.visibleTotals.payable)}. Los totales de arriba son del periodo completo.</p>
+                    )}
+
+                    <section aria-labelledby="inf-obras" className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-x-auto">
+                        <h3 id="inf-obras" className="px-4 pt-4 font-bold text-gray-800 dark:text-white">Obras</h3>
+                        <table className="min-w-full mt-2">
+                            <thead className="bg-gray-50 dark:bg-gray-700"><tr>
+                                <th className={th}>Obra</th><th className={th}>Editorial</th><th className={th}>Q</th>
+                                {r.kind === 'month' && <><th className={th}>R</th><th className={th}>S</th></>}
+                                <th className={th}>MontoObra</th><th className={th}>Retenido</th><th className={th}>Pendiente</th>
+                            </tr></thead>
+                            <tbody>
+                                {r.works.map((w) => (
+                                    <tr key={w.contentId} className="border-t border-gray-100 dark:border-gray-700">
+                                        <td className={td}>{w.title || w.contentId}</td><td className={td}>{w.responsibleName || '—'}</td><td className={tdn}>{w.Q}</td>
+                                        {r.kind === 'month' && <><td className={tdn}>{dec(w.R)}</td><td className={tdn}>{dec(w.S)}</td></>}
+                                        <td className={tdn}>{cop(w.montoObra)}</td><td className={tdn}>{cop(w.retained)}</td><td className={tdn}>{cop(w.pendingDecision)}</td>
+                                    </tr>
+                                ))}
+                                {!r.works.length && <tr><td className={td} colSpan={8}>Sin obras en el periodo.</td></tr>}
+                            </tbody>
+                        </table>
+                    </section>
+
+                    {r.holders.length > 0 && (
+                        <section aria-labelledby="inf-titulares" className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-x-auto">
+                            <h3 id="inf-titulares" className="px-4 pt-4 font-bold text-gray-800 dark:text-white">Titulares y editoriales</h3>
+                            <table className="min-w-full mt-2">
+                                <thead className="bg-gray-50 dark:bg-gray-700"><tr>
+                                    <th className={th}>Titular</th><th className={th}>Base</th><th className={th}>Variable</th><th className={th}>Liquidado</th>
+                                    <th className={th}>Ajustes y recibidos</th><th className={th}>Pagado</th><th className={th}>Retenido</th><th className={th}>Saldo cobrable</th>
+                                </tr></thead>
+                                <tbody>
+                                    {r.holders.map((h) => (
+                                        <tr key={h.publisherId} className="border-t border-gray-100 dark:border-gray-700">
+                                            <td className={td}>{h.name}{h.belowPayoutThreshold ? <span className="ml-2 text-xs text-gray-500">(bajo umbral)</span> : null}</td>
+                                            <td className={tdn}>{cop(h.base ?? h.settledBase)}</td><td className={tdn}>{cop(h.variable ?? h.settledVariable)}</td><td className={tdn}>{cop(h.settledTotal)}</td>
+                                            <td className={tdn}>{cop(h.adjustments + h.carriedIn - h.transferredOut)}</td><td className={tdn}>{cop(h.paid)}</td>
+                                            <td className={tdn}>{cop(h.retained)}</td><td className={`${tdn} font-bold`}>{cop(h.payable)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </section>
+                    )}
+
+                    {r.movements.length > 0 && (
+                        <section aria-labelledby="inf-mov" className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-x-auto">
+                            <h3 id="inf-mov" className="px-4 pt-4 font-bold text-gray-800 dark:text-white">Movimientos</h3>
+                            <table className="min-w-full mt-2">
+                                <thead className="bg-gray-50 dark:bg-gray-700"><tr>
+                                    <th className={th}>Periodo</th><th className={th}>Tipo</th><th className={th}>Titular</th><th className={th}>Importe</th><th className={th}>Motivo</th><th className={th}>Fecha</th>
+                                </tr></thead>
+                                <tbody>
+                                    {r.movements.map((m) => (
+                                        <tr key={m.id} className="border-t border-gray-100 dark:border-gray-700">
+                                            <td className={td}>{m.period || r.period}</td><td className={td}>{m.kind}{m.targetPeriod ? ` → ${m.targetPeriod}` : ''}</td><td className={td}>{m.name}</td>
+                                            <td className={tdn}>{cop(m.amountCop)}</td><td className={td}>{m.reason}</td><td className={td}>{m.createdAt}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </section>
+                    )}
+
+                    {view === 'month' && r.source !== 'close' && (
+                        <section aria-labelledby="inf-ops" className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 grid md:grid-cols-2 gap-6">
+                            <h3 id="inf-ops" className="sr-only">Operaciones del periodo</h3>
+                            <form onSubmit={submitIns} className="space-y-2" aria-label="Registrar INS">
+                                <p className="font-bold text-gray-800 dark:text-white">Registrar INS de {month}</p>
+                                {latestInput && <p className="text-xs text-gray-500">Vigente: {cop(latestInput.insCop)} · soporte {latestInput.supportRef} ({inputs.length} registro{inputs.length > 1 ? 's' : ''}). Registrar otro lo reemplaza para la simulación; el anterior se conserva.</p>}
+                                <label className="block text-sm">Recaudo elegible (COP)<input required inputMode="numeric" value={insForm.grossCop} onChange={(e) => setInsForm({ ...insForm, grossCop: e.target.value })} className="mt-1 w-full bg-gray-50 dark:bg-gray-700 rounded-lg p-2" /></label>
+                                <label className="block text-sm">Deducciones contractuales (COP)<input required inputMode="numeric" value={insForm.deductionsCop} onChange={(e) => setInsForm({ ...insForm, deductionsCop: e.target.value })} className="mt-1 w-full bg-gray-50 dark:bg-gray-700 rounded-lg p-2" /></label>
+                                <label className="block text-sm">Referencia del soporte<input required value={insForm.supportRef} onChange={(e) => setInsForm({ ...insForm, supportRef: e.target.value })} className="mt-1 w-full bg-gray-50 dark:bg-gray-700 rounded-lg p-2" /></label>
+                                <button type="submit" disabled={busy} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold disabled:opacity-50">Registrar INS</button>
+                            </form>
+                            <form onSubmit={submitClose} className="space-y-2" aria-label="Cierre técnico">
+                                <p className="font-bold text-gray-800 dark:text-white flex items-center"><Lock size={16} className="mr-2" /> Cierre técnico</p>
+                                <p className="text-xs text-gray-600 dark:text-gray-300">Congela esta simulación con su hash. Es único por periodo y no se puede modificar. <strong>No autoriza pagos ni causación oficial.</strong> Los cierres oficiales no se habilitan desde aquí.</p>
+                                {canClose ? (
+                                    <>
+                                        <label className="block text-sm">Escribe <span className="font-mono">{month}</span> para confirmar
+                                            <input value={confirmMonth} onChange={(e) => setConfirmMonth(e.target.value)} className="mt-1 w-full bg-gray-50 dark:bg-gray-700 rounded-lg p-2 font-mono" /></label>
+                                        <button type="submit" disabled={busy || confirmMonth !== month} className="px-4 py-2 bg-sky-700 text-white rounded-lg text-sm font-bold disabled:opacity-50">Crear cierre técnico</button>
+                                    </>
+                                ) : <p className="text-sm text-gray-500">Requiere un INS registrado.</p>}
+                            </form>
+                        </section>
+                    )}
+                </>
+            )}
+        </div>
+    );
+};
+
+export default InformesRegalias;

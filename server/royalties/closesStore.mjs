@@ -203,6 +203,13 @@ export function getClose(period, db = getRoyaltiesDb()) {
         createdBy: r.created_by, createdAt: r.created_at, snapshot: JSON.parse(r.snapshot) };
 }
 
+/** Cierres guardados (sin snapshot), del más reciente al más antiguo. */
+export function listCloses(db = getRoyaltiesDb()) {
+    return db.prepare('SELECT id, period, mode, rule_set_id, snapshot_sha256, authorization_ref, created_by, created_at FROM closes ORDER BY period DESC').all()
+        .map((r) => ({ id: r.id, period: r.period, mode: r.mode, ruleSetId: r.rule_set_id, snapshotSha256: r.snapshot_sha256,
+            authorizationRef: r.authorization_ref, createdBy: r.created_by, createdAt: r.created_at }));
+}
+
 /** Recalcula el cierre con las mismas entradas de U2 y compara el hash. */
 export function verifyCloseReproduction(period, inputs, db = getRoyaltiesDb()) {
     const c = getClose(period, db);

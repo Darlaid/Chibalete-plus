@@ -1,10 +1,13 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { dataService } from '../services/dataService';
 import type { StoreOrder, Group, Bundle } from '../types';
-import { BarChart2, ShoppingCart, Users, BookOpen, Package, CheckCircle, Clock, Search, MapPin, Loader2, Brain, TrendingUp, Award, Download, Sparkles, GraduationCap } from 'lucide-react';
+import { BarChart2, ShoppingCart, Users, BookOpen, Package, CheckCircle, Clock, Search, MapPin, Loader2, Brain, TrendingUp, Award, Download, Sparkles, GraduationCap, Scale } from 'lucide-react';
+
+// CHP-EDITORIAL-ROYALTIES V1.4 U5: «Informes» de regalías (carga diferida: solo administración la abre).
+const InformesRegalias = lazy(() => import('../components/admin/InformesRegalias'));
 
 const AdminDashboard: React.FC = () => {
-    const [activeTab, setActiveTab] = useState<'reports' | 'sales' | 'grupos'>('reports');
+    const [activeTab, setActiveTab] = useState<'reports' | 'sales' | 'grupos' | 'informes'>('reports');
     const [orders, setOrders] = useState<StoreOrder[]>([]);
 
     // Pagination
@@ -124,7 +127,19 @@ const AdminDashboard: React.FC = () => {
                 >
                     <GraduationCap className="mr-2" /> Estado de Grupos
                 </button>
+                <button
+                    onClick={() => setActiveTab('informes')}
+                    className={`pb-4 px-2 font-bold flex items-center border-b-2 transition-colors ${activeTab === 'informes' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                >
+                    <Scale className="mr-2" /> Informes
+                </button>
             </div>
+
+            {activeTab === 'informes' && (
+                <Suspense fallback={<div className="flex justify-center p-10"><Loader2 size={32} className="animate-spin text-indigo-600" /></div>}>
+                    <InformesRegalias />
+                </Suspense>
+            )}
 
             {activeTab === 'reports' && (
                 <div className="animate-in fade-in space-y-8">
