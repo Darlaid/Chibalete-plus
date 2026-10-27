@@ -280,6 +280,11 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     description: 'Administración de editoriales responsables (F1-B)',
   },
   {
+    path: '/admin/derechos/:contentId',
+    access: 'admin',
+    description: 'Derechos contractuales por obra (U1 DERECHOS-UI-01)',
+  },
+  {
     path: '/admin/experiencias',
     access: 'admin',
     description: 'Gestión de experiencias gamificadas',

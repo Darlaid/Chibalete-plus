@@ -91,6 +91,7 @@ const Bitacora = React.lazy(() => import('./pages/Bitacora'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
 const AdminRecompensas = React.lazy(() => import('./pages/AdminRecompensas'));
 const AdminEditoriales = React.lazy(() => import('./pages/AdminEditoriales'));
+const AdminDerechos = React.lazy(() => import('./pages/AdminDerechos'));
 const AdminExperiencias = React.lazy(() => import('./pages/AdminExperiencias'));
 const Clubs = React.lazy(() => import('./pages/Clubs'));
 const ClubExterno = React.lazy(() => import('./pages/ClubExterno'));
@@ -491,6 +492,9 @@ const AppContent: React.FC = () => {
                 } />
                 <Route path="/admin/editoriales" element={
                     <ProtectedRoute access={getRouteAccess('/admin/editoriales')}><Layout><AdminEditoriales /></Layout></ProtectedRoute>
+                } />
+                <Route path="/admin/derechos/:contentId" element={
+                    <ProtectedRoute access={getRouteAccess('/admin/derechos/:contentId')}><Layout><AdminDerechos /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/experiencias" element={
                     <ProtectedRoute access={getRouteAccess('/admin/experiencias')}><Layout><AdminExperiencias /></Layout></ProtectedRoute>

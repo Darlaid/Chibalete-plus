@@ -3,6 +3,9 @@ import type {
     Content,
     Publisher,
     PublisherAudit,
+    RightsRegistry,
+    RightsEligibility,
+    RightsVersion,
     EpubInspection,
     ProgresoLectura,
     ReadingStatus,
@@ -5166,6 +5169,41 @@ class DataService {
             console.error('Error fetching publisher audit:', e);
             return null;
         }
+    }
+
+    // --- U1 DERECHOS-UI-01: derechos por obra (F2-A, solo administración) ---
+    // null = no se pudo cargar (la UI muestra error, nunca «sin derechos»).
+    async getRights(contentId: string): Promise<RightsRegistry | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/admin/rights/${encodeURIComponent(contentId)}`, { credentials: 'include', cache: 'no-store' });
+            return res.ok ? res.json() : null;
+        } catch (e) {
+            console.error('Error fetching rights:', e);
+            return null;
+        }
+    }
+
+    async getRightsEligibility(contentId: string): Promise<RightsEligibility | null> {
+        try {
+            const res = await fetch(`${this.apiUrl}/admin/rights/${encodeURIComponent(contentId)}/eligibility`, { credentials: 'include', cache: 'no-store' });
+            return res.ok ? res.json() : null;
+        } catch (e) {
+            console.error('Error fetching rights eligibility:', e);
+            return null;
+        }
+    }
+
+    // Append-only: siempre una versión nueva. El error lleva el `code` del servidor.
+    async createRightsVersion(contentId: string, body: Record<string, unknown>): Promise<RightsVersion> {
+        const res = await fetch(`${this.apiUrl}/admin/rights/${encodeURIComponent(contentId)}/versions`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw Object.assign(new Error(data.error || `Error ${res.status} al registrar la versión`), { code: data.code, status: res.status });
+        return data as RightsVersion;
     }
 
     // --- CHP-LIB-01: BIBLIOTECA EDITORIAL (solo lectura; abrir contenido

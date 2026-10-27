@@ -648,6 +648,45 @@ export interface PublisherAudit {
   byPublisher: Record<string, { books: number; contents: number }>;
 }
 
+// CHP-EDITORIAL-ROYALTIES F2-A — versión de derechos de una obra (append-only).
+// Solo administración (GET/POST /api/admin/rights/:contentId…, U1 DERECHOS-UI-01).
+export type RightsCapability = 'subscription_reading' | 'tts' | 'ai_leo' | 'offline' | 'indexing' | 'promo_fragments' | 'cover_metadata';
+export interface RightsVersion {
+  id: string;
+  contentId: string;
+  versionNo: number;
+  publisherId: string;
+  actRef: string;
+  actSignedOn: string;
+  validFrom: string;
+  validUntil: string | null;
+  effectiveAt: string;
+  legalStatus: 'active' | 'suspended' | 'revoked' | 'disputed';
+  economicStatus: 'pending' | 'active' | 'retained';
+  settlementClass: 'liquidable' | 'auxiliary' | 'excluded';
+  alpha: number | null;
+  expectedMinutes: number | null;
+  shares: Array<{ publisherId: string; shareBp: number }>;
+  permissions: Record<RightsCapability, boolean>;
+  notes: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+export interface RightsRegistry {
+  contentId: string;
+  publisherId: string | null;
+  enforcementMode: 'off' | 'shadow' | 'enforce';
+  effectiveVersionId: string | null;
+  versions: RightsVersion[];
+}
+export interface RightsEligibility {
+  contentId: string;
+  at: string;
+  eligible: boolean;
+  reasons: string[];
+  versionId: string | null;
+}
+
 export interface Product {
   id: string;
   nombre: string;

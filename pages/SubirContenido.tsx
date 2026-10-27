@@ -1,10 +1,10 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { UploadCloud, FileImage, FileText, Film, Music, BookOpen, Plus, Trash, Link as LinkIcon, Layers, CheckCircle, Eye, Scan, Users, X, ChevronLeft, Edit2, AlertCircle, RefreshCw, AlertTriangle, Clock } from 'lucide-react';
+import { UploadCloud, FileImage, FileText, Film, Music, BookOpen, Plus, Trash, Link as LinkIcon, Layers, CheckCircle, Eye, Scan, Users, X, ChevronLeft, Edit2, AlertCircle, RefreshCw, AlertTriangle, Clock, Scale } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import * as analyticsService from '../services/analyticsService';
 import type { Content, AlbumRegion, AlbumReadingRoute, RegionAction, RegionActionType, AlbumMediaAsset, Section, Publisher } from '../types';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link as RouterLink, useNavigate, useSearchParams } from 'react-router-dom';
 import { analizarIlustracionAlbum, sugerirEtiquetasThema } from '../services/geminiService';
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -1572,6 +1572,14 @@ const SubirContenido: React.FC = () => {
                                                     </div>
                                                 </td>
                                                 <td className="p-3 text-right">
+                                                    {/* U1 DERECHOS-UI-01: derechos contractuales por obra (solo libros; página y API de administración) */}
+                                                    {isBookForm(content.tipo) && (
+                                                        <RouterLink to={`/admin/derechos/${encodeURIComponent(content.id)}`}
+                                                            className="mr-2 px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-md hover:bg-amber-200 dark:hover:bg-amber-900/50 font-bold transition-colors inline-flex items-center"
+                                                            aria-label={`Derechos de ${content.titulo}`}>
+                                                            <Scale size={14} className="mr-1" aria-hidden="true" /> Derechos
+                                                        </RouterLink>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         onClick={() => handleEditContent(content)}
