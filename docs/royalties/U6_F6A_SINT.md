@@ -1,6 +1,6 @@
 # CHP-EDITORIAL-ROYALTIES-2026-01 — V1.4 / U6 · F6-A-SINT · Validación integral del circuito de regalías
 
-**Estado:** ver §I · **Fecha:** 2026-10-27 · **Baseline:** `df0510c`
+**Estado:** GREEN_LOCAL+CI (`7157200`, CI 10/10) · **Fecha:** 2026-10-27 · **Baseline:** `df0510c`
 **Todos los resultados de esta unidad son SINTÉTICOS — NO EXIGIBLES.** Solo laboratorio aislado. Sin despliegue, ingesta real, Actas reales, pagos ni cierres oficiales. ACCESS-04 no se tocó.
 
 ## A. Baseline y CI
@@ -124,11 +124,12 @@ Resultado: 42 filas `econ_events` reales.
 
 ## H. Commits
 
-Ver `SEGUIMIENTO_PLAN_V1_1.md` (fila U6).
+- `7157200`: corrección de las exportaciones filtradas, prueba de regresión, informe U6 y seguimiento (CI 10/10, `identity-preflight` incluido).
+- Este commit: registro de CI y veredicto.
 
 ## I. Veredicto
 
-Ver `SEGUIMIENTO_PLAN_V1_1.md` (fila U6).
+**GREEN_LOCAL+CI.** El circuito completo funciona en laboratorio. Para desplegar quedan las condiciones de §J; la J.4 (guarda de mes no terminado) es previa a habilitar cierres técnicos en producción. Sin despliegue ni ingesta. ACCESS-04 sin tocar.
 
 ## J. Condiciones concretas para el despliegue productivo de U2–U5
 
