@@ -437,5 +437,31 @@ console.log('\n[14] ECON-FOCUS-05 — el foco no es señal; el foco por código 
     ok('el desplazamiento provocado por un foco por código no es señal', scrolledByFocus === false);
 }
 
+console.log('\n[15] DEF-1 — caracterización: la marca de avance sobrevive a un retroceso (Leo no interviene)');
+{
+    // Secuencia del caso 12 de ACCESS-03-AUTO en el núcleo: el Guiado reanuda en
+    // 0,2 (desplazamiento propio), la página vuelve a 0 sin marcar (el arnés hizo
+    // `scrollTo(0,0)`), un clic y avances de ½ pantalla sin entrada cada 40 s.
+    const MINADV = 0.02;
+    const run = (resetToTop) => {
+        const c = createEconomicTickCore({ mode: 'text', contentId: 'c1', sessionId: `D1-${resetToTop}`, startedAt: T0, visible: true });
+        c.scrollObserved(T0, { position: 0, auto: true });
+        c.scrollObserved(T0 + 500, { position: 0.2, minAdvance: MINADV, sinceProgrammaticMs: 10, programmaticPending: true });
+        let pos = 0.2;
+        if (resetToTop) { pos = 0; c.scrollObserved(T0 + 4_000, { position: 0, minAdvance: MINADV }); }
+        c.humanSignal(T0 + 10_000);
+        const counted = [];
+        for (let t = T0 + 50_000; t <= T0 + 170_000; t += 40_000) {
+            pos += 0.04;
+            if (c.scrollObserved(t, { position: pos, minAdvance: MINADV })) counted.push(Math.round(pos * 100) / 100);
+        }
+        return counted;
+    };
+    const fromResume = run(false);
+    ok('desde la posición reanudada, cada avance renueva la señal', fromResume.length === 4, JSON.stringify(fromResume));
+    const afterReset = run(true);
+    ok('tras volver a 0, los avances por debajo de la posición reanudada no renuevan (S-5)', afterReset.length === 0, JSON.stringify(afterReset));
+}
+
 console.log(`\neconomicTick — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);
