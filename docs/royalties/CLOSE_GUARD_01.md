@@ -1,6 +1,6 @@
 # CHP-EDITORIAL-ROYALTIES-2026-01 — V1.4 / CLOSE-GUARD-01 · Impedir cierres de meses incompletos
 
-**Estado:** ver §F · **Fecha:** 2026-10-27 · **Baseline:** `0a45061` · **Origen:** riesgo G.1 y condición J.4 de `U6_F6A_SINT.md`
+**Estado:** GREEN_LOCAL+CI (`a6fda3b`, CI 10/10) · **Fecha:** 2026-10-27 · **Baseline:** `0a45061` · **Origen:** riesgo G.1 y condición J.4 de `U6_F6A_SINT.md`
 Sin cambios en Q, R, S, alfa, bolsas ni D1–D5. Sin migraciones, despliegue, ingesta ni enforcement.
 
 ## A. Baseline
@@ -52,14 +52,15 @@ Sin cambios en Q, R, S, alfa, bolsas ni D1–D5. Sin migraciones, despliegue, in
 - `test:royalties` completo: rc = 0 (`periodPreview` 61, `royaltiesPreviewHttp` 22, `settlement` 87, `closes` 85, `royaltyReportsHttp` 64 y las demás).
 - `typecheck:baseline` sin regresiones; `server.js` con sintaxis válida.
 - U6 no se repitió: no hay regresión demostrada, y el comportamiento de los meses terminados es idéntico (mismo hash que la simulación).
-- CI: ver §E.
+- CI 10/10 en `a6fda3b` (`identity-preflight` incluido).
 
 ## E. Commit
 
-Ver `SEGUIMIENTO_PLAN_V1_1.md` (fila CG1).
+- `a6fda3b`: guarda, pruebas e informe.
+- Este commit: registro de CI.
 
 ## F. Veredicto
 
-Ver `SEGUIMIENTO_PLAN_V1_1.md` (fila CG1).
+**GREEN_LOCAL+CI.** Sin despliegue.
 
 **Nota para el despliegue:** cumple la condición J.4 de U6. La guarda usa el fin exacto del mes. Una lectura enviada en los últimos minutos del mes y recibida tras el corte con retraso de ingesta (máx. `maxIngestDelayMs`) podría quedar fuera si se cierra en el primer minuto del mes siguiente. Recomendación operativa: cerrar a partir del día 1 con margen (el plan prevé la conciliación en 15 días hábiles).
