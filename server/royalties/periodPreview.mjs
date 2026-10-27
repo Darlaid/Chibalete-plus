@@ -17,7 +17,12 @@
  *      · minutos esperados de la versión vigente en ese instante;
  *      · el tope diario (DECISIONES §3) se vuelve a aplicar con la
  *        elegibilidad ya evaluada (misma regla que el paso 6 del motor);
- *      · R = mediana de min(cap, minutos / esperados) y S = √Q·(0,40 + 0,60·R).
+ *      · R = mediana de min(cap, minutos / esperados) y S = √Q·(0,40 + 0,60·R);
+ *      · U3-02 (PLAN §6.5): los episodios de una versión en disputa, retenida
+ *        o sin titularidad acreditada CUENTAN en Q/R/S, marcados como
+ *        retenidos, para que su parte de la BLC no se redistribuya;
+ *      · presencia por día con los beneficiarios de la matriz vigente (glosario:
+ *        «Beneficiarios… es lo único que define quién cobra»).
  *    Con derechos y minutos constantes en el mes, Q y R coinciden con los del
  *    motor (prueba de equivalencia en periodPreview.test.mjs).
  *
@@ -36,6 +41,18 @@ export const PREVIEW_MARGIN_MS = 24 * 3600_000;
 const BOGOTA_OFFSET_MS = 5 * 3600_000; // America/Bogota: UTC−5 sin horario de verano
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 const DAY_MS = 24 * 3600_000;
+/**
+ * Motivos de no elegibilidad que el PLAN §6.5 manda RETENER (no excluir): si
+ * todos los motivos de un instante están aquí, la lectura cuenta y su importe
+ * se retiene con este motivo. Suspensión, revocación, vigencia y demás siguen
+ * excluyendo.
+ */
+export const RETAINABLE_REASONS = Object.freeze({
+    LEGAL_DISPUTED: 'disputed',
+    ECONOMIC_RETAINED: 'economic_retained',
+    SHARES_INVALID: 'shares_incomplete',
+    SHARE_HOLDER_NOT_ACTIVE: 'title_not_proven',
+});
 
 const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const digest = (v) => crypto.createHash('sha256').update(typeof v === 'string' ? v : JSON.stringify(v)).digest('hex').slice(0, 16);
@@ -126,15 +143,19 @@ export function computePeriodPreview(p) {
         const at = new Date(atMs);
         const contentAt = { ...content, publisherId: publisherAt(historyByContent.get(contentId) || [], content.publisherId ?? null, isoOf(atMs)) };
         const v = economicEligibility({ content: contentAt, versions, publisherById, at });
-        return { eligible: v.eligible, reasons: v.reasons, version: v.versionId ? versions.find((x) => x.id === v.versionId) || null : effectiveVersion(versions, at) };
+        const version = v.versionId ? versions.find((x) => x.id === v.versionId) || null : effectiveVersion(versions, at);
+        const retained = !v.eligible && version && v.reasons.length && v.reasons.every((r) => RETAINABLE_REASONS[r])
+            ? [...new Set(v.reasons.map((r) => RETAINABLE_REASONS[r]))].sort() : null;
+        return { eligible: v.eligible, retained, reasons: v.reasons, version };
     };
 
     // 2. Derechos en el inicio de cada episodio + tope diario con la elegibilidad ya resuelta.
     const episodes = engine.episodes.map((e) => {
         const base = e.reasons.filter((r) => r !== 'daily_cap' && r !== 'work_not_eligible');
         const el = eligibilityAt(e.contentId, e.startMs);
-        const reasons = el.eligible ? base : [...base, ...el.reasons.map((r) => `rights:${r}`)];
-        return { ...e, reasons, version: el.eligible ? el.version : null };
+        const counts = el.eligible || !!el.retained;
+        const reasons = counts ? base : [...base, ...el.reasons.map((r) => `rights:${r}`)];
+        return { ...e, reasons, version: counts ? el.version : null, retained: el.retained };
     });
     const capGroups = new Map();
     for (const e of episodes) {
@@ -174,7 +195,7 @@ export function computePeriodPreview(p) {
                 agg.byVersion.set(v.id, {
                     versionId: v.id, versionNo: v.versionNo, actRef: v.actRef, publisherId: v.publisherId, alpha: v.alpha,
                     expectedMinutes: v.expectedMinutes, shares: v.shares.map((s) => ({ publisherId: s.publisherId, shareBp: s.shareBp })),
-                    Q: 0, activeSecondsQualified: 0,
+                    retainedReasons: e.retained || [], Q: 0, activeSecondsQualified: 0,
                 });
             }
             const bv = agg.byVersion.get(v.id);
@@ -183,14 +204,32 @@ export function computePeriodPreview(p) {
         }
         const R = agg.Q ? median([...agg.r].sort((x, y) => x - y)) : null;
         const S = scoreS(agg.Q, R, rs);
-        // Días del mes con la obra elegible (al empezar o al terminar el día): base de presencia para F4-A.
-        const eligibleDays = (versionsByContent.get(contentId) || []).length
-            ? b.days.filter((d, i) => eligibilityAt(contentId, b.startMs + i * DAY_MS).eligible || eligibilityAt(contentId, b.startMs + (i + 1) * DAY_MS - 1).eligible)
-            : [];
+        // Presencia (§6.3): un día cuenta si la obra estuvo activa en algún momento del día. La
+        // elegibilidad solo cambia en effectiveAt y en las reasignaciones (la vigencia es por día),
+        // así que basta evaluarla al empezar el día y en cada uno de esos instantes. Titulares =
+        // beneficiarios de la matriz vigente; los de versiones retenidas se separan.
+        const cuts = [...(versionsByContent.get(contentId) || []).map((v) => Date.parse(v.effectiveAt)), ...history.map((h) => Date.parse(h.changedAt))];
+        const presenceDayList = [];
+        if ((versionsByContent.get(contentId) || []).length) {
+            b.days.forEach((day, i) => {
+                const t0 = b.startMs + i * DAY_MS;
+                const payable = new Set(), retained = new Set();
+                for (const t of [t0, ...cuts.filter((t) => t > t0 && t < t0 + DAY_MS)]) {
+                    const el = eligibilityAt(contentId, t);
+                    if (el.eligible) el.version.shares.forEach((s) => payable.add(s.publisherId));
+                    else if (el.retained) el.version.shares.forEach((s) => retained.add(s.publisherId));
+                }
+                if (payable.size || retained.size) {
+                    presenceDayList.push({ day, payable: [...payable].sort(cmpStr), retained: [...retained].filter((id) => !payable.has(id)).sort(cmpStr) });
+                }
+            });
+        }
+        const eligibleDays = presenceDayList.filter((x) => x.payable.length).map((x) => x.day);
         const changes = history.filter((h) => h.changedAt >= isoOf(b.startMs) && h.changedAt < isoOf(b.endMs))
             .map((h) => ({ from: h.from, to: h.to, changedAt: h.changedAt }));
         const flags = [];
         if (agg.byVersion.size > 1) flags.push('rights_version_changed_in_period');
+        if ([...agg.byVersion.values()].some((v) => v.retainedReasons.length)) flags.push('retained_readings');
         if (changes.length) flags.push('publisher_changed_in_period');
         if (!content) flags.push('content_not_in_catalog');
         works.push({
@@ -202,6 +241,7 @@ export function computePeriodPreview(p) {
             rightsRegime: (versionsByContent.get(contentId) || []).length > 0,
             eligibleDays: eligibleDays.length,
             eligibleDayList: eligibleDays,
+            presenceDayList,
             Q: agg.Q,
             R,
             S,
@@ -234,7 +274,8 @@ export function computePeriodPreview(p) {
         trace: {
             engine: 'computeEconomicEpisodes (F3-A1)',
             eligibilityEvaluatedAt: 'episode_start',
-            presenceDayRule: 'eligible_at_day_start_or_day_end',
+            presenceDayRule: 'active_at_any_moment_of_day',
+            presenceHolders: 'rights_version_shares',
             readWindow: p.readWindow ? { from: isoOf(p.readWindow.fromServerTs), to: isoOf(p.readWindow.toServerTs) } : null,
             rowsRead: rows.length,
             rowsDigest: digest(rows.map((r) => String(r.event_id)).sort().join('|')),

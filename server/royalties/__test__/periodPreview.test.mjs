@@ -213,5 +213,33 @@ section('[9] reproducibilidad y privacidad');
     ok('no muta sus entradas', JSON.stringify(rs) === frozen);
 }
 
+section('[10] U3-02: disputa retenida (no excluida) y presencia por beneficiarios');
+{
+    const sh = [{ publisherId: PUB_A, shareBp: 7000 }, { publisherId: HOLDER, shareBp: 3000 }];
+    const v1 = version('W1', { id: 'rv-d-1', versionNo: 1, shares: sh });
+    const v2 = version('W1', { id: 'rv-d-2', versionNo: 2, effectiveAt: '2026-11-15T05:00:00.000Z', legalStatus: 'disputed', shares: sh });
+    const rs = [...rows({ start: '2026-11-05T10:00:00' }), ...rows({ start: '2026-11-20T10:00:00' })];
+    const p = preview({ rows: rs, contents: new Map([['W1', book('W1')]]), versionsByContent: new Map([['W1', [v1, v2]]]) });
+    const w = work(p, 'W1');
+    ok('versión en disputa: la lectura cuenta en Q (2) y no se excluye', w.Q === 2 && !w.episodes.excludedByReason['rights:LEGAL_DISPUTED']);
+    ok('…marcada como retenida en su versión', w.versions[1].retainedReasons.join() === 'disputed' && w.versions[0].retainedReasons.length === 0 && w.flags.includes('retained_readings'));
+    const d = (n) => w.presenceDayList.find((x) => x.day === `2026-11-${String(n).padStart(2, '0')}`);
+    ok('presencia: beneficiarios de la matriz (editorial y tercero)', d(5).payable.join() === [HOLDER, PUB_A].sort().join() && d(5).retained.length === 0);
+    ok('días en disputa: presencia retenida, no cobrable', d(20).payable.length === 0 && d(20).retained.length === 2 && w.eligibleDays === 14);
+    const vs = version('W3', { legalStatus: 'suspended' });
+    const ps = preview({ rows: rows({ content: 'W3', start: '2026-11-05T10:00:00' }), contents: new Map([['W3', book('W3')]]), versionsByContent: new Map([['W3', [vs]]]) });
+    ok('suspendida: sigue excluida, sin presencia', work(ps, 'W3').Q === 0 && work(ps, 'W3').episodes.excludedByReason['rights:LEGAL_SUSPENDED'] === 1 && work(ps, 'W3').presenceDayList.length === 0);
+    const r = version('W4', { id: 'rv-r', versionNo: 1, validUntil: '2026-11-09' });
+    const m = version('W4', { id: 'rv-m', versionNo: 2, validFrom: '2026-11-12', effectiveAt: '2026-11-12T15:00:00.000Z' });
+    const x = version('W4', { id: 'rv-x', versionNo: 3, effectiveAt: '2026-11-12T20:00:00.000Z', legalStatus: 'revoked' });
+    const pm = preview({ rows: [], contents: new Map([['W4', book('W4')]]), versionsByContent: new Map([['W4', [r, m, x]]]) });
+    ok('activa solo de 10:00 a 15:00 del día 12: el día cuenta (algún momento del día)', work(pm, 'W4').eligibleDayList.join() === [...Array.from({ length: 9 }, (_, i) => `2026-11-0${i + 1}`), '2026-11-12'].join());
+    const history = [{ id: 'cph-9', from: PUB_A, to: PUB_B, changedAt: '2026-11-15T15:00:00.000Z' }];
+    const pr = preview({ rows: [], contents: new Map([['W2', book('W2', PUB_B)]]), versionsByContent: new Map([['W2', [version('W2', { publisherId: PUB_A })]]]),
+        publisherHistoryByContent: new Map([['W2', history]]) });
+    ok('reasignada el 15 a las 10:00: presencia del Acta vigente hasta ese día (1–15)', work(pr, 'W2').eligibleDays === 15 && work(pr, 'W2').presenceDayList.at(-1).day === '2026-11-15');
+    ok('regla y titulares de presencia en la traza', p.trace.presenceDayRule === 'active_at_any_moment_of_day' && p.trace.presenceHolders === 'rights_version_shares');
+}
+
 console.log(`\nperiodPreview — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

@@ -10,15 +10,21 @@
  * Reglas (PLAN_GENERAL_V1_1.md §6, DECISIONES_F0C.md §3):
  *   BRD = 25 % × INS; BGP = 30 % × BRD; BLC = 70 % × BRD (una sola BRD).
  *   MontoObra = BLC × S_obra / Σ S; si Σ S = 0, la BLC pasa a la BGP.
- *   Base = BGP × P_titular / Σ P (cada titular cuenta una vez).
+ *   Base = BGP × P_titular / Σ P (cada titular cuenta una vez). Titular =
+ *   beneficiario de la matriz vigente ese día (glosario: la editorial
+ *   responsable «no define quién cobra»); día = obra activa en algún momento.
  *   Variable = Σ MontoObra × alfa, repartida por la matriz (pb, suma 100 %).
  *   Retenidos (disputa, titularidad no acreditada, matriz incompleta): quedan
- *   en la liquidación como retenidos y nunca se redistribuyen.
+ *   en la liquidación como retenidos y nunca se redistribuyen. Las lecturas de
+ *   versiones retenidas llegan de U2 con su S (no salen de Σ S) y la presencia
+ *   de esos días se retiene para sus beneficiarios.
  *   Redondeo: COP enteros, resto mayor en cada reparto (las partes suman el todo).
  *
- * Lo que la Doctrina no determina no se decide aquí (U3 §E): el reparto de
- * MontoObra entre versiones con alfa o matriz distintos y la regla de presencia.
- * Sin una política explícita, esos importes quedan «pendientes de decisión».
+ * Lo que los documentos no determinan no se decide aquí (U3_F4A_02 §D):
+ *   D1 reparto de MontoObra entre versiones con condiciones distintas (sin
+ *      `policies.versionSplit` ⇒ pendiente);
+ *   D4 destino del complemento de alfa y D5 BGP sin beneficiarios: se
+ *      informan exactos como pendientes, nunca como cobrables.
  */
 import crypto from 'node:crypto';
 import { PREVIEW_STATUS } from './periodPreview.mjs';
@@ -26,9 +32,9 @@ import { PREVIEW_STATUS } from './periodPreview.mjs';
 export const SETTLEMENT_STATUS = 'PROVISIONAL';
 export const SUPPORTED_ROUNDING = 'cop_integer_largest_remainder';
 /** Candidatos documentados para las decisiones pendientes (no son valores por defecto). */
-export const VERSION_SPLIT_POLICIES = Object.freeze(['proportional_q']);
-export const PRESENCE_HOLDER_POLICIES = Object.freeze(['responsible_publisher']);
-export const HOLD_REASONS = Object.freeze(['disputed', 'title_not_proven', 'shares_incomplete']);
+export const VERSION_SPLIT_POLICIES = Object.freeze(['proportional_q', 'proportional_seconds']);
+export const HOLD_REASONS = Object.freeze(['disputed', 'economic_retained', 'title_not_proven', 'shares_incomplete']);
+const RETAINED_PRESENCE = 'retained_work_presence';
 /** Resolución de los pesos no enteros: fracciones (porcentajes, alfa) a 1e-6 y S a 1e-9. */
 export const FRACTION_SCALE = 1_000_000;
 export const SCORE_SCALE = 1_000_000_000;
@@ -69,9 +75,9 @@ function scaledFraction(x, label) {
     return BigInt(s);
 }
 
-/** Clave de condiciones económicas de una versión: alfa + matriz (sin depender del orden). */
+/** Clave de condiciones económicas de una versión: alfa + matriz + retención (sin depender del orden). */
 const termsKey = (v) => JSON.stringify([scaledFraction(v.alpha, 'alpha').toString(),
-    [...v.shares].map((s) => [s.publisherId, s.shareBp]).sort((a, b) => cmpStr(a[0], b[0]))]);
+    [...v.shares].map((s) => [s.publisherId, s.shareBp]).sort((a, b) => cmpStr(a[0], b[0])), [...(v.retainedReasons || [])].sort()]);
 
 function validateInputs(preview, o) {
     if (!preview || preview.status !== PREVIEW_STATUS || !Array.isArray(preview.works)) throw new Error('preview: se espera la salida de computePeriodPreview (U2)');
@@ -85,7 +91,7 @@ function validateInputs(preview, o) {
     if (!ins || !Number.isSafeInteger(ins.amountCop) || ins.amountCop < 0) throw new RangeError('ins.amountCop debe ser un entero de COP ≥ 0');
     const pol = o.policies || {};
     if (pol.versionSplit != null && !VERSION_SPLIT_POLICIES.includes(pol.versionSplit)) throw new Error(`versionSplit desconocida: ${pol.versionSplit}`);
-    if (pol.presenceHolder != null && !PRESENCE_HOLDER_POLICIES.includes(pol.presenceHolder)) throw new Error(`presenceHolder desconocida: ${pol.presenceHolder}`);
+    if (pol.presenceHolder != null) throw new Error('presenceHolder ya no es una opción: los titulares de presencia son los de la matriz (U3-02)');
     for (const h of o.holds || []) {
         if (!h || !['work', 'holder'].includes(h.scope) || typeof h.id !== 'string' || !HOLD_REASONS.includes(h.reason)) {
             throw new Error('hold inválido: { scope: work|holder, id, reason }');
@@ -95,6 +101,7 @@ function validateInputs(preview, o) {
     for (const w of preview.works) {
         if (typeof w.S !== 'number' || !Number.isFinite(w.S) || w.S < 0) throw new Error(`S inválido en ${w.contentId}`);
         sumS += w.S;
+        if (!Array.isArray(w.presenceDayList)) throw new Error(`vista previa sin presenceDayList (anterior a U3-02): ${w.contentId}`);
         if (w.S > 0) {
             if (!w.versions?.length) throw new Error(`obra con S > 0 sin versiones: ${w.contentId}`);
             if (sum(w.versions.map((v) => v.Q)) !== w.Q) throw new Error(`Q por versión no suma el Q de ${w.contentId}`);
@@ -103,20 +110,12 @@ function validateInputs(preview, o) {
     if (Math.abs(sumS - preview.totals.sumS) > 1e-9) throw new Error('totals.sumS no concuerda con las obras');
 }
 
-/** Editorial responsable de la obra en un instante, a partir de los cambios del mes que entrega U2. */
-function responsibleAt(work, atIso) {
-    let pub = work.responsiblePublisherId ?? null;
-    const changes = [...(work.publisherChanges || [])].sort((a, b) => cmpStr(b.changedAt, a.changedAt));
-    for (const c of changes) if (atIso < c.changedAt) pub = c.from;
-    return pub;
-}
-
 /**
  * @param {object} preview  salida de computePeriodPreview (U2), sin modificar
  * @param {object} o
  * @param {{amountCop:number, ref?:string}} o.ins          INS del mes (P11), COP enteros
  * @param {object} o.ruleSet                               el mismo rule_set de la vista previa
- * @param {{versionSplit?:string|null, presenceHolder?:string|null}} [o.policies]  decisiones de Dirección (U3 §E)
+ * @param {{versionSplit?:string|null}} [o.policies]  decisión D1 de Dirección (U3_F4A_02 §D)
  * @param {Array<{scope:'work'|'holder', id:string, reason:string}>} [o.holds]  retenciones declaradas
  * @param {Map<string, {status:string}>} [o.publishersById]  titulares al liquidar (titularidad acreditada)
  * @param {string} [o.generatedAt]
@@ -124,7 +123,7 @@ function responsibleAt(work, atIso) {
 export function computeSettlement(preview, o) {
     validateInputs(preview, o);
     const rs = o.ruleSet;
-    const pol = { versionSplit: o.policies?.versionSplit ?? null, presenceHolder: o.policies?.presenceHolder ?? null };
+    const pol = { versionSplit: o.policies?.versionSplit ?? null };
     const holds = [...(o.holds || [])].sort((a, b) => cmpStr(`${a.scope}:${a.id}`, `${b.scope}:${b.id}`));
     const workHold = new Map(holds.filter((h) => h.scope === 'work').map((h) => [h.id, h.reason]));
     const holderHold = new Map(holds.filter((h) => h.scope === 'holder').map((h) => [h.id, h.reason]));
@@ -149,7 +148,7 @@ export function computeSettlement(preview, o) {
     };
     const retainedByReason = {};
     const retain = (reason, amount) => { if (amount > 0) retainedByReason[reason] = (retainedByReason[reason] || 0) + amount; };
-    let alphaComplement = 0, pendingVersionSplit = 0, pendingPresence = 0, bgpWithoutHolders = 0;
+    let alphaComplement = 0, pendingVersionSplit = 0, bgpWithoutHolders = 0;
 
     // 2. Lectura cualificada: MontoObra por S, luego versiones, alfa y matriz.
     const montos = blcToBgp ? [] : largestRemainder(blcEffective, scored.map((w) => BigInt(Math.round(w.S * SCORE_SCALE))));
@@ -164,14 +163,15 @@ export function computeSettlement(preview, o) {
         const groups = new Map();
         for (const v of [...w.versions].sort((a, b) => a.versionNo - b.versionNo)) {
             const k = termsKey(v);
-            if (!groups.has(k)) groups.set(k, { versionIds: [], versionNos: [], alpha: v.alpha, shares: v.shares, Q: 0 });
+            if (!groups.has(k)) groups.set(k, { versionIds: [], versionNos: [], alpha: v.alpha, shares: v.shares, retainedReasons: v.retainedReasons || [], Q: 0, seconds: 0 });
             const g = groups.get(k);
-            g.versionIds.push(v.versionId); g.versionNos.push(v.versionNo); g.Q += v.Q;
+            g.versionIds.push(v.versionId); g.versionNos.push(v.versionNo); g.Q += v.Q; g.seconds += v.activeSecondsQualified;
         }
         const gs = [...groups.values()];
         let amounts;
         if (gs.length === 1) amounts = [monto];
         else if (pol.versionSplit === 'proportional_q') amounts = largestRemainder(monto, gs.map((g) => BigInt(g.Q)));
+        else if (pol.versionSplit === 'proportional_seconds') amounts = largestRemainder(monto, gs.map((g) => BigInt(Math.round(g.seconds))));
         else { ow.status = 'pending_decision'; ow.pendingDecision = monto; pendingVersionSplit += monto; continue; }
         ow.status = 'settled';
         if (workHold.has(w.contentId)) {
@@ -181,9 +181,15 @@ export function computeSettlement(preview, o) {
         }
         gs.forEach((g, i) => {
             const amount = amounts[i];
-            const part = { versionIds: g.versionIds, versionNos: g.versionNos, alpha: g.alpha, Q: g.Q, amount, variable: 0, alphaComplement: 0, shares: [] };
+            const part = { versionIds: g.versionIds, versionNos: g.versionNos, alpha: g.alpha, Q: g.Q, amount, variable: 0, alphaComplement: 0, retained: 0, retainedReason: null, shares: [] };
             ow.parts.push(part);
             if (ow.status === 'retained') return;
+            if (g.retainedReasons.length) {
+                // Lecturas de una versión retenida en U2 (§6.5): la parte entera queda retenida.
+                part.retained = amount; part.retainedReason = g.retainedReasons.join('+');
+                ow.retained += amount; retain(part.retainedReason, amount);
+                return;
+            }
             const a = scaledFraction(g.alpha, 'alpha');
             const [variable, rest] = largestRemainder(amount, [a, BigInt(FRACTION_SCALE) - a]);
             part.variable = variable; part.alphaComplement = rest; alphaComplement += rest;
@@ -205,43 +211,36 @@ export function computeSettlement(preview, o) {
         });
     }
 
-    // 3. Presencia: días con ≥1 obra activa por titular (unión de días: cada titular cuenta una vez).
+    // 3. Presencia: días con ≥1 obra activa por beneficiario (unión de días: cada titular cuenta una vez).
+    //    Los días que un titular solo tiene por obras retenidas cuentan para P, y esa parte de su base se retiene.
     const daysInMonth = Math.round((Date.parse(preview.period.end) - Date.parse(preview.period.start)) / DAY_MS);
     const presence = new Map();
-    if (pol.presenceHolder === 'responsible_publisher') {
-        const startMs = Date.parse(preview.period.start);
-        const dayIndex = new Map();
-        for (let i = 0; i < daysInMonth; i++) dayIndex.set(new Date(startMs + i * DAY_MS - 5 * 3600_000).toISOString().slice(0, 10), i);
-        for (const w of works) {
-            for (const d of w.eligibleDayList || []) {
-                const i = dayIndex.get(d);
-                if (i === undefined) throw new Error(`día fuera del mes en ${w.contentId}: ${d}`);
-                // Día de reasignación: cuentan la editorial al empezar y la del final del día.
-                const ids = new Set([responsibleAt(w, new Date(startMs + i * DAY_MS).toISOString()), responsibleAt(w, new Date(startMs + (i + 1) * DAY_MS - 1).toISOString())]);
-                for (const id of ids) {
-                    if (!id) continue;
-                    if (!presence.has(id)) presence.set(id, new Set());
-                    presence.get(id).add(d);
-                }
-            }
+    const pdays = (id) => { if (!presence.has(id)) presence.set(id, { payable: new Set(), retained: new Set() }); return presence.get(id); };
+    for (const w of works) {
+        for (const x of w.presenceDayList) {
+            if (!(x.day >= preview.period.fromDay && x.day <= preview.period.toDay)) throw new Error(`día fuera del mes en ${w.contentId}: ${x.day}`);
+            for (const id of x.payable) pdays(id).payable.add(x.day);
+            for (const id of x.retained) pdays(id).retained.add(x.day);
         }
     }
-    if (bgpEffective > 0 && pol.presenceHolder == null) pendingPresence = bgpEffective;
+    const ids = [...presence.keys()].sort(cmpStr);
+    const days = ids.map((id) => new Set([...presence.get(id).payable, ...presence.get(id).retained]).size);
+    if (sum(days) === 0) bgpWithoutHolders = bgpEffective;
     else {
-        const ids = [...presence.keys()].sort(cmpStr);
-        const days = ids.map((id) => presence.get(id).size);
-        if (sum(days) === 0) bgpWithoutHolders = bgpEffective;
-        else {
-            const base = largestRemainder(bgpEffective, days.map(BigInt));
-            ids.forEach((id, i) => {
-                const h = holder(id);
-                h.presenceDays = days[i];
-                h.presenceShare = days[i] / daysInMonth;
-                const issue = holderIssue(id);
-                if (issue) { h.baseRetained += base[i]; h.retainedReasons[issue] = (h.retainedReasons[issue] || 0) + base[i]; retain(issue, base[i]); }
-                else h.base += base[i];
-            });
-        }
+        const base = largestRemainder(bgpEffective, days.map(BigInt));
+        ids.forEach((id, i) => {
+            const h = holder(id);
+            h.presenceDays = days[i];
+            h.presenceShare = days[i] / daysInMonth;
+            const onlyRetained = [...presence.get(id).retained].filter((d) => !presence.get(id).payable.has(d)).length;
+            const [free, held] = largestRemainder(base[i], [BigInt(days[i] - onlyRetained), BigInt(onlyRetained)]);
+            const issue = holderIssue(id);
+            if (!issue) h.base += free;
+            for (const [reason, amt] of issue ? [[issue, free + held]] : [[RETAINED_PRESENCE, held]]) {
+                if (!amt) continue;
+                h.baseRetained += amt; h.retainedReasons[reason] = (h.retainedReasons[reason] || 0) + amt; retain(reason, amt);
+            }
+        });
     }
 
     const outHolders = [...holders.values()].sort((a, b) => cmpStr(a.publisherId, b.publisherId)).map((h) => {
@@ -264,8 +263,8 @@ export function computeSettlement(preview, o) {
         montos_eq_parts_plus_pending: sum(outWorks.map((w) => w.montoObra)) === sum(outWorks.flatMap((w) => w.parts.map((p) => p.amount))) + pendingVersionSplit,
         parts_eq_variable_complement_retained: sum(outWorks.flatMap((w) => w.parts.map((p) => p.amount))) === variableTotal + alphaComplement + workRetained,
         variable_eq_shares: variableTotal === sharesTotal,
-        bgp_eq_base_destinations: bgpEffective === sum(outHolders.map((h) => h.base + h.baseRetained)) + pendingPresence + bgpWithoutHolders,
-        brd_eq_all_destinations: brd === payable + retained + pendingVersionSplit + pendingPresence + alphaComplement + bgpWithoutHolders,
+        bgp_eq_base_destinations: bgpEffective === sum(outHolders.map((h) => h.base + h.baseRetained)) + bgpWithoutHolders,
+        brd_eq_all_destinations: brd === payable + retained + pendingVersionSplit + alphaComplement + bgpWithoutHolders,
     };
     const failed = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
     if (failed.length) throw new Error(`conciliación fallida: ${failed.join(', ')}`);
@@ -290,16 +289,18 @@ export function computeSettlement(preview, o) {
             payable,
             retained,
             retainedByReason: Object.fromEntries(Object.entries(retainedByReason).sort((a, b) => cmpStr(a[0], b[0]))),
-            pendingDecision: { versionSplit: pendingVersionSplit, presence: pendingPresence },
+            // Pendientes de decisión (D1, D4, D5): ninguno es cobrable.
+            pendingDecision: { versionSplit: pendingVersionSplit, alphaComplement, bgpWithoutHolders },
             alphaComplement,
             bgpWithoutHolders,
         },
         decisions: [
             { id: 'D1_VERSION_SPLIT', needed: outWorks.some((w) => w.status === 'pending_decision') || (pol.versionSplit != null && outWorks.some((w) => w.parts.length > 1)), policy: pol.versionSplit, amountPending: pendingVersionSplit },
-            { id: 'D2_PRESENCE_RULE', needed: bgpEffective > 0, policy: pol.presenceHolder, presenceDayRule: preview.trace?.presenceDayRule ?? null, amountPending: pendingPresence },
+            { id: 'D4_ALPHA_COMPLEMENT', needed: alphaComplement > 0, policy: null, amountPending: alphaComplement },
+            { id: 'D5_BGP_WITHOUT_HOLDERS', needed: bgpWithoutHolders > 0, policy: null, amountPending: bgpWithoutHolders },
         ],
         reconciliation: { ok: true, checks },
-        trace: { rounding: rs.rounding, fractionScale: FRACTION_SCALE, scoreScale: SCORE_SCALE, tieBreak: 'lower_index_in_sorted_input' },
+        trace: { presenceDayRule: preview.trace?.presenceDayRule ?? null, presenceHolders: preview.trace?.presenceHolders ?? null, rounding: rs.rounding, fractionScale: FRACTION_SCALE, scoreScale: SCORE_SCALE, tieBreak: 'lower_index_in_sorted_input' },
     };
     body.trace.resultDigest = digest({ ...body, trace: undefined });
     return { ...body, generatedAt: o.generatedAt ?? null };
