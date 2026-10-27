@@ -37,7 +37,7 @@ try {
     ok('modo WAL', String(db.pragma('journal_mode', { simple: true })).toLowerCase() === 'wal');
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
     // F2-A añade rights_versions (0002) y F1-B content_publisher_history (0003); ninguna otra tabla del Plan existe aún.
-    ok('solo _migrations + content_publisher_history + publishers + rights_versions', JSON.stringify(tables) === JSON.stringify(['_migrations', 'content_publisher_history', 'publishers', 'rights_versions']), tables.join(','));
+    ok('solo _migrations + content_publisher_history + publishers + rights_versions + las 4 de cierres (U4)', JSON.stringify(tables) === JSON.stringify(['_migrations', 'adjustments', 'closes', 'content_publisher_history', 'period_inputs', 'publishers', 'rights_versions', 'rule_sets']), tables.join(','));
     S.closeRoyaltiesDb();
 
     section('[2] migración idempotente');

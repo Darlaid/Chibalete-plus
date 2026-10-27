@@ -53,9 +53,9 @@ try {
     section('[1] migración');
     const db = P.getRoyaltiesDb();
     const versions = () => db.prepare('SELECT version FROM _migrations ORDER BY version').all().map((r) => r.version);
-    ok('0001, 0002 y 0003 (F1-B) aplicadas en orden', JSON.stringify(versions()) === JSON.stringify(['0001_publishers', '0002_rights_versions', '0003_content_publisher_history']));
+    ok('0001, 0002, 0003 (F1-B) y 0004 (U4) aplicadas en orden', JSON.stringify(versions()) === JSON.stringify(['0001_publishers', '0002_rights_versions', '0003_content_publisher_history', '0004_closes']));
     const second = runMigrations(db, () => {}, { dir: path.join(REPO, 'server', 'royalties', 'migrations'), tag: 't' });
-    ok('re-ejecutar no aplica nada', second.applied.length === 0 && second.already.length === 3);
+    ok('re-ejecutar no aplica nada', second.applied.length === 0 && second.already.length === 4);
     const cols = db.prepare('PRAGMA table_info(rights_versions)').all().map((c) => c.name);
     ok('columnas mínimas presentes', ['content_id', 'publisher_id', 'act_ref', 'act_signed_on', 'valid_from', 'valid_until', 'effective_at',
         'legal_status', 'economic_status', 'settlement_class', 'alpha', 'expected_minutes', 'shares', 'version_no', 'created_at',

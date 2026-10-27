@@ -3953,6 +3953,18 @@ def _build_royalties_db(base_dir: str) -> str:
     conn.execute(
         "INSERT INTO content_publisher_history (id, content_id, from_publisher_id, to_publisher_id, actor, changed_at)"
         " VALUES ('cph-fx-0001', 'content-fx', 'pub-chibalete-editores', 'pub-fx-0001', 'fx', '2026-10-26T00:00:00.000Z')")
+    # U4 (0004): rule_set, INS con soporte, un cierre tecnico y un movimiento.
+    conn.execute("INSERT INTO rule_sets (id, params, params_sha256, created_at)"
+                 " VALUES ('rs-fx', '{\"id\":\"rs-fx\"}', ?, '2026-10-27T00:00:00.000Z')", ("a" * 64,))
+    conn.execute("INSERT INTO period_inputs (id, period, gross_cop, deductions_cop, ins_cop, support_ref, notes, created_by, created_at)"
+                 " VALUES ('pi-fx', '2026-10', 1000, 0, 1000, 'SOPORTE-FX', NULL, 'fx', '2026-11-02T00:00:00.000Z')")
+    conn.execute("INSERT INTO closes (id, period, mode, rule_set_id, period_input_id, preview_digest, settlement_digest, snapshot,"
+                 " snapshot_sha256, authorization_ref, created_by, created_at)"
+                 " VALUES ('cl-fx', '2026-10', 'technical', 'rs-fx', 'pi-fx', 'p', 's', '{}', ?, NULL, 'fx', '2026-11-05T00:00:00.000Z')",
+                 (hashlib.sha256(b"{}").hexdigest(),))
+    conn.execute("INSERT INTO adjustments (id, close_id, kind, source, publisher_id, amount_cop, target_period, reason, ref, created_by, created_at)"
+                 " VALUES ('adj-fx', 'cl-fx', 'payment_recorded', 'none', 'pub-fx-0001', 100, NULL, 'pago registrado', NULL, 'fx',"
+                 " '2026-11-10T00:00:00.000Z')")
     conn.commit()
     conn.close()
     return path
@@ -3974,6 +3986,8 @@ def _royalties_logical_digest(path: str) -> dict:
                 sort_keys=True, default=str).encode("utf-8")).hexdigest(),
             "rights_count": conn.execute("SELECT COUNT(*) FROM rights_versions").fetchone()[0],
             "history": conn.execute("SELECT * FROM content_publisher_history ORDER BY id").fetchall(),
+            "closes": [conn.execute(f"SELECT * FROM {t} ORDER BY id").fetchall()
+                       for t in ("rule_sets", "period_inputs", "closes", "adjustments")],
         }
     finally:
         conn.close()
@@ -4038,7 +4052,7 @@ def test_ry_present_included():
     assert _royalties_logical_digest(origen) == digest_before, "la fuente cambio logicamente"
 
 
-@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones, titulares, derechos e historial editorial identicos")
+@case("RY04", "restore aislado de royalties.db: integridad, schema, migraciones, titulares, derechos, historial editorial y cierres (0004) identicos")
 def test_ry_restore_logical():
     env = Env("ry04")
     origen = _build_royalties_db(env.base)
@@ -4047,10 +4061,12 @@ def test_ry_restore_logical():
     assert esperado["ids"] == ["pub-chibalete-editores", "pub-fx-0001", "pub-fx-0002"], esperado["ids"]
     assert esperado["rights_count"] == 1, esperado
     assert esperado["migrations"] == ["0001_publishers", "0002_rights_versions",
-                                      "0003_content_publisher_history"], esperado["migrations"]
-    # rights_versions (F2-A) y content_publisher_history (F1-B): 2 triggers append-only cada una
-    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 4, esperado["schema"]
+                                      "0003_content_publisher_history", "0004_closes"], esperado["migrations"]
+    # rights_versions (F2-A), content_publisher_history (F1-B) y las 4 tablas de cierres (U4):
+    # 2 triggers append-only cada una
+    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 12, esperado["schema"]
     assert len(esperado["history"]) == 1, esperado["history"]
+    assert [len(t) for t in esperado["closes"]] == [1, 1, 1, 1], esperado["closes"]
     env.provision_repository()
     env.run("structured_backup.py", expect=0)
     staged = _restore_staging(env)
