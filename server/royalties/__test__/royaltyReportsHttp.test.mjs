@@ -207,6 +207,14 @@ try {
     const f = (await call(R(`month=2026-11&titular=${AUT.id}`), 'ADM')).body;
     ok('filtro por titular: solo la autora y sus obras; totales intactos', f.holders.length === 1 && f.holders[0].publisherId === AUT.id && f.works.length === 2
         && f.totals.payable === sim.totals.payable && f.visibleTotals.payable === aut.payable);
+    // U6 (regresión): con filtro, el archivo dice que los totales son del periodo completo y da el subtotal visible.
+    const fcsv = await call(R(`month=2026-11&titular=${AUT.id}&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    const fhtml = await call(R(`month=2026-11&titular=${AUT.id}&format=html&expectReference=${sim.reference.value}`), 'ADM');
+    ok('CSV filtrado: ámbito de los totales y subtotal visible del titular', fcsv.text.includes('"Ámbito de los totales";"Periodo completo (sin filtrar)"')
+        && fcsv.text.includes(`"Subtotal visible: cobrable (COP)";${aut.payable}\r\n`) && fcsv.text.includes(`"Cobrable (COP)";${sim.totals.payable}\r\n`));
+    ok('HTML filtrado: ámbito y subtotal visible', fhtml.text.includes('Periodo completo (sin filtrar)') && fhtml.text.includes(`cobrable ${Number(aut.payable).toLocaleString('es-CO')} COP`));
+    const nf = await call(R(`month=2026-11&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    ok('sin filtro no aparece el subtotal visible', !nf.text.includes('Subtotal visible'));
     const fe = (await call(R(`month=2026-11&editorial=${EXT.id}`), 'ADM')).body;
     ok('filtro por editorial: obras de Externa (c2, c3)', fe.works.map((w) => w.contentId).join() === 'c2,c3', JSON.stringify(fe.works.map((w) => [w.contentId, w.responsiblePublisherId])) + ' ext=' + EXT.id);
     const fo = (await call(R('month=2026-11&obra=c1'), 'ADM')).body;

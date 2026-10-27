@@ -196,7 +196,14 @@ export function reportToCsv(r) {
     }
     L.push(csvRow(['Fórmula S', r.scoreFormula]));
     L.push(csvRow(['Bolsas', r.poolFormula]));
-    if (r.filters) L.push(csvRow(['Filtros', `editorial=${r.filters.editorial || '-'}; titular=${r.filters.titular || '-'}; obra=${r.filters.obra || '-'}`]));
+    if (r.filters) {
+        // U6: con filtro, los totales de abajo son del periodo completo; lo visible va aparte.
+        L.push(csvRow(['Filtros', `editorial=${r.filters.editorial || '-'}; titular=${r.filters.titular || '-'}; obra=${r.filters.obra || '-'}`]));
+        L.push(csvRow(['Ámbito de los totales', 'Periodo completo (sin filtrar)']));
+        L.push(csvRow(['Subtotal visible: titulares', r.visibleTotals.holders]), csvRow(['Subtotal visible: obras', r.visibleTotals.works]),
+            csvRow(['Subtotal visible: cobrable (COP)', r.visibleTotals.payable]), csvRow(['Subtotal visible: retenido (COP)', r.visibleTotals.retained]),
+            csvRow(['Subtotal visible: MontoObra (COP)', r.visibleTotals.montoObra]));
+    }
     if (r.ins) L.push(csvRow(['INS (COP)', r.ins.insCop]), csvRow(['Recaudo (COP)', r.ins.grossCop]), csvRow(['Deducciones (COP)', r.ins.deductionsCop]), csvRow(['Soporte INS', r.ins.supportRef]));
     if (r.pools) {
         L.push(csvRow(['BRD 25 % (COP)', r.pools.brd]), csvRow(['BGP 30 % (COP)', r.pools.bgp]), csvRow(['BLC 70 % (COP)', r.pools.blc]),
@@ -254,7 +261,11 @@ export function reportToHtml(r) {
         kv.push(['Meses', esc(r.months.join(', '))], ['Meses faltantes', esc(r.missingMonths.join(', ') || 'ninguno')]);
     }
     kv.push(['Fórmula S', esc(r.scoreFormula)], ['Bolsas', esc(r.poolFormula)]);
-    if (r.filters) kv.push(['Filtros', esc(`editorial=${r.filters.editorial || '-'}; titular=${r.filters.titular || '-'}; obra=${r.filters.obra || '-'}`)]);
+    if (r.filters) {
+        kv.push(['Filtros', esc(`editorial=${r.filters.editorial || '-'}; titular=${r.filters.titular || '-'}; obra=${r.filters.obra || '-'}`)],
+            ['Ámbito de los totales', '<strong>Periodo completo (sin filtrar)</strong>'],
+            ['Subtotal visible', `${esc(r.visibleTotals.holders)} titulares · ${esc(r.visibleTotals.works)} obras · cobrable ${cop(r.visibleTotals.payable)} COP · retenido ${cop(r.visibleTotals.retained)} COP · MontoObra ${cop(r.visibleTotals.montoObra)} COP`]);
+    }
     if (r.ins) kv.push(['INS', `${cop(r.ins.insCop)} COP (recaudo ${cop(r.ins.grossCop)} − deducciones ${cop(r.ins.deductionsCop)}; soporte ${esc(r.ins.supportRef)})`]);
     if (r.pools) kv.push(['BRD 25 %', `${cop(r.pools.brd)} COP`], ['BGP 30 % / BLC 70 %', `${cop(r.pools.bgp)} / ${cop(r.pools.blc)} COP${r.pools.blcToBgp ? ' (BLC trasladada a BGP)' : ''}`]);
     if (r.totals) {
