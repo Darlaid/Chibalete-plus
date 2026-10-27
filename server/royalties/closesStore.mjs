@@ -168,14 +168,30 @@ const transfersInto = (db, period) => db.prepare(`SELECT a.id, a.close_id AS clo
     FROM adjustments a JOIN closes c ON c.id = a.close_id WHERE a.kind = 'balance_transfer' AND a.target_period = ? ORDER BY a.id`).all(period);
 
 /**
- * Cierra (o simula) un mes. `simulate: true` ⇒ nada se guarda.
- * Oficial ⇒ `authorizationRef` obligatorio. Un cierre por periodo.
+ * CLOSE-GUARD-01 (Plan §6.6, corte en hora de Colombia): un mes solo se cierra
+ * cuando terminó en America/Bogota. `now` lo pone el servidor (su reloj), nunca
+ * el navegador. Sin excepciones por rol ni por modo.
+ */
+export function assertPeriodEnded(month, now) {
+    const b = monthBounds(month);
+    const t = Date.parse(now);
+    if (!Number.isFinite(t)) throw bad('invalid_clock', 'Reloj del servidor inválido', 500);
+    if (t < b.endMs) {
+        const opens = new Date(b.endMs - 5 * 3600_000).toISOString().slice(0, 10);
+        throw bad('period_not_ended', `El mes ${b.month} aún no ha terminado (hora de Colombia). Podrá cerrarse a partir del ${opens} a las 00:00 (America/Bogota).`, 409);
+    }
+}
+
+/**
+ * Cierra (o simula) un mes. `simulate: true` ⇒ nada se guarda (y se permite con el mes abierto).
+ * Oficial ⇒ `authorizationRef` obligatorio. Un cierre por periodo y solo de meses terminados.
  */
 export function closeMonth(p, { actor, now = new Date().toISOString(), simulate = false, db = getRoyaltiesDb() }) {
     if (!actor) throw bad('actor_required', 'actor requerido');
     if (p.mode === 'official' && !(typeof p.authorizationRef === 'string' && p.authorizationRef.trim())) {
         throw bad('authorization_required', 'Un cierre oficial exige la referencia de autorización');
     }
+    if (!simulate) assertPeriodEnded(p.month, now); // antes de abrir la transacción: rechazo sin escrituras
     const run = () => {
         if (closeRow(db, p.month)) throw bad('close_exists', `El periodo ${p.month} ya está cerrado`, 409);
         const periodInput = getPeriodInput(p.periodInputId, db);

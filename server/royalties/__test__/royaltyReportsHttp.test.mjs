@@ -1,5 +1,5 @@
 /**
- * royaltyReportsHttp.test.mjs — CHP-EDITORIAL-ROYALTIES-2026-01 / V1.4 U5 · REPORTES-01.
+ * royaltyReportsHttp.test.mjs — CHP-EDITORIAL-ROYALTIES-2025-01 / V1.4 U5 · REPORTES-01.
  *
  * server.js REAL contra stores y bases TEMPORALES (datos sintéticos):
  *   [1] acceso: administración 200 no-store; mediación/lectura 403; anónimo 401; entradas inválidas 400
@@ -10,6 +10,7 @@
  *   [5] exportaciones del MISMO resultado: CSV endurecido, HTML escapado, referencia y filtros
  *   [6] INS cero
  *   [7] cierre técnico solo con confirmación (oficial no habilitado); mismo hash que la simulación
+ *       + CLOSE-GUARD-01: el mes en curso (reloj del servidor, America/Bogota) se consulta y simula pero no se cierra
  *   [8] cambios posteriores de derechos: el informe del cierre no cambia
  *   [9] trimestre incompleto y completo desde cierres congelados
  *   [10] sin datos de lectores y sin escrituras en las consultas
@@ -60,13 +61,13 @@ fs.writeFileSync(P.content, JSON.stringify(CONTENT, null, 2));
 fs.writeFileSync(P.access, '[]');
 for (const f of ['groups', 'schools']) fs.writeFileSync(path.join(tmp, `${f}.json`), '[]');
 const ALL = Object.fromEntries(rights.RIGHTS_CAPABILITIES.map((c) => [c, true]));
-const v = (publisherId, extra = {}) => ({ publisherId, actRef: 'ACTA-FX', actSignedOn: '2026-10-01', validFrom: '2026-10-01', validUntil: null,
-    effectiveAt: '2026-10-01T05:00:00.000Z', legalStatus: 'active', economicStatus: 'active', settlementClass: 'liquidable',
+const v = (publisherId, extra = {}) => ({ publisherId, actRef: 'ACTA-FX', actSignedOn: '2025-10-01', validFrom: '2025-10-01', validUntil: null,
+    effectiveAt: '2025-10-01T05:00:00.000Z', legalStatus: 'active', economicStatus: 'active', settlementClass: 'liquidable',
     alpha: 0.7, expectedMinutes: 10, shares: [{ publisherId, shareBp: 10000 }], permissions: ALL, ...extra });
 const C = (id) => CONTENT.find((c) => c.id === id);
 rights.createRightsVersion('c1', v(PUB, { shares: [{ publisherId: PUB, shareBp: 8000 }, { publisherId: AUT.id, shareBp: 2000 }] }), { content: C('c1'), actor: 'fixture' });
 rights.createRightsVersion('c2', v(EXT.id, { alpha: 0.6 }), { content: C('c2'), actor: 'fixture' });
-rights.createRightsVersion('c2', v(EXT.id, { alpha: 0.9, validFrom: '2026-11-15', effectiveAt: '2026-11-15T05:00:00.000Z',
+rights.createRightsVersion('c2', v(EXT.id, { alpha: 0.9, validFrom: '2025-11-15', effectiveAt: '2025-11-15T05:00:00.000Z',
     shares: [{ publisherId: EXT.id, shareBp: 7000 }, { publisherId: AUT.id, shareBp: 3000 }] }), { content: C('c2'), actor: 'fixture' });
 rights.createRightsVersion('c3', v(EXT.id, { legalStatus: 'disputed' }), { content: C('c3'), actor: 'fixture' });
 rights.createRightsVersion('c4', v(PUB), { content: C('c4'), actor: 'fixture' });
@@ -87,9 +88,9 @@ function read(user, cid, start, minutes = 10) {
     put('econ.session_start', t0, { econAccess: PAID });
     for (let s = 15; s <= minutes * 60; s += 15) put('econ_tick', t0 + s * 1000, { windowMs: 15_000, visible: true, humanSignalAgoMs: 5_000, firstHumanSignalAgoMs: 5_000 });
 }
-read('LEC', 'c1', '2026-11-03T10:00:00'); read('LEC2', 'c1', '2026-11-04T10:00:00', 5);
-read('LEC', 'c2', '2026-11-05T10:00:00'); read('LEC2', 'c2', '2026-11-06T10:00:00'); read('LEC', 'c2', '2026-11-20T10:00:00');
-read('LEC', 'c3', '2026-11-07T10:00:00');
+read('LEC', 'c1', '2025-11-03T10:00:00'); read('LEC2', 'c1', '2025-11-04T10:00:00', 5);
+read('LEC', 'c2', '2025-11-05T10:00:00'); read('LEC2', 'c2', '2025-11-06T10:00:00'); read('LEC', 'c2', '2025-11-20T10:00:00');
+read('LEC', 'c3', '2025-11-07T10:00:00');
 edb.close();
 
 const PORT = 5900 + (process.pid % 90);
@@ -146,35 +147,35 @@ try {
     await start();
 
     console.log('\n[1] acceso');
-    ok('anónimo → 401', (await call(R('month=2026-11'), null)).status === 401);
-    ok('lector → 403', (await call(R('month=2026-11'), 'LEC')).status === 403);
-    ok('mediador → 403', (await call(R('month=2026-11'), 'MED')).status === 403);
+    ok('anónimo → 401', (await call(R('month=2025-11'), null)).status === 401);
+    ok('lector → 403', (await call(R('month=2025-11'), 'LEC')).status === 403);
+    ok('mediador → 403', (await call(R('month=2025-11'), 'MED')).status === 403);
     // Escrituras: guard compartido requireAdminAccess (sin sesión firmada → 401; con sesión no admin → 403).
-    ok('mediación y lectura no registran INS ni cierran', [401, 403].includes((await call('/api/admin/royalties/period-inputs', 'MED', { period: '2026-11', grossCop: 1, deductionsCop: 0, supportRef: 'x' })).status)
-        && [401, 403].includes((await call('/api/admin/royalties/closes', 'LEC', { month: '2026-11', confirmMonth: '2026-11' })).status));
-    for (const q of ['month=2026-13', 'month=x', 'quarter=2026-Q5', '']) ok(`«${q}» → 400`, (await call(R(q), 'ADM')).status === 400);
+    ok('mediación y lectura no registran INS ni cierran', [401, 403].includes((await call('/api/admin/royalties/period-inputs', 'MED', { period: '2025-11', grossCop: 1, deductionsCop: 0, supportRef: 'x' })).status)
+        && [401, 403].includes((await call('/api/admin/royalties/closes', 'LEC', { month: '2025-11', confirmMonth: '2025-11' })).status));
+    for (const q of ['month=2025-13', 'month=x', 'quarter=2025-Q5', '']) ok(`«${q}» → 400`, (await call(R(q), 'ADM')).status === 400);
 
     console.log('\n[2] mes sin INS y mes sin lecturas');
     const before = fingerprint();
-    const noIns = await call(R('month=2026-11'), 'ADM');
+    const noIns = await call(R('month=2025-11'), 'ADM');
     ok('200 no-store', noIns.status === 200 && /no-store/.test(noIns.h('cache-control') || ''));
     const ni = noIns.body;
     ok('sin INS: PROVISIONAL, NO EXIGIBLE, solo Q/R/S (sin importes)', ni.source === 'preview' && ni.notExigible && ni.ins === null && ni.pools === null
         && ni.works.find((w) => w.contentId === 'c1').Q === 2 && ni.works.every((w) => w.montoObra === null));
-    const oct = (await call(R('month=2026-10'), 'ADM')).body;
+    const oct = (await call(R('month=2025-10'), 'ADM')).body;
     ok('octubre sin lecturas: obras con régimen y Q = 0', oct.works.length === 4 && oct.works.every((w) => w.Q === 0));
     ok('consultar no escribe nada', JSON.stringify(fingerprint()) === JSON.stringify(before));
 
     console.log('\n[3] INS con soporte');
-    ok('sin soporte → 400 support_required', (await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2026-11', grossCop: 1, deductionsCop: 0, supportRef: '' })).body?.code === 'support_required');
-    const pi = await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2026-11', grossCop: 2_100_000, deductionsCop: 100_000, supportRef: 'SOPORTE-FX-NOV' });
+    ok('sin soporte → 400 support_required', (await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2025-11', grossCop: 1, deductionsCop: 0, supportRef: '' })).body?.code === 'support_required');
+    const pi = await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2025-11', grossCop: 2_100_000, deductionsCop: 100_000, supportRef: 'SOPORTE-FX-NOV' });
     ok('INS 2.000.000 registrado (201)', pi.status === 201 && pi.body.insCop === 2_000_000);
-    ok('listado de INS del periodo', (await call('/api/admin/royalties/period-inputs?period=2026-11', 'ADM')).body.length === 1);
+    ok('listado de INS del periodo', (await call('/api/admin/royalties/period-inputs?period=2025-11', 'ADM')).body.length === 1);
 
     console.log('\n[4] simulación de noviembre');
     const mid = fingerprint();
-    const sim = (await call(R('month=2026-11'), 'ADM')).body;
-    const sim2 = (await call(R('month=2026-11'), 'ADM')).body;
+    const sim = (await call(R('month=2025-11'), 'ADM')).body;
+    const sim2 = (await call(R('month=2025-11'), 'ADM')).body;
     ok('PROVISIONAL, NO EXIGIBLE, simulación con referencia sha256', sim.status === 'PROVISIONAL' && sim.source === 'simulation' && sim.notExigible && /^[0-9a-f]{64}$/.test(sim.reference.value));
     ok('reproducible: misma referencia en otra consulta', sim2.reference.value === sim.reference.value);
     ok('la simulación no guarda nada', JSON.stringify(fingerprint()) === JSON.stringify(mid));
@@ -191,7 +192,7 @@ try {
     texts.push(JSON.stringify(sim));
 
     console.log('\n[5] exportaciones del mismo resultado');
-    const csv = await call(R(`month=2026-11&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    const csv = await call(R(`month=2025-11&format=csv&expectReference=${sim.reference.value}`), 'ADM');
     ok('CSV: 200, text/csv, adjunto, no-store, BOM', csv.status === 200 && /text\/csv/.test(csv.h('content-type')) && /attachment/.test(csv.h('content-disposition'))
         && /no-store/.test(csv.h('cache-control') || '') && csv.bom);
     ok('CSV: referencia, NO EXIGIBLE, fórmula y D1', csv.text.includes(sim.reference.value) && csv.text.includes('NO EXIGIBLE') && csv.text.includes('sqrt(Q)') && csv.text.includes('D1-PROV-2026-10-v1'));
@@ -199,72 +200,85 @@ try {
     ok('CSV: ninguna celda empieza por = + - @ (inyección neutralizada)', cells.every((c) => !/^"?[=+@]/.test(c) && !/^"-/.test(c)) && csv.text.includes(`"'=HYPERLINK(""http://x.test"",""clic"")"`));
     ok('CSV: cobrable total igual al de la pantalla', csv.text.includes(`"Cobrable (COP)";${sim.totals.payable}\r\n`));
     for (const h of sim.holders) ok(`CSV: saldo de ${h.name} = ${h.payable}`, csv.text.split('\r\n').some((l) => l.startsWith(`"${h.publisherId}";`) && l.endsWith(`;${h.payable};"${h.belowPayoutThreshold ? 'sí' : 'no'}"`)));
-    const html = await call(R(`month=2026-11&format=html&expectReference=${sim.reference.value}`), 'ADM');
+    const html = await call(R(`month=2025-11&format=html&expectReference=${sim.reference.value}`), 'ADM');
     ok('HTML: 200, CSP sin scripts, no-store', html.status === 200 && /text\/html/.test(html.h('content-type')) && /default-src 'none'/.test(html.h('content-security-policy') || ''));
     ok('HTML: título escapado y sin <script>', html.text.includes('&lt;script&gt;alert(1)&lt;/script&gt;') && !/<script/i.test(html.text));
     ok('HTML: NO EXIGIBLE, referencia e importes', html.text.includes('NO EXIGIBLE') && html.text.includes(sim.reference.value) && html.text.includes(Number(sim.totals.payable).toLocaleString('es-CO')));
-    ok('referencia distinta → 409 result_changed', (await call(R('month=2026-11&format=csv&expectReference=deadbeef'), 'ADM')).body?.code === 'result_changed');
-    const f = (await call(R(`month=2026-11&titular=${AUT.id}`), 'ADM')).body;
+    ok('referencia distinta → 409 result_changed', (await call(R('month=2025-11&format=csv&expectReference=deadbeef'), 'ADM')).body?.code === 'result_changed');
+    const f = (await call(R(`month=2025-11&titular=${AUT.id}`), 'ADM')).body;
     ok('filtro por titular: solo la autora y sus obras; totales intactos', f.holders.length === 1 && f.holders[0].publisherId === AUT.id && f.works.length === 2
         && f.totals.payable === sim.totals.payable && f.visibleTotals.payable === aut.payable);
     // U6 (regresión): con filtro, el archivo dice que los totales son del periodo completo y da el subtotal visible.
-    const fcsv = await call(R(`month=2026-11&titular=${AUT.id}&format=csv&expectReference=${sim.reference.value}`), 'ADM');
-    const fhtml = await call(R(`month=2026-11&titular=${AUT.id}&format=html&expectReference=${sim.reference.value}`), 'ADM');
+    const fcsv = await call(R(`month=2025-11&titular=${AUT.id}&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    const fhtml = await call(R(`month=2025-11&titular=${AUT.id}&format=html&expectReference=${sim.reference.value}`), 'ADM');
     ok('CSV filtrado: ámbito de los totales y subtotal visible del titular', fcsv.text.includes('"Ámbito de los totales";"Periodo completo (sin filtrar)"')
         && fcsv.text.includes(`"Subtotal visible: cobrable (COP)";${aut.payable}\r\n`) && fcsv.text.includes(`"Cobrable (COP)";${sim.totals.payable}\r\n`));
     ok('HTML filtrado: ámbito y subtotal visible', fhtml.text.includes('Periodo completo (sin filtrar)') && fhtml.text.includes(`cobrable ${Number(aut.payable).toLocaleString('es-CO')} COP`));
-    const nf = await call(R(`month=2026-11&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    const nf = await call(R(`month=2025-11&format=csv&expectReference=${sim.reference.value}`), 'ADM');
     ok('sin filtro no aparece el subtotal visible', !nf.text.includes('Subtotal visible'));
-    const fe = (await call(R(`month=2026-11&editorial=${EXT.id}`), 'ADM')).body;
+    const fe = (await call(R(`month=2025-11&editorial=${EXT.id}`), 'ADM')).body;
     ok('filtro por editorial: obras de Externa (c2, c3)', fe.works.map((w) => w.contentId).join() === 'c2,c3', JSON.stringify(fe.works.map((w) => [w.contentId, w.responsiblePublisherId])) + ' ext=' + EXT.id);
-    const fo = (await call(R('month=2026-11&obra=c1'), 'ADM')).body;
+    const fo = (await call(R('month=2025-11&obra=c1'), 'ADM')).body;
     ok('filtro por obra: c1 y sus beneficiarios', fo.works.length === 1 && fo.holders.map((h) => h.publisherId).sort().join() === [AUT.id, PUB].sort().join());
     texts.push(csv.text, html.text);
 
     console.log('\n[6] INS cero');
-    await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2026-12', grossCop: 0, deductionsCop: 0, supportRef: 'SIN-RECAUDO-FX-DIC' });
-    const dec = (await call(R('month=2026-12'), 'ADM')).body;
+    await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2025-12', grossCop: 0, deductionsCop: 0, supportRef: 'SIN-RECAUDO-FX-DIC' });
+    const dec = (await call(R('month=2025-12'), 'ADM')).body;
     ok('diciembre con INS 0: bolsas en 0, conciliado', dec.pools.brd === 0 && dec.totals.payable === 0 && dec.reconciliation.ok);
 
     console.log('\n[7] cierre técnico');
-    ok('sin confirmación → 400', (await call('/api/admin/royalties/closes', 'ADM', { month: '2026-11', periodInputId: pi.body.id })).body?.code === 'confirmation_required');
-    ok('oficial no habilitado → 400', (await call('/api/admin/royalties/closes', 'ADM', { month: '2026-11', periodInputId: pi.body.id, confirmMonth: '2026-11', mode: 'official' })).body?.code === 'official_not_enabled');
-    const cl = await call('/api/admin/royalties/closes', 'ADM', { month: '2026-11', periodInputId: pi.body.id, confirmMonth: '2026-11' });
+    ok('sin confirmación → 400', (await call('/api/admin/royalties/closes', 'ADM', { month: '2025-11', periodInputId: pi.body.id })).body?.code === 'confirmation_required');
+    ok('oficial no habilitado → 400', (await call('/api/admin/royalties/closes', 'ADM', { month: '2025-11', periodInputId: pi.body.id, confirmMonth: '2025-11', mode: 'official' })).body?.code === 'official_not_enabled');
+    const cl = await call('/api/admin/royalties/closes', 'ADM', { month: '2025-11', periodInputId: pi.body.id, confirmMonth: '2025-11' });
     ok('cierre técnico 201 con el mismo hash que la simulación', cl.status === 201 && cl.body.mode === 'technical' && cl.body.snapshotSha256 === sim.reference.value);
-    ok('segundo cierre → 409', (await call('/api/admin/royalties/closes', 'ADM', { month: '2026-11', periodInputId: pi.body.id, confirmMonth: '2026-11' })).status === 409);
-    ok('INS de un periodo cerrado → 409', (await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2026-11', grossCop: 1, deductionsCop: 0, supportRef: 'x' })).status === 409);
-    const closed = (await call(R('month=2026-11'), 'ADM')).body;
+    ok('segundo cierre → 409', (await call('/api/admin/royalties/closes', 'ADM', { month: '2025-11', periodInputId: pi.body.id, confirmMonth: '2025-11' })).status === 409);
+    ok('INS de un periodo cerrado → 409', (await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2025-11', grossCop: 1, deductionsCop: 0, supportRef: 'x' })).status === 409);
+    const closed = (await call(R('month=2025-11'), 'ADM')).body;
     ok('el informe pasa a TÉCNICO desde el cierre, con la misma referencia y cifras', closed.status === 'TECHNICAL' && closed.source === 'close' && closed.notExigible
         && closed.reference.value === sim.reference.value && closed.totals.payable === sim.totals.payable);
-    ok('lista de cierres', (await call('/api/admin/royalties/closes', 'ADM')).body.map((c) => c.period).join() === '2026-11');
+    ok('lista de cierres', (await call('/api/admin/royalties/closes', 'ADM')).body.map((c) => c.period).join() === '2025-11');
+
+    // CLOSE-GUARD-01: el mes en curso (reloj real del servidor, America/Bogota) no se cierra; se consulta y simula.
+    const cur = new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 7);
+    const curIn = await call('/api/admin/royalties/period-inputs', 'ADM', { period: cur, grossCop: 1000, deductionsCop: 0, supportRef: 'SOPORTE-FX-MES-EN-CURSO' });
+    const curSim = (await call(R(`month=${cur}`), 'ADM')).body;
+    ok('mes en curso: consulta y simulación permitidas (PROVISIONAL)', curIn.status === 201 && curSim.source === 'simulation' && curSim.status === 'PROVISIONAL');
+    const fpOpen = fingerprint();
+    const curClose = await call('/api/admin/royalties/closes', 'ADM', { month: cur, periodInputId: curIn.body.id, confirmMonth: cur });
+    ok('mes en curso: cierre técnico rechazado 409 period_not_ended con mensaje', curClose.status === 409 && curClose.body?.code === 'period_not_ended' && /aún no ha terminado/.test(curClose.body?.error || ''), curClose.text);
+    const curCloseNow = await call('/api/admin/royalties/closes', 'ADM', { month: cur, periodInputId: curIn.body.id, confirmMonth: cur, now: '2099-01-01T00:00:00.000Z', force: true });
+    ok('ni un `now` ni un `force` enviados por el navegador lo saltan', curCloseNow.status === 409 && curCloseNow.body?.code === 'period_not_ended');
+    ok('el rechazo no escribe nada', JSON.stringify(fingerprint()) === JSON.stringify(fpOpen));
+    ok('exportación provisional del mes en curso disponible', (await call(R(`month=${cur}&format=csv&expectReference=${curSim.reference.value}`), 'ADM')).status === 200);
 
     console.log('\n[8] cambios posteriores de derechos');
     const st2 = await import('../publishersStore.mjs');
-    rights.createRightsVersion('c1', v(PUB, { alpha: 0.2, effectiveAt: '2026-11-20T05:00:00.000Z' }), { content: C('c1'), actor: 'fixture' });
+    rights.createRightsVersion('c1', v(PUB, { alpha: 0.2, effectiveAt: '2025-11-20T05:00:00.000Z' }), { content: C('c1'), actor: 'fixture' });
     st2.closeRoyaltiesDb();
-    const after = (await call(R('month=2026-11'), 'ADM')).body;
+    const after = (await call(R('month=2025-11'), 'ADM')).body;
     ok('el informe del cierre no cambia (misma referencia y cifras)', after.reference.value === closed.reference.value && JSON.stringify(after.holders) === JSON.stringify(closed.holders));
 
     console.log('\n[9] trimestre');
-    const q1 = (await call(R('quarter=2026-Q4'), 'ADM')).body;
-    ok('Q4 con solo noviembre: PROVISIONAL incompleto, faltan oct y dic', q1.status === 'PROVISIONAL_INCOMPLETE' && q1.missingMonths.join() === '2026-10,2026-12' && q1.notExigible);
-    await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2026-10', grossCop: 300_000, deductionsCop: 0, supportRef: 'SOPORTE-FX-OCT' });
-    const octIn = (await call('/api/admin/royalties/period-inputs?period=2026-10', 'ADM')).body[0];
-    const decIn = (await call('/api/admin/royalties/period-inputs?period=2026-12', 'ADM')).body[0];
-    await call('/api/admin/royalties/closes', 'ADM', { month: '2026-10', periodInputId: octIn.id, confirmMonth: '2026-10' });
-    await call('/api/admin/royalties/closes', 'ADM', { month: '2026-12', periodInputId: decIn.id, confirmMonth: '2026-12' });
-    const q = (await call(R('quarter=2026-Q4'), 'ADM')).body;
+    const q1 = (await call(R('quarter=2025-Q4'), 'ADM')).body;
+    ok('Q4 con solo noviembre: PROVISIONAL incompleto, faltan oct y dic', q1.status === 'PROVISIONAL_INCOMPLETE' && q1.missingMonths.join() === '2025-10,2025-12' && q1.notExigible);
+    await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2025-10', grossCop: 300_000, deductionsCop: 0, supportRef: 'SOPORTE-FX-OCT' });
+    const octIn = (await call('/api/admin/royalties/period-inputs?period=2025-10', 'ADM')).body[0];
+    const decIn = (await call('/api/admin/royalties/period-inputs?period=2025-12', 'ADM')).body[0];
+    await call('/api/admin/royalties/closes', 'ADM', { month: '2025-10', periodInputId: octIn.id, confirmMonth: '2025-10' });
+    await call('/api/admin/royalties/closes', 'ADM', { month: '2025-12', periodInputId: decIn.id, confirmMonth: '2025-12' });
+    const q = (await call(R('quarter=2025-Q4'), 'ADM')).body;
     ok('Q4 completo con cierres técnicos → PROVISIONAL_TECHNICAL, nunca definitivo', q.complete && !q.definitive && q.status === 'PROVISIONAL_TECHNICAL' && q.notExigible);
     ok('Q4 = Σ cierres: BRD 75.000 + 500.000 + 0, conciliado', q.totals.brd === 575_000 && q.reconciliation.ok && sum(q.holders.map((h) => h.payable)) === q.totals.payable);
     ok('Q4: referencia sha256 y hashes de los 3 cierres', /^[0-9a-f]{64}$/.test(q.reference.value) && q.closes.every((c) => /^[0-9a-f]{64}$/.test(c.snapshotSha256)));
-    const qcsv = await call(R(`quarter=2026-Q4&format=csv&expectReference=${q.reference.value}`), 'ADM');
+    const qcsv = await call(R(`quarter=2025-Q4&format=csv&expectReference=${q.reference.value}`), 'ADM');
     ok('CSV trimestral del mismo resultado', qcsv.status === 200 && qcsv.text.includes(q.reference.value) && qcsv.text.includes('"Meses faltantes";"ninguno"'));
     texts.push(JSON.stringify(q), qcsv.text);
 
     console.log('\n[10] privacidad y no escrituras');
     ok('sin identificadores, nombres ni correos de lectores en JSON, CSV ni HTML', texts.every((t) => !/"(LEC|LEC2)"|Lectora|lec@fx|userId|sessionId|S0000/.test(t)));
     const fp = fingerprint();
-    for (const qq of ['month=2026-11', 'month=2026-12', 'month=2027-01', 'quarter=2026-Q4', 'month=2026-11&format=csv', 'quarter=2026-Q4&format=html']) await call(R(qq), 'ADM');
+    for (const qq of ['month=2025-11', 'month=2025-12', 'month=2026-01', 'quarter=2025-Q4', 'month=2025-11&format=csv', 'quarter=2025-Q4&format=html']) await call(R(qq), 'ADM');
     ok('las consultas y exportaciones no escriben', JSON.stringify(fingerprint()) === JSON.stringify(fp));
     ok('sin errores del informe en el log', !/ROYALTIES_REPORT/.test(boot));
 } catch (e) {

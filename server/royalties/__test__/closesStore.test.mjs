@@ -43,6 +43,8 @@ const { runMigrations } = await import('../../db/migrate.js');
 
 const ALL = Object.fromEntries(R.RIGHTS_CAPABILITIES.map((c) => [c, true]));
 const CLOCK = { clockSkewToleranceMs: 120_000, maxIngestDelayMs: 600_000 };
+// Reloj del servidor controlado (CLOSE-GUARD-01): posterior a todos los meses que se cierran.
+const LATER = '2027-06-01T12:00:00.000Z';
 let seq = 0;
 const read = (user, content, start, minutes = 10) => {
     const sid = `s-${++seq}`; const t0 = Date.parse(`${start}-05:00`);
@@ -114,11 +116,11 @@ try {
     ok('UPDATE/DELETE de rule_sets fallan', sqlFails(() => db.prepare("UPDATE rule_sets SET params = '{}'").run(), /append-only/) && sqlFails(() => db.prepare('DELETE FROM rule_sets').run(), /append-only/));
 
     section('[5] cierre repetido y cierre oficial');
-    ok('segundo cierre del mismo periodo → close_exists', code(() => C.closeMonth({ month: '2026-11', mode: 'official', authorizationRef: 'AUT-1', periodInputId: inNov.id, ...live(NOV_ROWS) }, { actor: 'ADM' }), 'close_exists'));
+    ok('segundo cierre del mismo periodo → close_exists', code(() => C.closeMonth({ month: '2026-11', mode: 'official', authorizationRef: 'AUT-1', periodInputId: inNov.id, ...live(NOV_ROWS) }, { actor: 'ADM', now: LATER }), 'close_exists'));
     ok('UNIQUE(period) también en SQL', sqlFails(() => db.prepare(`INSERT INTO closes SELECT 'dup', period, mode, rule_set_id, period_input_id, preview_digest, settlement_digest, snapshot, snapshot_sha256, authorization_ref, created_by, created_at FROM closes WHERE period='2026-11'`).run(), /UNIQUE/));
-    ok('oficial sin autorización → authorization_required', code(() => C.closeMonth({ month: '2026-10', mode: 'official', periodInputId: inNov.id, ...live([]) }, { actor: 'ADM' }), 'authorization_required'));
+    ok('oficial sin autorización → authorization_required', code(() => C.closeMonth({ month: '2026-10', mode: 'official', periodInputId: inNov.id, ...live([]) }, { actor: 'ADM', now: LATER }), 'authorization_required'));
     ok('oficial sin autorización también rechazado por CHECK en SQL', sqlFails(() => db.prepare(`INSERT INTO closes SELECT 'x2', '2030-01', 'official', rule_set_id, period_input_id, preview_digest, settlement_digest, snapshot, snapshot_sha256, NULL, created_by, created_at FROM closes WHERE period='2026-11'`).run(), /CHECK/));
-    ok('INS de otro periodo → period_input_mismatch', code(() => C.closeMonth({ month: '2026-10', mode: 'technical', periodInputId: inNov.id, ...live([]) }, { actor: 'ADM' }), 'period_input_mismatch'));
+    ok('INS de otro periodo → period_input_mismatch', code(() => C.closeMonth({ month: '2026-10', mode: 'technical', periodInputId: inNov.id, ...live([]) }, { actor: 'ADM', now: LATER }), 'period_input_mismatch'));
 
     section('[6] reproducción determinista y cambios posteriores');
     ok('recalcular con las mismas entradas → mismo hash', C.verifyCloseReproduction('2026-11', live(NOV_ROWS)).reproduced);
@@ -135,7 +137,7 @@ try {
 
     section('[7] mes sin ingresos y periodo sin lecturas');
     const inOct = C.recordPeriodInput({ period: '2026-10', grossCop: 600_000, deductionsCop: 0, supportRef: 'SOPORTE-FX-2026-10' }, { actor: 'ADM' });
-    const oct = C.closeMonth({ month: '2026-10', mode: 'technical', periodInputId: inOct.id, ...live([]) }, { actor: 'ADM' });
+    const oct = C.closeMonth({ month: '2026-10', mode: 'technical', periodInputId: inOct.id, ...live([]) }, { actor: 'ADM', now: LATER });
     const so = oct.snapshot.settlement;
     ok('octubre sin lecturas: Σ S = 0, la BLC pasa a la BGP y se reparte por presencia', so.pools.blcToBgp && so.pools.bgpEffective === 150_000 && so.destinations.payable + so.destinations.retained === 150_000);
     ok('…conciliado', C.closeLedger('2026-10').reconciliation.ok);
@@ -175,7 +177,7 @@ try {
     ok('UPDATE/DELETE de adjustments fallan', sqlFails(() => db.prepare('UPDATE adjustments SET amount_cop = 1').run(), /append-only/) && sqlFails(() => db.prepare('DELETE FROM adjustments').run(), /append-only/));
     ok('los movimientos no tocan el cierre (mismo hash)', C.getClose('2026-11').snapshotSha256 === nov.snapshotSha256);
     const inDec = C.recordPeriodInput({ period: '2026-12', grossCop: 0, deductionsCop: 0, supportRef: 'SIN-RECAUDO-FX-2026-12' }, { actor: 'ADM' });
-    const dec = C.closeMonth({ month: '2026-12', mode: 'technical', periodInputId: inDec.id, ...live([...read('LECTOR-1', 'B2', '2026-12-03T10:00:00')]) }, { actor: 'ADM' });
+    const dec = C.closeMonth({ month: '2026-12', mode: 'technical', periodInputId: inDec.id, ...live([...read('LECTOR-1', 'B2', '2026-12-03T10:00:00')]) }, { actor: 'ADM', now: LATER });
     const LD = C.closeLedger('2026-12');
     ok('mes sin ingresos (INS 0): bolsas en 0 aunque haya lecturas', dec.snapshot.settlement.pools.brd === 0 && dec.snapshot.settlement.destinations.payable === 0);
     ok('…el traslado entra congelado en el snapshot de diciembre', dec.snapshot.carriedIn.length === 1 && dec.snapshot.carriedIn[0].amountCop === autPayable
@@ -195,16 +197,41 @@ try {
     ok('trimestre sin cierres: incompleto, meses faltantes listados', !q3.complete && q3.status === 'PROVISIONAL_INCOMPLETE' && q3.missingMonths.join() === '2026-07,2026-08,2026-09');
     for (const [i, mo] of ['2027-01', '2027-02'].entries()) {
         const inp = C.recordPeriodInput({ period: mo, grossCop: 400_000 * (i + 1), deductionsCop: 0, supportRef: `SOPORTE-FX-${mo}` }, { actor: 'ADM' });
-        C.closeMonth({ month: mo, mode: 'official', authorizationRef: `AUTORIZACION-FX-${mo}`, periodInputId: inp.id, ...live([]) }, { actor: 'ADM' });
+        C.closeMonth({ month: mo, mode: 'official', authorizationRef: `AUTORIZACION-FX-${mo}`, periodInputId: inp.id, ...live([]) }, { actor: 'ADM', now: LATER });
     }
     const q1p = C.quarterSummary('2027-Q1');
     ok('2027-Q1 con 2 de 3 cierres oficiales → incompleto, nunca definitivo', !q1p.complete && !q1p.definitive && q1p.missingMonths.join() === '2027-03' && q1p.reconciliation.ok);
     const inMar = C.recordPeriodInput({ period: '2027-03', grossCop: 0, deductionsCop: 0, supportRef: 'SIN-RECAUDO-FX-2027-03' }, { actor: 'ADM' });
-    const mar = C.closeMonth({ month: '2027-03', mode: 'official', authorizationRef: 'AUTORIZACION-FX-2027-03', periodInputId: inMar.id, ...live([]) }, { actor: 'ADM' });
+    const mar = C.closeMonth({ month: '2027-03', mode: 'official', authorizationRef: 'AUTORIZACION-FX-2027-03', periodInputId: inMar.id, ...live([]) }, { actor: 'ADM', now: LATER });
     const q1 = C.quarterSummary('2027-Q1');
     ok('3 cierres oficiales → trimestre DEFINITIVE', mar.mode === 'official' && mar.authorizationRef === 'AUTORIZACION-FX-2027-03' && q1.definitive && q1.status === 'DEFINITIVE' && q1.reconciliation.ok);
     ok('…y aun así el cierre oficial no autoriza pagos por sí mismo', mar.snapshot.paymentsAuthorized === false && mar.snapshot.status === 'OFFICIAL_CLOSE');
     ok('trimestre inválido → invalid_quarter', code(() => C.quarterSummary('2027-Q5'), 'invalid_quarter'));
+
+    section('[10b] CLOSE-GUARD-01: solo meses terminados (America/Bogota, reloj controlado)');
+    const counts = () => ['closes', 'period_inputs', 'rule_sets', 'adjustments'].map((t) => db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n).join(',');
+    const inApr = C.recordPeriodInput({ period: '2027-04', grossCop: 100_000, deductionsCop: 0, supportRef: 'SOPORTE-FX-2027-04' }, { actor: 'ADM' });
+    const inDec27 = C.recordPeriodInput({ period: '2027-12', grossCop: 0, deductionsCop: 0, supportRef: 'SOPORTE-FX-2027-12' }, { actor: 'ADM' });
+    const closeAt = (month, periodInputId, now, extra = {}) => () => C.closeMonth({ month, mode: 'technical', periodInputId, ...live([]), ...extra }, { actor: 'ADM', now });
+    const before = counts();
+    ok('mes en curso (15/04): cierre técnico rechazado → period_not_ended', code(closeAt('2027-04', inApr.id, '2027-04-15T17:00:00.000Z'), 'period_not_ended'));
+    ok('…y el oficial también, aunque traiga autorización', code(closeAt('2027-04', inApr.id, '2027-04-15T17:00:00.000Z', { mode: 'official', authorizationRef: 'AUT-FX' }), 'period_not_ended'));
+    let msg = ''; try { closeAt('2027-04', inApr.id, '2027-04-15T17:00:00.000Z')(); } catch (e) { msg = e.message; }
+    ok('mensaje explícito con la fecha de apertura del cierre', /2027-04 aún no ha terminado/.test(msg) && /2027-05-01 a las 00:00 \(America\/Bogota\)/.test(msg), msg);
+    ok('rechazo sin escrituras (cierres, INS, rule_sets, movimientos)', counts() === before);
+    const simOpen = C.closeMonth({ month: '2027-04', mode: 'technical', periodInputId: inApr.id, ...live([]) }, { actor: 'ADM', now: '2027-04-15T17:00:00.000Z', simulate: true });
+    ok('simulación del mes abierto permitida (no guarda)', simOpen.simulation === true && counts() === before);
+    ok('último instante del mes en Bogotá (30/04 23:59:59.999 = 2027-05-01T04:59:59.999Z) → rechazado', code(closeAt('2027-04', inApr.id, '2027-05-01T04:59:59.999Z'), 'period_not_ended'));
+    ok('medianoche UTC del 01/05 (aún 30/04 19:00 en Bogotá) → rechazado', code(closeAt('2027-04', inApr.id, '2027-05-01T00:00:00.000Z'), 'period_not_ended'));
+    const apr = closeAt('2027-04', inApr.id, '2027-05-01T05:00:00.000Z')();
+    ok('primer instante del mes siguiente en Bogotá (01/05 00:00 = 05:00Z) → cierre técnico permitido', apr && apr.mode === 'technical' && apr.integrityOk);
+    ok('ese cierre tiene el mismo hash que su simulación con el mes abierto', apr.snapshotSha256 === simOpen.snapshotSha256);
+    ok('cierre duplicado → close_exists', code(closeAt('2027-04', inApr.id, '2027-06-01T00:00:00.000Z'), 'close_exists'));
+    ok('cambio de año: 2027-12 el 31/12 23:59:59.999 de Bogotá → rechazado', code(closeAt('2027-12', inDec27.id, '2028-01-01T04:59:59.999Z'), 'period_not_ended'));
+    ok('cambio de año: año nuevo UTC (31/12 19:00 en Bogotá) → rechazado', code(closeAt('2027-12', inDec27.id, '2028-01-01T00:00:00.000Z'), 'period_not_ended'));
+    ok('cambio de año: 01/01/2028 00:00 en Bogotá → permitido', C.closeMonth({ month: '2027-12', mode: 'technical', periodInputId: inDec27.id, ...live([]) }, { actor: 'ADM', now: '2028-01-01T05:00:00.000Z' }).period === '2027-12');
+    ok('assertPeriodEnded: reloj inválido → invalid_clock', code(() => C.assertPeriodEnded('2027-04', 'no-es-fecha'), 'invalid_clock'));
+    ok('cierres históricos intactos (íntegros y con el mismo hash)', C.getClose('2026-11').snapshotSha256 === nov.snapshotSha256 && ['2026-10', '2026-11', '2026-12', '2027-01', '2027-02', '2027-03'].every((p) => C.getClose(p).integrityOk));
 
     section('[11] manipulación detectada');
     const copy = path.join(tmp, 'tampered.db');
