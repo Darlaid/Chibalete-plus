@@ -1,6 +1,6 @@
 # CHP-EDITORIAL-ROYALTIES-2026-01 — V1.4 / U5 · REPORTES-01 · Panel Admin: informes de regalías
 
-**Estado:** ver §I · **Fecha:** 2026-10-27 · **Baseline:** `1b07303`
+**Estado:** GREEN_LOCAL+CI (`e1f8780`, CI 10/10) · **Fecha:** 2026-10-27 · **Baseline:** `1b07303`
 Desarrollo local, CI y laboratorio aislado. Sin despliegue, ingesta, enforcement, cambios de fórmulas o de D1–D5, ni registros productivos.
 
 ## A. Baseline y CI
@@ -130,8 +130,9 @@ Ambas exportaciones parten del **mismo objeto** que la pantalla y se piden con `
 
 ## H. Commits
 
-Ver `SEGUIMIENTO_PLAN_V1_1.md` (fila R1).
+- `e1f8780`: endpoints, módulo de informes, pestaña «Informes», pruebas e informe; registro de U4 en verde (CI 10/10, incluido `identity-preflight`).
+- Este commit: registro de CI y veredicto.
 
 ## I. Veredicto
 
-Ver `SEGUIMIENTO_PLAN_V1_1.md` (fila R1).
+**GREEN_LOCAL+CI.** Sin despliegue. U6 no iniciada.
