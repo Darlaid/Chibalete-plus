@@ -704,6 +704,22 @@ export interface RoyaltyReportWork {
   retained: number;
   pendingDecision: number;
   beneficiaries: string[];
+  // REPORTES-FILTROS-01: desglose leído de la liquidación (null sin INS) y elegibilidad U2.
+  amounts?: {
+    payable: number; retained: number; pending: number; pendingD1: number; pendingD4: number;
+    byHolder: { publisherId: string | null; name: string | null; payable: number; retained: number }[];
+  } | null;
+  eligibility?: {
+    rightsRegime?: boolean | null; eligibleDays?: number | null;
+    episodes?: { total: number; qualified: number; excludedByReason: Record<string, number> } | null;
+    flags?: string[]; publisherChanges?: { from: string | null; to: string | null; changedAt: string }[];
+    publisherChangedInQuarter?: boolean;
+  } | null;
+  parts?: { versionNos: number[]; alpha: number; Q: number; amount: number; variable: number; alphaComplement: number; retained: number;
+    shares: { publisherId: string | null; shareBp: number; amount: number; status: string }[] }[];
+  months?: { period: string; Q: number; R: number | null; S: number; montoObra: number }[];
+  imprint?: string | null;
+  imprintStatus?: 'current' | 'none' | 'publisher_changed' | 'not_in_catalog' | 'not_historical' | 'unknown';
 }
 
 export interface RoyaltyReportHolder {
@@ -722,6 +738,7 @@ export interface RoyaltyReportHolder {
   paid: number;
   transferredOut: number;
   belowPayoutThreshold: boolean | null;
+  visibleWorks?: { payable: number; retained: number };
 }
 
 export interface RoyaltyReportMovement {
@@ -774,8 +791,13 @@ export interface RoyaltyReport {
   totals: RoyaltyReportTotals | null;
   movements: RoyaltyReportMovement[];
   reconciliation: { ok: boolean };
-  filters?: { editorial: string | null; titular: string | null; obra: string | null } | null;
-  visibleTotals?: { holders: number; works: number; payable: number; retained: number; montoObra: number } | null;
+  dimensions?: { responsiblePublisher: 'historical'; imprint: 'current_catalog' | 'unavailable' };
+  filters?: { editorial: string | null; sello?: string | null; titular: string | null; obra: string | null } | null;
+  visibleTotals?: {
+    holders: number; works: number; Q: number; montoObra: number | null;
+    worksPayable: number | null; worksRetained: number | null; worksPending: number | null;
+    payable: number | null; retained: number | null;
+  } | null;
 }
 
 export interface RoyaltyPeriodInput {

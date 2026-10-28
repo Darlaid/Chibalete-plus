@@ -2135,7 +2135,14 @@ app.get('/api/admin/royalties/report', requireAdminAccess, requireAdminRead, pub
         if (req.query.expectReference && req.query.expectReference !== report.reference.value) {
             return res.status(409).json({ error: 'El resultado cambió desde que se mostró; vuelve a consultarlo', code: 'result_changed', reference: report.reference.value });
         }
-        const filtered = royaltyReports.filterReport(report, { editorial: req.query.editorial || null, titular: req.query.titular || null, obra: req.query.obra || null });
+        // REPORTES-FILTROS-01: sello solo en resultados vivos (no altera la referencia);
+        // un cierre no congela el sello y no se reescribe con el actual.
+        const withImprints = royaltyReports.attachImprints(report, new Map(readJSON(DB_FILE).filter((c) => c && c.id).map((c) => [c.id, c])));
+        const sello = req.query.sello ? String(req.query.sello) : null;
+        if (sello && withImprints.dimensions.imprint === 'unavailable') {
+            return res.status(400).json({ error: 'Este informe sale de cierres congelados, que no guardan el sello: no se puede filtrar por sello', code: 'imprint_not_historical' });
+        }
+        const filtered = royaltyReports.filterReport(withImprints, { editorial: req.query.editorial || null, sello, titular: req.query.titular || null, obra: req.query.obra || null });
         const format = String(req.query.format || 'json');
         const base = `regalias-${report.period}-${report.status.toLowerCase()}`;
         res.set('X-Content-Type-Options', 'nosniff');

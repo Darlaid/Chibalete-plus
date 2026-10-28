@@ -15,9 +15,17 @@
  * D) detalle, exportación (una sola ubicación) y operaciones. Solo presentación.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle, FileDown, Loader2, Lock, Printer, RefreshCw, Scale } from 'lucide-react';
+import { AlertTriangle, CheckCircle, ChevronDown, ChevronRight, FileDown, Loader2, Lock, Printer, RefreshCw, Scale } from 'lucide-react';
 import { dataService } from '../../services/dataService';
-import type { RoyaltyPeriodInput, RoyaltyReport } from '../../types';
+import type { RoyaltyPeriodInput, RoyaltyReport, RoyaltyReportWork } from '../../types';
+
+// REPORTES-FILTROS-01: mismo valor que `NO_IMPRINT` del servidor (obras sin sello asignado).
+const NO_IMPRINT = '__sin_sello__';
+const NO_FILTERS = { editorial: '', sello: '', titular: '', obra: '' };
+const IMPRINT_STATUS: Record<string, string> = {
+    none: 'Sin sello asignado', publisher_changed: 'La editorial cambió después del periodo: el sello actual no se aplica',
+    not_in_catalog: 'Obra fuera del catálogo actual', not_historical: 'El cierre no congela el sello', unknown: '—',
+};
 
 const cop = (n: number | null | undefined) => (n == null ? '—' : `$ ${Number(n).toLocaleString('es-CO')}`);
 const dec = (n: number | null | undefined, d = 3) => (n == null ? '—' : Number(n).toFixed(d));
@@ -44,6 +52,57 @@ const Card: React.FC<{ label: string; value: string; hint?: string }> = ({ label
     </div>
 );
 
+// Detalle de una obra dentro del mismo periodo: elegibilidad económica (U2), reparto entre titulares y partes (U3).
+const WorkDetail: React.FC<{ w: RoyaltyReportWork; kind: 'month' | 'quarter'; nameOf: (id: string | null) => string }> = ({ w, kind, nameOf }) => {
+    const el = w.eligibility;
+    const excluded = Object.entries(el?.episodes?.excludedByReason || {});
+    return (
+        <div className="grid gap-4 lg:grid-cols-2 text-sm text-gray-700 dark:text-gray-200 min-w-0">
+            <div className="space-y-1 min-w-0">
+                <p className="font-bold">Elegibilidad económica</p>
+                <p className="text-xs text-gray-500">Lecturas que cuentan para regalías (Q), no métricas pedagógicas.</p>
+                {kind === 'month' ? (
+                    <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs">
+                        <dt className="font-bold">Régimen de derechos</dt><dd>{el?.rightsRegime == null ? '—' : el.rightsRegime ? 'sí' : 'no (sin versión de derechos)'}</dd>
+                        <dt className="font-bold">Episodios cualificados</dt><dd>{el?.episodes ? `${el.episodes.qualified} de ${el.episodes.total}` : '—'}</dd>
+                        <dt className="font-bold">Días de presencia elegibles</dt><dd>{el?.eligibleDays ?? '—'}</dd>
+                        <dt className="font-bold">Exclusiones</dt><dd className="font-mono break-all">{excluded.length ? excluded.map(([k, n]) => `${k}: ${n}`).join(' · ') : 'ninguna'}</dd>
+                        <dt className="font-bold">Avisos</dt><dd className="font-mono break-all">{el?.flags?.length ? el.flags.join(' · ') : 'ninguno'}</dd>
+                        {!!el?.publisherChanges?.length && <><dt className="font-bold">Cambio de editorial</dt>
+                            <dd>{el.publisherChanges.map((c) => `${nameOf(c.from)} → ${nameOf(c.to)} (${c.changedAt.slice(0, 10)})`).join('; ')}</dd></>}
+                    </dl>
+                ) : (
+                    <>
+                        {el?.publisherChangedInQuarter && <p className="text-xs text-amber-800">La editorial responsable cambió entre meses: se muestra la del primer cierre.</p>}
+                        <table className="text-xs"><thead><tr><th className="pr-3 text-left">Mes</th><th className="pr-3 text-right">Q</th><th className="pr-3 text-right">R</th><th className="pr-3 text-right">S</th><th className="text-right">MontoObra</th></tr></thead>
+                            <tbody>{(w.months || []).map((m) => (
+                                <tr key={m.period}><td className="pr-3">{m.period}</td><td className="pr-3 text-right tabular-nums">{m.Q}</td><td className="pr-3 text-right tabular-nums">{dec(m.R)}</td>
+                                    <td className="pr-3 text-right tabular-nums">{dec(m.S)}</td><td className="text-right tabular-nums">{cop(m.montoObra)}</td></tr>
+                            ))}</tbody></table>
+                        <p className="text-xs text-gray-500">R y S son mensuales y no se suman en el trimestre.</p>
+                    </>
+                )}
+            </div>
+            <div className="space-y-1 min-w-0">
+                <p className="font-bold">Reparto de la variable entre titulares</p>
+                {!w.amounts ? <p className="text-xs text-gray-500">Sin importes: registra el INS del mes para simular el reparto.</p> : (
+                    <>
+                        <table className="text-xs"><thead><tr><th className="pr-3 text-left">Titular</th><th className="pr-3 text-right">Cobrable</th><th className="text-right">Retenido</th></tr></thead>
+                            <tbody>{w.amounts.byHolder.map((h) => (
+                                <tr key={h.publisherId ?? 'none'}><td className="pr-3">{h.name ?? 'sin titular (matriz incompleta)'}</td>
+                                    <td className="pr-3 text-right tabular-nums">{cop(h.payable)}</td><td className="text-right tabular-nums">{cop(h.retained)}</td></tr>
+                            ))}{!w.amounts.byHolder.length && <tr><td colSpan={3} className="text-gray-500">Sin participaciones (obra retenida, pendiente o sin importe)</td></tr>}</tbody></table>
+                        <p className="text-xs text-gray-500">Pendiente {cop(w.amounts.pending)} = D1 {cop(w.amounts.pendingD1)} + D4 {cop(w.amounts.pendingD4)}. La Base de presencia se reparte por titular y días, no por obra.</p>
+                        {kind === 'month' && !!w.parts?.length && (
+                            <p className="text-xs text-gray-500">Partes: {w.parts.map((p) => `v${p.versionNos.join('+')} α ${p.alpha} · Q ${p.Q} · ${cop(p.amount)}`).join(' | ')}</p>
+                        )}
+                    </>
+                )}
+            </div>
+        </div>
+    );
+};
+
 const panel = 'bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700';
 const h3 = 'font-bold text-gray-800 dark:text-white';
 const th = 'px-3 py-2 text-left text-xs font-bold text-gray-600 dark:text-gray-300 uppercase whitespace-nowrap';
@@ -57,7 +116,8 @@ const InformesRegalias: React.FC = () => {
     const [view, setView] = useState<'month' | 'quarter'>('month');
     const [month, setMonth] = useState(bogotaMonth());
     const [quarter, setQuarter] = useState(quarterOf(bogotaMonth()));
-    const [filters, setFilters] = useState({ editorial: '', titular: '', obra: '' });
+    const [filters, setFilters] = useState(NO_FILTERS);
+    const [openWork, setOpenWork] = useState<string | null>(null);
     const [report, setReport] = useState<RoyaltyReport | null>(null);
     const [options, setOptions] = useState<RoyaltyReport | null>(null);
     const [inputs, setInputs] = useState<RoyaltyPeriodInput[]>([]);
@@ -76,7 +136,7 @@ const InformesRegalias: React.FC = () => {
         try {
             const unfiltered = await dataService.getRoyaltyReport(periodParams);
             setOptions(unfiltered);
-            const hasFilters = !!(filters.editorial || filters.titular || filters.obra);
+            const hasFilters = !!(filters.editorial || filters.sello || filters.titular || filters.obra);
             setReport(hasFilters ? await dataService.getRoyaltyReport({ ...periodParams, ...filters }) : unfiltered);
             setInputs(view === 'month' ? await dataService.listRoyaltyPeriodInputs(month) : []);
         } catch (e: any) {
@@ -86,15 +146,40 @@ const InformesRegalias: React.FC = () => {
 
     useEffect(() => { load(); }, [load]);
     useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
-    useEffect(() => { setFilters({ editorial: '', titular: '', obra: '' }); setNotice(null); setConfirmMonth(''); }, [view, month, quarter]);
+    useEffect(() => { setFilters(NO_FILTERS); setOpenWork(null); setNotice(null); setConfirmMonth(''); }, [view, month, quarter]);
 
+    // Opciones en cascada sobre el informe sin filtrar: editorial → sellos y obras; sello → obras.
+    const imprintAvailable = options?.dimensions?.imprint === 'current_catalog';
+    const allWorks = useMemo(() => options?.works || [], [options]);
+    const inEditorial = (w: RoyaltyReportWork, ed: string) => !ed || w.responsiblePublisherId === ed;
+    const inSello = (w: RoyaltyReportWork, se: string) => !se || (se === NO_IMPRINT ? !w.imprint : w.imprint === se);
     const editorialOptions = useMemo(() => {
         const m = new Map<string, string>();
-        options?.works.forEach((w) => { if (w.responsiblePublisherId) m.set(w.responsiblePublisherId, w.responsibleName || w.responsiblePublisherId); });
+        allWorks.forEach((w) => { if (w.responsiblePublisherId) m.set(w.responsiblePublisherId, w.responsibleName || w.responsiblePublisherId); });
         return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-    }, [options]);
-    const titularOptions = useMemo(() => (options?.holders || []).map((h) => [h.publisherId, h.name] as const).sort((a, b) => a[1].localeCompare(b[1])), [options]);
-    const obraOptions = useMemo(() => (options?.works || []).map((w) => [w.contentId, w.title || w.contentId] as const), [options]);
+    }, [allWorks]);
+    const selloOptions = useMemo(() => [...new Set<string>(allWorks.filter((w) => inEditorial(w, filters.editorial) && w.imprint).map((w) => w.imprint as string))]
+        .sort((a, b) => a.localeCompare(b)), [allWorks, filters.editorial]);
+    const obraOptions = useMemo(() => allWorks.filter((w) => inEditorial(w, filters.editorial) && inSello(w, filters.sello))
+        .map((w) => [w.contentId, w.title || w.contentId] as const), [allWorks, filters.editorial, filters.sello]);
+    const titularOptions = useMemo(() => {
+        const scoped = new Set(allWorks.filter((w) => inEditorial(w, filters.editorial) && inSello(w, filters.sello)).flatMap((w) => w.beneficiaries));
+        const narrowed = !!(filters.editorial || filters.sello);
+        return (options?.holders || []).filter((h) => !narrowed || scoped.has(h.publisherId))
+            .map((h) => [h.publisherId, h.name] as const).sort((a, b) => a[1].localeCompare(b[1]));
+    }, [options, allWorks, filters.editorial, filters.sello]);
+    // Al cambiar un nivel, se descartan las selecciones inferiores que ya no pertenecen a él.
+    const changeFilter = (key: keyof typeof NO_FILTERS, value: string) => {
+        const next = { ...filters, [key]: value };
+        if (key === 'editorial') {
+            if (next.sello && next.sello !== NO_IMPRINT && !allWorks.some((w) => inEditorial(w, next.editorial) && w.imprint === next.sello)) next.sello = '';
+        }
+        if (key === 'editorial' || key === 'sello') {
+            if (next.obra && !allWorks.some((w) => w.contentId === next.obra && inEditorial(w, next.editorial) && inSello(w, next.sello))) next.obra = '';
+        }
+        setFilters(next); setOpenWork(null);
+    };
+    const nameOf = (id: string | null) => (id ? (options?.holders.find((h) => h.publisherId === id)?.name ?? editorialOptions.find(([k]) => k === id)?.[1] ?? id) : '—');
 
     const exportUrl = (format: 'csv' | 'html') => (report
         ? dataService.royaltyReportUrl({ ...periodParams, ...filters, format, expectReference: report.reference.value }) : '#');
@@ -127,7 +212,7 @@ const InformesRegalias: React.FC = () => {
     };
 
     const r = report;
-    const workCols = r?.kind === 'month' ? 8 : 6;
+    const workCols = r?.kind === 'month' ? 11 : 9;
     return (
         <div className="animate-in fade-in space-y-6 min-w-0">
             {/* A. Encabezado y filtros */}
@@ -163,24 +248,41 @@ const InformesRegalias: React.FC = () => {
                         </label>
                     )}
                     <label className={fieldLabel}>Editorial
-                        <select value={filters.editorial} onChange={(e) => setFilters({ ...filters, editorial: e.target.value })} className={`${field} max-w-[14rem]`}>
+                        <select value={filters.editorial} onChange={(e) => changeFilter('editorial', e.target.value)} className={`${field} max-w-[14rem]`}>
                             <option value="">Todas</option>
                             {editorialOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
                         </select>
                     </label>
+                    <label className={fieldLabel}>Sello
+                        <select value={filters.sello} onChange={(e) => changeFilter('sello', e.target.value)} disabled={!imprintAvailable}
+                            aria-describedby={imprintAvailable ? undefined : 'inf-sello-nota'} className={`${field} max-w-[14rem] disabled:opacity-60`}>
+                            <option value="">Todos</option>
+                            <option value={NO_IMPRINT}>Sin sello asignado</option>
+                            {selloOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                    </label>
+                    <label className={fieldLabel}>Libro
+                        <select value={filters.obra} onChange={(e) => changeFilter('obra', e.target.value)} className={`${field} max-w-[14rem]`}>
+                            <option value="">Todos</option>
+                            {obraOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
+                        </select>
+                    </label>
                     <label className={fieldLabel}>Titular
-                        <select value={filters.titular} onChange={(e) => setFilters({ ...filters, titular: e.target.value })} className={`${field} max-w-[14rem]`}>
+                        <select value={filters.titular} onChange={(e) => changeFilter('titular', e.target.value)} className={`${field} max-w-[14rem]`}>
                             <option value="">Todos</option>
                             {titularOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
                         </select>
                     </label>
-                    <label className={fieldLabel}>Obra
-                        <select value={filters.obra} onChange={(e) => setFilters({ ...filters, obra: e.target.value })} className={`${field} max-w-[14rem]`}>
-                            <option value="">Todas</option>
-                            {obraOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}
-                        </select>
-                    </label>
+                    {(filters.editorial || filters.sello || filters.obra || filters.titular) && (
+                        <button type="button" onClick={() => { setFilters(NO_FILTERS); setOpenWork(null); }} className="px-3 py-2 text-sm font-bold text-gray-600 dark:text-gray-300 underline">Quitar filtros</button>
+                    )}
                 </div>
+                {options && !imprintAvailable && (
+                    <p id="inf-sello-nota" className="text-xs text-gray-500">El sello no está disponible: este informe sale de cierres congelados, que no guardan el sello, y no se reconstruye con el sello actual.</p>
+                )}
+                {imprintAvailable && (
+                    <p className="text-xs text-gray-500">Sello tomado del catálogo actual (no tiene historial); si la editorial de una obra cambió después del periodo, esa obra figura sin sello.</p>
+                )}
             </section>
 
             {error && (
@@ -206,6 +308,7 @@ const InformesRegalias: React.FC = () => {
                         {r.notExigible && (
                             <p className="p-2 border-2 border-red-600 text-red-700 font-extrabold text-sm rounded">PROVISIONAL — NO EXIGIBLE. No constituye liquidación ni obligación de pago.</p>
                         )}
+                        <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Total del periodo completo{r.source === 'close' || r.source === 'quarter_closes' ? ' (cierre congelado)' : ''}</p>
                         {r.kind === 'month' && (
                             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                                 <Card label="INS" value={r.ins ? cop(r.ins.insCop) : 'Sin INS'} hint={r.ins ? `Soporte: ${r.ins.supportRef}` : 'Registra el INS para simular importes'} />
@@ -228,7 +331,22 @@ const InformesRegalias: React.FC = () => {
                             <p className="p-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-sm font-medium">Trimestre incompleto: faltan cierres de {r.missingMonths.join(', ')}.</p>
                         )}
                         {r.filters && r.visibleTotals && (
-                            <p className="text-sm text-gray-600 dark:text-gray-300">Filtro aplicado: {r.visibleTotals.works} obras y {r.visibleTotals.holders} titulares visibles; cobrable visible {cop(r.visibleTotals.payable)}. Los totales de arriba son del periodo completo.</p>
+                            <div aria-labelledby="inf-subtotal" className="rounded-lg border border-indigo-200 dark:border-indigo-900 bg-indigo-50/60 dark:bg-gray-900/40 p-3 space-y-3">
+                                <div>
+                                    <h4 id="inf-subtotal" className="text-sm font-bold text-indigo-900 dark:text-indigo-200">Subtotal filtrado</h4>
+                                    <p className="text-xs text-gray-600 dark:text-gray-300">Vista sobre el mismo resultado: las cifras de arriba son el total del periodo completo y no cambian. No se redistribuyen bolsas ni se recalcula S; R no se suma.</p>
+                                </div>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
+                                    <Card label="Obras visibles" value={String(r.visibleTotals.works)} hint={`${r.visibleTotals.holders} titulares`} />
+                                    <Card label="Q visible" value={String(r.visibleTotals.Q)} hint="Sesiones cualificadas" />
+                                    <Card label="MontoObra visible" value={cop(r.visibleTotals.montoObra)} />
+                                    <Card label={r.filters.titular ? 'Cobrable del titular en estas obras' : 'Cobrable por obras'} value={cop(r.visibleTotals.worksPayable)} hint="Variable; sin Base de presencia" />
+                                    <Card label={r.filters.titular ? 'Retenido del titular en estas obras' : 'Retenido por obras'} value={cop(r.visibleTotals.worksRetained)} />
+                                    {r.filters.titular
+                                        ? <Card label="Saldo total del titular" value={cop(r.visibleTotals.payable)} hint={`Incluye Base y movimientos · retenido ${cop(r.visibleTotals.retained)}`} />
+                                        : <Card label="Pendiente por obras" value={cop(r.visibleTotals.worksPending)} hint="D1 + D4, no cobrable" />}
+                                </div>
+                            </div>
                         )}
                         <dl aria-label="Datos técnicos del informe" className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-1 text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-900/40 rounded-lg p-3">
                             <div className="flex gap-2 min-w-0 lg:col-span-2"><dt className="font-bold shrink-0">Referencia</dt><dd className="font-mono break-all" title={r.reference.value}>{r.reference.kind}: {r.reference.value}</dd></div>
@@ -249,21 +367,43 @@ const InformesRegalias: React.FC = () => {
                                 <p className="text-xs text-gray-500 mt-1">Sin INS registrado: los importes se calculan al registrar el INS del mes.</p>
                             )}
                         </div>
-                        <div className="overflow-x-auto mt-2">
+                        <div className="overflow-x-auto relative mt-2">
                             <table className="min-w-full">
                                 <thead className="bg-gray-50 dark:bg-gray-700"><tr>
-                                    <th className={th}>Obra</th><th className={th}>Editorial</th><th className={thn}>Q</th>
+                                    <th className={th}>Obra</th><th className={th}>Editorial</th><th className={th}>Sello</th><th className={thn}>Q</th>
                                     {r.kind === 'month' && <><th className={thn}>R</th><th className={thn}>S</th></>}
-                                    <th className={thn}>MontoObra</th><th className={thn}>Retenido</th><th className={thn}>Pendiente</th>
+                                    <th className={thn}>MontoObra</th><th className={thn}>Cobrable</th><th className={thn}>Retenido</th><th className={thn}>Pendiente</th>
+                                    <th className={th}><span className="sr-only">Detalle</span></th>
                                 </tr></thead>
                                 <tbody>
-                                    {r.works.map((w) => (
-                                        <tr key={w.contentId} className="border-t border-gray-100 dark:border-gray-700">
-                                            <td className={`${td} min-w-[10rem]`}>{w.title || w.contentId}</td><td className={td}>{w.responsibleName || '—'}</td><td className={tdn}>{w.Q}</td>
-                                            {r.kind === 'month' && <><td className={tdn}>{dec(w.R)}</td><td className={tdn}>{dec(w.S)}</td></>}
-                                            <td className={tdn}>{cop(w.montoObra)}</td><td className={tdn}>{cop(w.retained)}</td><td className={tdn}>{cop(w.pendingDecision)}</td>
-                                        </tr>
-                                    ))}
+                                    {r.works.map((w) => {
+                                        const open = openWork === w.contentId;
+                                        return (
+                                            <React.Fragment key={w.contentId}>
+                                                <tr className="border-t border-gray-100 dark:border-gray-700">
+                                                    <td className={`${td} min-w-[10rem]`}>{w.title || w.contentId}</td><td className={td}>{w.responsibleName || '—'}</td>
+                                                    <td className={`${td} ${w.imprint ? '' : 'text-gray-500'}`} title={w.imprint ? undefined : IMPRINT_STATUS[w.imprintStatus || 'unknown']}>
+                                                        {w.imprint || (w.imprintStatus === 'none' ? 'Sin sello' : '—')}
+                                                    </td>
+                                                    <td className={tdn}>{w.Q}</td>
+                                                    {r.kind === 'month' && <><td className={tdn}>{dec(w.R)}</td><td className={tdn}>{dec(w.S)}</td></>}
+                                                    <td className={tdn}>{cop(w.montoObra)}</td><td className={tdn}>{cop(w.amounts?.payable)}</td>
+                                                    <td className={tdn}>{cop(w.amounts?.retained)}</td><td className={tdn}>{cop(w.amounts?.pending)}</td>
+                                                    <td className={td}>
+                                                        <button type="button" aria-expanded={open} aria-controls={`inf-det-${w.contentId}`} onClick={() => setOpenWork(open ? null : w.contentId)}
+                                                            className="flex items-center text-xs font-bold text-indigo-700 dark:text-indigo-300 whitespace-nowrap">
+                                                            {open ? <ChevronDown size={14} className="mr-1" /> : <ChevronRight size={14} className="mr-1" />} Detalle
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                                {open && (
+                                                    <tr id={`inf-det-${w.contentId}`} className="bg-gray-50 dark:bg-gray-900/40">
+                                                        <td colSpan={workCols} className="px-4 py-3"><div className="sticky left-4 max-w-[calc(100vw-4rem)] md:max-w-none"><WorkDetail w={w} kind={r.kind} nameOf={nameOf} /></div></td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        );
+                                    })}
                                     {!r.works.length && (
                                         <tr><td className={`${td} text-gray-500`} colSpan={workCols}>
                                             {r.filters ? 'Ninguna obra coincide con los filtros aplicados.'
@@ -280,11 +420,13 @@ const InformesRegalias: React.FC = () => {
                     {r.holders.length > 0 && (
                         <section aria-labelledby="inf-titulares" className={panel}>
                             <h3 id="inf-titulares" className={`${h3} px-4 pt-4`}>Titulares y editoriales</h3>
-                            <div className="overflow-x-auto mt-2">
+                            {r.filters && <p className="px-4 text-xs text-gray-500">Las columnas de saldo son del titular en todo el periodo (Base, todas sus obras y movimientos); «En obras visibles» es solo su variable cobrable en la selección.</p>}
+                            <div className="overflow-x-auto relative mt-2">
                                 <table className="min-w-full">
                                     <thead className="bg-gray-50 dark:bg-gray-700"><tr>
                                         <th className={th}>Titular</th><th className={thn}>Base</th><th className={thn}>Variable</th><th className={thn}>Liquidado</th>
                                         <th className={thn}>Ajustes y recibidos</th><th className={thn}>Pagado</th><th className={thn}>Retenido</th><th className={thn}>Saldo cobrable</th>
+                                        {r.filters && <th className={thn}>En obras visibles</th>}
                                     </tr></thead>
                                     <tbody>
                                         {r.holders.map((h) => (
@@ -293,6 +435,7 @@ const InformesRegalias: React.FC = () => {
                                                 <td className={tdn}>{cop(h.base ?? h.settledBase)}</td><td className={tdn}>{cop(h.variable ?? h.settledVariable)}</td><td className={tdn}>{cop(h.settledTotal)}</td>
                                                 <td className={tdn}>{cop(h.adjustments + h.carriedIn - h.transferredOut)}</td><td className={tdn}>{cop(h.paid)}</td>
                                                 <td className={tdn}>{cop(h.retained)}</td><td className={`${tdn} font-bold`}>{cop(h.payable)}</td>
+                                                {r.filters && <td className={tdn} title="Variable cobrable de este titular en las obras visibles">{h.visibleWorks ? cop(h.visibleWorks.payable) : '—'}</td>}
                                             </tr>
                                         ))}
                                     </tbody>
@@ -304,7 +447,7 @@ const InformesRegalias: React.FC = () => {
                     {r.movements.length > 0 && (
                         <section aria-labelledby="inf-mov" className={panel}>
                             <h3 id="inf-mov" className={`${h3} px-4 pt-4`}>Movimientos</h3>
-                            <div className="overflow-x-auto mt-2">
+                            <div className="overflow-x-auto relative mt-2">
                                 <table className="min-w-full">
                                     <thead className="bg-gray-50 dark:bg-gray-700"><tr>
                                         <th className={th}>Periodo</th><th className={th}>Tipo</th><th className={th}>Titular</th><th className={thn}>Importe</th><th className={th}>Motivo</th><th className={th}>Fecha</th>

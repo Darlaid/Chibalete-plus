@@ -14,6 +14,8 @@
  *   [8] cambios posteriores de derechos: el informe del cierre no cambia
  *   [9] trimestre incompleto y completo desde cierres congelados
  *   [10] sin datos de lectores y sin escrituras en las consultas
+ *   REPORTES-FILTROS-01: [5b] sello, filtros combinados, desglose por obra y subtotales sin doble conteo;
+ *       [7b] el cierre no reconstruye el sello; [9b] trimestre: desglose acumulado y referencia intacta
  */
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
@@ -56,7 +58,9 @@ const rights = await import('../rightsStore.mjs');
 const EXT = store.createPublisher({ kind: 'editorial', legalName: 'Externa FX', tradeName: 'Externa' });
 const AUT = store.createPublisher({ kind: 'tercero', legalName: 'Autora FX', tradeName: 'Autora' });
 // Títulos hostiles: inyección de fórmulas (CSV) y marcado (HTML).
-const CONTENT = [mk('c1', '=HYPERLINK("http://x.test","clic")'), mk('c2', '<script>alert(1)</script> Dos', EXT.id), mk('c3', 'Obra en disputa', EXT.id), mk('c4', 'Sin lecturas')];
+// Sellos (F1-C): c1 «Sello A» de PUB, c2 «Sello Ext» de Externa; c3 y c4 sin sello.
+const CONTENT = [{ ...mk('c1', '=HYPERLINK("http://x.test","clic")'), imprint: 'Sello A' }, { ...mk('c2', '<script>alert(1)</script> Dos', EXT.id), imprint: 'Sello Ext' },
+    mk('c3', 'Obra en disputa', EXT.id), mk('c4', 'Sin lecturas')];
 fs.writeFileSync(P.content, JSON.stringify(CONTENT, null, 2));
 fs.writeFileSync(P.access, '[]');
 for (const f of ['groups', 'schools']) fs.writeFileSync(path.join(tmp, `${f}.json`), '[]');
@@ -222,6 +226,62 @@ try {
     ok('filtro por obra: c1 y sus beneficiarios', fo.works.length === 1 && fo.holders.map((h) => h.publisherId).sort().join() === [AUT.id, PUB].sort().join());
     texts.push(csv.text, html.text);
 
+    console.log('\n[5b] REPORTES-FILTROS-01: sello, filtros combinados y subtotales');
+    const W = (rep, id) => rep.works.find((w) => w.contentId === id);
+    ok('sello en simulación desde el catálogo actual (c1 Sello A, c2 Sello Ext, c3/c4 sin sello)', sim.dimensions?.imprint === 'current_catalog'
+        && W(sim, 'c1').imprint === 'Sello A' && W(sim, 'c2').imprint === 'Sello Ext' && !W(sim, 'c3').imprint && W(sim, 'c3').imprintStatus === 'none');
+    ok('cada obra: cobrable + retenido + pendiente = MontoObra', sim.works.every((w) => w.amounts && w.amounts.payable + w.amounts.retained + w.amounts.pending === w.montoObra),
+        JSON.stringify(sim.works.map((w) => [w.contentId, w.montoObra, w.amounts])));
+    ok('Σ MontoObra de las obras = BLC efectiva', sum(sim.works.map((w) => w.montoObra)) === sim.pools.blcEffective);
+    ok('Σ pendiente por obras = D1 + D4 del periodo', sum(sim.works.map((w) => w.amounts.pending)) === sim.totals.pending.versionSplit + sim.totals.pending.alphaComplement);
+    for (const h of sim.holders) {
+        const byW = sum(sim.works.flatMap((w) => w.amounts.byHolder.filter((x) => x.publisherId === h.publisherId).map((x) => x.payable)));
+        ok(`sin doble conteo: Σ por obra de ${h.name} = su variable (${h.variable})`, byW === h.variable, String(byW));
+    }
+    ok('c3 en disputa: todo retenido, nada cobrable', W(sim, 'c3').amounts.retained === W(sim, 'c3').montoObra && W(sim, 'c3').amounts.payable === 0);
+    ok('elegibilidad económica por obra (episodios cualificados/total)', W(sim, 'c1').eligibility.episodes.qualified === 2 && W(sim, 'c1').eligibility.rightsRegime === true
+        && W(sim, 'c2').eligibility.flags.includes('rights_version_changed_in_period'));
+    const fs1 = (await call(R('month=2025-11&sello=Sello%20A'), 'ADM')).body;
+    ok('sello A → solo c1; total del periodo intacto; misma referencia', fs1.works.map((w) => w.contentId).join() === 'c1' && fs1.totals.payable === sim.totals.payable
+        && fs1.reference.value === sim.reference.value && fs1.filters.sello === 'Sello A');
+    const fsn = (await call(R('month=2025-11&sello=__sin_sello__'), 'ADM')).body;
+    ok('«Sin sello asignado» → c3 y c4', fsn.works.map((w) => w.contentId).join() === 'c3,c4');
+    const fes = (await call(R(`month=2025-11&editorial=${EXT.id}&sello=__sin_sello__`), 'ADM')).body;
+    ok('editorial Externa + sin sello → c3', fes.works.map((w) => w.contentId).join() === 'c3');
+    const ext = (await call(R(`month=2025-11&editorial=${EXT.id}`), 'ADM')).body;
+    const c2 = W(sim, 'c2'), c3s = W(sim, 'c3');
+    ok('subtotal editorial = Σ de sus obras (MontoObra, cobrable, retenido, pendiente)', ext.visibleTotals.montoObra === c2.montoObra + c3s.montoObra
+        && ext.visibleTotals.worksPayable === c2.amounts.payable + c3s.amounts.payable && ext.visibleTotals.worksRetained === c2.amounts.retained + c3s.amounts.retained
+        && ext.visibleTotals.worksPending === c2.amounts.pending + c3s.amounts.pending);
+    ok('subtotal editorial no imputa saldos completos de titulares (Base y obras ajenas)', ext.visibleTotals.payable === null
+        && ext.holders.find((h) => h.publisherId === AUT.id).visibleWorks.payable < aut.payable);
+    ok('Q visible = Σ Q (R y S no se suman)', ext.visibleTotals.Q === c2.Q + c3s.Q && !('R' in ext.visibleTotals) && !('S' in ext.visibleTotals));
+    const ft = (await call(R(`month=2025-11&titular=${AUT.id}`), 'ADM')).body;
+    ok('titular compartido: su variable en todas sus obras = su variable del periodo', ft.visibleTotals.worksPayable === aut.variable && ft.visibleTotals.payable === aut.payable);
+    const fpt = (await call(R(`month=2025-11&editorial=${PUB}&titular=${AUT.id}`), 'ADM')).body;
+    const autC1 = W(sim, 'c1').amounts.byHolder.find((h) => h.publisherId === AUT.id).payable;
+    ok('editorial PUB + titular compartido → solo su parte en c1 (sin la de c2)', fpt.works.map((w) => w.contentId).join() === 'c1'
+        && fpt.visibleTotals.worksPayable === autC1 && autC1 < aut.variable);
+    const fo1 = (await call(R(`month=2025-11&obra=c2&titular=${AUT.id}`), 'ADM')).body;
+    ok('libro + titular combinados', fo1.works.length === 1 && fo1.visibleTotals.worksPayable === aut.variable - autC1);
+    const ecsv = await call(R(`month=2025-11&editorial=${EXT.id}&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    const ehtml = await call(R(`month=2025-11&editorial=${EXT.id}&format=html&expectReference=${sim.reference.value}`), 'ADM');
+    ok('CSV filtrado = API: filtros, subtotales por obra y total del periodo aparte', ecsv.text.includes(`editorial=${EXT.id}; sello=-; titular=-; obra=-`)
+        && ecsv.text.includes(`"Subtotal visible: MontoObra (COP)";${ext.visibleTotals.montoObra}\r\n`)
+        && ecsv.text.includes(`"Subtotal visible: cobrable por obras (COP)";${ext.visibleTotals.worksPayable}\r\n`)
+        && ecsv.text.includes(`"Subtotal visible: pendiente por obras (COP)";${ext.visibleTotals.worksPending}\r\n`)
+        && ecsv.text.includes(`"Cobrable (COP)";${sim.totals.payable}\r\n`) && ecsv.text.includes('"Ámbito de los totales";"Periodo completo (sin filtrar)"'));
+    ok('CSV: fila de la obra con sello y desglose', ecsv.text.split('\r\n').some((l) => l.startsWith('"c2";') && l.includes('"Sello Ext"')
+        && l.includes(`;${c2.amounts.payable};${c2.amounts.retained};${c2.amounts.pending};`)));
+    ok('HTML filtrado = API: subtotal por obras y reparto por titular', ehtml.text.includes(`cobrable ${Number(ext.visibleTotals.worksPayable).toLocaleString('es-CO')} COP`)
+        && ehtml.text.includes('Reparto de la variable por obra y titular') && ehtml.text.includes('NO EXIGIBLE') && !/<script/i.test(ehtml.text));
+    const scsv = await call(R(`month=2025-11&sello=__sin_sello__&format=csv&expectReference=${sim.reference.value}`), 'ADM');
+    ok('CSV con «sin sello»: filtro legible y celdas neutralizadas', scsv.text.includes('sello=sin sello asignado')
+        && scsv.text.split(/\r\n/).flatMap((l) => l.split(';')).every((c) => !/^"?[=+@]/.test(c) && !/^"-/.test(c)));
+    ok('filtros: mediación y lectura siguen sin acceso (403)', (await call(R(`month=2025-11&sello=Sello%20A&editorial=${PUB}`), 'MED')).status === 403
+        && (await call(R(`month=2025-11&titular=${AUT.id}`), 'LEC')).status === 403);
+    texts.push(JSON.stringify(ext), ecsv.text, ehtml.text);
+
     console.log('\n[6] INS cero');
     await call('/api/admin/royalties/period-inputs', 'ADM', { period: '2025-12', grossCop: 0, deductionsCop: 0, supportRef: 'SIN-RECAUDO-FX-DIC' });
     const dec = (await call(R('month=2025-12'), 'ADM')).body;
@@ -238,6 +298,12 @@ try {
     ok('el informe pasa a TÉCNICO desde el cierre, con la misma referencia y cifras', closed.status === 'TECHNICAL' && closed.source === 'close' && closed.notExigible
         && closed.reference.value === sim.reference.value && closed.totals.payable === sim.totals.payable);
     ok('lista de cierres', (await call('/api/admin/royalties/closes', 'ADM')).body.map((c) => c.period).join() === '2025-11');
+    // [7b] el cierre no congela el sello: no se reconstruye con el actual.
+    ok('cierre: sello no reconstruible (dimensión unavailable, obras sin sello aunque el catálogo lo tenga)', closed.dimensions.imprint === 'unavailable'
+        && closed.works.every((w) => w.imprint === null && w.imprintStatus === 'not_historical'));
+    const cs = await call(R('month=2025-11&sello=Sello%20A'), 'ADM');
+    ok('cierre: filtrar por sello → 400 imprint_not_historical', cs.status === 400 && cs.body?.code === 'imprint_not_historical');
+    ok('cierre: desglose por obra idéntico al de la simulación', JSON.stringify(closed.works.map((w) => w.amounts)) === JSON.stringify(sim.works.map((w) => w.amounts)));
 
     // CLOSE-GUARD-01: el mes en curso (reloj real del servidor, America/Bogota) no se cierra; se consulta y simula.
     const cur = new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 7);
@@ -274,6 +340,22 @@ try {
     const qcsv = await call(R(`quarter=2025-Q4&format=csv&expectReference=${q.reference.value}`), 'ADM');
     ok('CSV trimestral del mismo resultado', qcsv.status === 200 && qcsv.text.includes(q.reference.value) && qcsv.text.includes('"Meses faltantes";"ninguno"'));
     texts.push(JSON.stringify(q), qcsv.text);
+    // [9b] desglose acumulado = Σ de los cierres; la referencia sigue siendo el hash del cuerpo previo a REPORTES-FILTROS-01.
+    const { canonicalJson } = await import('../closesStore.mjs');
+    const { reference: qRef, filters: _f, visibleTotals: _v, dimensions: _d, ...qBody } = q; // capas de presentación añadidas tras el hash
+    const strip = ({ amounts, imprint, imprintStatus, eligibility, ...w }) => w;
+    ok('trimestre: referencia = sha256 del cuerpo sin los campos nuevos', crypto.createHash('sha256').update(canonicalJson({ ...qBody, works: qBody.works.map(strip) })).digest('hex') === qRef.value);
+    const months = await Promise.all(['2025-10', '2025-11', '2025-12'].map(async (m) => (await call(R(`month=${m}`), 'ADM')).body));
+    ok('trimestre: cobrable por obra = Σ de los cierres mensuales', q.works.every((w) => w.amounts.payable === sum(months.map((m) => m.works.find((x) => x.contentId === w.contentId)?.amounts?.payable || 0))));
+    ok('trimestre: cada obra cuadra con su MontoObra acumulado', q.works.every((w) => w.amounts.payable + w.amounts.retained + w.amounts.pending === w.montoObra));
+    const qs = await call(R('quarter=2025-Q4&sello=__sin_sello__'), 'ADM');
+    ok('trimestre: sello no reconstruible → 400', qs.status === 400 && qs.body?.code === 'imprint_not_historical');
+    const qe = (await call(R(`quarter=2025-Q4&editorial=${EXT.id}`), 'ADM')).body;
+    ok('trimestre filtrado: subtotal por obras y total intacto', qe.visibleTotals.montoObra === sum(qe.works.map((w) => w.montoObra)) && qe.totals.payable === q.totals.payable
+        && qe.reference.value === q.reference.value);
+    const qecsv = await call(R(`quarter=2025-Q4&editorial=${EXT.id}&format=csv&expectReference=${q.reference.value}`), 'ADM');
+    ok('CSV trimestral filtrado: sello no reconstruible y reparto por titular', qecsv.text.includes('No reconstruible: el cierre no congela el sello')
+        && qecsv.text.includes('"Obra";"Titular";"Nombre";"Cobrable acumulado (COP)";"Retenido acumulado (COP)"'));
 
     console.log('\n[10] privacidad y no escrituras');
     ok('sin identificadores, nombres ni correos de lectores en JSON, CSV ni HTML', texts.every((t) => !/"(LEC|LEC2)"|Lectora|lec@fx|userId|sessionId|S0000/.test(t)));
