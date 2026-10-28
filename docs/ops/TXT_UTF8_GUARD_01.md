@@ -1,6 +1,6 @@
 # TXT-UTF8-GUARD-01 · Validación de codificación en archivos TXT
 
-**Estado:** ver §G · **Fecha:** 2026-10-27 · **Baseline:** `2d0a947` · **Antecedentes:** `IMMERSIVE_UTF8_01/02/03.md`
+**Estado:** YELLOW (CI 9/10: `content-rmw` sin reproducirse en Linux; pendiente de re-ejecutar el job) · **Fecha:** 2026-10-27 · **Baseline:** `2d0a947` · **Antecedentes:** `IMMERSIVE_UTF8_01/02/03.md`
 Sin migraciones, regeneraciones TTS, reimportaciones, limpiezas ni despliegue. No se tocó ningún archivo de libros ni ningún dato.
 
 ## A. Baseline
@@ -81,7 +81,10 @@ Sin migraciones, regeneraciones TTS, reimportaciones, limpiezas ni despliegue. N
   - **EPUB, imágenes y la importación TXT/EPUB sin regresión**.
 - `test:content-rmw` completo rc = 0; `test:royalties` rc = 0; `typecheck:baseline` sin regresiones.
 - **Libros existentes:** el barrido de IMMERSIVE-UTF8-01 encontró 0 de 61 TXT del catálogo con UTF-8 inválido, así que ninguno queda bloqueado por la nueva regla.
-- CI: ver §F.
+- **CI en `89d8015`: 9/10.** `content-rmw` falló en el paso «Gate — pérdida de escrituras entre réplicas» (= `npm run test:content-rmw`). Sin sesión de GitHub no se puede leer el log. Diagnóstico:
+  - **reproducción exacta en Linux** (`git archive 89d8015`, Node 20, con las devDependencies de `npm ci`, sin red): **`test:content-rmw` completo rc = 0, 28 de 28 suites**, incluidas `txtUtf8Guard` 26/0 y `canonicalBookEpubIngestion` 96/0;
+  - **precedente:** este mismo gate falló de forma intermitente en F1-A y en F2-B (el usuario lo re-ejecutó y salió verde sin cambios), y `identity-preflight` siguió el mismo patrón en U4;
+  - pendiente: **re-ejecutar el job** (run `40607925033`, «Re-run failed jobs»), lo que requiere la sesión de Dirección.
 
 ## E. Riesgos residuales
 
@@ -93,8 +96,9 @@ Sin migraciones, regeneraciones TTS, reimportaciones, limpiezas ni despliegue. N
 
 ## F. Commits
 
-Ver §G.
+- `89d8015`: validador, protección TTS, pruebas e informe.
+- Este commit: registro de CI.
 
 ## G. Veredicto
 
-Pendiente de CI al escribir este informe.
+**YELLOW.** Implementado y validado en local y en Linux (suite completa en verde); CI 9/10 por `content-rmw`, sin reproducirse. Pasa a **GREEN_LOCAL+CI** si la re-ejecución sale en verde. Sin despliegue.
