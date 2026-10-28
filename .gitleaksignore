@@ -78,3 +78,28 @@ f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:verify_pipeline.cjs:chibalete-admin-sec
 # Su tratamiento corresponde a una unidad independiente de Studio Editor BI.
 f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:studio-editor-bi/assets/index-CqLdlylq.js:gcp-api-key:1120
 f7f0c5c98ea7531a4e9ecd7d91f0ca3015b975e7:studio-editor-bi/assets/index-CqLdlylq.js:chibalete-gemini-key:1120
+#
+# ── CI-GITLEAKS-INVENTORY-01 (2026-10-28) ──────────────────────────────────────
+# Seis hallazgos `generic-api-key` en el inventario de imágenes Docker de
+# VPS-STORAGE-05 (docs/ops/vps_storage_05/inventario.tsv, commit 78bcdc0).
+# Analizados uno por uno: el valor señalado es, en las seis líneas, una etiqueta
+# de imagen Docker del repositorio chibalete/api (columna 5: nombre de release +
+# sha corto de commit), junto a su ImageID corto, fecha y tamaño. La regla salta
+# porque la etiqueta sigue a la palabra clave «api» y tiene entropía de ~3,6.
+# No es una clave, un token ni una credencial: las diez etiquetas de este tipo
+# del lote coinciden con el inventario y las seis líneas no contienen nada más.
+# Se ignoran SOLO estos fingerprints exactos (árbol de trabajo para
+# gitleaks-head; commit 78bcdc0 para gitleaks-history). Cualquier otra línea,
+# archivo o commit con el mismo patrón sigue disparando.
+docs/ops/vps_storage_05/inventario.tsv:generic-api-key:36
+docs/ops/vps_storage_05/inventario.tsv:generic-api-key:37
+docs/ops/vps_storage_05/inventario.tsv:generic-api-key:39
+docs/ops/vps_storage_05/inventario.tsv:generic-api-key:46
+docs/ops/vps_storage_05/inventario.tsv:generic-api-key:47
+docs/ops/vps_storage_05/inventario.tsv:generic-api-key:64
+78bcdc0219b77c093edc285819235bf5a6ee012a:docs/ops/vps_storage_05/inventario.tsv:generic-api-key:36
+78bcdc0219b77c093edc285819235bf5a6ee012a:docs/ops/vps_storage_05/inventario.tsv:generic-api-key:37
+78bcdc0219b77c093edc285819235bf5a6ee012a:docs/ops/vps_storage_05/inventario.tsv:generic-api-key:39
+78bcdc0219b77c093edc285819235bf5a6ee012a:docs/ops/vps_storage_05/inventario.tsv:generic-api-key:46
+78bcdc0219b77c093edc285819235bf5a6ee012a:docs/ops/vps_storage_05/inventario.tsv:generic-api-key:47
+78bcdc0219b77c093edc285819235bf5a6ee012a:docs/ops/vps_storage_05/inventario.tsv:generic-api-key:64
