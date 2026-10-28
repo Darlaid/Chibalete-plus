@@ -31,7 +31,7 @@ Por imagen (`lote.sh`): re-verificación remota (`recheck.py`: todas sus etiquet
 | 4 | api `editoriales-beb11e4` (`2bb58b4be9f5`) | 2 (+`rollback-pre-f1c`) | ver `lote4.log` | +628 MiB |
 | 4 | api `catalogos-b3dd8a9` (`f8812c438bab`) | 2 (+`rollback-pre-dep01`, rollback N-2, no vigente) | ver `lote4.log` | +628 MiB |
 
-Las etiquetas `rollback-pre-*` retiradas pertenecen a procedimientos de despliegues superados; el rollback vigente (`rollback-pre-edinf01`) no se tocó. Registros completos (incluidos sha256 de cada tarball descargado y comprobado): `scratchpad/storage04/lote{1..4}.log` y `re_*.json` por imagen; en el VPS `/root/chp-vps-storage-04/`.
+Las etiquetas `rollback-pre-*` retiradas pertenecen a procedimientos de despliegues superados; el rollback vigente (`rollback-pre-edinf01`) no se tocó. Registros completos (incluidos sha256 de cada tarball descargado y comprobado): `docs/ops/vps_storage_04/lote{1..4}.log`; en el VPS `/root/chp-vps-storage-04/`.
 
 ## C. Verificaciones de restauración
 16/16 tarballs: íntegros (blobs = nombre, `diff_ids` = sha256 de capa descomprimida), descargados con el mismo sha256, cargados en un daemon `docker:dind` aislado y vacío (creado y eliminado por lote) y con **13/13 capas y `created` idénticos** a la imagen del VPS. Restaurar cualquiera: `docker load -i <tarball>`.
@@ -63,7 +63,7 @@ Las etiquetas `rollback-pre-*` retiradas pertenecen a procedimientos de desplieg
 - La caché BuildKit no se podó (prohibido en esta unidad).
 
 ## H. Evidencia
-Este documento; scripts `recheck.py`, `select.py` (VPS `/root/chp-vps-storage-04/`) y `lote.sh`, `postcheck.sh` (scratchpad de la sesión); logs `lote1..4.log`.
+Este documento; scripts `recheck.py`, `select.py` (VPS `/root/chp-vps-storage-04/`) y `lote.sh`, `postcheck.sh` (scratchpad de la sesión); logs en `docs/ops/vps_storage_04/`.
 
 ## I. Veredicto
 **GREEN** en seguridad y procedimiento (16/16 retiradas recuperables y probadas, 0 incidencias, +8,92 GiB) — **sin alcanzar el umbral del 15 % (14,8 %)**: candidatas api agotadas. STOP.
