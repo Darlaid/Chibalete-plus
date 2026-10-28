@@ -48,7 +48,7 @@ Sin `-f`; por etiqueta inequívoca. Los 4 tarballs se conservan con el mismo sha
 ## G. Conservado y riesgos
 - Conservadas: 124 imágenes (todas las demás), los 40 tarballs, restauraciones, logs y caché.
 - Restaurar una imagen del lote: `docker load -i <tarball>` (probado en daemon aislado).
-- Riesgo residual: disco al 94 %. Cada api histórica con tarball libera ≈ 659 MiB; quedan **34 imágenes con tarball** no activas ni de rollback vigente (≈ 16 api + 18 front, ≈ 10,5 GB estimados). La caché seguirá en Private 0 B mientras haya imágenes que compartan sus capas.
+- Riesgo residual: disco al 94 %. Cada api histórica con tarball libera ≈ 659 MiB; quedan **32 imágenes con tarball** no activas ni de rollback vigente (16 api + 16 front, ≈ 10,6 GB estimados: 16 × 659 MiB + 16 × 5 MiB). La caché seguirá en Private 0 B mientras haya imágenes que compartan sus capas.
 
 ## H. Evidencia
 Este documento; en el VPS `/root/chp-vps-storage-03/` (`img_inventory.jsonl`, `tarcheck.py`, `tarcheck_lote1.jsonl`, `images_lote1.txt`, `avail_pre.txt`, `snapshot-post-lote1.json`).
