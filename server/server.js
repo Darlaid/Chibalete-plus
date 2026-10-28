@@ -249,6 +249,7 @@ console.log(`[BOOT] UPLOADS_AUTHZ_MODE=${UPLOADS_AUTHZ_STRICT ? 'strict' : 'lega
 app.set('trust proxy', 1);
 
 import { generateAudioForContent } from './ttsService.js';
+import { inspectTextFile, TEXT_UPLOAD_MESSAGES } from './lib/textEncoding.js';
 import { createTtsProgressWriter } from './ttsProgressWriter.js';
 import { computeContentFingerprint, nextContentTextVersion, readUploadTextForFingerprint } from './contentFingerprint.js';
 import { uploadOwnerOfRel, uploadOwnerOfUrl, uploadDedupKey, uploadReferencesExcept, externalReferrersUnder } from './uploadOwnership.js';
@@ -1418,19 +1419,14 @@ app.get('/api/access/by-user/:userId', requireAuth, async (req, res) => {
 });
 
 // --- ROBUST UPLOAD HELPERS ---
+// TXT-UTF8-GUARD-01: todo el archivo, UTF-8 estricto (sin conversión ni U+FFFD),
+// sin bytes nulos y no vacío. Devuelve { ok } o { ok:false, code } (server/lib/textEncoding.js).
 const isTextFileSafe = (filePath) => {
     try {
-        const buffer = Buffer.alloc(4096);
-        const fd = fs.openSync(filePath, 'r');
-        const bytesRead = fs.readSync(fd, buffer, 0, 4096, 0);
-        fs.closeSync(fd);
-        for (let i = 0; i < bytesRead; i++) {
-            if (buffer[i] === 0x00) return false;
-        }
-        return true;
+        return inspectTextFile(filePath);
     } catch (e) {
         log(`Error leyendo validación TXT: ${e.message}`, 'ERROR');
-        return false;
+        return { ok: false, code: 'TXT_BINARY' };
     }
 };
 
@@ -3903,9 +3899,16 @@ app.post('/api/upload', (req, res) => {
                 }
                 isValid = epubCheck.ok;
             } else if (expectedCategory === 'text') {
-                // TXT validation: Usually file-type returns undefined for pure txt
-                // But we must check for null bytes to prevent binary spoofing
-                isValid = isTextFileSafe(tempPath);
+                // TXT: file-type no reconoce texto plano. Bytes nulos (binario disfrazado)
+                // y, desde TXT-UTF8-GUARD-01, UTF-8 estricto: un TXT en Windows-1252 se
+                // rechaza aquí, antes de persistirlo y antes de cualquier TTS.
+                const txtCheck = isTextFileSafe(tempPath);
+                if (!txtCheck.ok && txtCheck.code !== 'TXT_BINARY') {
+                    safeUnlink(tempPath);
+                    log(`[UPLOAD_FAIL] actor=${actorId} reason=${txtCheck.code} file=${req.file.originalname} offset=${txtCheck.offset ?? '-'}`, 'WARN');
+                    return res.status(415).json({ error: TEXT_UPLOAD_MESSAGES[txtCheck.code], code: txtCheck.code });
+                }
+                isValid = txtCheck.ok;
             } else if (expectedCategory !== 'unknown') {
                 // For PDF, Video, Audio, Image we MUST match strictly the mime category
                 isValid = matchesExpectedCategory(expectedCategory, fileTypeInfo);
@@ -9887,8 +9890,14 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
         const ingestRawExt = path.extname(req.file.originalname).toLowerCase().replace('.', '');
         const ingestCategory = getExpectedCategoryFromExtension(ingestRawExt);
         const ingestIsText = ingestCategory === 'text';
+        const ingestTxtCheck = ingestIsText ? isTextFileSafe(req.file.path) : null;
+        if (ingestTxtCheck && !ingestTxtCheck.ok && ingestTxtCheck.code !== 'TXT_BINARY') {
+            safeUnlink(req.file.path);
+            log(`Leo ingest: TXT rechazado (${ingestTxtCheck.code}) — ${req.file.originalname}`, 'WARN');
+            return res.status(415).json({ error: TEXT_UPLOAD_MESSAGES[ingestTxtCheck.code], code: ingestTxtCheck.code });
+        }
         const ingestIsValid = ingestIsText
-            ? isTextFileSafe(req.file.path)
+            ? ingestTxtCheck.ok
             : (ingestCategory !== 'unknown' && matchesExpectedCategory(ingestCategory, ingestFileTypeInfo));
         if (!ingestIsValid) {
             safeUnlink(req.file.path);

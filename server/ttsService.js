@@ -2,6 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 import { runHybridTask, AI_CONFIG, generateHash } from './aiEngine.js';
+import { readUtf8Strict } from './lib/textEncoding.js';
 
 // DEV/MOCK mode via env (real | mock)
 const AI_MODE = process.env.AI_MODE || 'real';
@@ -152,7 +153,9 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
         if (!fs.existsSync(textFilePath)) {
             throw new Error(`Text file not found: ${textFilePath}`);
         }
-        const textContent = fs.readFileSync(textFilePath, 'utf8');
+        // TXT-UTF8-GUARD-01: UTF-8 estricto. readFileSync(…, 'utf8') convertía en
+        // silencio cada byte inválido en U+FFFD y la sincronización salía con «�».
+        const textContent = readUtf8Strict(textFilePath);
         let chunks = chunkText(textContent);
 
         log(`Starting generation for ${contentId}. Total chunks: ${chunks.length}`);
@@ -379,7 +382,9 @@ export const generateAudioForContent = async (contentId, textFilePath, uploadDir
             onProgress({
                 percentage: 0,
                 currentSentence: 0,
-                totalSentences: chunks ? chunks.length : 0,
+                // `chunks` vive dentro del try: aquí no existe. Referenciarlo lanzaba
+                // ReferenceError, onProgress nunca recibía el error y la obra quedaba en «generando».
+                totalSentences: 0,
                 status: 'error_proveedor',
                 error: error.message,
                 lastUpdated: new Date().toISOString()

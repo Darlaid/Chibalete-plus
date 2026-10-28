@@ -274,6 +274,22 @@ try {
     ok('TXT sigue aceptado igual', u.status === 200 && u.body.url.endsWith('.txt'));
     u = await uploadFile('texto.txt', Buffer.from([0x48, 0x00, 0x49]), 'text/plain');
     ok('TXT binario sigue rechazado', u.status === 415);
+    // TXT-UTF8-GUARD-01: UTF-8 estricto, sin conversión ni U+FFFD.
+    u = await uploadFile('acentos.txt', Buffer.from('Antología poética. Prólogo I. —Ñandú— «Ítaca» “así” 📚', 'utf8'), 'text/plain');
+    ok('TXT UTF-8 con tildes, ñ y signos tipográficos → 200', u.status === 200 && u.body.url.endsWith('.txt'));
+    u = await uploadFile('win1252.txt', Buffer.from([0x41, 0x6e, 0x74, 0x6f, 0x6c, 0x6f, 0x67, 0xed, 0x61, 0x20, 0x97, 0x20, 0x93, 0x78, 0x94]), 'text/plain');
+    ok('TXT Windows-1252 → 415 TXT_NOT_UTF8 con mensaje comprensible', u.status === 415 && u.body.code === 'TXT_NOT_UTF8' && /UTF-8/.test(u.body.error || ''), JSON.stringify(u));
+    u = await uploadFile('truncado.txt', Buffer.from([0x48, 0x6f, 0x6c, 0x61, 0xc3]), 'text/plain');
+    ok('TXT con secuencia UTF-8 truncada → 415 TXT_NOT_UTF8', u.status === 415 && u.body.code === 'TXT_NOT_UTF8');
+    u = await uploadFile('vacio.txt', Buffer.alloc(0), 'text/plain');
+    ok('TXT vacío → 415 TXT_EMPTY', u.status === 415 && u.body.code === 'TXT_EMPTY');
+    const good = await uploadFile('obra.txt', Buffer.from('Texto vigente en UTF-8: canción.', 'utf8'), 'text/plain', 't-utf8');
+    const ownDir = path.join(up, 't-utf8');
+    const before = fs.readdirSync(ownDir).map((f) => [f, fs.readFileSync(path.join(ownDir, f), 'hex')]);
+    u = await uploadFile('obra-nueva.txt', Buffer.from([0x63, 0x61, 0x6e, 0x63, 0x69, 0xf3, 0x6e]), 'text/plain', 't-utf8');
+    ok('sustitución con TXT Latin-1 → 415 y el TXT vigente queda intacto (sin archivos nuevos)', good.status === 200 && u.status === 415
+        && JSON.stringify(fs.readdirSync(ownDir).map((f) => [f, fs.readFileSync(path.join(ownDir, f), 'hex')])) === JSON.stringify(before));
+    ok('rechazos de TXT no dejan archivos en uploads', !listTree(up).some((f) => /win1252|truncado|vacio|obra-nueva/.test(f)));
 
     console.log('\n[5] POST /api/content — fuente EPUB');
     const B = { id: 'e-1', titulo: 'Libro EPUB', tipo: 'libro', standalone: true };
