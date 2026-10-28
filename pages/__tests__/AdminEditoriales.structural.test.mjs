@@ -68,5 +68,16 @@ ok('Búsqueda agrupa por editorial real, no por el texto libre', /groupSearchRes
 ok('Búsqueda toma los nombres de my-catalog, no de endpoints administrativos', /dataService\.getMyCatalog\(\)\.then\(\(\) => setPublishers\(dataService\.getVisiblePublishers\(\)\)\)/.test(search) && !/getAdminPublishers|admin\/publishers/.test(search));
 ok('Búsqueda conserva su fuente de resultados', /dataService\.buscarContenido\(query, user\.roles\)/.test(search));
 
+console.log('\n[5] EDITORIALES-CATALOGO-01: catálogo por sello en la ficha');
+const panel = read('components', 'admin', 'PublisherCatalogPanel.tsx');
+ok('la página abre el catálogo con ?catalogo=<id> y la misma lista canónica de la gestión', /searchParams\.get\('catalogo'\)/.test(page)
+    && /dataService\.getContenidos\(\['administrador'\]\)/.test(page) && /<PublisherCatalogPanel publisher=\{sel\} contents=\{contents\}/.test(page));
+ok('agrupa con utils/publisherCatalog.mjs (sin lógica propia de sellos)', /import \{ publisherCatalog, isbnOf \} from '\.\.\/\.\.\/utils\/publisherCatalog\.mjs'/.test(panel));
+ok('cada libro abre sus fichas existentes (editor y derechos)', /to=\{`\/subir-contenido\?editar=\$\{encodeURIComponent\(b\.id\)\}`\}/.test(panel) && /to=\{`\/admin\/derechos\/\$\{encodeURIComponent\(b\.id\)\}`\}/.test(panel));
+ok('el catálogo no escribe (sin dataService ni fetch en el panel)', !/dataService|fetch\(/.test(panel));
+ok('grupos expandibles con aria-expanded y «Sin sello asignado»', /aria-expanded=\{open\}/.test(panel) && /'Sin sello asignado'/.test(panel));
+ok('recursos aparte: no se cuentan como libros', /no se cuentan como libros/.test(panel));
+ok('la gestión abre la misma ficha de edición con ?editar=<id>', /searchParams\.get\('editar'\)/.test(form) && /if \(target\) handleEditContent\(target\);/.test(form));
+
 console.log(`\nAdminEditoriales.structural — ${pass} ✓, ${fail} ✗`);
 process.exit(fail === 0 ? 0 : 1);

@@ -504,6 +504,17 @@ const SubirContenido: React.FC = () => {
         window.scrollTo({ top: 0, behavior: 'smooth' });
     };
 
+    // EDITORIALES-CATALOGO-01: ?editar=<id> (desde el catálogo de una editorial) abre
+    // esta misma ficha de edición; se consume una vez y se quita de la URL.
+    const editarParam = searchParams.get('editar');
+    useEffect(() => {
+        if (!editarParam || !existingParents.length) return;
+        const target = existingParents.find(c => c.id === editarParam);
+        setSearchParams(prev => { const n = new URLSearchParams(prev); n.delete('editar'); return n; }, { replace: true });
+        if (target) handleEditContent(target);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [editarParam, existingParents]);
+
     const handleDeleteContent = async (id: string, title: string) => {
         if (confirm(`¿Estás seguro de que deseas eliminar permanentemente "${title}" y todos sus archivos? Esta acción no se puede deshacer.`)) {
             try {

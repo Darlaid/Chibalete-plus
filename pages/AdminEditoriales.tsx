@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
-import type { Publisher, PublisherAudit } from '../types';
-import { Building2, Plus, Edit2, AlertTriangle, CheckCircle, BookOpen, X, Save } from 'lucide-react';
+import type { Content, Publisher, PublisherAudit } from '../types';
+import { Building2, Plus, Edit2, AlertTriangle, CheckCircle, BookOpen, X, Save, Library } from 'lucide-react';
+import PublisherCatalogPanel from '../components/admin/PublisherCatalogPanel';
 
 // CHP-EDITORIAL-ROYALTIES-2026-01 F1-B — administración de editoriales.
 // Usa /api/admin/publishers (F1-A). Sin borrado desde la interfaz: una
@@ -71,15 +72,22 @@ const AdminEditoriales: React.FC = () => {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+    // EDITORIALES-CATALOGO-01: ?catalogo=<id> abre el catálogo de esa editorial sobre la
+    // misma lista canónica que la gestión de contenido.
+    const [searchParams, setSearchParams] = useSearchParams();
+    const catalogoId = searchParams.get('catalogo');
+    const [contents, setContents] = useState<Content[] | null>(null);
 
     const load = useCallback(async () => {
-        const [list, census] = await Promise.all([
+        const [list, census, catalog] = await Promise.all([
             dataService.getAdminPublishers({ withCounts: true }),
             dataService.getPublisherAudit(),
+            dataService.getContenidos(['administrador']),
         ]);
         setLoadError(list === null);
         if (list !== null) setPublishers(list);
         setAudit(census);
+        setContents(catalog);
     }, []);
 
     useEffect(() => { load(); }, [load]);
@@ -204,6 +212,13 @@ const AdminEditoriales: React.FC = () => {
                 </form>
             )}
 
+            {catalogoId && publishers && (() => {
+                const sel = publishers.find(p => p.id === catalogoId);
+                return sel
+                    ? <PublisherCatalogPanel publisher={sel} contents={contents} onClose={() => setSearchParams({})} />
+                    : <div role="alert" className="mb-6 p-3 rounded-lg bg-amber-50 text-amber-900 text-sm">La editorial indicada no existe.</div>;
+            })()}
+
             <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-x-auto">
                 {publishers === null ? (
                     <p className="p-6 text-gray-500">{loadError ? 'Sin datos.' : 'Cargando editoriales…'}</p>
@@ -254,6 +269,10 @@ const AdminEditoriales: React.FC = () => {
                                         </span>
                                     </td>
                                     <td className="p-3 text-right whitespace-nowrap">
+                                        <button type="button" onClick={() => setSearchParams({ catalogo: p.id })} aria-pressed={catalogoId === p.id}
+                                            className="mr-2 px-3 py-1.5 bg-indigo-50 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 rounded-md hover:bg-indigo-100 font-bold inline-flex items-center">
+                                            <Library size={14} className="mr-1" aria-hidden="true" /> Catálogo
+                                        </button>
                                         <button type="button" onClick={() => startEdit(p)}
                                             className="mr-2 px-3 py-1.5 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-md hover:bg-indigo-200 font-bold inline-flex items-center">
                                             <Edit2 size={14} className="mr-1" aria-hidden="true" /> Editar
