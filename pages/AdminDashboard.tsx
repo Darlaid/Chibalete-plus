@@ -98,8 +98,8 @@ const AdminDashboard: React.FC = () => {
 
     return (
         <div className="p-4 md:p-8 min-h-screen bg-gray-50 dark:bg-gray-900">
-            <div className="flex justify-between items-center mb-8">
-                <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Panel de Administración Global</h1>
+            <div className="flex flex-wrap justify-between items-center gap-4 mb-8">
+                <h1 className="text-2xl md:text-3xl font-bold text-gray-900 dark:text-white">Panel de Administración Global</h1>
                 <div className="flex gap-2">
                     <button className="px-4 py-2 bg-indigo-50 dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 rounded-lg text-sm font-bold flex items-center hover:bg-indigo-100">
                         <Download size={16} className="mr-2" /> Exportar Informe
@@ -108,7 +108,7 @@ const AdminDashboard: React.FC = () => {
             </div>
 
             {/* Tab Nav */}
-            <div className="flex space-x-6 border-b border-gray-200 dark:border-gray-700 mb-8">
+            <div className="flex space-x-6 overflow-x-auto whitespace-nowrap border-b border-gray-200 dark:border-gray-700 mb-8">
                 <button
                     onClick={() => setActiveTab('reports')}
                     className={`pb-4 px-2 font-bold flex items-center border-b-2 transition-colors ${activeTab === 'reports' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
