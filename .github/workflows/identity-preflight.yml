@@ -203,5 +203,12 @@ jobs:
       - name: Contención de gamificación (G0)
         run: npm run test:gamification-g0
 
+      # CHP-GAMIFICACION-G3-01 — núcleo persistente del ledger sobre bases
+      # temporales: flag OFF sin archivo, idempotencia, dos réplicas en
+      # procesos separados, snapshot = Σ ledger y backup/restore con la
+      # función real del runner (capture_sqlite). Sin ganchos ni HTTP.
+      - name: Núcleo del ledger de gamificación (G3-01)
+        run: npm run test:gamification-core
+
       - name: Build de producción
         run: npm run build
