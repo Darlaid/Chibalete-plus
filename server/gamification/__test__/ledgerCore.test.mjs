@@ -278,7 +278,10 @@ try {
     ok('mookSource solo escribe/borra su lock `<base>.reconcile.lock`', /const lockFile = `\$\{dbPath\}\.reconcile\.lock`/.test(srcOf('mookSource.mjs'))
         && !/writeFile|appendFile|rename|rmSync|copyFile/.test(srcOf('mookSource.mjs')));
     ok('server/gamification no registra rutas HTTP', !/app\.(get|post|put|delete|use)\s*\(|express\.Router/.test(modSrc));
-    ok('server/gamification no lee stores de producto (las fuentes se le pasan)', !/readFileSync|progressService|experienceStore|eventsService|USERS_DB|mook_db/.test(modSrc));
+    // Imports y lecturas reales, no menciones en comentarios: readingValidator
+    // documenta que sus lectores (eventsService/progressService) se le INYECTAN.
+    ok('server/gamification no importa ni lee stores de producto (las fuentes se le pasan)',
+        !/readFileSync|from\s+['"][^'"]*(progressService|experienceStore|eventsService)[^'"]*['"]|USERS_DB|mook_db\.json/.test(modSrc));
     const serverSrc = read('server/server.js');
     ok('server.js importa del motor SOLO mookSource.mjs', (serverSrc.match(/from '\.\/gamification\/[^']+'/g) || []).join() === "from './gamification/mookSource.mjs'");
     ok('server.js engancha solo revisión MOOK, experiencia completada y el reconciliador', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler');
