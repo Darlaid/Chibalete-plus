@@ -97,7 +97,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "autocannon": "^7.15.0",
     "typescript": "~5.8.2",
-    "vite": "^6.4.3"
+    "vite": "^6.4.5"
   },
   "overrides": {
     "protobufjs": "^7.6.5",
