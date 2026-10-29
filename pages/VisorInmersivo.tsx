@@ -148,6 +148,9 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     const [currentLevel, setCurrentLevel] = useState<number>(user?.immersive_level || 1);
     const [timeLeft, setTimeLeft] = useState(LEVELS[currentLevel as keyof typeof LEVELS].duration);
     const [sessionComplete, setSessionComplete] = useState(false);
+    // G0: motivo del overlay. 'timer' = venció el bloque de sesión (LEVELS);
+    // 'content_end' = terminó el audio de la obra o no hay siguiente contenido.
+    const [sessionEndReason, setSessionEndReason] = useState<'timer' | 'content_end'>('content_end');
 
     // BlockEngine — instantiated once per content session via ref.
     // React never controls the timer; it only observes engine events.
@@ -243,6 +246,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             userId: analyticsUserIdRef.current,
         });
         sessionCompletingRef.current = true;
+        setSessionEndReason('content_end');
         setSessionComplete(true);
         // Audio ya está en estado 'paused' (esta callback viene de handleEnded en el hook),
         // por lo que NO se necesita pb.pause() aquí.
@@ -362,6 +366,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 progressPercentage: progressPercentageRef.current,
             });
             analyticsService.flush();
+            setSessionEndReason('content_end');
             setSessionComplete(true);
             pb.pause();
             return;
@@ -1138,6 +1143,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                         contentId: analyticsContentIdRef.current,
                     });
                     sessionCompletingRef.current = true;
+                    // G0: corte por tiempo, no fin de la obra (sin progreso ni completion).
+                    setSessionEndReason('timer');
                     setSessionComplete(true);
                     // F20: pausa controlada. F10 garantiza que buffer.current
                     // se preserva (status reading → visible). La frase sigue
@@ -3180,11 +3187,23 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                     className="absolute inset-0 z-50 bg-black/95 flex flex-col items-center justify-center text-white p-8 backdrop-blur-sm animate-in fade-in"
                     role="dialog"
                     aria-modal="true"
-                    aria-label="Lectura completada"
+                    aria-label={sessionEndReason === 'timer' ? 'Fin del tiempo de sesión' : 'Lectura completada'}
                     data-completion-overlay="true"
+                    data-session-end-reason={sessionEndReason}
                 >
-                    <Award size={80} className="text-yellow-400 mb-6" />
-                    <h1 className="text-4xl font-bold mb-4">¡Lectura Completada!</h1>
+                    {/* G0: el vencimiento del temporizador es una pausa, no el fin de la obra. */}
+                    {sessionEndReason === 'timer' ? (
+                        <>
+                            <Clock size={80} className="text-indigo-300 mb-6" aria-hidden="true" />
+                            <h1 className="text-4xl font-bold mb-4">Fin del tiempo de sesión</h1>
+                            <p className="text-lg text-gray-300 mb-2">Tu lectura no ha terminado: puedes seguir donde la dejaste.</p>
+                        </>
+                    ) : (
+                        <>
+                            <Award size={80} className="text-yellow-400 mb-6" />
+                            <h1 className="text-4xl font-bold mb-4">¡Lectura Completada!</h1>
+                        </>
+                    )}
                     <p className="text-xl text-gray-400 mb-8">{content.titulo}</p>
                     <div className="flex gap-4">
                         <button

@@ -6,7 +6,7 @@ import { dataService } from '../services/dataService';
 import { isMediator, isAdmin, normalizeRoles } from '../utils/permissions';
 import {
     Home, Library, Search, User, LifeBuoy, Upload, LogOut, Users,
-    PlayCircle, ShoppingBag, Gamepad2, GraduationCap, BarChart2,
+    PlayCircle, ShoppingBag, GraduationCap, BarChart2,
     Clock, Menu, X, NotebookPen, Package, Gift, Sparkles, Globe, Smartphone, Building2
 } from 'lucide-react';
 
@@ -117,7 +117,6 @@ const Navbar: React.FC = () => {
         { to: '/aula-viva', icon: <GraduationCap size={22} strokeWidth={2} />, label: aulaLabel },
         { to: '/biblioteca', icon: <Library size={22} strokeWidth={2} />,     label: 'Biblioteca' },
         { to: '/multimedia', icon: <PlayCircle size={22} strokeWidth={2} />,  label: 'Multimedia' },
-        { to: '/trivia',     icon: <Gamepad2 size={22} strokeWidth={2} />,    label: 'Trívia' },
         { to: '/tienda',     icon: <ShoppingBag size={22} strokeWidth={2} />, label: 'Tienda' },
         { to: '/bitacora',   icon: <NotebookPen size={22} strokeWidth={2} />, label: 'Bitácora' },
         { to: '/clubs',      icon: <Globe size={22} strokeWidth={2} />,       label: 'Clubes' },
@@ -162,7 +161,6 @@ const Navbar: React.FC = () => {
         { to: '/aula-viva', icon: <GraduationCap size={28} />, label: aulaLabel },
         { to: '/biblioteca', icon: <Library size={28} />,       label: 'Biblioteca' },
         { to: '/multimedia', icon: <PlayCircle size={28} />,    label: 'Multimedia' },
-        { to: '/trivia',     icon: <Gamepad2 size={28} />,      label: 'Trívia' },
         { to: '/tienda',     icon: <ShoppingBag size={28} />,   label: 'Tienda' },
         { to: '/bitacora',   icon: <NotebookPen size={28} />,   label: 'Bitácora' },
         { to: '/clubs',      icon: <Globe size={28} />,         label: 'Clubes' },

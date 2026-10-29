@@ -8,7 +8,7 @@ import ContentCarousel from '../components/ContentCarousel';
 import ProgressUpdater from '../components/ProgressUpdater';
 import CommunityPostCard from '../components/CommunityPostCard';
 import type { Content, ProgresoLectura, User, CommunityPost, Assignment } from '../types';
-import { MessageSquare, Heart, PenTool, ClipboardList, CheckCircle, Camera, Video, X, Upload, Check, Mic, StopCircle, Play, Square, Lightbulb, Calendar as CalendarIcon, ChevronLeft, ChevronRight, CheckSquare, Gift, BookOpen, Users, Plus, Zap } from 'lucide-react';
+import { MessageSquare, Heart, PenTool, ClipboardList, CheckCircle, Camera, Video, X, Upload, Check, Mic, StopCircle, Play, Square, Lightbulb, Calendar as CalendarIcon, ChevronLeft, ChevronRight, CheckSquare, BookOpen, Users, Plus, Zap } from 'lucide-react';
 import { isMediator, isAdmin } from '../utils/permissions';
 import QuickClubModal from '../components/QuickClubModal';
 
@@ -359,25 +359,8 @@ const Home: React.FC = () => {
             {/* NOTIFICATIONS / ALERTS SYSTEM */}
             <div className="px-4 md:px-8 mb-6 space-y-3">
 
-                {/* 1. ADMIN: Pending Reward Requests */}
-                {isAdmin(user) && (() => {
-                    const pendingRewards = dataService.getRewardRequests('submitted');
-                    if (pendingRewards.length === 0) return null;
-                    return (
-                        <div className="bg-orange-50 dark:bg-orange-900/20 border-l-4 border-orange-500 p-4 rounded-r-lg flex justify-between items-center animate-in slide-in-from-top-2">
-                            <div className="flex items-center text-orange-800 dark:text-orange-200">
-                                <Gift className="mr-3" />
-                                <div>
-                                    <p className="font-bold">Solicitudes de Recompensa Pendientes</p>
-                                    <p className="text-sm">Hay {pendingRewards.length} estudiantes esperando aprobación de cupones.</p>
-                                </div>
-                            </div>
-                            <button onClick={() => navigate('/admin/recompensas')} className="px-4 py-2 bg-orange-100 dark:bg-orange-800 text-orange-700 dark:text-orange-100 font-bold rounded-lg text-sm hover:bg-orange-200 transition-colors">
-                                Gestionar
-                            </button>
-                        </div>
-                    );
-                })()}
+                {/* 1. ADMIN: aviso de canjes pendientes retirado en G0 (el canje era simulado y
+                    no hay nada que aprobar; el historial sigue en /admin/recompensas). */}
 
                 {/* 2. STUDENT: New Assignments Alert */}
                 {(() => {

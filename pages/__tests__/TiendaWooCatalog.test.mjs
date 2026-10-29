@@ -6,7 +6,8 @@
  * salida REAL del adaptador (server/lib/wooCatalog.mjs) sobre el fixture fijo.
  *
  *   loading · catálogo · filtros dinámicos · colección nueva · sin tabs vacías ·
- *   COP sin decimales · oferta · agotado · stale · error · CTA · puntos intactos.
+ *   COP sin decimales · oferta · agotado · stale · error · CTA · canje simulado
+ *   retirado (G0, CHP-GAMIFICACION-G0-01).
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,7 +34,7 @@ fs.writeFileSync(mockDs, `
 export const dataService = {
     getStoreCatalog: () => new Promise(() => {}),
     getProductos: () => { globalThis.__getProductosCalled = true; return []; },
-    redeemCoupon: () => ({ success: true, message: '' }),
+    redeemCoupon: () => { globalThis.__redeemCouponCalled = true; return { success: true, message: '' }; },
 };`);
 const mockAuth = path.join(tmp, 'AuthContext.mock.mjs');
 fs.writeFileSync(mockAuth, `export const useAuth = () => ({ user: { id: 'u-1', puntos: 1200 } });`);
@@ -113,15 +114,27 @@ try {
     ok('error: CTA a la tienda web', error.includes(`href="${STORE_WEB_URL}"`) && error.includes('Visitar la tienda de Chibalete Editores'));
     ok('error: ningún producto inventado', !/<h3 /.test(error));
 
-    console.log('\n[P] página completa y Puntos de Magia intactos');
+    // CHP-GAMIFICACION-G0-01: antes este bloque exigía «canje intacto» (bonos
+    // 7 %/25 %, 2× «Solicitar Canje», redeemCoupon). Ese canje era simulado:
+    // nunca emitía cupones, la solicitud quedaba en el localStorage del alumno y
+    // el 25 % supera el tope previsto del 15 %. G0 lo retira; ahora se exige que
+    // NO exista y que haya un aviso veraz. El catálogo se verifica igual que antes.
+    console.log('\n[P] página completa y canje simulado retirado (G0)');
     globalThis.__getProductosCalled = false;
+    globalThis.__redeemCouponCalled = false;
     const page = M.renderToStaticMarkup(M.createElement(M.Tienda));
     ok('la Tienda arranca en carga (catálogo del servidor)', /Cargando catálogo/.test(page));
     ok('ya no lee dataService.getProductos() (localStorage)', globalThis.__getProductosCalled === false);
-    ok('bloque de canje intacto', /Canje de Puntos de Magia/.test(page) && /Bono 7% OFF/.test(page) && /Bono 25% OFF/.test(page)
-        && /500(<!-- -->)? pts/.test(page) && /1000(<!-- -->)? pts/.test(page) && count(page, /Solicitar Canje/g) === 2 && /Tus Puntos: (<!-- -->)?1200/.test(page));
+    ok('G0: sin botones de canje ni bonos', !/Solicitar Canje/.test(page) && !/Bono \d+% OFF/.test(page) && !/\d+(<!-- -->)? pts/.test(page));
+    ok('G0: sin bono del 25 %', !/25%/.test(page));
+    ok('G0: sin saldo de puntos simulado', !/Tus Puntos/.test(page));
+    ok('G0: aviso veraz de recompensas no habilitadas',
+        page.includes('Las recompensas con Puntos de Magia estarán disponibles cuando el sistema esté habilitado.'));
+    ok('G0: no promete códigos ni cupones', !/te enviará el código|código de descuento único|cupón/i.test(page));
+    ok('G0: render no invoca redeemCoupon', globalThis.__redeemCouponCalled === false);
     const src = fs.readFileSync(path.join(ROOT, 'pages', 'Tienda.tsx'), 'utf8');
-    ok('canje sigue llamando a redeemCoupon igual', /dataService\.redeemCoupon\(user\.id, points, description\)/.test(src));
+    ok('G0: el código de la página no llama a redeemCoupon', !/redeemCoupon/.test(src));
+    ok('G0: Contactar Ventas sigue presente', /Contactar Ventas/.test(page));
     ok('la página no llama a WooCommerce directamente', !/chibaleteeditores\.com\/wp-json|wc\/store/.test(src));
 } finally {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* */ }

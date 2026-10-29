@@ -1,7 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
 import { dataService } from '../services/dataService';
-import { useAuth } from '../context/AuthContext';
 import {
     ALL_FILTER,
     STORE_WEB_URL,
@@ -14,28 +13,6 @@ import {
     type StoreProduct,
 } from '../utils/storeCatalog.mjs';
 import { Tag, Gift, ShoppingBag, ShoppingCart, ExternalLink } from 'lucide-react';
-
-const RewardCard: React.FC<{ points: number, discount: string, onRedeem: (pts: number, desc: string) => void }> = ({ points, discount, onRedeem }) => (
-    <div className="bg-gradient-to-br from-purple-500 to-indigo-600 rounded-xl p-6 text-white shadow-lg flex flex-col justify-between h-full transform hover:scale-105 transition-transform">
-        <div>
-            <div className="flex justify-between items-start mb-4">
-                <Gift size={32} className="text-purple-200" />
-                <span className="bg-white/20 px-3 py-1 rounded-full text-xs font-bold backdrop-blur-sm">Canjeable</span>
-            </div>
-            <h3 className="text-2xl font-bold mb-2">Bono {discount}</h3>
-            <p className="text-purple-100 text-sm mb-4">Canjea tus puntos por un código de descuento único para la tienda física.</p>
-        </div>
-        <div>
-            <div className="text-3xl font-bold mb-4">{points} pts</div>
-            <button
-                onClick={() => onRedeem(points, `Bono ${discount}`)}
-                className="w-full py-2 bg-white text-indigo-600 font-bold rounded-lg hover:bg-indigo-50 transition-colors shadow-md"
-            >
-                Solicitar Canje
-            </button>
-        </div>
-    </div>
-);
 
 // ── Catálogo WooCommerce (CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01) ─────────────
 // WooCommerce es la fuente de verdad y el checkout es suyo: la tarjeta solo
@@ -189,7 +166,6 @@ export const CatalogSection: React.FC<{ state: CatalogState }> = ({ state }) => 
 };
 
 const Tienda: React.FC = () => {
-    const { user } = useAuth();
     const [catalogState, setCatalogState] = useState<CatalogState>({ status: 'loading' });
 
     useEffect(() => {
@@ -200,22 +176,6 @@ const Tienda: React.FC = () => {
         });
         return () => { cancelled = true; };
     }, []);
-
-    const handleRedeem = (points: number, description: string) => {
-        if (!user) {
-            alert("Inicia sesión para canjear puntos.");
-            return;
-        }
-
-        if (confirm(`¿Solicitar canje de ${points} puntos por ${description}?`)) {
-            const result = dataService.redeemCoupon(user.id, points, description);
-            if (result.success) {
-                alert(`¡Solicitud enviada!\nEl administrador revisará tu solicitud y te enviará el código pronto.`);
-            } else {
-                alert(`Error: ${result.message}`);
-            }
-        }
-    };
 
     return (
         <div className="p-4 md:p-8">
@@ -228,25 +188,16 @@ const Tienda: React.FC = () => {
                     <p className="text-gray-500 dark:text-gray-400 mt-1">
                         Lleva la magia de Chibalete al mundo real con los libros de Chibalete Editores.
                     </p>
-                    {user && (
-                        <div className="mt-2 inline-block bg-purple-100 dark:bg-purple-900 border border-purple-200 dark:border-purple-700 px-3 py-1 rounded-full text-sm font-bold text-purple-700 dark:text-purple-300">
-                            ✨ Tus Puntos: {user.puntos || 0}
-                        </div>
-                    )}
                 </div>
 
             </header>
 
-            {/* REWARDS SECTION */}
-            <div className="mb-12">
-                <h2 className="text-2xl font-bold mb-6 flex items-center gap-2 text-gray-800 dark:text-white">
-                    <Gift className="text-purple-600" />
-                    Canje de Puntos de Magia
-                </h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <RewardCard points={500} discount="7% OFF" onRedeem={handleRedeem} />
-                    <RewardCard points={1000} discount="25% OFF" onRedeem={handleRedeem} />
-                </div>
+            {/* REWARDS — G0: canje simulado retirado (nunca emitía cupones); sin saldo ni botones. */}
+            <div className="mb-12 flex items-start gap-3 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 p-4 text-purple-800 dark:text-purple-200">
+                <Gift className="shrink-0 mt-0.5" size={22} aria-hidden="true" />
+                <p className="text-sm">
+                    Las recompensas con Puntos de Magia estarán disponibles cuando el sistema esté habilitado.
+                </p>
             </div>
 
             <h2 className="text-2xl font-bold mb-6 text-gray-800 dark:text-white">Libros de Chibalete Editores</h2>

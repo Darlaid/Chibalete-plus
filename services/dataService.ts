@@ -1957,21 +1957,14 @@ class DataService {
         }
     }
 
-    addPuntos(userId: string, puntos: number) {
-        const user = this.getUsuarioById(userId);
-        if (user) {
-            user.puntos = (user.puntos || 0) + puntos;
-            this.saveState('users', this.users);
-        }
+    // CHP-GAMIFICACION-G0-01: los Puntos de Magia no tienen libro de movimientos en el
+    // servidor; mientras no exista, el cliente no suma ni gasta puntos. Firmas
+    // conservadas (retiro en G4B).
+    addPuntos(_userId: string, _puntos: number) {
+        return;
     }
 
-    canjearRecompensa(userId: string, cost: number): boolean {
-        const user = this.getUsuarioById(userId);
-        if (user && (user.puntos || 0) >= cost) {
-            user.puntos = (user.puntos || 0) - cost;
-            this.saveState('users', this.users);
-            return true;
-        }
+    canjearRecompensa(_userId: string, _cost: number): boolean {
         return false;
     }
 
@@ -3036,21 +3029,10 @@ class DataService {
         return this.journalEntries.filter(e => e.type === 'reward_request' && e.status === filter);
     }
 
-    processRewardRequest(id: string, action: 'approve' | 'reject') {
-        const req = this.journalEntries.find(e => e.id === id);
-        if (req && req.type === 'reward_request') {
-            req.status = action === 'approve' ? 'approved' : 'rejected';
-            this.saveState('journalEntries', this.journalEntries);
-
-            // Refund points if rejected
-            if (action === 'reject') {
-                const costMatch = req.content.match(/Costo: (\d+)/);
-                if (costMatch) {
-                    const points = parseInt(costMatch[1]);
-                    this.addPuntos(req.userId, points);
-                }
-            }
-        }
+    // CHP-GAMIFICACION-G0-01: aprobar/rechazar era simulado (nunca emitía cupones ni
+    // devolvía puntos). No-op: las solicitudes históricas quedan intactas, solo lectura.
+    processRewardRequest(_id: string, _action: 'approve' | 'reject') {
+        return;
     }
 
     getGlobalStats() {
@@ -3464,46 +3446,14 @@ class DataService {
     }
 
     // --- GAMIFICATION & POINTS ---
-    addPoints(userId: string, amount: number, reason: string): number {
-        const user = this.getUsuarioById(userId);
-        if (!user) return 0;
-
-        user.puntos = (user.puntos || 0) + amount;
-        this.saveState('users', this.users);
-
-        // Log entry (simulated)
-        console.log(`[Points] User ${user.nombre_usuario} +${amount} (${reason}). Total: ${user.puntos}`);
-        return user.puntos;
+    // CHP-GAMIFICACION-G0-01: sin otorgamiento ni canje en el cliente (ver addPuntos).
+    // Ya no escribe nombre_usuario en la consola ni crea solicitudes reward_request.
+    addPoints(userId: string, _amount: number, _reason: string): number {
+        return this.getUsuarioById(userId)?.puntos || 0;
     }
 
-    redeemCoupon(userId: string, cost: number, description: string): { success: boolean; message: string; remainingPoints?: number } {
-        const user = this.getUsuarioById(userId);
-        if (!user) return { success: false, message: 'Usuario no encontrado' };
-
-        if ((user.puntos || 0) < cost) {
-            return { success: false, message: `Insuficientes puntos. Tienes ${user.puntos || 0}, necesitas ${cost}.` };
-        }
-
-        // Deduct points
-        user.puntos = (user.puntos || 0) - cost;
-        this.saveState('users', this.users);
-
-        // Create Admin Task (Journal Entry)
-        const newRequest: JournalEntry = {
-            id: `req-${Date.now()}`,
-            userId: user.id,
-            title: `Solicitud de Canje: ${description}`,
-            content: `El estudiante solicita canjear ${cost} puntos por: ${description}. Pendiente de código.`,
-            date: new Date().toISOString(),
-            type: 'reward_request',
-            status: 'submitted',
-            tags: ['CANJE', 'PENDIENTE']
-        };
-
-        this.journalEntries.push(newRequest);
-        this.saveState('journalEntries', this.journalEntries);
-
-        return { success: true, message: 'Canje solicitado. Tu mediador revisará la solicitud.', remainingPoints: user.puntos };
+    redeemCoupon(_userId: string, _cost: number, _description: string): { success: boolean; message: string; remainingPoints?: number } {
+        return { success: false, message: 'Las recompensas con Puntos de Magia estarán disponibles cuando el sistema esté habilitado.' };
     }
 
     // --- UTILS FOR TEACHER VIEW ---

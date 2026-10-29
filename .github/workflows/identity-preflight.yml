@@ -196,5 +196,12 @@ jobs:
       - name: Suites MOOK (Experiencias, Studio, Runtime, cubierta y navegación)
         run: npm run test:mook
 
+      # CHP-GAMIFICACION-G0-01 — contención de la gamificación simulada: Leo no
+      # concede puntos por token, sin canjes ni aprobaciones simuladas, Trivia
+      # fuera de la navegación, corte por tiempo ≠ «Lectura Completada», y la
+      # Tienda (render real con catálogo Woo) sin canje.
+      - name: Contención de gamificación (G0)
+        run: npm run test:gamification-g0
+
       - name: Build de producción
         run: npm run build

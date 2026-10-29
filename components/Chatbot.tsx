@@ -7,30 +7,23 @@ import { chatConBibliotecario, generarMicroResumenRecordatorio } from '../servic
 import type { LeoSessionMemory } from '../services/geminiService';
 import { useLocation } from 'react-router-dom';
 import { dataService } from '../services/dataService';
+import { stripAwardPointsTokens } from '../utils/leoActionTokens.mjs';
 
 // --- ACTION TOKEN TYPES ---
 type InteractionType = 'vocab' | 'inferential' | 'reflection';
 
 interface ParsedActions {
     cleanText: string;
-    points: number | null;
     savedVocab: string | null;
     interactionType: InteractionType | null;
 }
 
 /** Parses all Leo action tokens from a response, returning clean text and structured data. */
 const parseActions = (text: string): ParsedActions => {
-    let cleanText = text;
-    let points: number | null = null;
+    // G0: [AWARD_POINTS:n] ya no otorga puntos; solo se borra del texto visible.
+    let cleanText = stripAwardPointsTokens(text);
     let savedVocab: string | null = null;
     let interactionType: InteractionType | null = null;
-
-    const pointsMatch = cleanText.match(/\[AWARD_POINTS:\s*(\d+)\]/);
-    if (pointsMatch) {
-        const n = parseInt(pointsMatch[1], 10);
-        if (!isNaN(n) && n > 0) points = n;
-        cleanText = cleanText.replace(pointsMatch[0], '').trim();
-    }
 
     const vocabMatch = cleanText.match(/\[SAVE_VOCAB:\s*([^\]]+)\]/);
     if (vocabMatch) {
@@ -44,7 +37,7 @@ const parseActions = (text: string): ParsedActions => {
         cleanText = cleanText.replace(typeMatch[0], '').trim();
     }
 
-    return { cleanText, points, savedVocab, interactionType };
+    return { cleanText, savedVocab, interactionType };
 };
 
 /**
@@ -382,19 +375,8 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
       );
 
       // leoType = complementary signal from Leo's [INTERACTION_TYPE:X] token
-      const { cleanText, points, savedVocab, interactionType: leoType } = parseActions(responseText);
+      const { cleanText, savedVocab, interactionType: leoType } = parseActions(responseText);
       const systemMessages: ChatMessage[] = [];
-
-      // Handle AWARD_POINTS
-      if (points !== null) {
-        dataService.addPoints(user.id, points, 'Recompensa de Leo (Conversación)');
-        systemMessages.push({
-          id: `sys-points-${Date.now()}`,
-          role: 'model',
-          text: `✨ ¡Has ganado ${points} Puntos de Magia por tu excelente participación! ✨`,
-          timestamp: Date.now(),
-        });
-      }
 
       // Handle SAVE_VOCAB
       if (savedVocab) {

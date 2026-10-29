@@ -39,6 +39,7 @@ import {
     emitMemoryUpdated,
 } from './leoBackboneEmitter.mjs';
 import { ulid } from './ulid.js';
+import { stripAwardPointsTokens, sanitizeLeoResult } from './leoAwardTokens.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -317,6 +318,8 @@ export async function dispatchInteraction(req) {
             case 'recap':     result = await _handleRecap(enrichedReq);     break;
             default:          throw _err(`Superficie no soportada: ${enrichedReq.surface}`, 400);
         }
+        // G0: ninguna superficie devuelve el token de puntos (también llega limpio a la evidencia).
+        result = sanitizeLeoResult(result);
 
         // D5: Persist sequence state (before D2 recordInteraction so the sequence
         // fields land in the DB before the interactionCount increment overwrites nothing).
@@ -755,7 +758,8 @@ async function _handleChat(req) {
     const chatTaskType = degradationMode === DEGRADATION_MODE.MULTIMODAL_FULL ? 'chat_visual' : 'chat';
     // EVIDENCE_HOOK: { surface:'chatbot', userId, contentId, mensaje, degradationMode, fallbackReason, answer, ts }
     const result = await runHybridTask(chatTaskType, { messages, systemInstruction, imageData });
-    const answer = (result.data ?? '').trim() ||
+    // G0: el token [AWARD_POINTS:n] se borra aunque el modelo lo produzca.
+    const answer = stripAwardPointsTokens(result.data ?? '') ||
         '¡Hola! Soy Leo 🦀. Estoy releyendo un clásico. ¿En qué puedo ayudarte con tu lectura?';
 
     return { answer };
@@ -801,11 +805,9 @@ TUS 8 OBJETIVOS DE MEDIACIÓN (ÚSALOS EN CADA INTERACCIÓN):
 7. EXPRESAR (Creación): Invita a escribir finales alternativos o cartas. "¿Qué le dirías al autor?".
 8. DISFRUTAR (Estético): Celebra el avance. Pregunta sobre emociones. "¿Qué sentiste en esa escena?".
 
-SISTEMA DE PREMIOS (PUNTOS DE MAGIA):
-Si el estudiante muestra una reflexión profunda, conecta ideas, o demuestra entusiasmo genuino, PUEDES PREMIARLO.
-Para hacerlo, escribe en una línea nueva al final de tu mensaje: [AWARD_POINTS: 5] (Máximo 5 puntos por interacción).
-Dile explícitamente "Te he dado 5 puntos de magia por esa gran respuesta".
-Úsalo con moderación (solo cuando sea muy bueno).
+RECONOCIMIENTO:
+Si el estudiante muestra una reflexión profunda o conecta ideas, reconócelo con palabras concretas sobre lo que hizo bien.
+No otorgues, prometas ni menciones puntos, premios, cupones ni recompensas.
 
 REGLA DE ORO DE CONTENIDO:
 Toda la conversación debe surgir y volver a los contenidos de la App (los libros del catálogo).

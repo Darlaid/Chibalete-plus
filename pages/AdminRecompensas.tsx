@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import type { JournalEntry } from '../types';
-import { Gift, CheckCircle, XCircle, Clock, Search, AlertCircle } from 'lucide-react';
+import { Gift, Clock, Search, AlertCircle } from 'lucide-react';
 
 const AdminRecompensas: React.FC = () => {
     const { user } = useAuth();
@@ -17,16 +17,6 @@ const AdminRecompensas: React.FC = () => {
         setRequests(dataService.getRewardRequests(filter));
     };
 
-    const handleProcess = (id: string, action: 'approve' | 'reject') => {
-        if (!window.confirm(`¿Estás seguro de ${action === 'approve' ? 'APROBAR' : 'RECHAZAR'} esta solicitud?`)) return;
-
-        dataService.processRewardRequest(id, action);
-
-        // Refresh list
-        loadRequests();
-        alert(action === 'approve' ? 'Solicitud aprobada y cupón generado.' : 'Solicitud rechazada y puntos devueltos.');
-    };
-
     if (!user || !user.roles.includes('administrador')) {
         return <div className="p-8 text-center text-red-500">Acceso restringido a administradores.</div>;
     }
@@ -37,7 +27,12 @@ const AdminRecompensas: React.FC = () => {
                 <h1 className="text-3xl font-bold flex items-center text-indigo-700 dark:text-indigo-400">
                     <Gift className="mr-3" size={32} /> Gestión de Recompensas
                 </h1>
-                <p className="text-gray-500 dark:text-gray-400">Aprueba o rechaza solicitudes de canje de puntos por cupones.</p>
+                <p className="text-gray-500 dark:text-gray-400">Historial de solicitudes guardadas en este navegador (solo lectura).</p>
+                {/* G0: el canje era simulado (nunca emitía cupones); sin aprobar ni rechazar. */}
+                <p role="status" className="mt-3 flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+                    <AlertCircle size={18} className="shrink-0 mt-0.5" aria-hidden="true" />
+                    El canje de Puntos de Magia no está habilitado: estas solicitudes no generan descuentos ni se pueden aprobar. Las recompensas estarán disponibles cuando el sistema esté habilitado.
+                </p>
             </header>
 
             <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -102,20 +97,9 @@ const AdminRecompensas: React.FC = () => {
                                                 </td>
                                                 <td className="p-4 text-right">
                                                     {filter === 'submitted' ? (
-                                                        <div className="flex justify-end gap-2">
-                                                            <button
-                                                                onClick={() => handleProcess(req.id, 'approve')}
-                                                                className="flex items-center px-3 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 font-bold text-sm transition-colors"
-                                                            >
-                                                                <CheckCircle size={16} className="mr-1" /> Aprobar
-                                                            </button>
-                                                            <button
-                                                                onClick={() => handleProcess(req.id, 'reject')}
-                                                                className="flex items-center px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 font-bold text-sm transition-colors"
-                                                            >
-                                                                <XCircle size={16} className="mr-1" /> Rechazar
-                                                            </button>
-                                                        </div>
+                                                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+                                                            Histórico · sin acción
+                                                        </span>
                                                     ) : (
                                                         <span className={`px-3 py-1 rounded-full text-xs font-bold ${filter === 'approved' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                                                             {filter === 'approved' ? 'Aprobado' : 'Rechazado'}
