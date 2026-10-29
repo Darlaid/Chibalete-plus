@@ -84,6 +84,13 @@ SQLITE_STORES: tuple[SqliteStore, ...] = (
     # produccion, asi que el runner con esta entrada se despliega DESPUES de la
     # API que la crea (recovery_point exige stores == declarados).
     SqliteStore("data-critical/royalties.db", "CANON", reconstructible=False, required=False),
+    # --- CHP-GAMIFICACION-G3-02 -----------------------------------------------
+    # Ledger de gamificacion (XP, Puntos de Magia, canjes). CANON y no
+    # reconstructible: los canjes y ajustes no se derivan de ninguna fuente.
+    # `required=False`: la base SOLO existe con GAMIFICATION_ENABLED=1 (hoy OFF
+    # en produccion); su ausencia se anota en `stores_absent`. Este runner se
+    # despliega ANTES de encender el flag (ADR-GAM-G2-01 §7).
+    SqliteStore("data-critical/gamification.db", "CANON", reconstructible=False, required=False),
 )
 
 # --- JSON canonicos (inventario §2.2) ----------------------------------------

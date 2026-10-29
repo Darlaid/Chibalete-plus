@@ -38,6 +38,16 @@ export function isGamificationEnabled(env = process.env) {
     return v === '1' || v === 'true';
 }
 
+/**
+ * `PM_EARNING_ENABLED`: hijo de `GAMIFICATION_ENABLED` (padre OFF ⇒ OFF).
+ * Sin él, los hechos elegibles se registran como `disabled_source` y no emiten.
+ */
+export function isEarningEnabled(env = process.env) {
+    if (!isGamificationEnabled(env)) return false;
+    const v = String(env.PM_EARNING_ENABLED ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true';
+}
+
 export const resolveGamificationDbPath = (env = process.env) =>
     (env.GAMIFICATION_DB ? path.resolve(env.GAMIFICATION_DB) : DEFAULT_DB_PATH);
 

@@ -1,11 +1,13 @@
 /**
- * ledgerCore.test.mjs — CHP-GAMIFICACION-G3-01.
+ * ledgerCore.test.mjs — CHP-GAMIFICACION-G3-01 / G3-02.
  *
  * Núcleo persistente sobre una gamification.db TEMPORAL (GAMIFICATION_DB):
- * flag OFF sin archivo, migración idempotente, constraints y triggers,
- * idempotencia (100 repeticiones), invariante snapshot = Σ ledger, operaciones
- * rechazadas, base corrupta con fallo seguro y aislamiento estructural
- * (sin ganchos, sin regalías). Nunca toca data/ ni data-critical/.
+ * flag OFF sin archivo, migración idempotente, reglas versionadas y
+ * validadas, política de emisión (el llamador nunca fija montos), topes
+ * diarios/semanales en America/Bogota, idempotencia (100 repeticiones),
+ * invariante snapshot = Σ ledger, constraints y triggers, base corrupta con
+ * fallo seguro y aislamiento estructural (sin ganchos, sin regalías).
+ * Nunca toca data/ ni data-critical/.
  *
  *   node server/gamification/__test__/ledgerCore.test.mjs
  */
@@ -29,10 +31,17 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_gam_core_'));
 const DB_PATH = path.join(tmp, 'nested', 'gamification.db');
 process.env.GAMIFICATION_DB = DB_PATH;
 delete process.env.GAMIFICATION_ENABLED;
+delete process.env.PM_EARNING_ENABLED;
 
 const D = await import('../db.mjs');
 const L = await import('../ledger.mjs');
 const RV = 'gm-test-v1';
+const EARN = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1' };
+const CAPS = { pmPerDay: 200, pmPerWeek: 300, pmPerDayBySource: { mook_review: 50 } };
+const RULES = { schema: 1, caps: CAPS, facts: {
+    'mook_review/evidence_reviewed': { xp: 30, pm: 20, emitWhen: { decision: ['aprobado'] } },
+    'mook_experience/experience_completed': { xp: 20, pm: 10 },
+} };
 const T0 = Date.UTC(2026, 9, 29, 15, 0, 0);
 let seqTime = T0;
 const tick = () => (seqTime += 1000);
@@ -43,6 +52,7 @@ try {
     ok('flag ausente ⇒ OFF', D.isGamificationEnabled({}) === false);
     for (const v of ['0', 'false', 'off', 'yes', ' ', 'TRUEISH']) ok(`GAMIFICATION_ENABLED='${v}' ⇒ OFF`, D.isGamificationEnabled({ GAMIFICATION_ENABLED: v }) === false);
     ok("'1' y 'true' ⇒ ON", D.isGamificationEnabled({ GAMIFICATION_ENABLED: '1' }) && D.isGamificationEnabled({ GAMIFICATION_ENABLED: 'TRUE' }));
+    ok('PM_EARNING_ENABLED sin el padre ⇒ OFF', D.isEarningEnabled({ PM_EARNING_ENABLED: '1' }) === false && D.isEarningEnabled(EARN) === true);
     ok('getGamificationDb con flag OFF lanza GAMIFICATION_DISABLED', throwsCode(() => D.getGamificationDb(), 'GAMIFICATION_DISABLED'));
     const off = D.safely(() => 1);
     ok('safely con flag OFF ⇒ { ok:false, code:GAMIFICATION_DISABLED } sin lanzar', off.ok === false && off.code === 'GAMIFICATION_DISABLED');
@@ -70,44 +80,88 @@ try {
     const again = runMigrations(db2, () => {}, { dir: path.join(HERE, '..', 'migrations'), tag: 't' });
     ok('runMigrations explícito sobre una base migrada es no-op', again.applied.length === 0 && again.already.length === 1);
 
-    section('[3] reglas versionadas (append-only, prospectivas)');
-    ok('crear rule set', L.createRuleSet(db2, { ruleVersion: RV, rules: { pm: { mook_review: 20 } }, createdBy: 'migration', now: T0 }).created === true);
-    ok('mismo contenido ⇒ idempotente', L.createRuleSet(db2, { ruleVersion: RV, rules: { pm: { mook_review: 20 } }, createdBy: 'migration', now: T0 }).created === false);
-    ok('mismo id con otro contenido ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => L.createRuleSet(db2, { ruleVersion: RV, rules: { pm: { mook_review: 99 } }, createdBy: 'migration', now: T0 }), 'IDEMPOTENCY_CONFLICT'));
-    ok('reglas retroactivas ⇒ RETROACTIVE_RULES', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-test-v0', rules: {}, createdBy: 'migration', effectiveFrom: T0 - 1, now: T0 }), 'RETROACTIVE_RULES'));
+    section('[3] reglas versionadas (validadas, append-only, prospectivas)');
+    ok('sin reglas vigentes ⇒ NO_ACTIVE_RULES', throwsCode(() => L.recordFact(db2, { source: 'mook_review', sourceEventId: 'ev-0', factType: 'evidence_reviewed', userId: 'u-x', occurredAt: T0, eligibility: 'eligible', now: T0 }, { env: EARN }), 'NO_ACTIVE_RULES'));
+    ok('crear rule set', L.createRuleSet(db2, { ruleVersion: RV, rules: RULES, createdBy: 'migration', now: T0 }).created === true);
+    ok('mismo contenido ⇒ idempotente', L.createRuleSet(db2, { ruleVersion: RV, rules: RULES, createdBy: 'migration', now: T0 }).created === false);
+    ok('mismo id con otro contenido ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => L.createRuleSet(db2, { ruleVersion: RV, rules: { ...RULES, caps: { pmPerDay: 1, pmPerWeek: 1 } }, createdBy: 'migration', now: T0 }), 'IDEMPOTENCY_CONFLICT'));
+    ok('reglas retroactivas ⇒ RETROACTIVE_RULES', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-test-v0', rules: RULES, createdBy: 'migration', effectiveFrom: T0 - 1, now: T0 }), 'RETROACTIVE_RULES'));
+    const badRules = [
+        ['sin topes', { schema: 1, facts: {} }],
+        ['tope diario > semanal', { schema: 1, facts: {}, caps: { pmPerDay: 10, pmPerWeek: 5 } }],
+        ['grado configurable', { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 1, pm: 1, grade: 'A' } }, caps: CAPS }],
+        ['fuente leo', { schema: 1, facts: { 'leo/answer': { xp: 1, pm: 1 } }, caps: CAPS }],
+        ['monto fuera de cota', { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 1, pm: 99999 } }, caps: CAPS }],
+        ['emitWhen con feature no admitida', { schema: 1, facts: { 'mook_review/evidence_reviewed': { pm: 1, emitWhen: { feedback: ['x'] } } }, caps: CAPS }],
+        ['clave raíz desconocida', { schema: 1, facts: {}, caps: CAPS, bonus: 5 }],
+    ];
+    for (const [l, r] of badRules) ok(`regla inválida (${l}) ⇒ INVALID_RULES`, throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-bad', rules: r, createdBy: 'migration', now: T0 }), 'INVALID_RULES'));
+    ok('regla que haría emitir a la lectura ⇒ READING_EMISSION_LOCKED', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-bad', rules: { schema: 1, facts: { 'reading_completion/reading_completed': { xp: 5, pm: 5 } }, caps: CAPS }, createdBy: 'migration', now: T0 }), 'READING_EMISSION_LOCKED'));
+    ok('ninguna regla inválida quedó registrada', db2.prepare("SELECT COUNT(*) n FROM gm_rule_sets WHERE rule_version='gm-bad'").get().n === 0);
 
     const fact = (over = {}) => ({ source: 'mook_review', sourceEventId: 'ev-1', factType: 'evidence_reviewed', userId: 'u-lector-1',
-        actorId: 'u-mediador-1', occurredAt: T0, grade: 'A', decision: 'awarded', ruleVersion: RV,
-        features: { experienceVersionId: 'xv-1', decision: 'aprobado', reviewerIsSelf: false }, xp: 30, pm: { amount: 20, reasonCode: 'mook_approved' }, ...over });
+        actorId: 'u-mediador-1', occurredAt: T0, eligibility: 'eligible',
+        features: { experienceVersionId: 'xv-1', decision: 'aprobado', reviewerIsSelf: false }, ...over });
+    const rec = (over = {}, env = EARN) => L.recordFact(db2, { now: tick(), ...fact(over) }, { env });
 
     section('[4] idempotencia: 100 repeticiones del mismo hecho');
     const results = [];
-    for (let i = 0; i < 100; i++) results.push(L.recordFact(db2, { ...fact(), now: tick() }));
+    for (let i = 0; i < 100; i++) results.push(rec());
     ok('solo la primera inserta', results.filter((r) => r.inserted).length === 1 && results[0].inserted);
-    ok('las 100 devuelven el mismo factId y movimiento', new Set(results.map((r) => r.factId)).size === 1 && new Set(results.map((r) => r.movementId)).size === 1);
+    ok('las 100 devuelven el mismo factId, movimiento y montos', new Set(results.map((r) => r.factId)).size === 1 && new Set(results.map((r) => r.movementId)).size === 1 && results.every((r) => r.pm === 20 && r.xp === 30));
     ok('1 hecho, 1 asiento XP y 1 movimiento PM en la base', db2.prepare('SELECT COUNT(*) n FROM gm_source_facts').get().n === 1
         && db2.prepare('SELECT COUNT(*) n FROM gm_xp_entries').get().n === 1 && db2.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 1);
-    ok('saldo = 20 y XP = 30', L.getBalance(db2, 'u-lector-1').available === 20 && L.getXp(db2, 'u-lector-1') === 30);
-    ok('mismo hecho con otro sujeto ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => L.recordFact(db2, fact({ userId: 'u-otro' })), 'IDEMPOTENCY_CONFLICT'));
+    ok('saldo = 20 y XP = 30 (montos de la regla, no del llamador)', L.getBalance(db2, 'u-lector-1').available === 20 && L.getXp(db2, 'u-lector-1') === 30);
+    ok('el hecho quedó con grado A (fijo por fuente) y la rule_version vigente', (() => { const r = db2.prepare('SELECT grade, rule_version FROM gm_source_facts').get(); return r.grade === 'A' && r.rule_version === RV; })());
+    ok('mismo hecho con otro sujeto ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => rec({ userId: 'u-otro' }), 'IDEMPOTENCY_CONFLICT'));
 
-    section('[5] decisiones sin emisión y emisiones rechazadas');
-    ok('observed sin montos se registra sin emitir', (() => { const r = L.recordFact(db2, fact({ sourceEventId: 'ev-obs', decision: 'observed', xp: 0, pm: null, features: { decision: 'con_comentarios' } })); return r.inserted && r.movementId === null && r.xpEntryId === null; })());
-    ok('observed con montos ⇒ INVALID_EMISSION', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x1', decision: 'observed' })), 'INVALID_EMISSION'));
-    ok('grado C emitiendo ⇒ GRADE_NOT_EMITTING', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x2', grade: 'C' })), 'GRADE_NOT_EMITTING'));
-    ok('grado D emitiendo ⇒ GRADE_NOT_EMITTING', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x3', grade: 'D' })), 'GRADE_NOT_EMITTING'));
-    ok('lectura terminada emitiendo ⇒ READING_EMISSION_LOCKED', throwsCode(() => L.recordFact(db2, fact({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible' } })), 'READING_EMISSION_LOCKED'));
-    ok('lectura terminada en observación sí se registra', L.recordFact(db2, fact({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', decision: 'observed', xp: 0, pm: null, features: { verdict: 'plausible', activeMinutes: 42, reasons: [] } })).inserted);
-    ok('autoconcesión (actor = sujeto) ⇒ SELF_AWARD', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x4', actorId: 'u-lector-1' })), 'SELF_AWARD'));
-    ok('fuente leo ⇒ UNKNOWN_SOURCE', throwsCode(() => L.recordFact(db2, fact({ source: 'leo', sourceEventId: 'ev-x5' })), 'UNKNOWN_SOURCE'));
-    ok('fuente royalties ⇒ UNKNOWN_SOURCE', throwsCode(() => L.recordFact(db2, fact({ source: 'royalties_qrs', sourceEventId: 'ev-x6' })), 'UNKNOWN_SOURCE'));
-    ok('features con texto libre no admitido ⇒ INVALID_FEATURES', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x7', features: { feedback: 'muy bien' } })), 'INVALID_FEATURES'));
-    ok('features con string largo ⇒ INVALID_FEATURES', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x8', features: { decision: 'x'.repeat(65) } })), 'INVALID_FEATURES'));
-    ok('PM negativo en un hecho ⇒ INVALID_AMOUNT', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x9', pm: { amount: -5, reasonCode: 'r' } })), 'INVALID_AMOUNT'));
-    ok('PM no entero ⇒ INVALID_AMOUNT', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x10', pm: { amount: 2.5, reasonCode: 'r' } })), 'INVALID_AMOUNT'));
-    ok('PM fuera de cota ⇒ AMOUNT_OUT_OF_BOUNDS', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x11', pm: { amount: 99999, reasonCode: 'r' } })), 'AMOUNT_OUT_OF_BOUNDS'));
-    ok('rule_version inexistente ⇒ UNKNOWN_RULE_VERSION', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev-x12', ruleVersion: 'gm-nope' })), 'UNKNOWN_RULE_VERSION'));
-    ok('id con caracteres inválidos ⇒ INVALID_FACT', throwsCode(() => L.recordFact(db2, fact({ sourceEventId: 'ev 13 ; DROP' })), 'INVALID_FACT'));
-    ok('ninguna operación rechazada dejó filas', db2.prepare("SELECT COUNT(*) n FROM gm_source_facts WHERE source_event_id LIKE 'ev-x%'").get().n === 0);
+    section('[5] el llamador no fija montos; decisiones sin emisión');
+    for (const k of ['xp', 'pm', 'amount', 'grade', 'decision', 'ruleVersion']) {
+        ok(`campo «${k}» del llamador ⇒ CALLER_FIELD_NOT_ALLOWED`, throwsCode(() => L.recordFact(db2, { ...fact({ sourceEventId: `ev-f-${k}` }), [k]: k === 'grade' ? 'A' : 999 }, { env: EARN }), 'CALLER_FIELD_NOT_ALLOWED'));
+    }
+    const obs = rec({ sourceEventId: 'ev-obs', eligibility: 'observe' });
+    ok('observe ⇒ observed sin emisión', obs.inserted && obs.decision === 'observed' && obs.pm === 0 && obs.xp === 0);
+    const cc = rec({ sourceEventId: 'ev-cc', features: { decision: 'con_comentarios' } });
+    ok('MOOK con_comentarios ⇒ observed (emitWhen) sin emisión', cc.decision === 'observed' && cc.pm === 0 && cc.movementId === null);
+    const self = rec({ sourceEventId: 'ev-self', actorId: 'u-lector-1' });
+    ok('autorrevisión declarada elegible ⇒ rejected_self_review, sin emisión', self.decision === 'rejected_self_review' && self.pm === 0 && self.xp === 0);
+    const rd = rec({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible', activeMinutes: 42, reasons: [] } });
+    ok('lectura terminada elegible ⇒ observed (bloqueada) y grado B', rd.decision === 'observed' && rd.pm === 0 && db2.prepare('SELECT grade FROM gm_source_facts WHERE fact_id=?').get(rd.factId).grade === 'B');
+    const nr = rec({ sourceEventId: 'ev-norule', factType: 'otro_tipo' });
+    ok('hecho sin regla ⇒ rejected_not_eligible', nr.decision === 'rejected_not_eligible' && nr.pm === 0);
+    const syn = rec({ sourceEventId: 'ev-syn', eligibility: 'rejected_excluded_user' });
+    ok('rechazo declarado por el adaptador se registra tal cual', syn.decision === 'rejected_excluded_user' && syn.pm === 0);
+    const offE = rec({ sourceEventId: 'ev-off' }, { GAMIFICATION_ENABLED: '1' });
+    ok('PM_EARNING_ENABLED ausente ⇒ disabled_source, sin emisión', offE.decision === 'disabled_source' && offE.pm === 0 && offE.xp === 0);
+    const offE2 = rec({ sourceEventId: 'ev-off2' }, { PM_EARNING_ENABLED: '1' });
+    ok('PM_EARNING_ENABLED con el padre OFF ⇒ disabled_source', offE2.decision === 'disabled_source');
+    ok('elegibilidad desconocida ⇒ INVALID_ELIGIBILITY', throwsCode(() => rec({ sourceEventId: 'ev-x1', eligibility: 'awarded' }), 'INVALID_ELIGIBILITY'));
+    ok('fuente leo ⇒ UNKNOWN_SOURCE', throwsCode(() => rec({ source: 'leo', sourceEventId: 'ev-x5' }), 'UNKNOWN_SOURCE'));
+    ok('fuente royalties ⇒ UNKNOWN_SOURCE', throwsCode(() => rec({ source: 'royalties_qrs', sourceEventId: 'ev-x6' }), 'UNKNOWN_SOURCE'));
+    ok('features con texto libre no admitido ⇒ INVALID_FEATURES', throwsCode(() => rec({ sourceEventId: 'ev-x7', features: { feedback: 'muy bien' } }), 'INVALID_FEATURES'));
+    ok('features con string largo ⇒ INVALID_FEATURES', throwsCode(() => rec({ sourceEventId: 'ev-x8', features: { decision: 'x'.repeat(65) } }), 'INVALID_FEATURES'));
+    ok('id con caracteres inválidos ⇒ INVALID_FACT', throwsCode(() => rec({ sourceEventId: 'ev 13 ; DROP' }), 'INVALID_FACT'));
+    ok('ninguna operación rechazada dejó filas', db2.prepare("SELECT COUNT(*) n FROM gm_source_facts WHERE source_event_id LIKE 'ev-x%' OR source_event_id LIKE 'ev-f-%'").get().n === 0);
+
+    section('[5b] topes diarios y semanales (America/Bogota)');
+    const DAY1 = Date.UTC(2026, 10, 2, 15); // lunes 2026-11-02, 10:00 Bogotá
+    const capRec = (id, at) => L.recordFact(db2, { ...fact({ userId: 'u-cap', sourceEventId: id }), now: at }, { env: EARN });
+    const c = [0, 1, 2, 3].map((i) => capRec(`cap-${i}`, DAY1 + i * 1000));
+    ok('20 + 20 + 10 (capped) + 0 (capped) con pmPerDayBySource.mook_review = 50', c.map((r) => r.pm).join(',') === '20,20,10,0' && c[2].decision === 'capped' && c[3].decision === 'capped');
+    ok('el XP no se recorta por los topes de PM', c.every((r) => r.xp === 30));
+    ok('al día siguiente (Bogotá) el tope diario se renueva', capRec('cap-d2', DAY1 + 86_400_000).pm === 20);
+    for (let d = 2; d < 7; d++) for (let i = 0; i < 3; i++) capRec(`cap-w-${d}-${i}`, DAY1 + d * 86_400_000 + i * 1000);
+    const weekly = db2.prepare("SELECT SUM(amount) n FROM gm_pm_movements WHERE user_id='u-cap' AND kind='earn' AND period_week='2026-W45'").get().n;
+    ok(`tope semanal respetado (${weekly} = ${CAPS.pmPerWeek})`, weekly === CAPS.pmPerWeek);
+    ok('la semana ISO siguiente vuelve a emitir', capRec('cap-nextweek', DAY1 + 7 * 86_400_000).pm === 20);
+    ok('23:59 del domingo en Bogotá (04:59Z del lunes) sigue en la semana anterior', L.periodsFor(Date.UTC(2026, 10, 9, 4, 59)).week === '2026-W45');
+
+    section('[5c] cambio de reglas prospectivo (D48)');
+    L.createRuleSet(db2, { ruleVersion: 'gm-test-v2', rules: { ...RULES, facts: { ...RULES.facts, 'mook_review/evidence_reviewed': { xp: 30, pm: 5, emitWhen: { decision: ['aprobado'] } } } }, createdBy: 'admin-1', effectiveFrom: T0 + 30 * 86_400_000, now: T0 });
+    ok('antes de entrar en vigor rige la versión anterior', L.getActiveRuleSet(db2, T0 + 5).ruleVersion === RV);
+    const v2 = L.recordFact(db2, { ...fact({ userId: 'u-v2', sourceEventId: 'ev-v2' }), now: T0 + 31 * 86_400_000 }, { env: EARN });
+    ok('después rige la nueva y el hecho guarda su rule_version', v2.pm === 5 && db2.prepare('SELECT rule_version FROM gm_source_facts WHERE fact_id=?').get(v2.factId).rule_version === 'gm-test-v2');
+    ok('los hechos anteriores conservan su versión y su monto', db2.prepare('SELECT rule_version FROM gm_source_facts WHERE fact_id=?').get(results[0].factId).rule_version === RV && L.getBalance(db2, 'u-lector-1').available === 20);
 
     section('[6] ajustes y compensaciones (nunca «set balance»)');
     const mv1 = results[0].movementId;
@@ -122,7 +176,7 @@ try {
     const comp = L.appendCompensation(db2, { userId: 'u-lector-1', amount: -40, reasonCode: 'fraud_proven', actorId: 'admin-1', relatedMovementId: mv1, idempotencyKey: 'c1', ruleVersion: RV, now: tick() });
     ok('la compensación SÍ puede dejar saldo negativo (Contratos §5.4)', comp.inserted && L.getBalance(db2, 'u-lector-1').available === -15);
     ok('lifetime_earned no cambia por ajustes ni compensaciones', L.getBalance(db2, 'u-lector-1').lifetimeEarned === 20);
-    ok('no existe primitiva de reserva ni de canje en G3-01', !('reserve' in L) && !('redeem' in L) && !Object.keys(L).some((k) => /reserv|redeem|coupon|grant/i.test(k)));
+    ok('no existe primitiva de reserva ni de canje', !Object.keys(L).some((k) => /reserv|redeem|coupon|grant/i.test(k)));
 
     section('[7] triggers append-only y constraints a nivel SQL');
     for (const t of ['gm_rule_sets', 'gm_source_facts', 'gm_xp_entries', 'gm_pm_movements', 'gm_admin_audit']) {
@@ -147,21 +201,25 @@ try {
     db2.prepare("UPDATE gm_redemptions SET state='DELIVERED' WHERE redemption_id='red-1'").run();
     db2.prepare("UPDATE gm_redemptions SET state='CONFIRMED' WHERE redemption_id='red-1'").run();
     ok('canje: estado final inmutable', throwsMsg(() => db2.prepare("UPDATE gm_redemptions SET state='RELEASED' WHERE redemption_id='red-1'").run(), /illegal transition/));
-    ok('canje: DELETE aborta', throwsMsg(() => db2.prepare("DELETE FROM gm_redemptions").run(), /never deleted/));
+    ok('canje: DELETE aborta', throwsMsg(() => db2.prepare('DELETE FROM gm_redemptions').run(), /never deleted/));
 
     section('[8] invariante snapshot = Σ ledger y reconstrucción');
-    // Secuencia pseudoaleatoria determinista de hechos, ajustes y compensaciones para varios usuarios.
+    // Secuencia pseudoaleatoria determinista de hechos (montos de la regla, con topes),
+    // ajustes y compensaciones para varios usuarios a lo largo de varios días.
     let s = 12345; const rnd = () => (s = (s * 1103515245 + 12345) % 2147483648) / 2147483648;
     const users = ['u-a', 'u-b', 'u-c', 'u-d'];
+    let tProp = Date.UTC(2026, 11, 1, 15);
     for (let i = 0; i < 300; i++) {
         const u = users[Math.floor(rnd() * users.length)];
         const r = rnd();
+        tProp += Math.floor(rnd() * 4 * 3_600_000);
         try {
-            if (r < 0.6) L.recordFact(db2, fact({ userId: u, sourceEventId: `prop-${Math.floor(rnd() * 120)}-${u}`, pm: { amount: 1 + Math.floor(rnd() * 50), reasonCode: 'mook_approved' }, now: tick() }));
-            else if (r < 0.85) L.appendAdjustment(db2, { userId: u, amount: Math.floor(rnd() * 40) - 20 || 1, reasonCode: 'support', actorId: 'admin-1', idempotencyKey: `pa-${i}`, ruleVersion: RV, now: tick() });
+            if (r < 0.35) L.recordFact(db2, { ...fact({ userId: u, sourceEventId: `prop-${Math.floor(rnd() * 120)}-${u}` }), now: tProp }, { env: EARN });
+            else if (r < 0.6) L.recordFact(db2, { source: 'mook_experience', sourceEventId: `pexp-${Math.floor(rnd() * 60)}-${u}`, factType: 'experience_completed', userId: u, occurredAt: tProp, eligibility: 'eligible', features: { experienceVersionId: 'xv-1' }, now: tProp }, { env: EARN });
+            else if (r < 0.85) L.appendAdjustment(db2, { userId: u, amount: Math.floor(rnd() * 40) - 20 || 1, reasonCode: 'support', actorId: 'admin-1', idempotencyKey: `pa-${i}`, ruleVersion: RV, now: tProp });
             else {
                 const last = db2.prepare('SELECT movement_id FROM gm_pm_movements WHERE user_id = ? ORDER BY seq DESC LIMIT 1').get(u);
-                if (last) L.appendCompensation(db2, { userId: u, amount: -(1 + Math.floor(rnd() * 30)), reasonCode: 'correction', actorId: 'admin-1', relatedMovementId: last.movement_id, idempotencyKey: `pc-${i}`, ruleVersion: RV, now: tick() });
+                if (last) L.appendCompensation(db2, { userId: u, amount: -(1 + Math.floor(rnd() * 30)), reasonCode: 'correction', actorId: 'admin-1', relatedMovementId: last.movement_id, idempotencyKey: `pc-${i}`, ruleVersion: RV, now: tProp });
             }
         } catch (e) {
             if (!['INSUFFICIENT_BALANCE', 'IDEMPOTENCY_CONFLICT'].includes(e.code)) throw e;
@@ -169,6 +227,9 @@ try {
     }
     const v = L.verifyLedger(db2);
     ok(`snapshot = Σ ledger para ${v.users} usuarios tras 300 operaciones aleatorias`, v.ok, JSON.stringify(v.divergences).slice(0, 300));
+    const over = db2.prepare(`SELECT user_id, period_day, SUM(amount) n FROM gm_pm_movements WHERE kind='earn' GROUP BY user_id, period_day HAVING n > ${CAPS.pmPerDay}`).all();
+    const overW = db2.prepare(`SELECT user_id, period_week, SUM(amount) n FROM gm_pm_movements WHERE kind='earn' GROUP BY user_id, period_week HAVING n > ${CAPS.pmPerWeek}`).all();
+    ok('ningún usuario excede los topes diario ni semanal en toda la secuencia', over.length === 0 && overW.length === 0, JSON.stringify([over, overW]));
     ok('ningún saldo negativo sin una compensación que lo explique', db2.prepare(`SELECT COUNT(*) n FROM gm_pm_balances b WHERE b.available < 0
         AND NOT EXISTS (SELECT 1 FROM gm_pm_movements m WHERE m.user_id = b.user_id AND m.kind = 'compensation')`).get().n === 0);
     const before = db2.prepare('SELECT user_id, available, reserved, lifetime_earned, last_seq FROM gm_pm_balances ORDER BY user_id').all();
@@ -210,10 +271,11 @@ try {
     const modFiles = fs.readdirSync(path.join(HERE, '..')).filter((f) => f.endsWith('.mjs') || f.endsWith('.js'));
     const modSrc = modFiles.map((f) => fs.readFileSync(path.join(HERE, '..', f), 'utf8')).join('\n');
     ok('server/gamification no importa server/royalties', !/from\s+['"][^'"]*royalties/.test(modSrc));
-    ok('server/gamification no menciona econ_events, royalties.db ni access_db', !/econ_events|royalties\.db|access_db|progress\.db|mook_db/.test(modSrc));
+    ok('server/gamification no menciona econ_events, royalties.db ni access_db', !/econ_events|royalties\.db|access_db/.test(modSrc));
     ok('server/gamification no escribe archivos (solo mkdir del directorio de su base)', !/writeFile|appendFile|rename|unlink|rmSync|copyFile/.test(modSrc));
     ok('server/gamification no registra rutas HTTP', !/app\.(get|post|put|delete|use)\s*\(|express\.Router/.test(modSrc));
-    ok('server.js no importa ni llama al motor (sin ganchos en G3-01)', !/gamification\//.test(read('server/server.js')));
+    ok('server/gamification no lee stores de producto (las fuentes se le pasan)', !/readFileSync|progressService|experienceStore|eventsService/.test(modSrc));
+    ok('server.js no importa ni llama al motor (sin ganchos)', !/gamification\//.test(read('server/server.js')));
     ok('progressService no depende del motor', !/gamification/.test(read('server/progressService.js')));
     ok('experienceStore (MOOK) no depende del motor', !/gamification/.test(read('server/lib/experienceStore.js')));
     ok('leoOrchestrator no depende del motor', !/server\/gamification|\.\/gamification/.test(read('server/leoOrchestrator.js')));
@@ -226,5 +288,5 @@ try {
     fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log(`\nCHP-GAMIFICACION-G3-01 (núcleo) — ${pass} ✓, ${fail} ✗`);
+console.log(`\nCHP-GAMIFICACION-G3 (núcleo) — ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);

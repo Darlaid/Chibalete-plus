@@ -10,6 +10,8 @@
  *    su emisión (XP/PM) ocurre en la MISMA transacción, así que un reintento
  *    no emite dos veces;
  *  - el snapshot `gm_pm_balances` solo cambia junto con su movimiento;
+ *  - el llamador NUNCA fija montos, grado ni decisión: los decide
+ *    `policy.mjs` con las reglas vigentes y los topes, en la misma transacción;
  *  - solo se emite desde evidencia de grado A/B; la lectura terminada sigue en
  *    observación (READING_EMISSION_LOCKED) hasta que G4 apruebe su validador;
  *  - reservas y canjes NO se exponen en G3-01 (solo existen sus tablas);
@@ -19,16 +21,16 @@
  */
 import crypto from 'node:crypto';
 import { ulid } from '../ulid.js';
-import { GamificationError } from './db.mjs';
+import { GamificationError, isEarningEnabled } from './db.mjs';
+import { ELIGIBILITY, SOURCE_GRADE, decideEmission, validateRules } from './policy.mjs';
 
-export const FACT_SOURCES = Object.freeze(['mook_review', 'mook_experience', 'reading_completion', 'offline_validation', 'mission']);
+export const FACT_SOURCES = Object.freeze(Object.keys(SOURCE_GRADE));
 export const FACT_DECISIONS = Object.freeze([
     'awarded', 'capped', 'observed', 'disabled_source',
     'rejected_self_review', 'rejected_excluded_user', 'rejected_inactive_account',
     'rejected_implausible', 'rejected_insufficient_data', 'rejected_not_eligible',
 ]);
-const EMITTING_DECISIONS = new Set(['awarded', 'capped']);
-const EMITTING_GRADES = new Set(['A', 'B']);
+const FACT_FIELDS = new Set(['source', 'sourceEventId', 'factType', 'userId', 'actorId', 'occurredAt', 'eligibility', 'features', 'now']);
 
 /** Claves admitidas en `features_json` por fuente (Modelo de datos V1 §4). Nada de texto libre. */
 export const FEATURE_ALLOWLIST = Object.freeze({
@@ -87,6 +89,24 @@ function requireRuleVersion(db, ruleVersion) {
     }
 }
 
+/** Conjunto de reglas vigente en `now` (D48: el más reciente ya en vigor). */
+export function getActiveRuleSet(db, now = Date.now()) {
+    const row = db.prepare(`SELECT rule_version, rules_json FROM gm_rule_sets WHERE effective_from <= ?
+        ORDER BY effective_from DESC, created_at DESC, rule_version DESC LIMIT 1`).get(now);
+    return row ? { ruleVersion: row.rule_version, rules: JSON.parse(row.rules_json) } : null;
+}
+
+/** PM `earn` ya emitidos al usuario en el día y semana (Bogotá) de `now`. */
+function earnedUsage(db, userId, source, now) {
+    const p = periodsFor(now);
+    const sum = (sql, ...a) => db.prepare(sql).get(...a).n;
+    return {
+        day: sum("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE user_id=? AND kind='earn' AND period_day=?", userId, p.day),
+        week: sum("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE user_id=? AND kind='earn' AND period_week=?", userId, p.week),
+        daySource: sum("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE user_id=? AND kind='earn' AND source=? AND period_day=?", userId, source, p.day),
+    };
+}
+
 function checkAmount(n, { allowNegative }) {
     if (!isInt(n) || n === 0) throw bad('INVALID_AMOUNT', 'monto entero distinto de 0');
     if (!allowNegative && n < 0) throw bad('INVALID_AMOUNT', 'monto positivo requerido');
@@ -118,11 +138,14 @@ function insertMovement(db, m) {
 
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-/** Registra un conjunto de reglas (append-only, prospectivo D48). Idempotente si el contenido coincide. */
+/**
+ * Registra un conjunto de reglas (append-only, prospectivo D48), validado por
+ * la política: sin topes no hay reglas. Idempotente si el contenido coincide.
+ */
 export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom, now = Date.now() }) {
     if (!isId(ruleVersion)) throw bad('INVALID_RULE_VERSION');
     if (!isId(createdBy)) throw bad('INVALID_ACTOR');
-    if (rules == null || typeof rules !== 'object') throw bad('INVALID_RULES');
+    validateRules(rules, { featureAllowlist: FEATURE_ALLOWLIST });
     const rulesJson = JSON.stringify(rules);
     const digest = sha256(rulesJson);
     const from = effectiveFrom ?? now;
@@ -139,63 +162,61 @@ export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom
 }
 
 /**
- * Registra un hecho de evidencia y, si su decisión emite, su XP y PM en la
- * MISMA transacción. Reintentos del mismo hecho devuelven el registro original
- * sin emitir de nuevo.
+ * Registra un hecho de evidencia. El llamador aporta SOLO el hecho y su
+ * elegibilidad; el grado (por fuente), la decisión y los montos los fija la
+ * política con las reglas VIGENTES y los topes del usuario, dentro de la misma
+ * transacción `IMMEDIATE` (dos réplicas no pueden exceder un tope). Un
+ * reintento del mismo hecho devuelve el registro original sin emitir.
  *
- * @returns {{ inserted: boolean, factId: string, decision: string, xpEntryId: string|null, movementId: string|null }}
+ * @param {object} fact  source, sourceEventId, factType, userId, actorId?, occurredAt, eligibility, features?, now?
+ * @param {{ env?: object }} [opts]  `PM_EARNING_ENABLED` se lee aquí, por llamada
+ * @returns {{ inserted: boolean, factId: string, decision: string, xp: number, pm: number, xpEntryId: string|null, movementId: string|null }}
  */
-export function recordFact(db, { source, sourceEventId, factType, userId, actorId = null, occurredAt, grade, decision,
-    ruleVersion, features = null, xp = 0, pm = null, now = Date.now() }) {
+export function recordFact(db, fact, { env = process.env } = {}) {
+    const unknown = Object.keys(fact || {}).filter((k) => !FACT_FIELDS.has(k));
+    if (unknown.length) throw bad('CALLER_FIELD_NOT_ALLOWED', `el llamador no fija ${unknown.join(',')}`);
+    const { source, sourceEventId, factType, userId, actorId = null, occurredAt, eligibility, features = null, now = Date.now() } = fact;
     if (!FACT_SOURCES.includes(source)) throw bad('UNKNOWN_SOURCE', String(source));
     if (!isId(sourceEventId) || !isId(factType) || !isId(userId)) throw bad('INVALID_FACT');
     if (actorId !== null && !isId(actorId)) throw bad('INVALID_ACTOR');
     if (!isInt(occurredAt) || occurredAt <= 0) throw bad('INVALID_FACT', 'occurredAt');
-    if (!['A', 'B', 'C', 'D'].includes(grade)) throw bad('INVALID_GRADE');
-    if (!FACT_DECISIONS.includes(decision)) throw bad('INVALID_DECISION');
+    if (!ELIGIBILITY.includes(eligibility)) throw bad('INVALID_ELIGIBILITY', String(eligibility));
     const featuresJson = validateFeatures(source, features);
-    if (!isInt(xp) || xp < 0 || xp > MAX_AMOUNT_PER_MOVEMENT) throw bad('INVALID_XP');
-    const emits = EMITTING_DECISIONS.has(decision);
-    const pmAmount = pm == null ? 0 : pm.amount;
-    if (pm != null) {
-        checkAmount(pmAmount, { allowNegative: false });
-        if (!isId(pm.reasonCode)) throw bad('INVALID_REASON');
-    }
-    if (!emits && (xp > 0 || pmAmount > 0)) throw bad('INVALID_EMISSION', `la decisión ${decision} no emite`);
-    if (emits && (xp > 0 || pmAmount > 0)) {
-        if (!EMITTING_GRADES.has(grade)) throw bad('GRADE_NOT_EMITTING', `grado ${grade} nunca emite`);
-        if (source === 'reading_completion') throw bad('READING_EMISSION_LOCKED', 'la lectura terminada sigue en observación (G4)');
-        if (actorId !== null && actorId === userId) throw bad('SELF_AWARD', 'el validador no puede ser el sujeto');
-    }
+    // La autoconcesión nunca emite, aunque el llamador la declare elegible.
+    const effectiveEligibility = eligibility === 'eligible' && actorId !== null && actorId === userId ? 'rejected_self_review' : eligibility;
+    const earningEnabled = isEarningEnabled(env);
 
     return db.transaction(() => {
-        requireRuleVersion(db, ruleVersion);
         const existing = db.prepare('SELECT * FROM gm_source_facts WHERE source = ? AND source_event_id = ? AND fact_type = ?')
             .get(source, sourceEventId, factType);
         if (existing) {
             if (existing.user_id !== userId) throw bad('IDEMPOTENCY_CONFLICT', 'el mismo hecho con otro sujeto');
-            const xpRow = db.prepare("SELECT entry_id FROM gm_xp_entries WHERE fact_id = ? AND kind = 'award'").get(existing.fact_id);
-            const mvRow = db.prepare('SELECT movement_id FROM gm_pm_movements WHERE idempotency_key = ?').get(`fact:${existing.fact_id}`);
-            return { inserted: false, factId: existing.fact_id, decision: existing.decision,
+            const xpRow = db.prepare("SELECT entry_id, xp FROM gm_xp_entries WHERE fact_id = ? AND kind = 'award'").get(existing.fact_id);
+            const mvRow = db.prepare('SELECT movement_id, amount FROM gm_pm_movements WHERE idempotency_key = ?').get(`fact:${existing.fact_id}`);
+            return { inserted: false, factId: existing.fact_id, decision: existing.decision, xp: xpRow?.xp ?? 0, pm: mvRow?.amount ?? 0,
                 xpEntryId: xpRow?.entry_id ?? null, movementId: mvRow?.movement_id ?? null };
         }
+        const active = getActiveRuleSet(db, now);
+        if (!active) throw bad('NO_ACTIVE_RULES', 'no hay reglas vigentes');
+        const d = decideEmission({ rules: active.rules, source, factType, eligibility: effectiveEligibility,
+            features: features || {}, earningEnabled, usage: earnedUsage(db, userId, source, now) });
         const factId = ulid(now);
         db.prepare(`
             INSERT INTO gm_source_facts (fact_id, source, source_event_id, fact_type, user_id, actor_id, occurred_at,
                 recorded_at, grade, decision, rule_version, features_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(factId, source, sourceEventId, factType, userId, actorId, occurredAt, now, grade, decision, ruleVersion, featuresJson);
+        `).run(factId, source, sourceEventId, factType, userId, actorId, occurredAt, now, d.grade, d.decision, active.ruleVersion, featuresJson);
         let xpEntryId = null;
         let movementId = null;
-        if (emits && xp > 0) {
+        if (d.xp > 0) {
             xpEntryId = ulid(now);
-            db.prepare("INSERT INTO gm_xp_entries VALUES (?, ?, 'award', ?, ?, NULL, ?, ?)").run(xpEntryId, userId, xp, factId, ruleVersion, now);
+            db.prepare("INSERT INTO gm_xp_entries VALUES (?, ?, 'award', ?, ?, NULL, ?, ?)").run(xpEntryId, userId, d.xp, factId, active.ruleVersion, now);
         }
-        if (emits && pmAmount > 0) {
-            movementId = insertMovement(db, { userId, kind: 'earn', amount: pmAmount, source, idempotencyKey: `fact:${factId}`,
-                factId, reasonCode: pm.reasonCode, actorId: 'system', ruleVersion, createdAt: now });
+        if (d.pm > 0) {
+            movementId = insertMovement(db, { userId, kind: 'earn', amount: d.pm, source, idempotencyKey: `fact:${factId}`,
+                factId, reasonCode: `${source}.${factType}`.slice(0, MAX_ID), actorId: 'system', ruleVersion: active.ruleVersion, createdAt: now });
         }
-        return { inserted: true, factId, decision, xpEntryId, movementId };
+        return { inserted: true, factId, decision: d.decision, xp: d.xp, pm: d.pm, xpEntryId, movementId };
     }).immediate();
 }
 

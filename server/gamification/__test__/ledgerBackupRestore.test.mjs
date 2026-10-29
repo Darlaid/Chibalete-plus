@@ -51,13 +51,15 @@ const TABLES = ['gm_rule_sets', 'gm_source_facts', 'gm_xp_entries', 'gm_achievem
     'gm_redemptions', 'gm_redemption_transitions', 'gm_reward_grants', 'gm_admin_audit', '_migrations'];
 const tableHash = (db, t) => crypto.createHash('sha256').update(JSON.stringify(db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all())).digest('hex');
 const fact = (i, user) => ({ source: 'mook_review', sourceEventId: `bk-${i}`, factType: 'evidence_reviewed', userId: user,
-    actorId: 'u-med', occurredAt: Date.now(), grade: 'A', decision: 'awarded', ruleVersion: RV, xp: 5, pm: { amount: 11, reasonCode: 'mook_approved' } });
+    actorId: 'u-med', occurredAt: Date.now(), eligibility: 'eligible', features: { decision: 'aprobado' } });
+const EARN = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1' };
+const RULES = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mook_review/evidence_reviewed': { xp: 5, pm: 11 } } };
 
 try {
     section('[1] base viva con historial, en WAL y sin checkpoint');
     const db = D.getGamificationDb();
-    L.createRuleSet(db, { ruleVersion: RV, rules: { pm: 11 }, createdBy: 'migration' });
-    for (let i = 0; i < 40; i++) L.recordFact(db, fact(i, `u-${i % 4}`));
+    L.createRuleSet(db, { ruleVersion: RV, rules: RULES, createdBy: 'migration' });
+    for (let i = 0; i < 40; i++) L.recordFact(db, fact(i, `u-${i % 4}`), { env: EARN });
     const mv = db.prepare('SELECT movement_id, user_id FROM gm_pm_movements ORDER BY seq LIMIT 1').get();
     L.appendAdjustment(db, { userId: 'u-1', amount: 4, reasonCode: 'support', actorId: 'admin-1', idempotencyKey: 'a1', ruleVersion: RV });
     L.appendCompensation(db, { userId: mv.user_id, amount: -11, reasonCode: 'correction', actorId: 'admin-1', relatedMovementId: mv.movement_id, idempotencyKey: 'c1', ruleVersion: RV });
@@ -80,7 +82,7 @@ try {
     ok('método = sqlite_online_backup_api e integrity_check = ok', meta.capture_method === 'sqlite_online_backup_api' && meta.integrity_result === 'ok', JSON.stringify(meta));
     ok('sha256 informado coincide con el archivo copiado', meta.sha256 === crypto.createHash('sha256').update(fs.readFileSync(COPY)).digest('hex'));
     ok('la base viva sigue en WAL y operativa tras la captura', String(db.pragma('journal_mode', { simple: true })).toLowerCase() === 'wal'
-        && L.recordFact(db, fact(999, 'u-live')).inserted);
+        && L.recordFact(db, fact(999, 'u-live'), { env: EARN }).inserted);
     D.closeGamificationDb();
 
     section('[3] restauración y verificación');
@@ -95,9 +97,9 @@ try {
     ok('el hecho escrito DESPUÉS de la captura no está (punto de restauración exacto)', !rdb.prepare("SELECT 1 FROM gm_source_facts WHERE source_event_id='bk-999'").get());
     ok('snapshot idéntico y = Σ ledger', JSON.stringify(rdb.prepare('SELECT * FROM gm_pm_balances ORDER BY user_id').all()) === balancesBefore && L.verifyLedger(rdb).ok);
     ok('los triggers append-only viajan con la copia', (() => { try { rdb.prepare('DELETE FROM gm_pm_movements').run(); return false; } catch (e) { return /append-only/.test(e.message); } })());
-    const replays = Array.from({ length: 40 }, (_, i) => L.recordFact(rdb, fact(i, `u-${i % 4}`)));
+    const replays = Array.from({ length: 40 }, (_, i) => L.recordFact(rdb, fact(i, `u-${i % 4}`), { env: EARN }));
     ok('re-procesar los 40 hechos tras restaurar no duplica (idempotencia I1)', replays.every((x) => !x.inserted) && rdb.prepare('SELECT COUNT(*) n FROM gm_source_facts').get().n === 40);
-    ok('los hechos perdidos tras el punto de restauración se recuperan al re-procesarlos', L.recordFact(rdb, fact(999, 'u-live')).inserted && L.verifyLedger(rdb).ok);
+    ok('los hechos perdidos tras el punto de restauración se recuperan al re-procesarlos', L.recordFact(rdb, fact(999, 'u-live'), { env: EARN }).inserted && L.verifyLedger(rdb).ok);
     D.closeGamificationDb();
 } catch (e) {
     console.error('  ✗ excepción inesperada', e);

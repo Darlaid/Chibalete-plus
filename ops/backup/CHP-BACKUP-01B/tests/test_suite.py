@@ -2349,9 +2349,9 @@ def test_id_inventory_path():
     # de la base no debe tumbar el backup de los otros 24 stores.
     assert store.required is False, store
 
-    # 7 = los 5 previos + data-critical/events.archive.db (EA01, opcional)
-    # + data-critical/royalties.db (RY01, opcional).
-    assert len(S.SQLITE_STORES) == 7, sqlite_paths
+    # 8 = los 5 previos + data-critical/events.archive.db (EA01, opcional)
+    # + data-critical/royalties.db (RY01, opcional) + data-critical/gamification.db (GM01, opcional).
+    assert len(S.SQLITE_STORES) == 8, sqlite_paths  # + gamification.db (GM01, opcional)
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
 
 
@@ -3666,7 +3666,7 @@ def test_ea_inventory():
     assert not os.path.isabs(ARCHIVE_LOGICAL_PATH)
     # El resto del inventario SQLite no cambia: 4 obligatorios + identity.db +
     # este + royalties.db (RY01).
-    assert len(S.SQLITE_STORES) == 7, sqlite_paths
+    assert len(S.SQLITE_STORES) == 8, sqlite_paths  # + gamification.db (GM01, opcional)
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
     assert "data-critical/events.db" in sqlite_paths, sqlite_paths
 
@@ -4009,7 +4009,7 @@ def test_ry_inventory():
     assert declaradas == [ROYALTIES_LOGICAL_PATH], declaradas
     store = next(s for s in S.SQLITE_STORES if s.logical_path == ROYALTIES_LOGICAL_PATH)
     assert store.category == "CANON" and store.reconstructible is False and store.required is False, store
-    assert len(S.SQLITE_STORES) == 7, sqlite_paths
+    assert len(S.SQLITE_STORES) == 8, sqlite_paths  # + gamification.db (GM01, opcional)
     assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
     assert os.path.isfile(os.path.join(ROYALTIES_MIGRATIONS_DIR, "0001_publishers.sql")), ROYALTIES_MIGRATIONS_DIR
 
@@ -4074,6 +4074,188 @@ def test_ry_restore_logical():
     assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "sqlite")))
     obtenido = _royalties_logical_digest(restaurada)
     assert obtenido == esperado, (obtenido, esperado)
+
+
+# --------------------------------------------------------------------------
+# Casos GM01-GM04 — gamification.db (CHP-GAMIFICACION-G3-02)
+# --------------------------------------------------------------------------
+#
+# Ledger de gamificacion. SQLite CANON opcional: solo existe con
+# GAMIFICATION_ENABLED=1. El fixture se construye con la MIGRACION REAL del
+# repo (server/gamification/migrations), igual que royalties.db.
+
+GAMIFICATION_LOGICAL_PATH = "data-critical/gamification.db"
+GAMIFICATION_MIGRATIONS_DIR = os.path.join(
+    HERE, "..", "..", "..", "..", "server", "gamification", "migrations")
+GAMIFICATION_TABLES = (
+    "gm_rule_sets", "gm_source_facts", "gm_xp_entries", "gm_achievements", "gm_redemptions",
+    "gm_pm_movements", "gm_pm_balances", "gm_redemption_transitions", "gm_reward_grants", "gm_admin_audit",
+)
+
+
+def _build_gamification_db(base_dir: str) -> str:
+    """gamification.db sintetica: migraciones reales + _migrations + un historial
+    con hechos, XP, movimientos (earn, ajuste, compensacion, reserva y
+    confirmacion de un canje), snapshot coherente y auditoria, en WAL."""
+    path = os.path.join(base_dir, GAMIFICATION_LOGICAL_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _migrations (version TEXT PRIMARY KEY,"
+        " applied_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    for name in sorted(f for f in os.listdir(GAMIFICATION_MIGRATIONS_DIR) if f.endswith(".sql")):
+        raw = open(os.path.join(GAMIFICATION_MIGRATIONS_DIR, name), encoding="utf-8").read()
+        conn.executescript(raw.split("-- DOWN")[0].split("-- UP", 1)[1])
+        conn.execute("INSERT INTO _migrations(version, applied_at) VALUES (?, '2026-10-29 00:00:00')", (name[:-4],))
+    t = 1_793_000_000_000
+    conn.execute("INSERT INTO gm_rule_sets VALUES ('gm-fx-v1', ?, 'migration', '{\"schema\":1}', ?, ?)",
+                 (t, "b" * 64, t))
+    for i in range(3):
+        conn.execute("INSERT INTO gm_source_facts VALUES (?, 'mook_review', ?, 'evidence_reviewed', 'u-fx', 'u-med',"
+                     " ?, ?, 'A', 'awarded', 'gm-fx-v1', '{\"decision\":\"aprobado\"}')",
+                     (f"fact-fx-{i}", f"evid-fx-{i}", t + i, t + i))
+        conn.execute("INSERT INTO gm_xp_entries VALUES (?, 'u-fx', 'award', 30, ?, NULL, 'gm-fx-v1', ?)",
+                     (f"xp-fx-{i}", f"fact-fx-{i}", t + i))
+    conn.execute("INSERT INTO gm_redemptions VALUES ('red-fx', 'u-fx', 'idem-fx', 'avatar-fx', 'digital_asset', 15,"
+                 " 'gm-fx-v1', 'RESERVED', ?, ?)", (t + 10, t + 10))
+    movs = [
+        ("mv-fx-0", "earn", 20, "fact-fx-0", None, None, "system"),
+        ("mv-fx-1", "earn", 20, "fact-fx-1", None, None, "system"),
+        ("mv-fx-2", "earn", 20, "fact-fx-2", None, None, "system"),
+        ("mv-fx-3", "adjustment", 5, None, None, None, "admin-fx"),
+        ("mv-fx-4", "compensation", -10, None, None, "mv-fx-0", "admin-fx"),
+        ("mv-fx-5", "reserve", -15, None, "red-fx", None, "system"),
+        ("mv-fx-6", "redeem_confirm", 0, None, "red-fx", None, "system"),
+    ]
+    for k, (mid, kind, amount, fact, red, rel, actor) in enumerate(movs):
+        conn.execute(
+            "INSERT INTO gm_pm_movements (movement_id, user_id, kind, amount, source, idempotency_key, fact_id,"
+            " redemption_id, related_movement_id, reason_code, actor_id, rule_version, period_day, period_week, created_at)"
+            " VALUES (?, 'u-fx', ?, ?, 'fx', ?, ?, ?, ?, 'fx', ?, 'gm-fx-v1', '2026-10-29', '2026-W44', ?)",
+            (mid, kind, amount, f"key-{mid}", fact, red, rel, actor, t + 20 + k))
+    conn.execute("UPDATE gm_redemptions SET state='DELIVERED', updated_at=? WHERE redemption_id='red-fx'", (t + 30,))
+    conn.execute("UPDATE gm_redemptions SET state='CONFIRMED', updated_at=? WHERE redemption_id='red-fx'", (t + 31,))
+    conn.execute("INSERT INTO gm_redemption_transitions VALUES ('tr-fx-1', 'red-fx', 'RESERVED', 'DELIVERED', 'fx', 'system', ?)", (t + 30,))
+    conn.execute("INSERT INTO gm_redemption_transitions VALUES ('tr-fx-2', 'red-fx', 'DELIVERED', 'CONFIRMED', 'fx', 'system', ?)", (t + 31,))
+    conn.execute("INSERT INTO gm_reward_grants VALUES ('gr-fx', 'red-fx', 'u-fx', 'digital_asset', 'avatar-fx', NULL, ?)", (t + 31,))
+    conn.execute("INSERT INTO gm_admin_audit VALUES ('au-fx', 'admin-fx', 'adjustment', 'u-fx', 'mv-fx-3', ?)", (t + 23,))
+    # Snapshot coherente: 20*3 + 5 - 10 - 15 = 40 disponibles, 0 reservados (canje confirmado).
+    conn.execute("INSERT INTO gm_pm_balances VALUES ('u-fx', 40, 0, 60, 7, ?)", (t + 31,))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _gamification_logical_digest(path: str) -> dict:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {
+            "integrity": conn.execute("PRAGMA integrity_check").fetchone()[0],
+            "schema": [r[0] for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")],
+            "migrations": [r[0] for r in conn.execute("SELECT version FROM _migrations ORDER BY version")],
+            "tables": {t: hashlib.sha256(json.dumps(conn.execute(f"SELECT * FROM {t} ORDER BY rowid").fetchall(),
+                                                    sort_keys=True, default=str).encode("utf-8")).hexdigest()
+                       for t in GAMIFICATION_TABLES},
+            "counts": {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in GAMIFICATION_TABLES},
+            # Invariante del ledger: snapshot = suma de movimientos.
+            "ledger_sum": conn.execute("SELECT SUM(amount) FROM gm_pm_movements WHERE user_id='u-fx'").fetchone()[0],
+            "snapshot": conn.execute("SELECT available, reserved, lifetime_earned, last_seq FROM gm_pm_balances").fetchall(),
+        }
+    finally:
+        conn.close()
+
+
+def _gamification_entry(manifest, key="stores"):
+    for entry in manifest.get(key, []):
+        if entry["logical_path"] == GAMIFICATION_LOGICAL_PATH:
+            return entry
+    return None
+
+
+@case("GM01", "gamification.db declarado una sola vez: SQLite CANON opcional, nombre exacto")
+def test_gm_inventory():
+    from chibalete_backup import stores as S
+    sqlite_paths = [s.logical_path for s in S.SQLITE_STORES]
+    json_paths = [s.logical_path for s in S.JSON_STORES]
+    declaradas = [p for p in sqlite_paths + json_paths if os.path.basename(p) == "gamification.db"]
+    assert declaradas == [GAMIFICATION_LOGICAL_PATH], declaradas
+    store = next(s for s in S.SQLITE_STORES if s.logical_path == GAMIFICATION_LOGICAL_PATH)
+    assert store.category == "CANON" and store.reconstructible is False and store.required is False, store
+    assert len(S.SQLITE_STORES) == 8, sqlite_paths
+    assert len([s for s in S.SQLITE_STORES if s.required]) == 4, sqlite_paths
+    assert os.path.isfile(os.path.join(GAMIFICATION_MIGRATIONS_DIR, "0001_ledger.sql")), GAMIFICATION_MIGRATIONS_DIR
+
+
+@case("GM02", "gamification.db ausente (flag OFF): backup ok, ausencia anotada y archivo NO creado")
+def test_gm_absent_tolerated():
+    env = Env("gm02")
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    assert manifest["result"] == "ok", manifest["result"]
+    assert len(manifest["stores"]) == 24 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    assert _gamification_entry(manifest) is None
+    ausente = _gamification_entry(manifest, "stores_absent")
+    assert ausente is not None and ausente["status"] == "absent_optional" and ausente["kind"] == "sqlite", ausente
+    assert not os.path.exists(os.path.join(env.base, GAMIFICATION_LOGICAL_PATH))
+
+
+@case("GM03", "gamification.db presente: una entrada sqlite integra, fuente intacta, resto sin cambios")
+def test_gm_present_included():
+    env = Env("gm03")
+    origen = _build_gamification_db(env.base)
+    before = fixtures.snapshot_tree(env.base)
+    digest_before = _gamification_logical_digest(origen)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    manifest = env.manifests()[-1]
+    assert manifest["result"] == "ok", manifest["result"]
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    paths = [s["logical_path"] for s in manifest["stores"]]
+    assert paths.count(GAMIFICATION_LOGICAL_PATH) == 1, paths
+    entry = _gamification_entry(manifest)
+    assert entry["kind"] == "sqlite" and entry["category"] == "CANON" and entry["status"] == "included", entry
+    assert entry["integrity_result"] == "ok" and entry["capture_method"] == "sqlite_online_backup_api", entry
+    assert entry["bytes"] > 0 and len(entry["sha256"]) == 64, entry
+    assert "aggregate_count" not in entry, entry
+    for lp in STORES_PREVIOS:
+        assert lp in paths, f"store previo ausente del manifiesto: {lp}"
+    assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "GM03")
+    assert _gamification_logical_digest(origen) == digest_before, "la fuente cambio logicamente"
+
+
+@case("GM04", "restore aislado de gamification.db: integridad, schema, triggers, migraciones, historial y saldo identicos")
+def test_gm_restore_logical():
+    env = Env("gm04")
+    origen = _build_gamification_db(env.base)
+    esperado = _gamification_logical_digest(origen)
+    assert esperado["integrity"] == "ok", esperado
+    assert esperado["migrations"] == ["0001_ledger"], esperado["migrations"]
+    # 8 tablas append-only (2 triggers c/u) + balances sin DELETE + canjes (transicion y DELETE).
+    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 19, esperado["schema"]
+    assert esperado["counts"]["gm_pm_movements"] == 7 and esperado["counts"]["gm_source_facts"] == 3, esperado["counts"]
+    assert esperado["ledger_sum"] == 40 and esperado["snapshot"] == [(40, 0, 60, 7)], esperado
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    staged = _restore_staging(env)
+    restaurada = os.path.join(staged, "sqlite", "gamification.db")
+    assert os.path.isfile(restaurada), sorted(os.listdir(os.path.join(staged, "sqlite")))
+    obtenido = _gamification_logical_digest(restaurada)
+    assert obtenido == esperado, (obtenido, esperado)
+    # Los triggers append-only siguen vigentes en la copia restaurada.
+    conn = sqlite3.connect(restaurada)
+    try:
+        try:
+            conn.execute("DELETE FROM gm_pm_movements")
+            raise AssertionError("la copia restaurada admitio un DELETE en el ledger")
+        except sqlite3.DatabaseError as exc:
+            assert "append-only" in str(exc), exc
+    finally:
+        conn.rollback()
+        conn.close()
 
 
 def main() -> int:
