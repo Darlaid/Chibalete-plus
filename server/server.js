@@ -34,6 +34,10 @@ import {
     emitExperienceStarted, emitNodeStarted, emitNodeCompleted,
     emitEvidenceSubmitted, emitEvidenceReviewed, emitExperienceCompleted,
 } from './experienceBackboneEmitter.mjs';
+// CHP-GAMIFICACION-G3-03 — MOOK como fuente de hechos. Inerte con
+// GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
+import * as gamificationMook from './gamification/mookSource.mjs';
+import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
 import { recordCanonicalEvent } from './services/analyticsShadow.mjs';
 import {
@@ -2627,8 +2631,13 @@ function emitCompletionEvents(out, nodeId, nodeType, moduleId, ctx) {
     }
     if (out.experienceTransitioned) {
         void emitExperienceCompleted({ ...base, requiredNodes: out.progress.totalRequired }, log);
+        // G3-03: aditivo; nunca lanza ni espera (el registro ocurre tras la respuesta).
+        gamificationMook.onMookRunUpdated(run, { resolveUser: gamificationResolveUser, log: (m) => log(m, 'WARN') });
     }
 }
+
+// G3-03: sujeto de un hecho de gamificación con el padrón canónico (activo y no sintético).
+const gamificationResolveUser = (id) => gamificationMook.makeResolveUser(readJSON(USERS_DB), isUserActive, isSyntheticUser)(id);
 
 // Resumen de evidencias del PROPIO run (el dueño ve estado/retroalimentación/
 // historial de SUS entregas — REVIEW-01: proyección sin reviewerId).
@@ -3052,6 +3061,8 @@ app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res
         void emitEvidenceReviewed({ actorId: ev.userId, sessionId: req.auth?.sessionId ?? null, experienceId: ev.experienceId, experienceVersionId: ev.experienceVersionId, evidenceId: ev.id, reviewerId: req.user.id, decision: ev.review.decision }, log);
         log(`[MOOK] evidence reviewed: ${ev.id} -> ${ev.review.decision}`);
         res.json({ id: ev.id, review: ev.review });
+        // G3-03: aditivo y posterior a la respuesta; nunca lanza ni espera.
+        gamificationMook.onMookEvidenceReviewed(ev, { resolveUser: gamificationResolveUser, log: (m) => log(m, 'WARN') });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
@@ -12752,6 +12763,11 @@ catch (e) { log(`[ECON] econ_events schema unavailable at boot: ${e.message}`, '
 app.listen(PORT, '0.0.0.0', () => {
     log(`Server running on port ${PORT}`);
     setTimeout(checkMissingTTS, 2000);
+    // G3-03: reconciliación MOOK programada. No programa nada sin
+    // GAMIFICATION_ENABLED y GAMIFICATION_MOOK_SINCE; una sola réplica por barrido.
+    gamificationMook.startMookReconciler(
+        { readMook, readUsers: () => readJSON(USERS_DB), isUserActive, isSyntheticUser },
+        { log: (m) => log(m, 'WARN') });
     // Build upload dedup index in background — never blocks startup
     buildHashIndex(UPLOAD_DIR, UPLOAD_DIR)
         .then(() => log(`[HASH_INDEX] Built: ${uploadHashIndex.size} entries`, 'INFO'))

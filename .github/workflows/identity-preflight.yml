@@ -208,7 +208,9 @@ jobs:
       # fija montos) y topes en America/Bogota, idempotencia, réplicas en
       # procesos separados (escrituras, topes, reconciliación, caída abrupta),
       # snapshot = Σ ledger, backup/restore con capture_sqlite y entrada en
-      # línea que no bloquea la operación. Sin ganchos ni HTTP.
+      # línea que no bloquea la operación. G3-03: MOOK como fuente (adaptadores,
+      # corte de activación, reconciliador entre réplicas) y server.js real por
+      # HTTP con el motor OFF, roto y activo: respuestas MOOK idénticas.
       - name: Núcleo del ledger de gamificación (G3)
         run: npm run test:gamification-core
 

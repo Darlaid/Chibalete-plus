@@ -272,10 +272,18 @@ try {
     const modSrc = modFiles.map((f) => fs.readFileSync(path.join(HERE, '..', f), 'utf8')).join('\n');
     ok('server/gamification no importa server/royalties', !/from\s+['"][^'"]*royalties/.test(modSrc));
     ok('server/gamification no menciona econ_events, royalties.db ni access_db', !/econ_events|royalties\.db|access_db/.test(modSrc));
-    ok('server/gamification no escribe archivos (solo mkdir del directorio de su base)', !/writeFile|appendFile|rename|unlink|rmSync|copyFile/.test(modSrc));
+    const srcOf = (f) => fs.readFileSync(path.join(HERE, '..', f), 'utf8');
+    const nonLockSrc = modFiles.filter((f) => f !== 'mookSource.mjs').map(srcOf).join('\n');
+    ok('server/gamification no escribe archivos (salvo el lock del reconciliador)', !/writeFile|appendFile|rename|unlink|rmSync|copyFile|openSync/.test(nonLockSrc));
+    ok('mookSource solo escribe/borra su lock `<base>.reconcile.lock`', /const lockFile = `\$\{dbPath\}\.reconcile\.lock`/.test(srcOf('mookSource.mjs'))
+        && !/writeFile|appendFile|rename|rmSync|copyFile/.test(srcOf('mookSource.mjs')));
     ok('server/gamification no registra rutas HTTP', !/app\.(get|post|put|delete|use)\s*\(|express\.Router/.test(modSrc));
-    ok('server/gamification no lee stores de producto (las fuentes se le pasan)', !/readFileSync|progressService|experienceStore|eventsService/.test(modSrc));
-    ok('server.js no importa ni llama al motor (sin ganchos)', !/gamification\//.test(read('server/server.js')));
+    ok('server/gamification no lee stores de producto (las fuentes se le pasan)', !/readFileSync|progressService|experienceStore|eventsService|USERS_DB|mook_db/.test(modSrc));
+    const serverSrc = read('server/server.js');
+    ok('server.js importa del motor SOLO mookSource.mjs', (serverSrc.match(/from '\.\/gamification\/[^']+'/g) || []).join() === "from './gamification/mookSource.mjs'");
+    ok('server.js engancha solo revisión MOOK, experiencia completada y el reconciliador', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler');
+    ok('el gancho de revisión va DESPUÉS de res.json', /res\.json\(\{ id: ev\.id, review: ev\.review \}\);\s*\n\s*\/\/[^\n]*\n\s*gamificationMook\.onMookEvidenceReviewed/.test(serverSrc));
+    ok('ni lectura, ni progreso, ni Leo, ni acceso enganchados al motor', !/scheduleFact|recordFact|reading_completion/.test(serverSrc));
     ok('progressService no depende del motor', !/gamification/.test(read('server/progressService.js')));
     ok('experienceStore (MOOK) no depende del motor', !/gamification/.test(read('server/lib/experienceStore.js')));
     ok('leoOrchestrator no depende del motor', !/server\/gamification|\.\/gamification/.test(read('server/leoOrchestrator.js')));
