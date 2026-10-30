@@ -4234,9 +4234,9 @@ def test_gm_restore_logical():
     origen = _build_gamification_db(env.base)
     esperado = _gamification_logical_digest(origen)
     assert esperado["integrity"] == "ok", esperado
-    assert esperado["migrations"] == ["0001_ledger"], esperado["migrations"]
+    assert esperado["migrations"] == ["0001_ledger", "0002_subject_model"], esperado["migrations"]
     # 8 tablas append-only (2 triggers c/u) + balances sin DELETE + canjes (transicion y DELETE).
-    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 19, esperado["schema"]
+    assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 21, esperado["schema"]
     assert esperado["counts"]["gm_pm_movements"] == 7 and esperado["counts"]["gm_source_facts"] == 3, esperado["counts"]
     assert esperado["ledger_sum"] == 40 and esperado["snapshot"] == [(40, 0, 60, 7)], esperado
     env.provision_repository()
