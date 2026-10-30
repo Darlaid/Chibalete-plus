@@ -275,15 +275,16 @@ try {
     ok('server/gamification no importa server/royalties', !/from\s+['"][^'"]*royalties/.test(modSrc));
     ok('server/gamification no menciona econ_events, royalties.db ni access_db', !/econ_events|royalties\.db|access_db/.test(modSrc));
     const srcOf = (f) => fs.readFileSync(path.join(HERE, '..', f), 'utf8');
-    const nonLockSrc = modFiles.filter((f) => f !== 'mookSource.mjs').map(srcOf).join('\n');
-    ok('server/gamification no escribe archivos (salvo el lock del reconciliador)', !/writeFile|appendFile|rename|unlink|rmSync|copyFile|openSync/.test(nonLockSrc));
+    const nonLockSrc = modFiles.filter((f) => !['mookSource.mjs', 'exclusions.mjs'].includes(f)).map(srcOf).join('\n');
+    ok('server/gamification no escribe archivos (salvo el lock del reconciliador y el registro de exclusiones)', !/writeFile|appendFile|renameSync|unlinkSync|rmSync|copyFile|openSync/.test(nonLockSrc));
+    ok('el registro de exclusiones solo añade: no renombra, trunca ni borra', /openSync\(p, 'a'\)/.test(srcOf('exclusions.mjs')) && !/writeFile|rename|unlink|rmSync|truncate|copyFile/.test(srcOf('exclusions.mjs')));
     ok('mookSource solo escribe/borra su lock `<base>.reconcile.lock`', /const lockFile = `\$\{dbPath\}\.reconcile\.lock`/.test(srcOf('mookSource.mjs'))
         && !/writeFile|appendFile|rename|rmSync|copyFile/.test(srcOf('mookSource.mjs')));
     ok('server/gamification no registra rutas HTTP', !/app\.(get|post|put|delete|use)\s*\(|express\.Router/.test(modSrc));
     // Imports y lecturas reales, no menciones en comentarios: readingValidator
     // documenta que sus lectores (eventsService/progressService) se le INYECTAN.
     ok('server/gamification no importa ni lee stores de producto (las fuentes se le pasan)',
-        !/readFileSync|from\s+['"][^'"]*(progressService|experienceStore|eventsService)[^'"]*['"]|USERS_DB|mook_db\.json/.test(modSrc));
+        !/readFileSync|from\s+['"][^'"]*(progressService|experienceStore|eventsService)[^'"]*['"]|USERS_DB|mook_db\.json/.test(modFiles.filter((f) => f !== 'exclusions.mjs').map(srcOf).join('\n')));
     const serverSrc = read('server/server.js');
     ok('server.js importa del motor SOLO mookSource.mjs', (serverSrc.match(/from '\.\/gamification\/[^']+'/g) || []).join() === "from './gamification/mookSource.mjs'");
     ok('server.js engancha solo revisión MOOK, experiencia completada y el reconciliador', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler');

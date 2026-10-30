@@ -11,6 +11,8 @@
  * Funciones llamadas dentro de la transacción `IMMEDIATE` del ledger.
  */
 import crypto from 'node:crypto';
+import { GamificationError } from './db.mjs';
+import { tombstoneOf } from './exclusions.mjs';
 import { getSubjectKey } from './subjectKey.mjs';
 
 const hmac = (key, msg) => crypto.createHmac('sha256', key).update(msg).digest();
@@ -22,18 +24,33 @@ export function findSubject(db, userId) {
     return db.prepare('SELECT subject_ref, subject_salt FROM gm_subjects WHERE user_id = ?').get(userId) ?? null;
 }
 
+/** ¿Esta persona está excluida? Dentro de la transacción: serializa con su exclusión. */
+export const isExcluded = (db, userId) => !!db.prepare('SELECT 1 FROM gm_erasures WHERE tombstone = ?').get(tombstoneOf(userId));
+
 /**
- * Sujeto de `userId`, creándolo si no existe. El llamador garantiza que la
+ * Sujeto de `userId`, creándolo si no existe. Punto único de alta: una persona
+ * excluida no puede recrearse por ningún camino. El llamador garantiza que la
  * cuenta es elegible. `UNIQUE(user_id)` y `BEGIN IMMEDIATE` evitan duplicados
  * entre réplicas.
  * @param {string} day  `YYYY-MM-DD`: el alta no guarda más precisión
  */
 export function ensureSubject(db, userId, { roleClass, day }) {
     getSubjectKey(); // sin clave no se crean sujetos cuyas claves no se podrían derivar
+    if (isExcluded(db, userId)) throw new GamificationError('SUBJECT_EXCLUDED');
     db.prepare(`INSERT INTO gm_subjects (subject_ref, user_id, subject_salt, role_class, created_on)
         VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO NOTHING`)
         .run(crypto.randomBytes(16).toString('hex'), userId, crypto.randomBytes(32), roleClass, day);
     return findSubject(db, userId);
+}
+
+/** Borra el vínculo con la identidad y la sal. Las filas del ledger permanecen. */
+export function deleteSubject(db, subjectRef) {
+    db.prepare('DELETE FROM gm_subjects WHERE subject_ref = ?').run(subjectRef);
+}
+
+/** Sujetos con su tombstone, sin exponer la identidad al llamador. */
+export function listSubjectsByTombstone(db, tombstone) {
+    return db.prepare('SELECT subject_ref, user_id FROM gm_subjects').all().map((s) => ({ subject_ref: s.subject_ref, tombstone: tombstone(s.user_id) }));
 }
 
 /** Clave de idempotencia de un hecho: determinista por sujeto, distinta entre sujetos. */

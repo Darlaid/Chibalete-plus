@@ -19,6 +19,8 @@
  *    con `subjects.mjs`; solo se escriben `subject_ref` y claves HMAC, ids sin
  *    tiempo y fechas con precisión de día. Un hecho que no emite no deja fila;
  *  - la clave de sujeto es obligatoria: sin ella no se registra nada;
+ *  - PRIV-01D: sin registro de exclusiones válido no se escribe nada, y una
+ *    persona excluida no vuelve a tener sujeto;
  *  - reservas y canjes NO se exponen en G3-01 (solo existen sus tablas);
  *  - ningún ajuste fija un saldo: siempre es un movimiento con motivo y actor.
  *
@@ -27,7 +29,8 @@
 import crypto from 'node:crypto';
 import { GamificationError, isEarningEnabled, isXpEarningEnabled } from './db.mjs';
 import { ELIGIBILITY, SOURCE_GRADE, decideEmission, isEmissionLocked, validateRules } from './policy.mjs';
-import { deriveSourceKey, ensureSubject, findSubject } from './subjects.mjs';
+import { exclusionGate } from './exclusions.mjs';
+import { deriveSourceKey, ensureSubject, findSubject, isExcluded } from './subjects.mjs';
 import { getSubjectKey } from './subjectKey.mjs';
 
 export const FACT_SOURCES = Object.freeze(Object.keys(SOURCE_GRADE));
@@ -183,7 +186,7 @@ export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom
  * @param {{ env?: object }} [opts]  `XP_EARNING_ENABLED` y `PM_EARNING_ENABLED` se leen aquí, por llamada
  * @returns {{ inserted: boolean, factId: string, decision: string, xp: number, pm: number, xpEntryId: string|null, movementId: string|null }}
  */
-export function recordFact(db, fact, { env = process.env } = {}) {
+export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
     const unknown = Object.keys(fact || {}).filter((k) => !FACT_FIELDS.has(k));
     if (unknown.length) throw bad('CALLER_FIELD_NOT_ALLOWED', `el llamador no fija ${unknown.join(',')}`);
     const { source, sourceEventId, factType, userId, actorId = null, occurredAt, eligibility, features = null, now = Date.now() } = fact;
@@ -206,8 +209,13 @@ export function recordFact(db, fact, { env = process.env } = {}) {
 
     getSubjectKey(); // sin clave no se evalúa nada: nunca se escribe una fila que no se pueda deduplicar
     if (!xpEnabled && !pmEnabled) return noRow('disabled_source');
+    const open = gate ?? exclusionGate(db, env);
+    if (open.excludes(userId) || (actorId !== null && open.excludes(actorId))) return noRow('rejected_excluded_user');
 
     return db.transaction(() => {
+        // La puerta se leyó fuera de la transacción: esta comprobación cierra la
+        // carrera con una exclusión simultánea en otra réplica.
+        if (isExcluded(db, userId) || (actorId !== null && isExcluded(db, actorId))) return noRow('rejected_excluded_user');
         let subject = findSubject(db, userId);
         const existing = subject && db.prepare('SELECT * FROM gm_source_facts WHERE source = ? AND source_event_id = ? AND fact_type = ?')
             .get(source, deriveSourceKey(subject, source, factType, sourceEventId), factType);
@@ -278,6 +286,7 @@ export function appendAdjustment(db, { userId, amount, reasonCode, actorId, idem
     if (!isId(actorId) || actorId === 'system') throw bad('INVALID_ACTOR', 'un ajuste exige un actor humano');
     checkAmount(amount, { allowNegative: true });
     getSubjectKey();
+    exclusionGate(db);
     return db.transaction(() => {
         requireRuleVersion(db, ruleVersion);
         const day = periodsFor(now).day;
@@ -309,6 +318,7 @@ export function appendCompensation(db, { userId, amount, reasonCode, actorId, re
     if (!isId(actorId)) throw bad('INVALID_ACTOR');
     checkAmount(amount, { allowNegative: true });
     getSubjectKey();
+    exclusionGate(db);
     const key = `comp:${relatedMovementId}:${idempotencyKey}`;
     return db.transaction(() => {
         requireRuleVersion(db, ruleVersion);
@@ -324,6 +334,22 @@ export function appendCompensation(db, { userId, amount, reasonCode, actorId, re
             relatedMovementId, reasonCode, actorRef, ruleVersion, createdAt: now });
         return { inserted: true, movementId };
     }).immediate();
+}
+
+/**
+ * Extingue el saldo de un sujeto con una compensación auditada, antes de
+ * desvincularlo. Llamar SOLO dentro de una transacción. Idempotente: con saldo 0
+ * no escribe nada. Un canje abierto impide la exclusión.
+ * @returns importe extinguido
+ */
+export function extinguishSubject(db, subjectRef, { now = Date.now() } = {}) {
+    if (db.prepare("SELECT 1 FROM gm_redemptions WHERE subject_ref = ? AND state IN ('RESERVED','DELIVERED')").get(subjectRef)) throw bad('OPEN_REDEMPTIONS');
+    const bal = db.prepare('SELECT available FROM gm_pm_balances WHERE subject_ref = ?').get(subjectRef);
+    if (!bal || bal.available === 0) return 0;
+    const last = db.prepare('SELECT movement_id, rule_version FROM gm_pm_movements WHERE subject_ref = ? ORDER BY seq DESC LIMIT 1').get(subjectRef);
+    insertMovement(db, { subjectRef, kind: 'compensation', amount: -bal.available, source: 'admin', idempotencyKey: `erasure:${subjectRef}`,
+        relatedMovementId: last.movement_id, reasonCode: 'subject_erasure', actorRef: 'system', ruleVersion: last.rule_version, createdAt: now });
+    return bal.available;
 }
 
 // ── Consultas ───────────────────────────────────────────────────────────────

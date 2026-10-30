@@ -28,6 +28,7 @@
  *  - offline_validation, mission: sin fuente canónica todavía ⇒ deshabilitadas.
  */
 import { GamificationError } from './db.mjs';
+import { exclusionGate } from './exclusions.mjs';
 import { hasFact, recordFact } from './ledger.mjs';
 
 export const RECOVERABLE_SOURCES = Object.freeze({
@@ -105,11 +106,12 @@ export function reconcile(db, candidates, { resolveUser, env = process.env, now 
     for (const c of candidates) {
         if (!RECOVERABLE_SOURCES[c?.source]?.recoverable) throw bad('SOURCE_NOT_RECOVERABLE', String(c?.source));
     }
+    const gate = exclusionGate(db, env); // falla cerrado: sin registro válido no se barre nada
     const res = { scanned: candidates.length, alreadyRecorded: 0, recorded: 0, raced: 0, byDecision: {} };
     for (const c of candidates) {
         const eligibility = candidateEligibility(resolveUser, c);
         if (eligibility === 'eligible' && hasFact(db, c)) { res.alreadyRecorded++; continue; }
-        const r = recordFact(db, { ...c, eligibility, now: now() }, { env });
+        const r = recordFact(db, { ...c, eligibility, now: now() }, { env, gate });
         if (r.inserted || !r.persisted) res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
         if (r.inserted) {
             res.recorded++;

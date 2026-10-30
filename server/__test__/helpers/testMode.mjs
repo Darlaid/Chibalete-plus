@@ -55,6 +55,14 @@ for (const [key, file] of [
     if (!process.env[key]) process.env[key] = tmpFor(file);
 }
 
+// PRIV-01D: registro de exclusiones vacío y fuera del directorio de las bases.
+if (!process.env.GAMIFICATION_EXCLUSION_REGISTRY) {
+    const dir = tmpFor('exclusions');
+    fs.mkdirSync(dir);
+    process.env.GAMIFICATION_EXCLUSION_REGISTRY = path.join(dir, 'registry.jsonl');
+    fs.writeFileSync(process.env.GAMIFICATION_EXCLUSION_REGISTRY, '');
+}
+
 for (const flag of ['EXPERIENCE_EVENTS_BACKBONE_ENABLED', 'LEO_EVENTS_BACKBONE_ENABLED', 'ARCHIVE_ROTATION_ENABLED',
     'SNAPSHOT_HISTORY_ENABLED', 'AULA_VIVA_SCHEDULER_ENABLED']) delete process.env[flag];
 

@@ -20,6 +20,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import { isGamificationEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
+import { replayExclusions } from './erasure.mjs';
 import { scheduleFact } from './intake.mjs';
 import { candidateEligibility, mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
@@ -140,6 +141,8 @@ export function runMookReconcileOnce({ readMook, readUsers, isUserActive, isSynt
         db.pragma(`busy_timeout = ${RECONCILE_BUSY_MS}`);
         db.pragma('synchronous = FULL');
         db.pragma('foreign_keys = ON');
+        db.pragma('secure_delete = ON');
+        replayExclusions(db, { env }); // antes de leer la fuente: la puerta de restauración
         const doc = readMook();
         const cands = [...mookApprovedReviewCandidates(doc, since), ...mookCompletedExperienceCandidates(doc, since)];
         const resolveUser = makeResolveUser(readUsers(), isUserActive, isSyntheticUser);
