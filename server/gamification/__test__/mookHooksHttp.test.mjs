@@ -9,10 +9,13 @@
  * experiencia → revisión `aprobado` por un administrador) debe dar respuestas
  * y escrituras MOOK equivalentes en los tres; en ON, además, exactamente un
  * hecho de revisión y uno de experiencia. Ningún otro store cambia.
- * Nunca toca data/ ni data-critical/.
+ * Nunca toca data/ ni data-critical/: cada store con ruta configurable se
+ * redirige a un temporal y una huella de los stores reales lo verifica. Los que
+ * tienen ruta fija (memoria de Leo, LU) quedan cubiertos solo por la huella.
  *
  *   node server/gamification/__test__/mookHooksHttp.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -29,6 +32,32 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..', '..');
 const REAL_DB = path.join(REPO, 'data-critical', 'gamification.db');
 const realBefore = fs.existsSync(REAL_DB);
+
+/** Huella de los stores reales: contenido en data*, tamaño y fecha en uploads (1 GB). */
+function realStoresFingerprint() {
+    const out = {};
+    const walk = (dir, hash) => {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+            const p = path.join(dir, e.name);
+            if (e.isDirectory()) walk(p, hash);
+            else if (e.isFile()) {
+                const st = fs.statSync(p);
+                out[path.relative(REPO, p)] = `${st.size}:${st.mtimeMs}:${hash ? crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') : '-'}`;
+            }
+        }
+    };
+    walk(path.join(REPO, 'data'), true);
+    walk(path.join(REPO, 'data-critical'), true);
+    walk(path.join(REPO, 'public', 'uploads'), false);
+    return out;
+}
+const fingerprintDiff = (a, b) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => a[k] !== b[k]);
+const realFingerprintBefore = realStoresFingerprint();
+/** Rutas SQLite que el servidor anunció en su log y caen dentro del repo. */
+const sqlitePathsInRepo = (logs) => [...logs.matchAll(/SQLite path: (.+)/g)].map((m) => m[1].trim())
+    .filter((p) => path.resolve(p).toLowerCase().startsWith(REPO.toLowerCase() + path.sep));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_gam_http_'));
 const SINCE_ISO = new Date(Date.now() - 60_000).toISOString();
 
@@ -55,6 +84,9 @@ function makeEnvDir(name) {
     fs.writeFileSync(path.join(data, 'mook_db.json'), JSON.stringify(MOOK_FIXTURE, null, 2));
     fs.writeFileSync(path.join(data, 'content.json'), '[]');
     fs.writeFileSync(path.join(data, 'progress_db.json'), '[]');
+    fs.writeFileSync(path.join(data, 'groups_db.json'), '[]');
+    fs.writeFileSync(path.join(data, 'schools_db.json'), '[]');
+    fs.writeFileSync(path.join(data, 'leo_evidence_db.json'), '[]');
     fs.writeFileSync(path.join(dir, 'users.json'), JSON.stringify(USERS));
     return { dir, data };
 }
@@ -68,11 +100,19 @@ function snapshot(dir, skip) {
 
 async function runMode(name, port, extraEnv, prepare) {
     const { dir, data } = makeEnvDir(name);
+    const sqlite = path.join(tmp, `${name}_sqlite`); // fuera de `dir`: el WAL no cuenta como cambio de store
+    fs.mkdirSync(sqlite);
     prepare?.(dir);
     const child = spawn(process.execPath, [path.join(REPO, 'server', 'server.js')], {
         env: { ...process.env, NODE_ENV: 'test', PORT: String(port), USERS_DB: path.join(dir, 'users.json'), CHP_DATA_DIR: data,
             UPLOADS_ROOT: path.join(dir, 'uploads'), GAMIFICATION_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db'),
-            GAMIFICATION_MOOK_SINCE: '', ...extraEnv },
+            GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
+            EVENTS_SQLITE_PATH: path.join(sqlite, 'events.db'), ARCHIVE_SQLITE_PATH: path.join(sqlite, 'events.archive.db'),
+            INSIGHTS_SQLITE_PATH: path.join(sqlite, 'insights.db'), PROGRESS_SQLITE_PATH: path.join(sqlite, 'progress.db'),
+            OFFLINE_ASSIGNMENT_DB_PATH: path.join(sqlite, 'offline_assignments.db'), ROYALTIES_DB: path.join(sqlite, 'royalties.db'),
+            IDENTITY_DB: path.join(sqlite, 'identity.db'), SESSIONS_DB: path.join(sqlite, 'sessions.db'),
+            GROUPS_DB: path.join(data, 'groups_db.json'), SCHOOLS_DB: path.join(data, 'schools_db.json'),
+            LEO_EVIDENCE_DB: path.join(data, 'leo_evidence_db.json'), ...extraEnv },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     let logs = '';
@@ -145,6 +185,9 @@ try {
     { const a = JSON.stringify(norm(off.mook)), b = JSON.stringify(norm(broken.mook)), c = JSON.stringify(norm(on.mook)); const at = (x) => { let i = 0; while (i < a.length && a[i] === x[i]) i++; return `…${a.slice(Math.max(0, i - 80), i + 60)} ≠ ${x.slice(Math.max(0, i - 80), i + 60)}`; }; ok('mook_db.json final equivalente en los tres modos', b === a && c === a, b !== a ? at(b) : at(c)); }
     ok('la evidencia quedó REVIEWED/aprobado en los tres', [off, broken, on].every((r) => r.mook.evidence[0]?.review?.status === 'REVIEWED' && r.mook.evidence[0].review.decision === 'aprobado'));
     ok('ningún otro store (usuarios, contenido, progreso, uploads) cambió en ningún modo', off.otherStoresUnchanged && broken.otherStoresUnchanged && on.otherStoresUnchanged);
+    ok('el servidor anunció sus rutas SQLite y ninguna cae en el repo', [off, broken, on].every((r) => /SQLite path: /.test(r.logs) && sqlitePathsInRepo(r.logs).length === 0), sqlitePathsInRepo(off.logs + broken.logs + on.logs).join());
+    ok('control: una ruta real sí se detectaría', sqlitePathsInRepo(`[x] SQLite path: ${path.join(REPO, 'data-critical', 'events.db')}
+`).length === 1);
     ok('BROKEN: la base corrupta sigue intacta', fs.readFileSync(corruptPath).every((b) => b === 0x5a));
     ok('BROKEN: el motor desistió sin errores 5xx', !/\s5\d\d\s/.test(broken.logs) && /gamification/.test(broken.logs), broken.logs.slice(-600));
 
@@ -169,6 +212,8 @@ try {
     fail++;
 } finally {
     ok('la base real data-critical/gamification.db no se creó ni cambió de estado', fs.existsSync(REAL_DB) === realBefore);
+    const touched = fingerprintDiff(realFingerprintBefore, realStoresFingerprint());
+    ok('huella de data/, data-critical/ y public/uploads/ idéntica', touched.length === 0, touched.join());
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* Windows puede retener un handle un instante */ }
 }
 
