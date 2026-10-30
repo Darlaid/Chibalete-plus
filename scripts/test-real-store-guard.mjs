@@ -11,13 +11,21 @@
  * comprobar que sigue igual), pero jamás modificarlo. Tampoco se bloquea la
  * creación de los directorios en sí, solo la escritura de su contenido.
  *
+ * CHP-GAMIFICACION-SAFE-01: `better-sqlite3` es nativo y no pasa por `fs`, así
+ * que se envuelve su constructor: abrir una base dentro de un store protegido
+ * falla, también en solo lectura (en WAL, abrirla ya toca el `-shm`). Si está
+ * definido `REAL_STORE_GUARD_LOG`, cada bloqueo se anota ahí: un `try/catch` del
+ * código bajo prueba no puede ocultarlo (`testMode.mjs` lo convierte en fallo).
+ *
  * Uso (lo aplica scripts/verify-test-store-isolation.mjs a toda la suite):
  *   NODE_OPTIONS="--import ./scripts/test-real-store-guard.mjs" node <test>
  */
 import fs from 'node:fs';
+import { createRequire, register, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const originalAppend = fs.appendFileSync;
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const PROTECTED = [
@@ -34,6 +42,9 @@ class RealStoreWriteError extends Error {
             + 'Los tests deben usar fs.mkdtemp + rutas inyectadas (CHP-ID-CANON-01B).');
         this.name = 'RealStoreWriteError';
         this.code = 'REAL_STORE_WRITE_BLOCKED';
+        if (process.env.REAL_STORE_GUARD_LOG) {
+            try { originalAppend(process.env.REAL_STORE_GUARD_LOG, `${op} ${path.relative(REPO_ROOT, target)}\n`); } catch { /* el throw sigue vigente */ }
+        }
     }
 }
 
@@ -109,6 +120,28 @@ const patchOpen = (obj, name) => {
 patchOpen(fs, 'openSync');
 patchOpen(fs, 'open');
 patchOpen(fs.promises, 'open');
+patch(fs, 'cpSync', [1]);
+patch(fs, 'cp', [1]);
+patch(fs.promises, 'cp', [1]);
+
+// `import { writeFileSync } from 'node:fs'` lee estas copias, no el objeto parcheado.
+syncBuiltinESMExports();
+
+// SQLite nativo: envuelve el constructor antes de que nadie lo importe.
+function guardSqlite() {
+    const require = createRequire(import.meta.url);
+    let id;
+    try { id = require.resolve('better-sqlite3'); } catch { return; } // sin dependencias instaladas no hay nada que abrir
+    const Database = require(id);
+    const check = (args) => { if (isProtected(args[0])) throw new RealStoreWriteError('better-sqlite3', toPath(args[0])); };
+    const guarded = new Proxy(Database, {
+        construct(target, args) { check(args); return Reflect.construct(target, args, target); },
+        apply(target, self, args) { check(args); return Reflect.construct(target, args, target); },
+    });
+    require.cache[id].exports = guarded;
+    register(new URL('./test-real-store-guard-hooks.mjs', import.meta.url));
+}
+guardSqlite();
 
 if (process.env.REAL_STORE_GUARD_VERBOSE === '1') {
     console.log('[REAL_STORE_GUARD] activo sobre:',

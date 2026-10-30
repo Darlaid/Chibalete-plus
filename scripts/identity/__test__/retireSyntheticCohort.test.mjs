@@ -19,6 +19,7 @@
  *
  *   node scripts/identity/__test__/retireSyntheticCohort.test.mjs
  */
+import '../../../server/__test__/helpers/testMode.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

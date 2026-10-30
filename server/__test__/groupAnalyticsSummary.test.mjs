@@ -20,6 +20,7 @@
  *   +  rendimiento con 80 lectores y ~35k filas; /api/health durante el cálculo
  *   +  no-store; stores sin escrituras
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

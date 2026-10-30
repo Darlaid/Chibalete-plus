@@ -10,6 +10,7 @@
  *
  * Usa un almacén temporal de fixtures: NUNCA toca datos productivos. POSIX-only.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto'; import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';

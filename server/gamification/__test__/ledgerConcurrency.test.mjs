@@ -15,6 +15,7 @@
  *
  *   node server/gamification/__test__/ledgerConcurrency.test.mjs
  */
+import './helpers/pmMechanicsHarness.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

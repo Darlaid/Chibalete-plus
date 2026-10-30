@@ -13,6 +13,7 @@
  *
  *   node server/gamification/__test__/ledgerBackupRestore.test.mjs
  */
+import './helpers/pmMechanicsHarness.mjs';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';

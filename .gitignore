@@ -158,6 +158,8 @@ dummy_text.txt
 # scripts/__test__/shadowScopeEquivalence.test.mjs dependen de ellos: sin esto,
 # la suite no correría en un clone limpio ni en CI.
 !/scripts/test-real-store-guard.mjs
+!/scripts/test-real-store-guard-hooks.mjs
+!/scripts/test-real-store-guard-sqlite.mjs
 !/scripts/verify-test-store-isolation.mjs
 !/scripts/shadow-scope-compare.mjs
 

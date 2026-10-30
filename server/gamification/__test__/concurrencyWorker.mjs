@@ -11,6 +11,7 @@
  * recon-* (reconciliar el MOOK de CHP_FIXTURE) · crash (reconciliar y morir
  * abruptamente tras CHP_CRASH_AFTER hechos).
  */
+import './helpers/pmMechanicsHarness.mjs';
 import fs from 'node:fs';
 
 const [, , role, barrier] = process.argv;

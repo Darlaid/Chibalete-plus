@@ -8,6 +8,7 @@
  * POSIX-only: el lector de secretos exige semántica POSIX (0400 + uid match);
  * en Windows se salta (mismo criterio que otras suites de identidad).
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

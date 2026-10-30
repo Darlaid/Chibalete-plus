@@ -16,6 +16,7 @@
  *   - materializador y Dashboard de Lectura dan el MISMO resultado sobre una
  *     sesión canónica que sobre la misma sesión en vocabulario v1.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

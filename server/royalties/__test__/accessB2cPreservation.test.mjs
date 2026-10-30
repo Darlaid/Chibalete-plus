@@ -16,6 +16,7 @@
  *
  *   node server/royalties/__test__/accessB2cPreservation.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';

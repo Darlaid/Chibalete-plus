@@ -13,6 +13,7 @@
  *   E6 Cache-Control: no-store (la frescura la controla el servidor).
  *   E7 caché server-side: varias lecturas → 1 llamada a WooCommerce.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import http from 'http';
 import fs from 'fs';

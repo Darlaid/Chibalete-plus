@@ -21,6 +21,7 @@
  * FUERA DE ALCANCE (fase 2, deliberadamente NO se prueba aquí): los listados
  * `/api/users` y `/api/groups`, que se acotarán filtrando por tenant.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

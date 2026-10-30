@@ -13,6 +13,7 @@
  *   - elegibilidad (open / no open), idempotencia y administrador: sin cambios;
  *   - store canónico ilegible → 503.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

@@ -4,6 +4,7 @@
  * (sin x-user-id), en compat y enforce, incluido el preflight de acceso y las
  * rutas gateadas por middleware/handler que antes leían x-user-id. POSIX-only.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto'; import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';

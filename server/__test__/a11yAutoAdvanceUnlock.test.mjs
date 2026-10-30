@@ -13,6 +13,7 @@
  *   +   umbral exacto: 120 min.
  *   +   no-store; stores de eventos sin escrituras.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

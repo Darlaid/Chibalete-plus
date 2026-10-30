@@ -20,6 +20,7 @@
  * indisponible → 503. `leo/activation/:userId` ya estaba acotado (CIS) y aquí
  * se re-verifica con el mismo fixture de dos organizaciones.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

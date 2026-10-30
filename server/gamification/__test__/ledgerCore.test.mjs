@@ -11,6 +11,7 @@
  *
  *   node server/gamification/__test__/ledgerCore.test.mjs
  */
+import './helpers/pmMechanicsHarness.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,7 +40,7 @@ const RV = 'gm-test-v1';
 const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
 const CAPS = { pmPerDay: 200, pmPerWeek: 300, pmPerDayBySource: { mission: 50 } };
 const RULES = { schema: 1, caps: CAPS, facts: {
-    'mission/mission_completed': { xp: 30, pm: 20 }, // única fuente sin bloqueos de G4-04: prueba la mecánica de emisión
+    'mission/mission_completed': { xp: 30, pm: 20 }, // hecho sintético: el arnés de pruebas levanta el bloqueo solo en este proceso
     'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
     'mook_experience/experience_completed': { xp: 20 },
 } };

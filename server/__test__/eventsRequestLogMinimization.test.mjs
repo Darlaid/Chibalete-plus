@@ -9,6 +9,7 @@
  *
  *   node server/__test__/eventsRequestLogMinimization.test.mjs
  */
+import './helpers/testMode.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

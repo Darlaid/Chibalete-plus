@@ -17,6 +17,7 @@
  *
  * POSIX-only (clave de sesión 0400, mismo criterio que sessionIdentityIntegration).
  */
+import '../../__test__/helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

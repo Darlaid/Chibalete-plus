@@ -27,11 +27,12 @@ export const LOCKED_SOURCES = Object.freeze(['reading_completion']);
 /**
  * G4-04. Bloqueos por código, por encima de cualquier regla:
  *  - lectura libre y ruta MOOK nunca dan PM: no demuestran comprensión (A1);
+ *  - una misión es institucional: nunca da PM personales (D38);
  *  - revisión y validación necesitan cobertura verificable de obra y ciclo, que
  *    aún no existe. Sin ella no se puede aplicar la unicidad de PM ni el techo de
  *    XP por obra (A4), así que tampoco dan XP. Se registran como `observed`.
  */
-export const PM_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_experience', 'mook_review', 'offline_validation']);
+export const PM_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_experience', 'mission', 'mook_review', 'offline_validation']);
 export const XP_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_review', 'offline_validation']);
 
 export const ELIGIBILITY = Object.freeze([

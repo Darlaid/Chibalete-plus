@@ -17,6 +17,7 @@
  *   REPORTES-FILTROS-01: [5b] sello, filtros combinados, desglose por obra y subtotales sin doble conteo;
  *       [7b] el cierre no reconstruye el sello; [9b] trimestre: desglose acumulado y referencia intacta
  */
+import '../../__test__/helpers/testMode.mjs';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';

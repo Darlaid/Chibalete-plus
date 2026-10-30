@@ -12,6 +12,7 @@
  *   CHP_B2C_TEST_SECRET_SANDBOX=1 y el archivo NO debe existir de antemano (nunca pisa un secreto real).
  * POSIX-only. Nunca toca datos productivos.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';

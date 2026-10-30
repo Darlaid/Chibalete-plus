@@ -15,6 +15,7 @@
  *      y negativo por membership e institución, datos falsificados, revisión
  *      válida con transición conservada y `evidence_reviewed` emitido una vez.
  */
+import './helpers/testMode.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

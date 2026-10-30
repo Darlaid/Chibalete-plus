@@ -14,6 +14,7 @@
  *   D. my-catalog responde `Cache-Control: no-store`;
  *   y el lector no hereda nada de la regla del administrador.
  */
+import './helpers/testMode.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';

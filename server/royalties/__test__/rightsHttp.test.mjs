@@ -13,6 +13,7 @@
  *
  *   node server/royalties/__test__/rightsHttp.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';

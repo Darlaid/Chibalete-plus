@@ -15,6 +15,7 @@
  * sobre el comportamiento — que es justo el error que esta unidad ya cometió
  * una vez al leer la firma de `/api/upload` y no su `app.use`.
  */
+import './helpers/testMode.mjs';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
