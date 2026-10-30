@@ -105,7 +105,7 @@ async function runMode(name, port, extraEnv, prepare) {
     prepare?.(dir);
     const child = spawn(process.execPath, [path.join(REPO, 'server', 'server.js')], {
         env: { ...process.env, NODE_ENV: 'test', PORT: String(port), USERS_DB: path.join(dir, 'users.json'), CHP_DATA_DIR: data,
-            UPLOADS_ROOT: path.join(dir, 'uploads'), GAMIFICATION_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db'),
+            UPLOADS_ROOT: path.join(dir, 'uploads'), GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db'),
             GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
             EVENTS_SQLITE_PATH: path.join(sqlite, 'events.db'), ARCHIVE_SQLITE_PATH: path.join(sqlite, 'events.archive.db'),
             INSIGHTS_SQLITE_PATH: path.join(sqlite, 'insights.db'), PROGRESS_SQLITE_PATH: path.join(sqlite, 'progress.db'),
@@ -157,13 +157,13 @@ try {
     section('[1] los tres modos');
     const off = await runMode('off', 3991, {});
     let corruptPath;
-    const broken = await runMode('broken', 3992, { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_MOOK_SINCE: SINCE_ISO,
+    const broken = await runMode('broken', 3992, { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_MOOK_SINCE: SINCE_ISO,
         GAMIFICATION_RECONCILE_INITIAL_DELAY_MS: '200' }, (dir) => {
         corruptPath = path.join(dir, 'gam', 'gamification.db');
         fs.mkdirSync(path.dirname(corruptPath), { recursive: true });
         fs.writeFileSync(corruptPath, Buffer.alloc(8192, 0x5a));
     });
-    const on = await runMode('on', 3993, { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_MOOK_SINCE: SINCE_ISO,
+    const on = await runMode('on', 3993, { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_MOOK_SINCE: SINCE_ISO,
         GAMIFICATION_RECONCILE_INITIAL_DELAY_MS: '200' }, (dir) => {
         const env = { GAMIFICATION_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db') };
         const prev = { ...process.env };
@@ -172,7 +172,7 @@ try {
             const L = await import('../ledger.mjs');
             const db = D.getGamificationDb({ env });
             L.createRuleSet(db, { ruleVersion: 'gm-http-v1', createdBy: 'migration', now: Date.now() - 5000, rules: { schema: 1, caps: { pmPerDay: 500, pmPerWeek: 1000 },
-                facts: { 'mook_review/evidence_reviewed': { xp: 30, pm: 20, emitWhen: { decision: ['aprobado'] } }, 'mook_experience/experience_completed': { xp: 20, pm: 10 } } } });
+                facts: { 'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } }, 'mook_experience/experience_completed': { xp: 20 } } } });
             D.closeGamificationDb({ resetBackoff: true });
             process.env = prev;
         });
@@ -202,9 +202,9 @@ try {
     ok('2 hechos: mook_experience (u-lector:versión) y mook_review (id de evidencia)', f.length === 2
         && f[0].source === 'mook_experience' && f[0].source_event_id === `u-lector:${VER_ID}`
         && f[1].source === 'mook_review' && f[1].source_event_id === on.mook.evidence[0].id, JSON.stringify(f));
-    ok('ambos awarded para el lector; el revisor queda como actor', f.every((x) => x.decision === 'awarded' && x.user_id === 'u-lector') && f[1].actor_id === 'u-admin');
-    ok('saldo 30 PM y 50 XP (montos de la regla)', L.getBalance(db, 'u-lector').available === 30 && L.getXp(db, 'u-lector') === 50);
-    ok('el reconciliador de arranque no duplicó nada', db.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 2 && L.verifyLedger(db).ok);
+    ok('ruta awarded y revisión observed para el lector; el revisor queda como actor', f[0].decision === 'awarded' && f[1].decision === 'observed' && f.every((x) => x.user_id === 'u-lector') && f[1].actor_id === 'u-admin');
+    ok('0 PM y 20 XP (solo la ruta)', L.getBalance(db, 'u-lector').available === 0 && L.getXp(db, 'u-lector') === 20);
+    ok('el reconciliador de arranque no duplicó nada', db.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 0 && L.verifyLedger(db).ok);
     D.closeGamificationDb({ resetBackoff: true });
     ok('OFF: no se creó gamification.db', !fs.existsSync(path.join(off.dir, 'gam', 'gamification.db')));
 } catch (e) {

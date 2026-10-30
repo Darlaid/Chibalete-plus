@@ -31,7 +31,7 @@ const REAL_DB = path.join(REPO, 'data-critical', 'gamification.db');
 const realBefore = fs.existsSync(REAL_DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_gam_iso_'));
 const DB_PATH = path.join(tmp, 'live', 'gamification.db');
-const EARN = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: DB_PATH };
+const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: DB_PATH };
 
 process.env.GAMIFICATION_ENABLED = '1';
 process.env.GAMIFICATION_DB = DB_PATH;
@@ -41,8 +41,8 @@ const R = await import('../reconcile.mjs');
 const I = await import('../intake.mjs');
 
 const schedule = (fact, env) => new Promise((resolve) => I.scheduleFact(fact, { env, onDone: resolve }));
-const fact = (i) => ({ source: 'mook_review', sourceEventId: `iso-${i}`, factType: 'evidence_reviewed', userId: `u-${i % 3}`,
-    actorId: 'u-med', occurredAt: Date.UTC(2026, 9, 29, 15) + i, eligibility: 'eligible', features: { decision: 'aprobado' } });
+const fact = (i) => ({ source: 'mook_experience', sourceEventId: `iso-${i}`, factType: 'experience_completed', userId: `u-${i % 3}`,
+    actorId: 'u-med', occurredAt: Date.UTC(2026, 9, 29, 15) + i, eligibility: 'eligible' });
 
 /** «Operación crítica» simulada: calcula su respuesta, programa el hecho y responde. */
 function criticalOperation(i, env, onDone) {
@@ -79,7 +79,7 @@ try {
     section('[2] la operación responde antes de que el hecho se registre');
     const db = D.getGamificationDb(); // arranque: abre y migra fuera de las peticiones
     L.createRuleSet(db, { ruleVersion: 'gm-iso-v1', createdBy: 'migration',
-        rules: { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mook_review/evidence_reviewed': { xp: 2, pm: 5 } } } });
+        rules: { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mook_experience/experience_completed': { xp: 2 } } } });
     const order = [];
     const done1 = new Promise((resolve) => {
         const { body } = criticalOperation(1, EARN, (o) => { order.push('hecho'); resolve(o); });
@@ -87,7 +87,7 @@ try {
     });
     const o1 = await done1;
     ok('primero la respuesta y después el hecho', order.join(' → ') === 'respuesta:progreso-1 → hecho', order.join(' → '));
-    ok('el hecho quedó registrado y emitido por la regla', o1.ok && o1.result.inserted && o1.result.pm === 5);
+    ok('el hecho quedó registrado y emitido por la regla', o1.ok && o1.result.inserted && o1.result.xp === 2);
 
     section('[3] otra réplica retiene el lock de escritura durante 2,5 s');
     const lock = holdLock(DB_PATH, 2500);

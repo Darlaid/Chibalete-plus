@@ -40,11 +40,18 @@ export function isGamificationEnabled(env = process.env) {
 
 /**
  * `PM_EARNING_ENABLED`: hijo de `GAMIFICATION_ENABLED` (padre OFF ⇒ OFF).
- * Sin él, los hechos elegibles se registran como `disabled_source` y no emiten.
+ * Solo gobierna PM. El XP tiene su propio flag (G4-04).
  */
 export function isEarningEnabled(env = process.env) {
     if (!isGamificationEnabled(env)) return false;
     const v = String(env.PM_EARNING_ENABLED ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true';
+}
+
+/** `XP_EARNING_ENABLED`: hijo de `GAMIFICATION_ENABLED`, independiente de `PM_EARNING_ENABLED` (A4). */
+export function isXpEarningEnabled(env = process.env) {
+    if (!isGamificationEnabled(env)) return false;
+    const v = String(env.XP_EARNING_ENABLED ?? '').trim().toLowerCase();
     return v === '1' || v === 'true';
 }
 

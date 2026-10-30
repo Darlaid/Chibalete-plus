@@ -41,8 +41,8 @@ const SINCE_ISO = '2026-11-01T00:00:00.000Z';
 const SINCE = Date.parse(SINCE_ISO);
 const iso = (minutesAfterSince) => new Date(SINCE + minutesAfterSince * 60_000).toISOString();
 const RULES = { schema: 1, caps: { pmPerDay: 1000, pmPerWeek: 5000 }, facts: {
-    'mook_review/evidence_reviewed': { xp: 30, pm: 20, emitWhen: { decision: ['aprobado'] } },
-    'mook_experience/experience_completed': { xp: 20, pm: 10 },
+    'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
+    'mook_experience/experience_completed': { xp: 20 },
 } };
 const USERS = [
     { id: 'u-lector', accountStatus: 'active' },
@@ -64,7 +64,7 @@ function freshEnv() {
     D.closeGamificationDb({ resetBackoff: true });
     I.closeIntake({ resetBackoff: true });
     const p = path.join(tmp, `db${++dbN}`, 'gamification.db');
-    const env = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: p, GAMIFICATION_MOOK_SINCE: SINCE_ISO };
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: p, GAMIFICATION_MOOK_SINCE: SINCE_ISO };
     const db = D.getGamificationDb({ env });
     // Vigentes desde el reloj real: los hechos se registran con Date.now() (D48 prospectivo).
     L.createRuleSet(db, { ruleVersion: 'gm-mook-v1', rules: RULES, createdBy: 'migration', now: Date.now() - 1000 });
@@ -83,12 +83,12 @@ try {
     let { env, db } = freshEnv();
     const e1 = ev('evid-1', 'u-lector', 'u-mediador', 'aprobado', iso(10));
     const o1 = await hook(M.onMookEvidenceReviewed, e1, env);
-    ok('el gancho registra el hecho con la regla vigente (awarded, 30 XP, 20 PM)', o1?.ok && o1.result.inserted && o1.result.decision === 'awarded' && o1.result.xp === 30 && o1.result.pm === 20, JSON.stringify(o1));
+    ok('el gancho registra el hecho como observed: sin cobertura de obra no emite', o1?.ok && o1.result.inserted && o1.result.decision === 'observed' && o1.result.xp === 0 && o1.result.pm === 0, JSON.stringify(o1));
     ok('el sourceEventId es el id de la evidencia (determinista)', facts(db)[0]?.source_event_id === 'evid-1');
     await hook(M.onMookEvidenceReviewed, e1, env);
     await hook(M.onMookEvidenceReviewed, e1, env);
     const r1 = reconcileDoc(env, { evidence: [e1], runs: [] });
-    ok('gancho ×3 + reconciliación ⇒ 1 hecho y 1 movimiento', facts(db).length === 1 && db.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 1 && r1.alreadyRecorded === 1, JSON.stringify(r1));
+    ok('gancho ×3 + reconciliación ⇒ 1 hecho y ningún movimiento', facts(db).length === 1 && db.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 0 && r1.alreadyRecorded === 1, JSON.stringify(r1));
 
     section('[2] autorrevisión ⇒ sin recompensa');
     const e2 = ev('evid-2', 'u-mediador', 'u-mediador', 'aprobado', iso(11));
@@ -110,7 +110,7 @@ try {
     section('[4] experiencia completada ⇒ idempotente');
     const ru = run('run-1', 'u-lector', iso(20));
     const o4 = await hook(M.onMookRunUpdated, ru, env);
-    ok('el gancho registra experience_completed (20 XP, 10 PM)', o4?.ok && o4.result.decision === 'awarded' && o4.result.xp === 20 && o4.result.pm === 10);
+    ok('el gancho registra experience_completed (20 XP, 0 PM)', o4?.ok && o4.result.decision === 'awarded' && o4.result.xp === 20 && o4.result.pm === 0);
     ok('sourceEventId determinista = usuario:versión', facts(db).some((f) => f.source === 'mook_experience' && f.source_event_id === 'u-lector:xv-1'));
     await hook(M.onMookRunUpdated, ru, env);
     const rerun = run('run-2', 'u-lector', iso(90)); // abandonó y repitió la ruta de la misma versión

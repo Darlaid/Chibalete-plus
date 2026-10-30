@@ -31,7 +31,7 @@ const REAL_DB = path.join(REPO, 'data-critical', 'gamification.db');
 const realBefore = fs.existsSync(REAL_DB);
 const WORKER = path.join(HERE, 'concurrencyWorker.mjs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_gam_conc_'));
-const EARN = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1' };
+const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
 
 let barrierN = 0;
 function runReplicas(dbPath, roles, extraEnv = {}) {
@@ -60,8 +60,9 @@ const openFresh = (dbPath, rules) => {
     D.closeGamificationDb();
 };
 const BIG = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: {
-    'mook_review/evidence_reviewed': { xp: 3, pm: 7, emitWhen: { decision: ['aprobado'] } },
-    'mook_experience/experience_completed': { xp: 2, pm: 4 },
+    'mission/mission_completed': { xp: 3, pm: 7 },
+    'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
+    'mook_experience/experience_completed': { xp: 2 },
 } };
 
 // Documento MOOK sintético (forma real de experienceStore): 60 evidencias revisadas
@@ -111,7 +112,7 @@ try {
 
     section('[3] topes bajo concurrencia: 2 réplicas × 50 hechos del mismo usuario');
     const DB3 = path.join(tmp, 'caps', 'gamification.db');
-    openFresh(DB3, { schema: 1, caps: { pmPerDay: 100, pmPerWeek: 300 }, facts: { 'mook_review/evidence_reviewed': { xp: 1, pm: 10, emitWhen: { decision: ['aprobado'] } } } });
+    openFresh(DB3, { schema: 1, caps: { pmPerDay: 100, pmPerWeek: 300 }, facts: { 'mission/mission_completed': { xp: 1, pm: 10 } } });
     const [c1, c2] = await runReplicas(DB3, ['caps-1', 'caps-2']);
     ok('ambas terminan sin error', c1.errors.length === 0 && c2.errors.length === 0, JSON.stringify([c1.errors, c2.errors]));
     process.env.GAMIFICATION_DB = DB3;
@@ -135,7 +136,7 @@ try {
     n = (sql) => db.prepare(sql).get().n;
     ok('80 hechos, ninguno duplicado', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_CANDIDATES);
     const dec = Object.fromEntries(db.prepare('SELECT decision, COUNT(*) n FROM gm_source_facts GROUP BY decision').all().map((r) => [r.decision, r.n]));
-    ok('decisiones: 10 con_comentarios→observed, 5 autorrevisiones, 5 sintéticos, 40+20 awarded', dec.observed === 10 && dec.rejected_self_review === 5 && dec.rejected_excluded_user === 5 && dec.awarded === 60, JSON.stringify(dec));
+    ok('decisiones: 10 con_comentarios→observed, 5 autorrevisiones, 5 sintéticos, 40 aprobadas→observed y 20 rutas awarded', dec.observed === 50 && dec.rejected_self_review === 5 && dec.rejected_excluded_user === 5 && dec.awarded === 20, JSON.stringify(dec));
     ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
 
     section('[5] interrupción abrupta a mitad de la reconciliación');
@@ -154,7 +155,7 @@ try {
     const rec = R.reconcile(db, cands, { resolveUser, env: EARN });
     ok(`el siguiente barrido recupera los ${EXPECTED_CANDIDATES - 23} restantes y salta los 23`, rec.recorded === EXPECTED_CANDIDATES - 23 && rec.alreadyRecorded === 23);
     ok('resultado final idéntico al de una reconciliación sin caída', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_CANDIDATES && L.verifyLedger(db).ok
-        && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 60);
+        && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 20);
     const again = R.reconcile(db, cands, { resolveUser, env: EARN });
     ok('un tercer barrido no registra nada (idempotente)', again.recorded === 0 && again.alreadyRecorded === EXPECTED_CANDIDATES);
 

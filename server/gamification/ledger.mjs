@@ -14,6 +14,7 @@
  *    `policy.mjs` con las reglas vigentes y los topes, en la misma transacción;
  *  - solo se emite desde evidencia de grado A/B; la lectura terminada sigue en
  *    observación (READING_EMISSION_LOCKED) hasta que G4 apruebe su validador;
+ *  - XP y PM tienen flags independientes y bloqueos por fuente (`policy.mjs`);
  *  - reservas y canjes NO se exponen en G3-01 (solo existen sus tablas);
  *  - ningún ajuste fija un saldo: siempre es un movimiento con motivo y actor.
  *
@@ -21,7 +22,7 @@
  */
 import crypto from 'node:crypto';
 import { ulid } from '../ulid.js';
-import { GamificationError, isEarningEnabled } from './db.mjs';
+import { GamificationError, isEarningEnabled, isXpEarningEnabled } from './db.mjs';
 import { ELIGIBILITY, SOURCE_GRADE, decideEmission, validateRules } from './policy.mjs';
 
 export const FACT_SOURCES = Object.freeze(Object.keys(SOURCE_GRADE));
@@ -36,7 +37,7 @@ const FACT_FIELDS = new Set(['source', 'sourceEventId', 'factType', 'userId', 'a
 export const FEATURE_ALLOWLIST = Object.freeze({
     mook_review: ['experienceVersionId', 'decision', 'reviewerIsSelf'],
     mook_experience: ['experienceVersionId'],
-    reading_completion: ['verdict', 'reasons', 'activeMinutes', 'sessions', 'distinctDays', 'maxProgressPct', 'monotonic', 'lengthUnits', 'mode'],
+    reading_completion: ['verdict', 'reasons', 'sessions', 'distinctDays', 'maxProgressPct', 'monotonic', 'lengthUnits'],
     offline_validation: [],
     mission: [],
 });
@@ -169,7 +170,7 @@ export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom
  * reintento del mismo hecho devuelve el registro original sin emitir.
  *
  * @param {object} fact  source, sourceEventId, factType, userId, actorId?, occurredAt, eligibility, features?, now?
- * @param {{ env?: object }} [opts]  `PM_EARNING_ENABLED` se lee aquí, por llamada
+ * @param {{ env?: object }} [opts]  `XP_EARNING_ENABLED` y `PM_EARNING_ENABLED` se leen aquí, por llamada
  * @returns {{ inserted: boolean, factId: string, decision: string, xp: number, pm: number, xpEntryId: string|null, movementId: string|null }}
  */
 export function recordFact(db, fact, { env = process.env } = {}) {
@@ -184,7 +185,8 @@ export function recordFact(db, fact, { env = process.env } = {}) {
     const featuresJson = validateFeatures(source, features);
     // La autoconcesión nunca emite, aunque el llamador la declare elegible.
     const effectiveEligibility = eligibility === 'eligible' && actorId !== null && actorId === userId ? 'rejected_self_review' : eligibility;
-    const earningEnabled = isEarningEnabled(env);
+    const xpEnabled = isXpEarningEnabled(env);
+    const pmEnabled = isEarningEnabled(env);
 
     return db.transaction(() => {
         const existing = db.prepare('SELECT * FROM gm_source_facts WHERE source = ? AND source_event_id = ? AND fact_type = ?')
@@ -199,7 +201,7 @@ export function recordFact(db, fact, { env = process.env } = {}) {
         const active = getActiveRuleSet(db, now);
         if (!active) throw bad('NO_ACTIVE_RULES', 'no hay reglas vigentes');
         const d = decideEmission({ rules: active.rules, source, factType, eligibility: effectiveEligibility,
-            features: features || {}, earningEnabled, usage: earnedUsage(db, userId, source, now) });
+            features: features || {}, xpEnabled, pmEnabled, usage: earnedUsage(db, userId, source, now) });
         const factId = ulid(now);
         db.prepare(`
             INSERT INTO gm_source_facts (fact_id, source, source_event_id, fact_type, user_id, actor_id, occurred_at,

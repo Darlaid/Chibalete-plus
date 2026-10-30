@@ -50,10 +50,10 @@ const RV = 'gm-bk-v1';
 const TABLES = ['gm_rule_sets', 'gm_source_facts', 'gm_xp_entries', 'gm_achievements', 'gm_pm_movements', 'gm_pm_balances',
     'gm_redemptions', 'gm_redemption_transitions', 'gm_reward_grants', 'gm_admin_audit', '_migrations'];
 const tableHash = (db, t) => crypto.createHash('sha256').update(JSON.stringify(db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all())).digest('hex');
-const fact = (i, user) => ({ source: 'mook_review', sourceEventId: `bk-${i}`, factType: 'evidence_reviewed', userId: user,
-    actorId: 'u-med', occurredAt: Date.now(), eligibility: 'eligible', features: { decision: 'aprobado' } });
-const EARN = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1' };
-const RULES = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mook_review/evidence_reviewed': { xp: 5, pm: 11 } } };
+const fact = (i, user) => ({ source: 'mission', sourceEventId: `bk-${i}`, factType: 'mission_completed', userId: user,
+    actorId: 'u-med', occurredAt: Date.now(), eligibility: 'eligible' });
+const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
+const RULES = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mission/mission_completed': { xp: 5, pm: 11 } } };
 
 try {
     section('[1] base viva con historial, en WAL y sin checkpoint');

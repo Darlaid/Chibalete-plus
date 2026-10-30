@@ -20,10 +20,10 @@ const R = await import('../reconcile.mjs');
 
 while (!fs.existsSync(barrier)) await new Promise((r) => setTimeout(r, 2));
 
-const env = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: process.env.GAMIFICATION_DB };
+const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: process.env.GAMIFICATION_DB };
 const out = { role, inserted: 0, replayed: 0, adjustments: 0, pm: 0, decisions: {}, rejected: {}, errors: [] };
-const fact = (sourceEventId, userId) => ({ source: 'mook_review', sourceEventId, factType: 'evidence_reviewed', userId,
-    actorId: 'u-mediador', occurredAt: Date.now(), eligibility: 'eligible', features: { decision: 'aprobado' } });
+const fact = (sourceEventId, userId) => ({ source: 'mission', sourceEventId, factType: 'mission_completed', userId,
+    actorId: 'u-mediador', occurredAt: Date.now(), eligibility: 'eligible' });
 const resolveUser = (id) => ({ exists: true, active: true, synthetic: id.startsWith('synthetic-') });
 try {
     const db = D.getGamificationDb({ log: () => {} });

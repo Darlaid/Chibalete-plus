@@ -36,11 +36,12 @@ delete process.env.PM_EARNING_ENABLED;
 const D = await import('../db.mjs');
 const L = await import('../ledger.mjs');
 const RV = 'gm-test-v1';
-const EARN = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1' };
-const CAPS = { pmPerDay: 200, pmPerWeek: 300, pmPerDayBySource: { mook_review: 50 } };
+const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
+const CAPS = { pmPerDay: 200, pmPerWeek: 300, pmPerDayBySource: { mission: 50 } };
 const RULES = { schema: 1, caps: CAPS, facts: {
-    'mook_review/evidence_reviewed': { xp: 30, pm: 20, emitWhen: { decision: ['aprobado'] } },
-    'mook_experience/experience_completed': { xp: 20, pm: 10 },
+    'mission/mission_completed': { xp: 30, pm: 20 }, // única fuente sin bloqueos de G4-04: prueba la mecánica de emisión
+    'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
+    'mook_experience/experience_completed': { xp: 20 },
 } };
 const T0 = Date.UTC(2026, 9, 29, 15, 0, 0);
 let seqTime = T0;
@@ -89,19 +90,18 @@ try {
     const badRules = [
         ['sin topes', { schema: 1, facts: {} }],
         ['tope diario > semanal', { schema: 1, facts: {}, caps: { pmPerDay: 10, pmPerWeek: 5 } }],
-        ['grado configurable', { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 1, pm: 1, grade: 'A' } }, caps: CAPS }],
+        ['grado configurable', { schema: 1, facts: { 'mission/mission_completed': { xp: 1, pm: 1, grade: 'A' } }, caps: CAPS }],
         ['fuente leo', { schema: 1, facts: { 'leo/answer': { xp: 1, pm: 1 } }, caps: CAPS }],
-        ['monto fuera de cota', { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 1, pm: 99999 } }, caps: CAPS }],
-        ['emitWhen con feature no admitida', { schema: 1, facts: { 'mook_review/evidence_reviewed': { pm: 1, emitWhen: { feedback: ['x'] } } }, caps: CAPS }],
+        ['monto fuera de cota', { schema: 1, facts: { 'mission/mission_completed': { xp: 1, pm: 99999 } }, caps: CAPS }],
+        ['emitWhen con feature no admitida', { schema: 1, facts: { 'mission/mission_completed': { pm: 1, emitWhen: { feedback: ['x'] } } }, caps: CAPS }],
         ['clave raíz desconocida', { schema: 1, facts: {}, caps: CAPS, bonus: 5 }],
     ];
     for (const [l, r] of badRules) ok(`regla inválida (${l}) ⇒ INVALID_RULES`, throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-bad', rules: r, createdBy: 'migration', now: T0 }), 'INVALID_RULES'));
     ok('regla que haría emitir a la lectura ⇒ READING_EMISSION_LOCKED', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-bad', rules: { schema: 1, facts: { 'reading_completion/reading_completed': { xp: 5, pm: 5 } }, caps: CAPS }, createdBy: 'migration', now: T0 }), 'READING_EMISSION_LOCKED'));
     ok('ninguna regla inválida quedó registrada', db2.prepare("SELECT COUNT(*) n FROM gm_rule_sets WHERE rule_version='gm-bad'").get().n === 0);
 
-    const fact = (over = {}) => ({ source: 'mook_review', sourceEventId: 'ev-1', factType: 'evidence_reviewed', userId: 'u-lector-1',
-        actorId: 'u-mediador-1', occurredAt: T0, eligibility: 'eligible',
-        features: { experienceVersionId: 'xv-1', decision: 'aprobado', reviewerIsSelf: false }, ...over });
+    const fact = (over = {}) => ({ source: 'mission', sourceEventId: 'ev-1', factType: 'mission_completed', userId: 'u-lector-1',
+        actorId: 'u-mediador-1', occurredAt: T0, eligibility: 'eligible', ...over });
     const rec = (over = {}, env = EARN) => L.recordFact(db2, { now: tick(), ...fact(over) }, { env });
 
     section('[4] idempotencia: 100 repeticiones del mismo hecho');
@@ -112,7 +112,7 @@ try {
     ok('1 hecho, 1 asiento XP y 1 movimiento PM en la base', db2.prepare('SELECT COUNT(*) n FROM gm_source_facts').get().n === 1
         && db2.prepare('SELECT COUNT(*) n FROM gm_xp_entries').get().n === 1 && db2.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 1);
     ok('saldo = 20 y XP = 30 (montos de la regla, no del llamador)', L.getBalance(db2, 'u-lector-1').available === 20 && L.getXp(db2, 'u-lector-1') === 30);
-    ok('el hecho quedó con grado A (fijo por fuente) y la rule_version vigente', (() => { const r = db2.prepare('SELECT grade, rule_version FROM gm_source_facts').get(); return r.grade === 'A' && r.rule_version === RV; })());
+    ok('el hecho quedó con grado B (fijo por fuente) y la rule_version vigente', (() => { const r = db2.prepare('SELECT grade, rule_version FROM gm_source_facts').get(); return r.grade === 'B' && r.rule_version === RV; })());
     ok('mismo hecho con otro sujeto ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => rec({ userId: 'u-otro' }), 'IDEMPOTENCY_CONFLICT'));
 
     section('[5] el llamador no fija montos; decisiones sin emisión');
@@ -121,11 +121,11 @@ try {
     }
     const obs = rec({ sourceEventId: 'ev-obs', eligibility: 'observe' });
     ok('observe ⇒ observed sin emisión', obs.inserted && obs.decision === 'observed' && obs.pm === 0 && obs.xp === 0);
-    const cc = rec({ sourceEventId: 'ev-cc', features: { decision: 'con_comentarios' } });
+    const cc = rec({ source: 'mook_review', factType: 'evidence_reviewed', sourceEventId: 'ev-cc', features: { decision: 'con_comentarios' } });
     ok('MOOK con_comentarios ⇒ observed (emitWhen) sin emisión', cc.decision === 'observed' && cc.pm === 0 && cc.movementId === null);
     const self = rec({ sourceEventId: 'ev-self', actorId: 'u-lector-1' });
     ok('autorrevisión declarada elegible ⇒ rejected_self_review, sin emisión', self.decision === 'rejected_self_review' && self.pm === 0 && self.xp === 0);
-    const rd = rec({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible', activeMinutes: 42, reasons: [] } });
+    const rd = rec({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible', reasons: [] } });
     ok('lectura terminada elegible ⇒ observed (bloqueada) y grado B', rd.decision === 'observed' && rd.pm === 0 && db2.prepare('SELECT grade FROM gm_source_facts WHERE fact_id=?').get(rd.factId).grade === 'B');
     const nr = rec({ sourceEventId: 'ev-norule', factType: 'otro_tipo' });
     ok('hecho sin regla ⇒ rejected_not_eligible', nr.decision === 'rejected_not_eligible' && nr.pm === 0);
@@ -138,8 +138,8 @@ try {
     ok('elegibilidad desconocida ⇒ INVALID_ELIGIBILITY', throwsCode(() => rec({ sourceEventId: 'ev-x1', eligibility: 'awarded' }), 'INVALID_ELIGIBILITY'));
     ok('fuente leo ⇒ UNKNOWN_SOURCE', throwsCode(() => rec({ source: 'leo', sourceEventId: 'ev-x5' }), 'UNKNOWN_SOURCE'));
     ok('fuente royalties ⇒ UNKNOWN_SOURCE', throwsCode(() => rec({ source: 'royalties_qrs', sourceEventId: 'ev-x6' }), 'UNKNOWN_SOURCE'));
-    ok('features con texto libre no admitido ⇒ INVALID_FEATURES', throwsCode(() => rec({ sourceEventId: 'ev-x7', features: { feedback: 'muy bien' } }), 'INVALID_FEATURES'));
-    ok('features con string largo ⇒ INVALID_FEATURES', throwsCode(() => rec({ sourceEventId: 'ev-x8', features: { decision: 'x'.repeat(65) } }), 'INVALID_FEATURES'));
+    ok('features con texto libre no admitido ⇒ INVALID_FEATURES', throwsCode(() => rec({ source: 'mook_review', factType: 'evidence_reviewed', sourceEventId: 'ev-x7', features: { feedback: 'muy bien' } }), 'INVALID_FEATURES'));
+    ok('features con string largo ⇒ INVALID_FEATURES', throwsCode(() => rec({ source: 'mook_review', factType: 'evidence_reviewed', sourceEventId: 'ev-x8', features: { decision: 'x'.repeat(65) } }), 'INVALID_FEATURES'));
     ok('id con caracteres inválidos ⇒ INVALID_FACT', throwsCode(() => rec({ sourceEventId: 'ev 13 ; DROP' }), 'INVALID_FACT'));
     ok('ninguna operación rechazada dejó filas', db2.prepare("SELECT COUNT(*) n FROM gm_source_facts WHERE source_event_id LIKE 'ev-x%' OR source_event_id LIKE 'ev-f-%'").get().n === 0);
 
@@ -147,7 +147,7 @@ try {
     const DAY1 = Date.UTC(2026, 10, 2, 15); // lunes 2026-11-02, 10:00 Bogotá
     const capRec = (id, at) => L.recordFact(db2, { ...fact({ userId: 'u-cap', sourceEventId: id }), now: at }, { env: EARN });
     const c = [0, 1, 2, 3].map((i) => capRec(`cap-${i}`, DAY1 + i * 1000));
-    ok('20 + 20 + 10 (capped) + 0 (capped) con pmPerDayBySource.mook_review = 50', c.map((r) => r.pm).join(',') === '20,20,10,0' && c[2].decision === 'capped' && c[3].decision === 'capped');
+    ok('20 + 20 + 10 (capped) + 0 (capped) con pmPerDayBySource.mission = 50', c.map((r) => r.pm).join(',') === '20,20,10,0' && c[2].decision === 'capped' && c[3].decision === 'capped');
     ok('el XP no se recorta por los topes de PM', c.every((r) => r.xp === 30));
     ok('al día siguiente (Bogotá) el tope diario se renueva', capRec('cap-d2', DAY1 + 86_400_000).pm === 20);
     for (let d = 2; d < 7; d++) for (let i = 0; i < 3; i++) capRec(`cap-w-${d}-${i}`, DAY1 + d * 86_400_000 + i * 1000);
@@ -157,7 +157,7 @@ try {
     ok('23:59 del domingo en Bogotá (04:59Z del lunes) sigue en la semana anterior', L.periodsFor(Date.UTC(2026, 10, 9, 4, 59)).week === '2026-W45');
 
     section('[5c] cambio de reglas prospectivo (D48)');
-    L.createRuleSet(db2, { ruleVersion: 'gm-test-v2', rules: { ...RULES, facts: { ...RULES.facts, 'mook_review/evidence_reviewed': { xp: 30, pm: 5, emitWhen: { decision: ['aprobado'] } } } }, createdBy: 'admin-1', effectiveFrom: T0 + 30 * 86_400_000, now: T0 });
+    L.createRuleSet(db2, { ruleVersion: 'gm-test-v2', rules: { ...RULES, facts: { ...RULES.facts, 'mission/mission_completed': { xp: 30, pm: 5 } } }, createdBy: 'admin-1', effectiveFrom: T0 + 30 * 86_400_000, now: T0 });
     ok('antes de entrar en vigor rige la versión anterior', L.getActiveRuleSet(db2, T0 + 5).ruleVersion === RV);
     const v2 = L.recordFact(db2, { ...fact({ userId: 'u-v2', sourceEventId: 'ev-v2' }), now: T0 + 31 * 86_400_000 }, { env: EARN });
     ok('después rige la nueva y el hecho guarda su rule_version', v2.pm === 5 && db2.prepare('SELECT rule_version FROM gm_source_facts WHERE fact_id=?').get(v2.factId).rule_version === 'gm-test-v2');

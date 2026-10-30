@@ -24,6 +24,15 @@ export const SOURCE_GRADE = Object.freeze({
 });
 /** Fuentes que no emiten en ningún caso todavía (READING_EMISSION_LOCKED). */
 export const LOCKED_SOURCES = Object.freeze(['reading_completion']);
+/**
+ * G4-04. Bloqueos por código, por encima de cualquier regla:
+ *  - lectura libre y ruta MOOK nunca dan PM: no demuestran comprensión (A1);
+ *  - revisión y validación necesitan cobertura verificable de obra y ciclo, que
+ *    aún no existe. Sin ella no se puede aplicar la unicidad de PM ni el techo de
+ *    XP por obra (A4), así que tampoco dan XP. Se registran como `observed`.
+ */
+export const PM_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_experience', 'mook_review', 'offline_validation']);
+export const XP_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_review', 'offline_validation']);
 
 export const ELIGIBILITY = Object.freeze([
     'eligible', 'observe',
@@ -44,6 +53,7 @@ const isAmount = (n) => Number.isSafeInteger(n) && n >= 0 && n <= MAX_RULE_AMOUN
  *   caps:  { pmPerDay, pmPerWeek, pmPerDayBySource?: { <source>: n } }
  * }
  * Los topes son OBLIGATORIOS: no existe la emisión sin techo (D13).
+ * Una regla que intente emitir desde una fuente bloqueada se rechaza.
  */
 export function validateRules(rules, { featureAllowlist }) {
     if (!rules || typeof rules !== 'object' || Array.isArray(rules)) throw bad('INVALID_RULES', 'objeto requerido');
@@ -63,6 +73,8 @@ export function validateRules(rules, { featureAllowlist }) {
         if (LOCKED_SOURCES.includes(source) && ((r.xp ?? 0) > 0 || (r.pm ?? 0) > 0)) {
             throw bad('READING_EMISSION_LOCKED', `${key}: la lectura terminada sigue en observación`);
         }
+        if (PM_LOCKED_SOURCES.includes(source) && (r.pm ?? 0) > 0) throw bad('PM_SOURCE_LOCKED', `${key}: esta fuente no puede emitir PM`);
+        if (XP_LOCKED_SOURCES.includes(source) && (r.xp ?? 0) > 0) throw bad('XP_SOURCE_LOCKED', `${key}: esta fuente no puede emitir XP`);
         if (r.emitWhen !== undefined) {
             if (!r.emitWhen || typeof r.emitWhen !== 'object' || Array.isArray(r.emitWhen)) throw bad('INVALID_RULES', `${key}.emitWhen`);
             const allowed = new Set(featureAllowlist[source] || []);
@@ -94,11 +106,12 @@ export function validateRules(rules, { featureAllowlist }) {
  * @param {string} p.factType
  * @param {string} p.eligibility    uno de ELIGIBILITY
  * @param {object} p.features
- * @param {boolean} p.earningEnabled
+ * @param {boolean} p.xpEnabled
+ * @param {boolean} p.pmEnabled
  * @param {{ day: number, week: number, daySource: number }} p.usage  PM `earn` ya emitidos
  * @returns {{ grade, decision, xp, pm }}
  */
-export function decideEmission({ rules, source, factType, eligibility, features, earningEnabled, usage }) {
+export function decideEmission({ rules, source, factType, eligibility, features, xpEnabled, pmEnabled, usage }) {
     const grade = SOURCE_GRADE[source];
     const none = (decision) => ({ grade, decision, xp: 0, pm: 0 });
     if (eligibility !== 'eligible') return none(eligibility === 'observe' ? 'observed' : eligibility);
@@ -108,9 +121,14 @@ export function decideEmission({ rules, source, factType, eligibility, features,
     for (const [f, vals] of Object.entries(rule.emitWhen ?? {})) {
         if (!vals.includes(features?.[f])) return none('observed');
     }
-    if (!earningEnabled) return none('disabled_source');
-    const xp = rule.xp ?? 0;
-    const want = rule.pm ?? 0;
+    // Los bloqueos valen también para un conjunto de reglas ya guardado.
+    const ruleXp = XP_LOCKED_SOURCES.includes(source) ? 0 : (rule.xp ?? 0);
+    const rulePm = PM_LOCKED_SOURCES.includes(source) ? 0 : (rule.pm ?? 0);
+    if (XP_LOCKED_SOURCES.includes(source) && PM_LOCKED_SOURCES.includes(source)) return none('observed');
+    if (!xpEnabled && !pmEnabled) return none('disabled_source');
+    const xp = xpEnabled ? ruleXp : 0;
+    const want = pmEnabled ? rulePm : 0;
+    if (xp === 0 && want === 0 && ruleXp + rulePm > 0) return none('disabled_source');
     const caps = rules.caps;
     const bySource = caps.pmPerDayBySource?.[source];
     const room = Math.max(0, Math.min(
