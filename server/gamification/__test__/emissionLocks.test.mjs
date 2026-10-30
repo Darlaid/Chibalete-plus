@@ -171,7 +171,7 @@ try {
     const mods = fs.readdirSync(path.join(HERE, '..')).filter((f) => f.endsWith('.mjs'));
     const imports = mods.flatMap((f) => [...fs.readFileSync(path.join(HERE, '..', f), 'utf8').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]));
     ok('sin imports de regalías, derechos ni acceso', !imports.some((i) => /royalt|rights|access|woo/i.test(i)), imports.join());
-    ok('una sola migración', fs.readdirSync(path.join(HERE, '..', 'migrations')).length === 1);
+    ok('solo las migraciones 0001 y 0002', fs.readdirSync(path.join(HERE, '..', 'migrations')).length === 2);
     ok('ledger íntegro al final', L.verifyLedger(db).ok);
     D.closeGamificationDb({ resetBackoff: true });
     ok('stores reales de gamificación y regalías sin cambios', JSON.stringify(fingerprint()) === JSON.stringify(realBefore));

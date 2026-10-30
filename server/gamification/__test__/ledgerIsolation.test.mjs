@@ -14,6 +14,7 @@
  *
  *   node server/gamification/__test__/ledgerIsolation.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -79,6 +80,7 @@ try {
     section('[2] la operación responde antes de que el hecho se registre');
     const db = D.getGamificationDb(); // arranque: abre y migra fuera de las peticiones
     L.createRuleSet(db, { ruleVersion: 'gm-iso-v1', createdBy: 'migration',
+        effectiveFrom: Date.UTC(2026, 0, 1), now: Date.UTC(2026, 0, 1),
         rules: { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mook_experience/experience_completed': { xp: 2 } } } });
     const order = [];
     const done1 = new Promise((resolve) => {

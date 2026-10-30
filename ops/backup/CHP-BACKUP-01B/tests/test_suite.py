@@ -4088,7 +4088,7 @@ GAMIFICATION_LOGICAL_PATH = "data-critical/gamification.db"
 GAMIFICATION_MIGRATIONS_DIR = os.path.join(
     HERE, "..", "..", "..", "..", "server", "gamification", "migrations")
 GAMIFICATION_TABLES = (
-    "gm_rule_sets", "gm_source_facts", "gm_xp_entries", "gm_achievements", "gm_redemptions",
+    "gm_rule_sets", "gm_subjects", "gm_source_facts", "gm_xp_entries", "gm_achievements", "gm_redemptions",
     "gm_pm_movements", "gm_pm_balances", "gm_redemption_transitions", "gm_reward_grants", "gm_admin_audit",
 )
 
@@ -4110,6 +4110,7 @@ def _build_gamification_db(base_dir: str) -> str:
         conn.executescript(raw.split("-- DOWN")[0].split("-- UP", 1)[1])
         conn.execute("INSERT INTO _migrations(version, applied_at) VALUES (?, '2026-10-29 00:00:00')", (name[:-4],))
     t = 1_793_000_000_000
+    conn.execute("INSERT INTO gm_subjects VALUES ('u-fx', 'sintetico-fx', zeroblob(32), 'reader', '2026-10-29')")
     conn.execute("INSERT INTO gm_rule_sets VALUES ('gm-fx-v1', ?, 'migration', '{\"schema\":1}', ?, ?)",
                  (t, "b" * 64, t))
     for i in range(3):
@@ -4131,8 +4132,8 @@ def _build_gamification_db(base_dir: str) -> str:
     ]
     for k, (mid, kind, amount, fact, red, rel, actor) in enumerate(movs):
         conn.execute(
-            "INSERT INTO gm_pm_movements (movement_id, user_id, kind, amount, source, idempotency_key, fact_id,"
-            " redemption_id, related_movement_id, reason_code, actor_id, rule_version, period_day, period_week, created_at)"
+            "INSERT INTO gm_pm_movements (movement_id, subject_ref, kind, amount, source, idempotency_key, fact_id,"
+            " redemption_id, related_movement_id, reason_code, actor_ref, rule_version, period_day, period_week, created_at)"
             " VALUES (?, 'u-fx', ?, ?, 'fx', ?, ?, ?, ?, 'fx', ?, 'gm-fx-v1', '2026-10-29', '2026-W44', ?)",
             (mid, kind, amount, f"key-{mid}", fact, red, rel, actor, t + 20 + k))
     conn.execute("UPDATE gm_redemptions SET state='DELIVERED', updated_at=? WHERE redemption_id='red-fx'", (t + 30,))
@@ -4161,7 +4162,7 @@ def _gamification_logical_digest(path: str) -> dict:
                        for t in GAMIFICATION_TABLES},
             "counts": {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in GAMIFICATION_TABLES},
             # Invariante del ledger: snapshot = suma de movimientos.
-            "ledger_sum": conn.execute("SELECT SUM(amount) FROM gm_pm_movements WHERE user_id='u-fx'").fetchone()[0],
+            "ledger_sum": conn.execute("SELECT SUM(amount) FROM gm_pm_movements WHERE subject_ref='u-fx'").fetchone()[0],
             "snapshot": conn.execute("SELECT available, reserved, lifetime_earned, last_seq FROM gm_pm_balances").fetchall(),
         }
     finally:

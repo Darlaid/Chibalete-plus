@@ -11,6 +11,7 @@
  *
  *   node server/gamification/__test__/ledgerCore.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import './helpers/pmMechanicsHarness.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -70,17 +71,17 @@ try {
     ok('busy_timeout = 5000', db.pragma('busy_timeout', { simple: true }) === 5000);
     ok('foreign_keys = ON', db.pragma('foreign_keys', { simple: true }) === 1);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'gm_%' ORDER BY name").all().map((r) => r.name);
-    ok('exactamente las 10 tablas gm_ del modelo', JSON.stringify(tables) === JSON.stringify(['gm_achievements', 'gm_admin_audit', 'gm_pm_balances', 'gm_pm_movements', 'gm_redemption_transitions', 'gm_redemptions', 'gm_reward_grants', 'gm_rule_sets', 'gm_source_facts', 'gm_xp_entries']), tables.join(','));
+    ok('exactamente las 13 tablas gm_ del modelo', JSON.stringify(tables) === JSON.stringify(['gm_achievements', 'gm_admin_audit', 'gm_erasures', 'gm_pm_balances', 'gm_pm_movements', 'gm_redemption_transitions', 'gm_redemptions', 'gm_reward_grants', 'gm_rule_sets', 'gm_source_facts', 'gm_subjects', 'gm_work_cycles', 'gm_xp_entries']), tables.join(','));
     const allTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
     ok('sin tablas auxiliares (solo _migrations y sqlite_sequence)', allTables.filter((t) => !t.startsWith('gm_')).join(',') === '_migrations,sqlite_sequence', allTables.join(','));
-    ok('una migración registrada (0001_ledger)', JSON.stringify(db.prepare('SELECT version FROM _migrations').all().map((r) => r.version)) === '["0001_ledger"]');
+    ok('dos migraciones registradas', JSON.stringify(db.prepare('SELECT version FROM _migrations ORDER BY version').all().map((r) => r.version)) === '["0001_ledger","0002_subject_model"]');
     ok('la segunda apertura devuelve la misma conexión', D.getGamificationDb() === db);
     D.closeGamificationDb();
     const db2 = D.getGamificationDb();
-    ok('reabrir no reaplica (sigue 1 migración)', db2.prepare('SELECT COUNT(*) n FROM _migrations').get().n === 1);
+    ok('reabrir no reaplica (siguen 2 migraciones)', db2.prepare('SELECT COUNT(*) n FROM _migrations').get().n === 2);
     const { runMigrations } = await import('../../db/migrate.js');
     const again = runMigrations(db2, () => {}, { dir: path.join(HERE, '..', 'migrations'), tag: 't' });
-    ok('runMigrations explícito sobre una base migrada es no-op', again.applied.length === 0 && again.already.length === 1);
+    ok('runMigrations explícito sobre una base migrada es no-op', again.applied.length === 0 && again.already.length === 2);
 
     section('[3] reglas versionadas (validadas, append-only, prospectivas)');
     ok('sin reglas vigentes ⇒ NO_ACTIVE_RULES', throwsCode(() => L.recordFact(db2, { source: 'mook_review', sourceEventId: 'ev-0', factType: 'evidence_reviewed', userId: 'u-x', occurredAt: T0, eligibility: 'eligible', now: T0 }, { env: EARN }), 'NO_ACTIVE_RULES'));
@@ -114,20 +115,20 @@ try {
         && db2.prepare('SELECT COUNT(*) n FROM gm_xp_entries').get().n === 1 && db2.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 1);
     ok('saldo = 20 y XP = 30 (montos de la regla, no del llamador)', L.getBalance(db2, 'u-lector-1').available === 20 && L.getXp(db2, 'u-lector-1') === 30);
     ok('el hecho quedó con grado B (fijo por fuente) y la rule_version vigente', (() => { const r = db2.prepare('SELECT grade, rule_version FROM gm_source_facts').get(); return r.grade === 'B' && r.rule_version === RV; })());
-    ok('mismo hecho con otro sujeto ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => rec({ userId: 'u-otro' }), 'IDEMPOTENCY_CONFLICT'));
+    ok('mismo id de fuente con otro sujeto ⇒ hecho propio: las claves no se cruzan entre sujetos', rec({ userId: 'u-otro' }).inserted === true);
 
     section('[5] el llamador no fija montos; decisiones sin emisión');
     for (const k of ['xp', 'pm', 'amount', 'grade', 'decision', 'ruleVersion']) {
         ok(`campo «${k}» del llamador ⇒ CALLER_FIELD_NOT_ALLOWED`, throwsCode(() => L.recordFact(db2, { ...fact({ sourceEventId: `ev-f-${k}` }), [k]: k === 'grade' ? 'A' : 999 }, { env: EARN }), 'CALLER_FIELD_NOT_ALLOWED'));
     }
     const obs = rec({ sourceEventId: 'ev-obs', eligibility: 'observe' });
-    ok('observe ⇒ observed sin emisión', obs.inserted && obs.decision === 'observed' && obs.pm === 0 && obs.xp === 0);
+    ok('observe ⇒ observed, sin emisión ni fila', !obs.persisted && obs.factId === null && obs.decision === 'observed' && obs.pm === 0 && obs.xp === 0);
     const cc = rec({ source: 'mook_review', factType: 'evidence_reviewed', sourceEventId: 'ev-cc', features: { decision: 'con_comentarios' } });
     ok('MOOK con_comentarios ⇒ observed (emitWhen) sin emisión', cc.decision === 'observed' && cc.pm === 0 && cc.movementId === null);
     const self = rec({ sourceEventId: 'ev-self', actorId: 'u-lector-1' });
     ok('autorrevisión declarada elegible ⇒ rejected_self_review, sin emisión', self.decision === 'rejected_self_review' && self.pm === 0 && self.xp === 0);
     const rd = rec({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible', reasons: [] } });
-    ok('lectura terminada elegible ⇒ observed (bloqueada) y grado B', rd.decision === 'observed' && rd.pm === 0 && db2.prepare('SELECT grade FROM gm_source_facts WHERE fact_id=?').get(rd.factId).grade === 'B');
+    ok('lectura terminada elegible ⇒ observed (bloqueada), sin fila', rd.decision === 'observed' && rd.pm === 0 && !rd.persisted);
     const nr = rec({ sourceEventId: 'ev-norule', factType: 'otro_tipo' });
     ok('hecho sin regla ⇒ rejected_not_eligible', nr.decision === 'rejected_not_eligible' && nr.pm === 0);
     const syn = rec({ sourceEventId: 'ev-syn', eligibility: 'rejected_excluded_user' });
@@ -152,7 +153,7 @@ try {
     ok('el XP no se recorta por los topes de PM', c.every((r) => r.xp === 30));
     ok('al día siguiente (Bogotá) el tope diario se renueva', capRec('cap-d2', DAY1 + 86_400_000).pm === 20);
     for (let d = 2; d < 7; d++) for (let i = 0; i < 3; i++) capRec(`cap-w-${d}-${i}`, DAY1 + d * 86_400_000 + i * 1000);
-    const weekly = db2.prepare("SELECT SUM(amount) n FROM gm_pm_movements WHERE user_id='u-cap' AND kind='earn' AND period_week='2026-W45'").get().n;
+    const weekly = db2.prepare("SELECT SUM(amount) n FROM gm_pm_movements WHERE subject_ref=(SELECT subject_ref FROM gm_subjects WHERE user_id='u-cap') AND kind='earn' AND period_week='2026-W45'").get().n;
     ok(`tope semanal respetado (${weekly} = ${CAPS.pmPerWeek})`, weekly === CAPS.pmPerWeek);
     ok('la semana ISO siguiente vuelve a emitir', capRec('cap-nextweek', DAY1 + 7 * 86_400_000).pm === 20);
     ok('23:59 del domingo en Bogotá (04:59Z del lunes) sigue en la semana anterior', L.periodsFor(Date.UTC(2026, 10, 9, 4, 59)).week === '2026-W45');
@@ -160,7 +161,7 @@ try {
     section('[5c] cambio de reglas prospectivo (D48)');
     L.createRuleSet(db2, { ruleVersion: 'gm-test-v2', rules: { ...RULES, facts: { ...RULES.facts, 'mission/mission_completed': { xp: 30, pm: 5 } } }, createdBy: 'admin-1', effectiveFrom: T0 + 30 * 86_400_000, now: T0 });
     ok('antes de entrar en vigor rige la versión anterior', L.getActiveRuleSet(db2, T0 + 5).ruleVersion === RV);
-    const v2 = L.recordFact(db2, { ...fact({ userId: 'u-v2', sourceEventId: 'ev-v2' }), now: T0 + 31 * 86_400_000 }, { env: EARN });
+    const v2 = L.recordFact(db2, { ...fact({ userId: 'u-v2', sourceEventId: 'ev-v2', occurredAt: T0 + 31 * 86_400_000 }), now: T0 + 31 * 86_400_000 }, { env: EARN });
     ok('después rige la nueva y el hecho guarda su rule_version', v2.pm === 5 && db2.prepare('SELECT rule_version FROM gm_source_facts WHERE fact_id=?').get(v2.factId).rule_version === 'gm-test-v2');
     ok('los hechos anteriores conservan su versión y su monto', db2.prepare('SELECT rule_version FROM gm_source_facts WHERE fact_id=?').get(results[0].factId).rule_version === RV && L.getBalance(db2, 'u-lector-1').available === 20);
 
@@ -185,7 +186,7 @@ try {
         ok(`DELETE en ${t} aborta`, throwsMsg(() => db2.prepare(`DELETE FROM ${t}`).run(), /append-only/));
     }
     ok('DELETE en gm_pm_balances aborta', throwsMsg(() => db2.prepare('DELETE FROM gm_pm_balances').run(), /never deleted/));
-    const rawMv = (o) => db2.prepare(`INSERT INTO gm_pm_movements (movement_id,user_id,kind,amount,source,idempotency_key,fact_id,redemption_id,related_movement_id,reason_code,actor_id,rule_version,period_day,period_week,created_at)
+    const rawMv = (o) => db2.prepare(`INSERT INTO gm_pm_movements (movement_id,subject_ref,kind,amount,source,idempotency_key,fact_id,redemption_id,related_movement_id,reason_code,actor_ref,rule_version,period_day,period_week,created_at)
         VALUES (@id,'u-raw',@kind,@amount,'raw',@key,@fact,@red,@rel,'r',@actor,'${RV}','2026-10-29','2026-W44',1)`).run({ fact: null, red: null, rel: null, actor: 'system', ...o });
     ok('SQL: earn sin hecho ⇒ CHECK', throwsMsg(() => rawMv({ id: 'r1', kind: 'earn', amount: 5, key: 'r1' }), /CHECK/));
     ok('SQL: earn negativo ⇒ CHECK', throwsMsg(() => rawMv({ id: 'r2', kind: 'earn', amount: -5, key: 'r2', fact: results[0].factId }), /CHECK/));
@@ -219,7 +220,7 @@ try {
             else if (r < 0.6) L.recordFact(db2, { source: 'mook_experience', sourceEventId: `pexp-${Math.floor(rnd() * 60)}-${u}`, factType: 'experience_completed', userId: u, occurredAt: tProp, eligibility: 'eligible', features: { experienceVersionId: 'xv-1' }, now: tProp }, { env: EARN });
             else if (r < 0.85) L.appendAdjustment(db2, { userId: u, amount: Math.floor(rnd() * 40) - 20 || 1, reasonCode: 'support', actorId: 'admin-1', idempotencyKey: `pa-${i}`, ruleVersion: RV, now: tProp });
             else {
-                const last = db2.prepare('SELECT movement_id FROM gm_pm_movements WHERE user_id = ? ORDER BY seq DESC LIMIT 1').get(u);
+                const last = db2.prepare('SELECT movement_id FROM gm_pm_movements WHERE subject_ref = (SELECT subject_ref FROM gm_subjects WHERE user_id = ?) ORDER BY seq DESC LIMIT 1').get(u);
                 if (last) L.appendCompensation(db2, { userId: u, amount: -(1 + Math.floor(rnd() * 30)), reasonCode: 'correction', actorId: 'admin-1', relatedMovementId: last.movement_id, idempotencyKey: `pc-${i}`, ruleVersion: RV, now: tProp });
             }
         } catch (e) {
@@ -228,16 +229,16 @@ try {
     }
     const v = L.verifyLedger(db2);
     ok(`snapshot = Σ ledger para ${v.users} usuarios tras 300 operaciones aleatorias`, v.ok, JSON.stringify(v.divergences).slice(0, 300));
-    const over = db2.prepare(`SELECT user_id, period_day, SUM(amount) n FROM gm_pm_movements WHERE kind='earn' GROUP BY user_id, period_day HAVING n > ${CAPS.pmPerDay}`).all();
-    const overW = db2.prepare(`SELECT user_id, period_week, SUM(amount) n FROM gm_pm_movements WHERE kind='earn' GROUP BY user_id, period_week HAVING n > ${CAPS.pmPerWeek}`).all();
+    const over = db2.prepare(`SELECT subject_ref, period_day, SUM(amount) n FROM gm_pm_movements WHERE kind='earn' GROUP BY subject_ref, period_day HAVING n > ${CAPS.pmPerDay}`).all();
+    const overW = db2.prepare(`SELECT subject_ref, period_week, SUM(amount) n FROM gm_pm_movements WHERE kind='earn' GROUP BY subject_ref, period_week HAVING n > ${CAPS.pmPerWeek}`).all();
     ok('ningún usuario excede los topes diario ni semanal en toda la secuencia', over.length === 0 && overW.length === 0, JSON.stringify([over, overW]));
     ok('ningún saldo negativo sin una compensación que lo explique', db2.prepare(`SELECT COUNT(*) n FROM gm_pm_balances b WHERE b.available < 0
-        AND NOT EXISTS (SELECT 1 FROM gm_pm_movements m WHERE m.user_id = b.user_id AND m.kind = 'compensation')`).get().n === 0);
-    const before = db2.prepare('SELECT user_id, available, reserved, lifetime_earned, last_seq FROM gm_pm_balances ORDER BY user_id').all();
-    db2.prepare("UPDATE gm_pm_balances SET available = available + 777 WHERE user_id = 'u-a'").run();
+        AND NOT EXISTS (SELECT 1 FROM gm_pm_movements m WHERE m.subject_ref = b.subject_ref AND m.kind = 'compensation')`).get().n === 0);
+    const before = db2.prepare('SELECT subject_ref, available, reserved, lifetime_earned, last_seq FROM gm_pm_balances ORDER BY subject_ref').all();
+    db2.prepare("UPDATE gm_pm_balances SET available = available + 777 WHERE subject_ref = (SELECT subject_ref FROM gm_subjects WHERE user_id = 'u-a')").run();
     ok('una alteración manual del snapshot se detecta', L.verifyLedger(db2).ok === false);
     L.rebuildBalances(db2);
-    const after = db2.prepare('SELECT user_id, available, reserved, lifetime_earned, last_seq FROM gm_pm_balances ORDER BY user_id').all();
+    const after = db2.prepare('SELECT subject_ref, available, reserved, lifetime_earned, last_seq FROM gm_pm_balances ORDER BY subject_ref').all();
     ok('rebuildBalances restaura exactamente el snapshot derivado', JSON.stringify(after) === JSON.stringify(before) && L.verifyLedger(db2).ok);
     const page = L.listMovements(db2, 'u-lector-1', { limit: 2 });
     ok('listMovements pagina por seq y no expone datos de otros', page.length === 2 && page[0].seq < page[1].seq && L.listMovements(db2, 'u-lector-1', { afterSeq: page[1].seq }).every((m) => m.seq > page[1].seq));

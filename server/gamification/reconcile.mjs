@@ -24,7 +24,7 @@
  *  - offline_validation, mission: sin fuente canónica todavía ⇒ deshabilitadas.
  */
 import { GamificationError } from './db.mjs';
-import { recordFact } from './ledger.mjs';
+import { hasFact, recordFact } from './ledger.mjs';
 
 export const RECOVERABLE_SOURCES = Object.freeze({
     mook_review: { recoverable: true },
@@ -95,16 +95,15 @@ export function reconcile(db, candidates, { resolveUser, env = process.env, now 
     for (const c of candidates) {
         if (!RECOVERABLE_SOURCES[c?.source]?.recoverable) throw bad('SOURCE_NOT_RECOVERABLE', String(c?.source));
     }
-    const exists = db.prepare('SELECT 1 FROM gm_source_facts WHERE source = ? AND source_event_id = ? AND fact_type = ?');
     const res = { scanned: candidates.length, alreadyRecorded: 0, recorded: 0, raced: 0, byDecision: {} };
     for (const c of candidates) {
-        if (exists.get(c.source, c.sourceEventId, c.factType)) { res.alreadyRecorded++; continue; }
+        if (hasFact(db, c)) { res.alreadyRecorded++; continue; }
         const eligibility = subjectEligibility(resolveUser, c.userId);
         const r = recordFact(db, { ...c, eligibility, now: now() }, { env });
+        if (r.inserted || !r.persisted) res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
         if (r.inserted) {
             res.recorded++;
-            res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
-        } else {
+        } else if (r.persisted) {
             res.raced++; // otra réplica lo registró entre la búsqueda y la transacción
         }
         onFact?.(c, r);

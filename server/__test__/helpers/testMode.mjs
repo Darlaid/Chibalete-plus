@@ -27,6 +27,7 @@
  * variable (memoria de Leo, analytics, LU) quedan cubiertas por el guard.
  */
 import '../../../scripts/test-real-store-guard.mjs';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -61,6 +62,12 @@ const guardUrl = new URL('../../../scripts/test-real-store-guard.mjs', import.me
 if (!(process.env.NODE_OPTIONS ?? '').includes('test-real-store-guard')) {
     process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --import ${guardUrl}`.trim();
 }
+
+// PRIV-01B: clave de sujeto aleatoria, compartida con los subprocesos de esta prueba.
+if (!process.env.CHP_TEST_SUBJECT_KEY) process.env.CHP_TEST_SUBJECT_KEY = crypto.randomBytes(32).toString('hex');
+const subjectKeyUrl = new URL('./testSubjectKey.mjs', import.meta.url).href;
+if (!process.env.NODE_OPTIONS.includes('testSubjectKey')) process.env.NODE_OPTIONS += ` --import ${subjectKeyUrl}`;
+await import(subjectKeyUrl);
 
 if (!process.env.REAL_STORE_GUARD_LOG) {
     const violations = tmpFor('real_store_violations.log');

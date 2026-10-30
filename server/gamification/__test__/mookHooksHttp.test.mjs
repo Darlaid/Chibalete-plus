@@ -198,11 +198,8 @@ try {
     const env = { GAMIFICATION_ENABLED: '1', GAMIFICATION_DB: path.join(on.dir, 'gam', 'gamification.db') };
     D.closeGamificationDb({ resetBackoff: true });
     const db = D.getGamificationDb({ env });
-    const f = db.prepare('SELECT source, source_event_id, decision, user_id, actor_id FROM gm_source_facts ORDER BY source').all();
-    ok('2 hechos: mook_experience (u-lector:versión) y mook_review (id de evidencia)', f.length === 2
-        && f[0].source === 'mook_experience' && f[0].source_event_id === `u-lector:${VER_ID}`
-        && f[1].source === 'mook_review' && f[1].source_event_id === on.mook.evidence[0].id, JSON.stringify(f));
-    ok('ruta awarded y revisión observed para el lector; el revisor queda como actor', f[0].decision === 'awarded' && f[1].decision === 'observed' && f.every((x) => x.user_id === 'u-lector') && f[1].actor_id === 'u-admin');
+    const f = db.prepare('SELECT source, source_event_id, decision, subject_ref, actor_ref FROM gm_source_facts ORDER BY source').all();
+    ok('1 hecho: la ruta, con clave HMAC; la revisión no deja fila', f.length === 1 && f[0].source === 'mook_experience' && f[0].decision === 'awarded' && /^[0-9a-f]{64}$/.test(f[0].source_event_id), JSON.stringify(f));
     ok('0 PM y 20 XP (solo la ruta)', L.getBalance(db, 'u-lector').available === 0 && L.getXp(db, 'u-lector') === 20);
     ok('el reconciliador de arranque no duplicó nada', db.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 0 && L.verifyLedger(db).ok);
     D.closeGamificationDb({ resetBackoff: true });

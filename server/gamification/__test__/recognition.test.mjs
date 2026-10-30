@@ -363,7 +363,7 @@ section('[12] privacidad y pureza');
     const consumers = ['server/server.js', 'server/gamification/ledger.mjs', 'server/gamification/policy.mjs', 'server/gamification/intake.mjs',
         'server/gamification/mookSource.mjs', 'server/gamification/reconcile.mjs', 'server/gamification/db.mjs'];
     ok('nada del producto llama al módulo', consumers.every((f) => !fs.readFileSync(path.join(REPO, f), 'utf8').includes('recognition.mjs')));
-    ok('sin migración nueva', fs.readdirSync(path.join(HERE, '..', 'migrations')).length === 1);
+    ok('sin migraciones ajenas a 0001 y 0002', fs.readdirSync(path.join(HERE, '..', 'migrations')).length === 2);
     ok('stores reales sin cambios', same(fingerprint(), realBefore));
 }
 

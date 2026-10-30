@@ -16,6 +16,7 @@
  *
  *   node server/gamification/__test__/mookSource.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -75,26 +76,25 @@ const hook = (fn, arg, env) => new Promise((resolve) => {
     fn(arg, { resolveUser, env, onDone: (o) => { called = true; resolve(o); } });
     setTimeout(() => { if (!called) resolve(null); }, 300); // el gancho no programó nada
 });
-const facts = (db) => db.prepare('SELECT source, source_event_id, decision, user_id FROM gm_source_facts ORDER BY source, source_event_id').all();
+const facts = (db) => db.prepare('SELECT source, source_event_id, decision, subject_ref FROM gm_source_facts ORDER BY source, source_event_id').all();
 const reconcileDoc = (env, doc) => M.runMookReconcileOnce({ readMook: () => doc, readUsers: () => USERS, isUserActive, isSyntheticUser, env });
 
 try {
-    section('[1] evidencia aprobada ⇒ un solo hecho elegible');
+    section('[1] evidencia aprobada ⇒ sin cobertura de obra no emite ni deja fila');
     let { env, db } = freshEnv();
     const e1 = ev('evid-1', 'u-lector', 'u-mediador', 'aprobado', iso(10));
     const o1 = await hook(M.onMookEvidenceReviewed, e1, env);
-    ok('el gancho registra el hecho como observed: sin cobertura de obra no emite', o1?.ok && o1.result.inserted && o1.result.decision === 'observed' && o1.result.xp === 0 && o1.result.pm === 0, JSON.stringify(o1));
-    ok('el sourceEventId es el id de la evidencia (determinista)', facts(db)[0]?.source_event_id === 'evid-1');
+    ok('el gancho decide observed, sin persistir', o1?.ok && !o1.result.persisted && o1.result.decision === 'observed' && o1.result.xp === 0 && o1.result.pm === 0, JSON.stringify(o1));
     await hook(M.onMookEvidenceReviewed, e1, env);
     await hook(M.onMookEvidenceReviewed, e1, env);
     const r1 = reconcileDoc(env, { evidence: [e1], runs: [] });
-    ok('gancho ×3 + reconciliación ⇒ 1 hecho y ningún movimiento', facts(db).length === 1 && db.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 0 && r1.alreadyRecorded === 1, JSON.stringify(r1));
+    ok('gancho ×3 + reconciliación ⇒ ninguna fila ni sujeto', facts(db).length === 0 && db.prepare('SELECT COUNT(*) n FROM gm_subjects').get().n === 0 && r1.recorded === 0, JSON.stringify(r1));
 
     section('[2] autorrevisión ⇒ sin recompensa');
     const e2 = ev('evid-2', 'u-mediador', 'u-mediador', 'aprobado', iso(11));
     const o2 = await hook(M.onMookEvidenceReviewed, e2, env);
     ok('revisor = autor ⇒ rejected_self_review, 0 XP, 0 PM', o2?.ok && o2.result.decision === 'rejected_self_review' && o2.result.xp === 0 && o2.result.pm === 0);
-    ok('queda trazado sin movimiento', db.prepare("SELECT COUNT(*) n FROM gm_pm_movements WHERE user_id='u-mediador'").get().n === 0);
+    ok('sin fila ni sujeto', facts(db).length === 0 && db.prepare('SELECT COUNT(*) n FROM gm_subjects').get().n === 0);
 
     section('[3] con_comentarios (y cualquier decisión no aprobada) ⇒ nada');
     for (const d of ['con_comentarios', 'rechazado', undefined]) {
@@ -111,7 +111,7 @@ try {
     const ru = run('run-1', 'u-lector', iso(20));
     const o4 = await hook(M.onMookRunUpdated, ru, env);
     ok('el gancho registra experience_completed (20 XP, 0 PM)', o4?.ok && o4.result.decision === 'awarded' && o4.result.xp === 20 && o4.result.pm === 0);
-    ok('sourceEventId determinista = usuario:versión', facts(db).some((f) => f.source === 'mook_experience' && f.source_event_id === 'u-lector:xv-1'));
+    ok('source_event_id es un HMAC: sin usuario ni versión en claro', facts(db).some((f) => f.source === 'mook_experience' && /^[0-9a-f]{64}$/.test(f.source_event_id)));
     await hook(M.onMookRunUpdated, ru, env);
     const rerun = run('run-2', 'u-lector', iso(90)); // abandonó y repitió la ruta de la misma versión
     await hook(M.onMookRunUpdated, rerun, env);
@@ -138,9 +138,9 @@ try {
     const [w1, w2] = await Promise.all(ws);
     const allRuns = [...(w1.runs || []), ...(w2.runs || [])];
     ok('ambas réplicas terminan sin error', w1.code === 0 && w2.code === 0 && allRuns.every((r) => r.ok || r.skipped === 'locked'), JSON.stringify([w1, w2]).slice(0, 400));
-    ok('barridos efectivos suman exactamente 50 hechos registrados', allRuns.filter((r) => r.ok).reduce((s, r) => s + r.recorded, 0) === 50);
+    ok('barridos efectivos suman exactamente las 10 rutas', allRuns.filter((r) => r.ok).reduce((s, r) => s + r.recorded, 0) === 10);
     db = D.getGamificationDb({ env });
-    ok('50 hechos en la base, ninguno duplicado', facts(db).length === 50 && new Set(facts(db).map((f) => `${f.source}:${f.source_event_id}`)).size === 50);
+    ok('10 hechos en la base, ninguno duplicado', facts(db).length === 10 && new Set(facts(db).map((f) => `${f.source}:${f.source_event_id}`)).size === 10);
     ok('el lock del reconciliador no quedó huérfano', !fs.existsSync(`${env.GAMIFICATION_DB}.reconcile.lock`));
     ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
 
@@ -151,8 +151,8 @@ try {
     D.closeGamificationDb(); I.closeIntake({ resetBackoff: true }); // «reinicio»
     const r6 = reconcileDoc(env, { evidence: [lost], runs: [lostRun] });
     db = D.getGamificationDb({ env });
-    ok('el barrido tras el reinicio recupera la evidencia y la experiencia', r6.ok && r6.recorded === 2 && facts(db).length === 2, JSON.stringify(r6));
-    ok('un segundo barrido no duplica', reconcileDoc(env, { evidence: [lost], runs: [lostRun] }).recorded === 0 && facts(db).length === 2);
+    ok('el barrido tras el reinicio recupera la experiencia', r6.ok && r6.recorded === 1 && facts(db).length === 1, JSON.stringify(r6));
+    ok('un segundo barrido no duplica', reconcileDoc(env, { evidence: [lost], runs: [lostRun] }).recorded === 0 && facts(db).length === 1);
 
     section('[7] eventos anteriores al corte ⇒ sin puntos retroactivos');
     const old = ev('evid-old', 'u-lector', 'u-mediador', 'aprobado', iso(-1));
@@ -161,7 +161,7 @@ try {
     ok('ni la experiencia previa al corte', (await hook(M.onMookRunUpdated, oldRun, env)) === null);
     const r7 = reconcileDoc(env, { evidence: [old, lost], runs: [oldRun, lostRun] });
     ok('la reconciliación los excluye: solo ve los 2 posteriores (ya registrados)', r7.scanned === 2 && r7.recorded === 0);
-    ok('ningún hecho previo al corte en la base', !facts(db).some((f) => ['evid-old', 'u-lector:xv-1'].includes(f.source_event_id) && f.source_event_id !== 'u-lector2:xv-1'));
+    ok('ningún hecho previo al corte en la base', facts(db).length === 1);
     ok('justo en el corte sí cuenta (>=)', M.mookApprovedReviewCandidates({ evidence: [ev('evid-edge', 'u-lector', 'u-mediador', 'aprobado', SINCE_ISO)] }, SINCE).length === 1);
 
     section('[+] sujetos no elegibles y lock huérfano');

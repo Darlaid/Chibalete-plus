@@ -40,7 +40,7 @@ function hookDb(env, now) {
         db.pragma('synchronous = FULL');
         db.pragma('foreign_keys = ON');
         // Corrupción ⇒ lanza; base sin migrar ⇒ sin fila. En ambos casos se desiste.
-        if (!db.prepare("SELECT 1 FROM _migrations WHERE version = '0001_ledger'").get()) throw new Error('sin migrar');
+        if (!db.prepare("SELECT 1 FROM _migrations WHERE version = '0002_subject_model'").get()) throw new Error('sin migrar');
         closeIntake();
         _hookDb = db;
         _hookPath = p;

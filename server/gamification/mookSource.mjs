@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import { isGamificationEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
 import { scheduleFact } from './intake.mjs';
 import { mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
+import { loadSubjectKey } from './subjectKey.mjs';
 
 export const RECONCILE_BUSY_MS = 250;
 export const DEFAULT_INTERVAL_MS = 15 * 60_000;
@@ -171,6 +172,8 @@ export function startMookReconciler(deps, { env = process.env, log = () => {} } 
         log('[gamification] reconciliación MOOK desactivada: falta GAMIFICATION_MOOK_SINCE');
         return null;
     }
+    // Sin clave de sujeto, ganchos y barridos desisten: nunca se usa un sustituto.
+    loadSubjectKey().catch((e) => log(`[gamification] clave de sujeto no disponible: ${e?.code || 'ERROR'}`));
     const intervalMs = Math.max(MIN_INTERVAL_MS, Number(env.GAMIFICATION_RECONCILE_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
     const initialDelayMs = Math.max(0, Number(env.GAMIFICATION_RECONCILE_INITIAL_DELAY_MS ?? DEFAULT_INITIAL_DELAY_MS));
     let running = false;

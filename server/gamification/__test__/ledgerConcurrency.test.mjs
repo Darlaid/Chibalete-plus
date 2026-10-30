@@ -15,6 +15,7 @@
  *
  *   node server/gamification/__test__/ledgerConcurrency.test.mjs
  */
+import '../../__test__/helpers/testMode.mjs';
 import './helpers/pmMechanicsHarness.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -57,7 +58,7 @@ const openFresh = (dbPath, rules) => {
     D.closeGamificationDb({ resetBackoff: true });
     process.env.GAMIFICATION_DB = dbPath;
     const db = D.getGamificationDb();
-    L.createRuleSet(db, { ruleVersion: 'gm-conc-v1', rules, createdBy: 'migration' });
+    L.createRuleSet(db, { ruleVersion: 'gm-conc-v1', rules, createdBy: 'migration', now: Date.UTC(2026, 0, 1) });
     D.closeGamificationDb();
 };
 const BIG = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: {
@@ -84,12 +85,13 @@ function mookFixture() {
 const FIXTURE = path.join(tmp, 'mook_fixture.json');
 fs.writeFileSync(FIXTURE, JSON.stringify(mookFixture()));
 const EXPECTED_CANDIDATES = 60 + 20;
+const EXPECTED_ROUTES = 20; // solo las rutas emiten: revisiones y rechazos no dejan fila
 
 try {
     section('[1] arranque simultáneo (4 procesos) sobre una base inexistente');
     const mig = await runReplicas(path.join(tmp, 'mig', 'gamification.db'), ['migrate-a', 'migrate-b', 'migrate-c', 'migrate-d']);
     ok('los 4 procesos terminan sin error', mig.every((r) => r.code === 0 && r.errors.length === 0), JSON.stringify(mig));
-    ok('todos ven exactamente 1 migración aplicada', mig.every((r) => r.migrations === 1), JSON.stringify(mig.map((r) => r.migrations)));
+    ok('todos ven exactamente 2 migraciones aplicadas', mig.every((r) => r.migrations === 2), JSON.stringify(mig.map((r) => r.migrations)));
 
     section('[2] dos réplicas escribiendo a la vez');
     const DB2 = path.join(tmp, 'w', 'gamification.db');
@@ -119,10 +121,11 @@ try {
     process.env.GAMIFICATION_DB = DB3;
     db = D.getGamificationDb();
     n = (sql) => db.prepare(sql).get().n;
-    const earned = n("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE user_id='u-hot' AND kind='earn'");
+    const earned = n("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE subject_ref=(SELECT subject_ref FROM gm_subjects WHERE user_id='u-hot') AND kind='earn'");
     ok(`PM emitidos al usuario = tope diario exacto (${earned} = 100), no más`, earned === 100 && c1.pm + c2.pm === 100, `${c1.pm}+${c2.pm}`);
     ok('100 hechos registrados: 10 awarded y 90 capped entre ambas', n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 10 && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='capped'") === 90);
     ok('el XP sí se emitió para los 100 (los topes son de PM)', n('SELECT COUNT(*) n FROM gm_xp_entries') === 100);
+    ok('un solo sujeto por usuario entre las dos réplicas', n('SELECT COUNT(*) n FROM gm_subjects') === n('SELECT COUNT(DISTINCT user_id) n FROM gm_subjects') && n("SELECT COUNT(*) n FROM gm_subjects WHERE user_id='u-hot'") === 1);
     ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
 
     section('[4] reconciliación simultánea de la misma fuente (2 procesos)');
@@ -131,57 +134,57 @@ try {
     const [r1, r2] = await runReplicas(DB4, ['recon-1', 'recon-2'], { CHP_FIXTURE: FIXTURE });
     ok('ambas terminan sin error', r1.errors.length === 0 && r2.errors.length === 0, JSON.stringify([r1.errors, r2.errors]));
     ok(`cada una vio los ${EXPECTED_CANDIDATES} candidatos (evidencia SUBMITTED y runs activos fuera)`, r1.recon.scanned === EXPECTED_CANDIDATES && r2.recon.scanned === EXPECTED_CANDIDATES);
-    ok('registrados entre ambas = candidatos (el resto, ya registrado o carrera)', r1.recon.recorded + r2.recon.recorded === EXPECTED_CANDIDATES, JSON.stringify([r1.recon, r2.recon]));
+    ok('registrados entre ambas = las rutas que emiten (el resto no deja fila)', r1.recon.recorded + r2.recon.recorded === EXPECTED_ROUTES, JSON.stringify([r1.recon, r2.recon]));
     process.env.GAMIFICATION_DB = DB4;
     db = D.getGamificationDb();
     n = (sql) => db.prepare(sql).get().n;
-    ok('80 hechos, ninguno duplicado', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_CANDIDATES);
+    ok('20 hechos, ninguno duplicado', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_ROUTES);
     const dec = Object.fromEntries(db.prepare('SELECT decision, COUNT(*) n FROM gm_source_facts GROUP BY decision').all().map((r) => [r.decision, r.n]));
-    ok('decisiones: 10 con_comentarios→observed, 5 autorrevisiones, 5 sintéticos, 40 aprobadas→observed y 20 rutas awarded', dec.observed === 50 && dec.rejected_self_review === 5 && dec.rejected_excluded_user === 5 && dec.awarded === 20, JSON.stringify(dec));
+    ok('solo persisten las 20 rutas awarded: ni observed ni rechazos', Object.keys(dec).join() === 'awarded' && dec.awarded === 20, JSON.stringify(dec));
     ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
 
     section('[5] interrupción abrupta a mitad de la reconciliación');
     const DB5 = path.join(tmp, 'crash', 'gamification.db');
     openFresh(DB5, BIG);
-    const [cr] = await runReplicas(DB5, ['crash'], { CHP_FIXTURE: FIXTURE, CHP_CRASH_AFTER: '23' });
+    const [cr] = await runReplicas(DB5, ['crash'], { CHP_FIXTURE: FIXTURE, CHP_CRASH_AFTER: '70' });
     ok('el proceso murió abruptamente (código 137, sin informe)', cr.code === 137, JSON.stringify(cr));
     process.env.GAMIFICATION_DB = DB5;
     db = D.getGamificationDb();
     n = (sql) => db.prepare(sql).get().n;
-    ok('quedaron registrados exactamente los 23 hechos previos a la caída', n('SELECT COUNT(*) n FROM gm_source_facts') === 23);
+    ok('quedaron registradas exactamente las 10 rutas previas a la caída (tras 60 revisiones sin fila)', n('SELECT COUNT(*) n FROM gm_source_facts') === 10);
     ok('la base sigue íntegra y consistente tras la caída', db.pragma('integrity_check', { simple: true }) === 'ok' && L.verifyLedger(db).ok);
     const doc = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
     const cands = [...R.mookReviewCandidates(doc), ...R.mookExperienceCandidates(doc)];
     const resolveUser = (id) => ({ exists: true, active: true, synthetic: id.startsWith('synthetic-') });
     const rec = R.reconcile(db, cands, { resolveUser, env: EARN });
-    ok(`el siguiente barrido recupera los ${EXPECTED_CANDIDATES - 23} restantes y salta los 23`, rec.recorded === EXPECTED_CANDIDATES - 23 && rec.alreadyRecorded === 23);
-    ok('resultado final idéntico al de una reconciliación sin caída', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_CANDIDATES && L.verifyLedger(db).ok
+    ok('el siguiente barrido recupera las 10 restantes y salta las 10 ya registradas', rec.recorded === 10 && rec.alreadyRecorded === 10);
+    ok('resultado final idéntico al de una reconciliación sin caída', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_ROUTES && L.verifyLedger(db).ok
         && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 20);
     const again = R.reconcile(db, cands, { resolveUser, env: EARN });
-    ok('un tercer barrido no registra nada (idempotente)', again.recorded === 0 && again.alreadyRecorded === EXPECTED_CANDIDATES);
+    ok('un tercer barrido no registra nada (idempotente)', again.recorded === 0 && again.alreadyRecorded === EXPECTED_ROUTES);
 
     section('[6] sin marca de agua: un hecho ANTERIOR perdido se recupera');
     const DB6 = path.join(tmp, 'wm', 'gamification.db');
     openFresh(DB6, BIG);
     process.env.GAMIFICATION_DB = DB6;
     db = D.getGamificationDb();
-    const reviews = R.mookReviewCandidates(doc).sort((x, y) => x.occurredAt - y.occurredAt);
+    const reviews = R.mookExperienceCandidates(doc).sort((x, y) => x.occurredAt - y.occurredAt);
     const lost = reviews[12];
     for (const c of reviews) if (c !== lost) L.recordFact(db, { ...c, eligibility: 'eligible' }, { env: EARN }); // la entrada en línea perdió uno
-    const maxProcessed = db.prepare('SELECT MAX(occurred_at) m FROM gm_source_facts').get().m;
-    ok('el hecho perdido es ANTERIOR a la marca MAX(occurred_at) ya procesada', lost.occurredAt < maxProcessed);
+    ok('el hecho perdido no está y sus posteriores sí', !L.hasFact(db, lost) && L.hasFact(db, reviews[13]));
     const wm = R.reconcile(db, reviews, { resolveUser, env: EARN });
-    ok('el barrido completo lo encuentra y registra (una marca de agua lo habría perdido)', wm.recorded === 1 && !!db.prepare('SELECT 1 FROM gm_source_facts WHERE source_event_id = ?').get(lost.sourceEventId));
+    ok('el barrido completo lo encuentra y registra (una marca de agua lo habría perdido)', wm.recorded === 1 && L.hasFact(db, lost));
 
     section('[7] fuentes no recuperables quedan fuera de la reconciliación');
     const throwsCode = (fn, code) => { try { fn(); return false; } catch (e) { return e.code === code; } };
     ok('reading_completion ⇒ SOURCE_NOT_RECOVERABLE', throwsCode(() => R.reconcile(db, [{ source: 'reading_completion', sourceEventId: 'u:c:w', factType: 'reading_completed', userId: 'u', occurredAt: 1 }], { resolveUser }), 'SOURCE_NOT_RECOVERABLE'));
     ok('offline_validation y mission ⇒ SOURCE_NOT_RECOVERABLE', ['offline_validation', 'mission'].every((s) => throwsCode(() => R.reconcile(db, [{ source: s, sourceEventId: 'x', factType: 't', userId: 'u', occurredAt: 1 }], { resolveUser }), 'SOURCE_NOT_RECOVERABLE')));
     ok('sin padrón (resolveUser) no se reconcilia ⇒ RESOLVE_USER_REQUIRED', throwsCode(() => R.reconcile(db, reviews, {}), 'RESOLVE_USER_REQUIRED'));
-    ok('usuario inexistente o inactivo ⇒ rechazo registrado, sin emisión', (() => {
+    ok('usuario inexistente o inactivo ⇒ rechazo sin fila ni sujeto', (() => {
         const r = R.reconcile(db, [{ ...reviews[0], sourceEventId: 'ghost-1', userId: 'u-ghost' }, { ...reviews[0], sourceEventId: 'ina-1', userId: 'u-ina' }],
             { resolveUser: (id) => (id === 'u-ghost' ? null : { exists: true, active: false, synthetic: false }), env: EARN });
-        return r.byDecision.rejected_not_eligible === 1 && r.byDecision.rejected_inactive_account === 1;
+        return r.byDecision.rejected_not_eligible === 1 && r.byDecision.rejected_inactive_account === 1 && r.recorded === 0
+            && !db.prepare("SELECT 1 FROM gm_subjects WHERE user_id IN ('u-ghost','u-ina')").get();
     })());
     D.closeGamificationDb();
 } catch (e) {

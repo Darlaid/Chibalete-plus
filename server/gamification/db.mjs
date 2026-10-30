@@ -92,6 +92,7 @@ function openAndMigrateOnce(dbPath, log) {
         db.pragma('journal_mode = WAL');
         db.pragma('synchronous = FULL');
         db.pragma('foreign_keys = ON');
+        db.pragma('secure_delete = ON'); // PRIV-01: lo borrado no debe quedar legible en el archivo
         const opts = { dir: MIGRATIONS_DIR, tag: 'gamification-migrate' };
         try {
             runMigrations(db, log, opts);
