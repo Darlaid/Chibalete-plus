@@ -61,7 +61,7 @@ const nextId = () => `id-${++n}`;
 const FACTS = {
     reading_completion: { factType: 'reading_completed', actorId: null, features: { verdict: 'plausible' } },
     mook_experience: { factType: 'experience_completed', actorId: null },
-    mook_review: { factType: 'evidence_reviewed', actorId: 'u-med', features: { decision: 'aprobado' } },
+    mook_review: { factType: 'evidence_reviewed', actorId: 'u-med' },
     offline_validation: { factType: 'offline_activity_validated', actorId: 'u-med' },
 };
 const fact = (source, over = {}) => ({ source, sourceEventId: nextId(), userId: 'u-1', occurredAt: T0, eligibility: 'eligible', now: T0 + ++n, ...FACTS[source], ...over });
@@ -149,7 +149,7 @@ try {
     }
 
     section('[7] features persistibles');
-    ok('activeMinutes ya no se admite', !L.FEATURE_ALLOWLIST.reading_completion.includes('activeMinutes'));
+    ok('la lectura solo admite verdict', L.FEATURE_ALLOWLIST.reading_completion.join() === 'verdict');
     ok('mode ya no se admite', !L.FEATURE_ALLOWLIST.reading_completion.includes('mode'));
     for (const features of [{ activeMinutes: 5 }, { mode: 'a11y' }]) {
         ok(`rechazada: ${Object.keys(features)[0]}`, throwsCode(() => L.recordFact(db, fact('reading_completion', { features }), { env: BOTH }), 'INVALID_FEATURES'));

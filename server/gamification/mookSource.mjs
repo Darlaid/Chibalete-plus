@@ -21,7 +21,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import { isGamificationEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
 import { scheduleFact } from './intake.mjs';
-import { mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
+import { candidateEligibility, mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
 export const RECONCILE_BUSY_MS = 250;
@@ -41,7 +41,7 @@ export function mookActivationSince(env = process.env) {
 /** Solo evidencias aprobadas, posteriores al corte. `con_comentarios` y cualquier otra decisión quedan fuera. */
 export function mookApprovedReviewCandidates(doc, sinceMs) {
     if (!sinceMs) return [];
-    return mookReviewCandidates(doc).filter((c) => c.features.decision === 'aprobado' && c.occurredAt >= sinceMs);
+    return mookReviewCandidates(doc).filter((c) => c.occurredAt >= sinceMs);
 }
 
 /** Solo experiencias completadas después del corte (una vez por usuario y versión). */
@@ -65,16 +65,8 @@ export function makeResolveUser(users, isUserActive, isSyntheticUser) {
     };
 }
 
-function eligibilityOf(resolveUser, userId) {
-    const u = resolveUser(userId);
-    if (!u || !u.exists) return 'rejected_not_eligible';
-    if (u.synthetic) return 'rejected_excluded_user';
-    if (!u.active) return 'rejected_inactive_account';
-    return 'eligible';
-}
-
 function scheduleCandidates(cands, resolveUser, opts) {
-    for (const c of cands) scheduleFact({ ...c, eligibility: eligibilityOf(resolveUser, c.userId) }, opts);
+    for (const c of cands) scheduleFact({ ...c, eligibility: candidateEligibility(resolveUser, c) }, opts);
 }
 
 /**
@@ -88,7 +80,7 @@ export function onMookEvidenceReviewed(evidence, { resolveUser, env = process.en
         if (!since || typeof resolveUser !== 'function') return;
         scheduleCandidates(mookApprovedReviewCandidates({ evidence: [evidence] }, since), resolveUser, { env, log, onDone });
     } catch (e) {
-        log(`[gamification] gancho MOOK review omitido: ${e?.message}`);
+        log(`[gamification] gancho MOOK review omitido: ${e?.code || 'ERROR'}`);
     }
 }
 
@@ -103,7 +95,7 @@ export function onMookRunUpdated(run, { resolveUser, env = process.env, log = ()
         if (!since || typeof resolveUser !== 'function') return;
         scheduleCandidates(mookCompletedExperienceCandidates({ runs: [run] }, since), resolveUser, { env, log, onDone });
     } catch (e) {
-        log(`[gamification] gancho MOOK run omitido: ${e?.message}`);
+        log(`[gamification] gancho MOOK run omitido: ${e?.code || 'ERROR'}`);
     }
 }
 

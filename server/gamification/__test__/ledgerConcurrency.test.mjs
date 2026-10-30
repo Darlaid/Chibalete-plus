@@ -63,7 +63,7 @@ const openFresh = (dbPath, rules) => {
 };
 const BIG = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: {
     'mission/mission_completed': { xp: 3, pm: 7 },
-    'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
+    'mook_review/evidence_reviewed': {},
     'mook_experience/experience_completed': { xp: 2 },
 } };
 
@@ -84,7 +84,7 @@ function mookFixture() {
 }
 const FIXTURE = path.join(tmp, 'mook_fixture.json');
 fs.writeFileSync(FIXTURE, JSON.stringify(mookFixture()));
-const EXPECTED_CANDIDATES = 60 + 20;
+const EXPECTED_CANDIDATES = 50 + 20; // 10 con_comentarios no son candidatos
 const EXPECTED_ROUTES = 20; // solo las rutas emiten: revisiones y rechazos no dejan fila
 
 try {
@@ -140,18 +140,18 @@ try {
     n = (sql) => db.prepare(sql).get().n;
     ok('20 hechos, ninguno duplicado', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_ROUTES);
     const dec = Object.fromEntries(db.prepare('SELECT decision, COUNT(*) n FROM gm_source_facts GROUP BY decision').all().map((r) => [r.decision, r.n]));
-    ok('solo persisten las 20 rutas awarded: ni observed ni rechazos', Object.keys(dec).join() === 'awarded' && dec.awarded === 20, JSON.stringify(dec));
+    ok('solo persisten las 20 rutas awarded: ni observadas ni rechazos', Object.keys(dec).join() === 'awarded' && dec.awarded === 20, JSON.stringify(dec));
     ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
 
     section('[5] interrupción abrupta a mitad de la reconciliación');
     const DB5 = path.join(tmp, 'crash', 'gamification.db');
     openFresh(DB5, BIG);
-    const [cr] = await runReplicas(DB5, ['crash'], { CHP_FIXTURE: FIXTURE, CHP_CRASH_AFTER: '70' });
+    const [cr] = await runReplicas(DB5, ['crash'], { CHP_FIXTURE: FIXTURE, CHP_CRASH_AFTER: '60' });
     ok('el proceso murió abruptamente (código 137, sin informe)', cr.code === 137, JSON.stringify(cr));
     process.env.GAMIFICATION_DB = DB5;
     db = D.getGamificationDb();
     n = (sql) => db.prepare(sql).get().n;
-    ok('quedaron registradas exactamente las 10 rutas previas a la caída (tras 60 revisiones sin fila)', n('SELECT COUNT(*) n FROM gm_source_facts') === 10);
+    ok('quedaron registradas exactamente las 10 rutas previas a la caída (tras 50 revisiones sin fila)', n('SELECT COUNT(*) n FROM gm_source_facts') === 10);
     ok('la base sigue íntegra y consistente tras la caída', db.pragma('integrity_check', { simple: true }) === 'ok' && L.verifyLedger(db).ok);
     const doc = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
     const cands = [...R.mookReviewCandidates(doc), ...R.mookExperienceCandidates(doc)];

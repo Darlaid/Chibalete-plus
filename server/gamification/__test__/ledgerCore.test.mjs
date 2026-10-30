@@ -42,7 +42,7 @@ const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_EN
 const CAPS = { pmPerDay: 200, pmPerWeek: 300, pmPerDayBySource: { mission: 50 } };
 const RULES = { schema: 1, caps: CAPS, facts: {
     'mission/mission_completed': { xp: 30, pm: 20 }, // hecho sintético: el arnés de pruebas levanta el bloqueo solo en este proceso
-    'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
+    'mook_review/evidence_reviewed': {},
     'mook_experience/experience_completed': { xp: 20 },
 } };
 const T0 = Date.UTC(2026, 9, 29, 15, 0, 0);
@@ -84,7 +84,7 @@ try {
     ok('runMigrations explícito sobre una base migrada es no-op', again.applied.length === 0 && again.already.length === 2);
 
     section('[3] reglas versionadas (validadas, append-only, prospectivas)');
-    ok('sin reglas vigentes ⇒ NO_ACTIVE_RULES', throwsCode(() => L.recordFact(db2, { source: 'mook_review', sourceEventId: 'ev-0', factType: 'evidence_reviewed', userId: 'u-x', occurredAt: T0, eligibility: 'eligible', now: T0 }, { env: EARN }), 'NO_ACTIVE_RULES'));
+    ok('sin reglas vigentes ⇒ NO_ACTIVE_RULES', throwsCode(() => L.recordFact(db2, { source: 'mission', sourceEventId: 'ev-0', factType: 'mission_completed', userId: 'u-x', occurredAt: T0, eligibility: 'eligible', now: T0 }, { env: EARN }), 'NO_ACTIVE_RULES'));
     ok('crear rule set', L.createRuleSet(db2, { ruleVersion: RV, rules: RULES, createdBy: 'migration', now: T0 }).created === true);
     ok('mismo contenido ⇒ idempotente', L.createRuleSet(db2, { ruleVersion: RV, rules: RULES, createdBy: 'migration', now: T0 }).created === false);
     ok('mismo id con otro contenido ⇒ IDEMPOTENCY_CONFLICT', throwsCode(() => L.createRuleSet(db2, { ruleVersion: RV, rules: { ...RULES, caps: { pmPerDay: 1, pmPerWeek: 1 } }, createdBy: 'migration', now: T0 }), 'IDEMPOTENCY_CONFLICT'));
@@ -123,11 +123,11 @@ try {
     }
     const obs = rec({ sourceEventId: 'ev-obs', eligibility: 'observe' });
     ok('observe ⇒ observed, sin emisión ni fila', !obs.persisted && obs.factId === null && obs.decision === 'observed' && obs.pm === 0 && obs.xp === 0);
-    const cc = rec({ source: 'mook_review', factType: 'evidence_reviewed', sourceEventId: 'ev-cc', features: { decision: 'con_comentarios' } });
-    ok('MOOK con_comentarios ⇒ observed (emitWhen) sin emisión', cc.decision === 'observed' && cc.pm === 0 && cc.movementId === null);
+    const cc = rec({ source: 'mook_review', factType: 'evidence_reviewed', sourceEventId: 'ev-cc' });
+    ok('revisión MOOK ⇒ observed, sin emisión', cc.decision === 'observed' && cc.pm === 0 && cc.movementId === null);
     const self = rec({ sourceEventId: 'ev-self', actorId: 'u-lector-1' });
     ok('autorrevisión declarada elegible ⇒ rejected_self_review, sin emisión', self.decision === 'rejected_self_review' && self.pm === 0 && self.xp === 0);
-    const rd = rec({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible', reasons: [] } });
+    const rd = rec({ source: 'reading_completion', sourceEventId: 'u:c:w1', factType: 'reading_completed', features: { verdict: 'plausible' } });
     ok('lectura terminada elegible ⇒ observed (bloqueada), sin fila', rd.decision === 'observed' && rd.pm === 0 && !rd.persisted);
     const nr = rec({ sourceEventId: 'ev-norule', factType: 'otro_tipo' });
     ok('hecho sin regla ⇒ rejected_not_eligible', nr.decision === 'rejected_not_eligible' && nr.pm === 0);
@@ -217,7 +217,7 @@ try {
         tProp += Math.floor(rnd() * 4 * 3_600_000);
         try {
             if (r < 0.35) L.recordFact(db2, { ...fact({ userId: u, sourceEventId: `prop-${Math.floor(rnd() * 120)}-${u}` }), now: tProp }, { env: EARN });
-            else if (r < 0.6) L.recordFact(db2, { source: 'mook_experience', sourceEventId: `pexp-${Math.floor(rnd() * 60)}-${u}`, factType: 'experience_completed', userId: u, occurredAt: tProp, eligibility: 'eligible', features: { experienceVersionId: 'xv-1' }, now: tProp }, { env: EARN });
+            else if (r < 0.6) L.recordFact(db2, { source: 'mook_experience', sourceEventId: `pexp-${Math.floor(rnd() * 60)}-${u}`, factType: 'experience_completed', userId: u, occurredAt: tProp, eligibility: 'eligible', now: tProp }, { env: EARN });
             else if (r < 0.85) L.appendAdjustment(db2, { userId: u, amount: Math.floor(rnd() * 40) - 20 || 1, reasonCode: 'support', actorId: 'admin-1', idempotencyKey: `pa-${i}`, ruleVersion: RV, now: tProp });
             else {
                 const last = db2.prepare('SELECT movement_id FROM gm_pm_movements WHERE subject_ref = (SELECT subject_ref FROM gm_subjects WHERE user_id = ?) ORDER BY seq DESC LIMIT 1').get(u);

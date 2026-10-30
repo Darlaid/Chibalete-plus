@@ -26,7 +26,7 @@
  */
 import crypto from 'node:crypto';
 import { GamificationError, isEarningEnabled, isXpEarningEnabled } from './db.mjs';
-import { ELIGIBILITY, SOURCE_GRADE, decideEmission, validateRules } from './policy.mjs';
+import { ELIGIBILITY, SOURCE_GRADE, decideEmission, isEmissionLocked, validateRules } from './policy.mjs';
 import { deriveSourceKey, ensureSubject, findSubject } from './subjects.mjs';
 import { getSubjectKey } from './subjectKey.mjs';
 
@@ -40,9 +40,9 @@ const FACT_FIELDS = new Set(['source', 'sourceEventId', 'factType', 'userId', 'a
 
 /** Claves admitidas en `features_json` por fuente (Modelo de datos V1 §4). Nada de texto libre. */
 export const FEATURE_ALLOWLIST = Object.freeze({
-    mook_review: ['experienceVersionId', 'decision', 'reviewerIsSelf'],
-    mook_experience: ['experienceVersionId'],
-    reading_completion: ['verdict', 'reasons', 'sessions', 'distinctDays', 'maxProgressPct', 'monotonic', 'lengthUnits'],
+    mook_review: [],
+    mook_experience: [],
+    reading_completion: ['verdict'],
     offline_validation: [],
     mission: [],
 });
@@ -198,7 +198,14 @@ export function recordFact(db, fact, { env = process.env } = {}) {
     const xpEnabled = isXpEarningEnabled(env);
     const pmEnabled = isEarningEnabled(env);
 
+    // PRIV-01C: lo que no puede emitir no toma el lock de escritura. Un barrido
+    // reevalúa estos hechos cada vez, porque no dejan fila.
+    const noRow = (decision) => ({ inserted: false, persisted: false, factId: null, decision, xp: 0, pm: 0, xpEntryId: null, movementId: null });
+    if (effectiveEligibility !== 'eligible') return noRow(effectiveEligibility === 'observe' ? 'observed' : effectiveEligibility);
+    if (isEmissionLocked(source)) return noRow('observed');
+
     getSubjectKey(); // sin clave no se evalúa nada: nunca se escribe una fila que no se pueda deduplicar
+    if (!xpEnabled && !pmEnabled) return noRow('disabled_source');
 
     return db.transaction(() => {
         let subject = findSubject(db, userId);
@@ -215,11 +222,9 @@ export function recordFact(db, fact, { env = process.env } = {}) {
         // D48: un hecho sin emisión no deja fila y volverá a evaluarse; una regla
         // posterior no puede premiarlo con efecto retroactivo.
         const prospective = occurredAt >= active.effectiveFrom;
-        const d = decideEmission({ rules: active.rules, source, factType, eligibility: prospective ? effectiveEligibility : 'observe',
+        const d = decideEmission({ rules: active.rules, source, factType, eligibility: prospective ? 'eligible' : 'observe',
             features: features || {}, xpEnabled, pmEnabled, usage: earnedUsage(db, subject?.subject_ref, source, now) });
-        if (d.xp === 0 && d.pm === 0) {
-            return { inserted: false, persisted: false, factId: null, decision: d.decision, xp: 0, pm: 0, xpEntryId: null, movementId: null };
-        }
+        if (d.xp === 0 && d.pm === 0) return noRow(d.decision);
         const day = periodsFor(now).day;
         subject ??= ensureSubject(db, userId, { roleClass: 'reader', day });
         const subjectRef = subject.subject_ref;

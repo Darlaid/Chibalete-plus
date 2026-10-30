@@ -34,6 +34,8 @@ export const LOCKED_SOURCES = Object.freeze(['reading_completion']);
  */
 export const PM_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_experience', 'mission', 'mook_review', 'offline_validation']);
 export const XP_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_review', 'offline_validation']);
+/** ¿Esta fuente no puede emitir nada, sean cuales sean las reglas? */
+export const isEmissionLocked = (source) => PM_LOCKED_SOURCES.includes(source) && XP_LOCKED_SOURCES.includes(source);
 
 export const ELIGIBILITY = Object.freeze([
     'eligible', 'observe',
@@ -125,7 +127,7 @@ export function decideEmission({ rules, source, factType, eligibility, features,
     // Los bloqueos valen también para un conjunto de reglas ya guardado.
     const ruleXp = XP_LOCKED_SOURCES.includes(source) ? 0 : (rule.xp ?? 0);
     const rulePm = PM_LOCKED_SOURCES.includes(source) ? 0 : (rule.pm ?? 0);
-    if (XP_LOCKED_SOURCES.includes(source) && PM_LOCKED_SOURCES.includes(source)) return none('observed');
+    if (isEmissionLocked(source)) return none('observed');
     if (!xpEnabled && !pmEnabled) return none('disabled_source');
     const xp = xpEnabled ? ruleXp : 0;
     const want = pmEnabled ? rulePm : 0;

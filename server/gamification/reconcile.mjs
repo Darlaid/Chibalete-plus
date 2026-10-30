@@ -14,6 +14,10 @@
  * Los adaptadores son PUROS: reciben el documento de la fuente que les pasa el
  * llamador (no leen disco). Ninguno está conectado al producto en G3-02.
  *
+ * PRIV-01C: `userId` viaja solo en memoria, para resolver al sujeto. Los ids de
+ * fuente no lo contienen y los candidatos no llevan `features`. Una cuenta
+ * inexistente, sintética o inactiva no llega a `recordFact`.
+ *
  * Fuentes y recuperabilidad:
  *  - mook_review      RECUPERABLE: la evidencia conserva su estado final
  *                     (REVIEWED, reviewerId, decision, reviewedAt) y nunca se borra.
@@ -50,17 +54,23 @@ function subjectEligibility(resolveUser, userId) {
     return 'eligible';
 }
 
-/** Candidatos `mook_review` desde un documento MOOK normalizado. */
+/** Elegibilidad de un candidato: el sujeto y, si lo hay, su actor humano. */
+export function candidateEligibility(resolveUser, { userId, actorId }) {
+    const subject = subjectEligibility(resolveUser, userId);
+    if (subject !== 'eligible' || !actorId) return subject;
+    return subjectEligibility(resolveUser, actorId) === 'eligible' ? 'eligible' : 'rejected_not_eligible';
+}
+
+/** Candidatos `mook_review`: solo evidencia `aprobado`, desde un documento MOOK normalizado. */
 export function mookReviewCandidates(mookDoc) {
     const out = [];
     for (const ev of mookDoc?.evidence ?? []) {
-        if (ev?.review?.status !== 'REVIEWED') continue;
+        if (ev?.review?.status !== 'REVIEWED' || ev.review.decision !== 'aprobado') continue;
         const at = ms(ev.review.reviewedAt);
         if (!ev.id || !ev.userId || !at) continue;
         out.push({
             source: 'mook_review', sourceEventId: ev.id, factType: 'evidence_reviewed',
             userId: ev.userId, actorId: ev.review.reviewerId ?? null, occurredAt: at,
-            features: { experienceVersionId: ev.experienceVersionId, decision: ev.review.decision, reviewerIsSelf: ev.review.reviewerId === ev.userId },
         });
     }
     return out;
@@ -76,8 +86,8 @@ export function mookExperienceCandidates(mookDoc) {
         const key = `${run.userId}:${run.experienceVersionId}`;
         const prev = out.get(key);
         if (!prev || at < prev.occurredAt) {
-            out.set(key, { source: 'mook_experience', sourceEventId: key, factType: 'experience_completed',
-                userId: run.userId, actorId: null, occurredAt: at, features: { experienceVersionId: run.experienceVersionId } });
+            out.set(key, { source: 'mook_experience', sourceEventId: run.experienceVersionId, factType: 'experience_completed',
+                userId: run.userId, actorId: null, occurredAt: at });
         }
     }
     return [...out.values()];
@@ -97,8 +107,8 @@ export function reconcile(db, candidates, { resolveUser, env = process.env, now 
     }
     const res = { scanned: candidates.length, alreadyRecorded: 0, recorded: 0, raced: 0, byDecision: {} };
     for (const c of candidates) {
-        if (hasFact(db, c)) { res.alreadyRecorded++; continue; }
-        const eligibility = subjectEligibility(resolveUser, c.userId);
+        const eligibility = candidateEligibility(resolveUser, c);
+        if (eligibility === 'eligible' && hasFact(db, c)) { res.alreadyRecorded++; continue; }
         const r = recordFact(db, { ...c, eligibility, now: now() }, { env });
         if (r.inserted || !r.persisted) res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
         if (r.inserted) {

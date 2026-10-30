@@ -42,7 +42,7 @@ const SINCE_ISO = '2026-11-01T00:00:00.000Z';
 const SINCE = Date.parse(SINCE_ISO);
 const iso = (minutesAfterSince) => new Date(SINCE + minutesAfterSince * 60_000).toISOString();
 const RULES = { schema: 1, caps: { pmPerDay: 1000, pmPerWeek: 5000 }, facts: {
-    'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } },
+    'mook_review/evidence_reviewed': {},
     'mook_experience/experience_completed': { xp: 20 },
 } };
 const USERS = [

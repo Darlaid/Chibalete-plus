@@ -172,7 +172,7 @@ try {
             const L = await import('../ledger.mjs');
             const db = D.getGamificationDb({ env });
             L.createRuleSet(db, { ruleVersion: 'gm-http-v1', createdBy: 'migration', now: Date.now() - 5000, rules: { schema: 1, caps: { pmPerDay: 500, pmPerWeek: 1000 },
-                facts: { 'mook_review/evidence_reviewed': { emitWhen: { decision: ['aprobado'] } }, 'mook_experience/experience_completed': { xp: 20 } } } });
+                facts: { 'mook_review/evidence_reviewed': {}, 'mook_experience/experience_completed': { xp: 20 } } } });
             D.closeGamificationDb({ resetBackoff: true });
             process.env = prev;
         });
