@@ -47,6 +47,9 @@ for (const [key, file] of [
     ['OFFLINE_ASSIGNMENT_DB_PATH', 'offline_assignments.db'],
     ['ROYALTIES_DB',         'royalties.db'],
     ['GAMIFICATION_DB',      'gamification.db'],
+    ['GROUPS_DB',            'groups_db.json'],
+    ['SCHOOLS_DB',           'schools_db.json'],
+    ['LEO_EVIDENCE_DB',      'leo_evidence_db.json'],
 ]) {
     if (!process.env[key]) process.env[key] = tmpFor(file);
 }

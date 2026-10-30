@@ -12,7 +12,7 @@ El riesgo era mayor que las diez suites conocidas: **60 suites** arrancan `serve
 | `events`, `archive`, `insights`, `progress` | Temporal solo con `testMode` | Temporal en las 60 |
 | `offline_assignments`, `royalties`, `gamification` | Real por defecto | Temporal por defecto en `testMode` |
 | `identity`, `sessions` | Real por defecto si la suite no los fija | Abrir el real falla |
-| JSON configurables (`groups`, `schools`, `leo_evidence`) | Real si no se fijan | Lectura permitida; escritura bloqueada |
+| JSON configurables (`groups`, `schools`, `leo_evidence`) | Real si no se fijan | Temporal por defecto en `testMode` |
 | Rutas fijas: `leo_memory_db`, `leo_profile_db`, `analytics_db`, `lu_config`, `content.json` de Leo | Escribibles | Lectura permitida; escritura bloqueada. **No se redirigen:** requeriría tocar el servidor |
 | Abrir SQLite fijo (`analyticsHealth`, `archiveRotation`) | Posible | Falla si cae en un store real |
 
@@ -37,7 +37,13 @@ Las pruebas de topes, idempotencia, concurrencia y saldo usan `__test__/helpers/
 - Se conservan porque la unidad prohíbe borrar en esas carpetas. Su retirada queda a decisión humana.
 - Las pruebas negativas ahora usan `fileMustExist` sobre un nombre inexistente: si el guard fallara, no se crea nada.
 
-## 5. Fallos e intermitentes
+## 5. Fallo de CI en `e7eac58`
+
+`identity-preflight` falló en la revisión publicada: el guard bloqueó a `mookCoverUpload`, porque el servidor crea `data/groups_db.json` al arrancar si no existe. En local no se vio porque ese archivo existe. **El guard hizo su trabajo:** sin él, esa escritura habría ocurrido en cualquier máquina sin ese archivo.
+
+La corrección redirige `GROUPS_DB`, `SCHOOLS_DB` y `LEO_EVIDENCE_DB` en `testMode.mjs`. Se validó en un árbol limpio sin `data/`, equivalente a la CI.
+
+## 6. Fallos e intermitentes
 
 | Suite | Resultado | Clasificación |
 |---|---|---|
@@ -46,4 +52,5 @@ Las pruebas de topes, idempotencia, concurrencia y saldo usan `__test__/helpers/
 | `identityCanonicalSource` (`test:identity`) | 1 ✗: el padrón local ya existe | **Preexistente y local.** Corta la cadena `test:identity` en esta máquina |
 | `contentGlobalReadOnlyPolicy` | `fetch failed` una vez; 3/3 al repetir | Coherente con el puerto `pid % N` de G4-01, sin confirmar en esta corrida |
 | `identityShadowCompare` | **Intermitente sin causa:** 81 ✓, 7 ✗ una vez (500 y JSON ilegible en la posición 151297); después 9/9 con 95 ✓ | No reproducido. No se añadieron reintentos |
+| `libraryStoreConcurrency` | Intermitente en Windows: 500 en escrituras concurrentes. 2 de 4 corridas ahora, 1 de 4 en `c75808a` | **Preexistente;** muestra insuficiente para comparar tasas |
 | `mookHooksHttp` arranque | No reapareció | Sigue sin causa determinada |
