@@ -68,3 +68,30 @@ PRIV-01D añade una lectura del registro por barrido y una comprobación por hec
 - Dos pruebas estructurales de `ledgerCore` se ajustaron a propósito: `exclusions.mjs` es la segunda excepción de escritura, limitada a añadir, con prueba propia.
 - `commercialClassHttp` sigue intermitente: 2 de 8 aquí, 3 de 8 en `e16bc9d`. No lo toca esta unidad.
 - `test:store-isolation` sigue en rojo en local por `test:identity`, sin stores alterados.
+
+## 7. Validación de restauración
+
+Escenario con `capture_sqlite` real del runner sobre rutas temporales: 40/40 en tres corridas (Windows). Captura antes y después de excluir, restaura la anterior, la puerta bloquea `recordFact`, ajustes, compensaciones, `reconcile` y ganchos, el barrido programado reaplica, y el sujeto no reaparece por ingesta, gancho, alta directa ni barrido tras reinicio. Ledger, `integrity_check`, `foreign_key_check` y sumas correctos.
+
+**No cubierto:** `restic` y el procedimiento completo del VPS. `capture_sqlite` se ejecutó directamente y la restauración fue una copia de archivo. GM04 cubre el ciclo `restic` en Linux para `gamification.db`, pero no este escenario de exclusión.
+
+**La copia anterior sigue conteniendo la identidad excluida** hasta que expire; esto no lo resuelve ninguna puerta.
+
+## 8. Custodia operativa
+
+**Ubicación esperada.** Un archivo por entorno en un volumen persistente **distinto** de `data/` y `data-critical/`, compartido por las dos réplicas, fuera del inventario de `stores.py`. No existe todavía: su volumen requiere una unidad de despliegue, porque hoy el compose monta `data`, `data-critical`, `public/uploads` y `server`.
+
+**Respaldo.** Independiente y durable, con destino y credenciales distintos de los de `gamification.db`, y con retención **igual o mayor** que la del último snapshot de la base. Tras cada exclusión debe copiarse antes de confirmar el acuse al titular. El registro no se edita: solo se añade.
+
+| Situación | Comportamiento | Recuperación mínima |
+|---|---|---|
+| Registro perdido | Ingesta bloqueada | Restaurar su copia independiente más reciente. Nunca crear un archivo vacío para desbloquear |
+| Línea alterada o truncada | Ingesta bloqueada | Igual. No editar el archivo a mano |
+| Registro antiguo, base con exclusiones más nuevas | `STALE`: bloqueada | Restaurar un registro al menos tan reciente; si no existe, escalar. Sin reparación automática |
+| Base antigua, registro vigente | `REPLAY_REQUIRED`: bloqueada | Mantener los flags en OFF, restaurar, reaplicar con el barrido, verificar y reabrir |
+| Base y registro antiguos | **Sin detección:** la puerta abre (confirmado por prueba) | Prevenir: copias separadas y contraste con el registro de solicitudes del responsable |
+| Registro recreado vacío con base antigua | **Sin detección**, misma causa | Igual |
+
+**El caso sin detección es el riesgo principal.** La autoridad final debe ser el registro de solicitudes que custodie Dirección, fuera del sistema. Tras cualquier restauración, un responsable debe confirmar que el número de exclusiones del registro coincide con el de solicitudes atendidas.
+
+**Clave.** Los tombstones y el MAC del registro dependen de la clave de servidor. Si se pierde, el registro no se puede verificar y la ingesta queda bloqueada: la clave necesita copia segura propia, separada del registro. **Rotarla sin migrar invalida el registro y los tombstones,** por lo que queda prohibido rotarla hasta que exista una unidad que lo resuelva.
