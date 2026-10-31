@@ -271,7 +271,8 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 // CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
 import { evaluateScopeAccess, requireScopeAccess } from './aulaViva/scopeAccess.mjs';
-import { getPrincipal, getMemberships, IdentityUnavailableError } from './identity/cis.mjs';
+import { getPrincipal, getMemberships, IdentityUnavailableError, mediatedGroupRosters } from './identity/cis.mjs';
+import { isSyntheticUser } from './identity/organizationScope.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — tiempo efectivo propio (desbloqueo
@@ -10169,18 +10170,48 @@ app.post('/api/submissions', requireUserAuth, async (req, res) => {
     }
 });
 
+/**
+ * SEC-EXPORT-AUTHZ-01 — alcance de las exportaciones de entregas. Se resuelve
+ * ANTES de leer ninguna entrega, siempre desde la sesión y el CIS.
+ *
+ * Las tareas no existen como entidad en el servidor y `groupId` lo declara el
+ * cliente al entregar. Por eso un mediador solo ve una entrega si media ese grupo
+ * Y el estudiante pertenece hoy a él: un `groupId` falso no abre nada. Una
+ * entrega fuera de alcance responde igual que una inexistente.
+ *
+ * @returns {Promise<null | {admin:boolean, rosters:Map<string,Set<string>>}>} null = ya se respondió
+ */
+async function resolveExportScope(req, res) {
+    if (isSyntheticUser(req.user)) { exportDenied(res); return null; }
+    try {
+        if (await isAdminRequest(req) || getPrincipal(req.user.id)?.platformAdmin) return { admin: true, rosters: new Map() };
+        return { admin: false, rosters: mediatedGroupRosters(req.user.id) };
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] export scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return null;
+    }
+}
+const exportDenied = (res) => res.status(403).json({ error: 'scope_access_denied' });
+const canExportSubmission = (scope, sub) => scope.admin || scope.rosters.get(sub.groupId)?.has(sub.studentId) === true;
+
 // GET /api/tasks/:taskId/export-submissions — genera y descarga el ZIP de entregas
-// Requiere autenticación de usuario válido (profesores/coordinadores).
-app.get('/api/tasks/:taskId/export-submissions', requireUserAuth, (req, res) => {
+// ZIP colectivo: administrador, o mediador con las entregas de sus grupos. Nunca un lector.
+app.get('/api/tasks/:taskId/export-submissions', requireUserAuth, async (req, res) => {
     try {
         const { taskId } = req.params;
+        const scope = await resolveExportScope(req, res);
+        if (!scope) return;
+        if (!scope.admin && scope.rosters.size === 0) return exportDenied(res);
 
         // CHP-IDDB-GAP2-01: export = superficie ADMIN/HISTÓRICA (puede
         // referenciar identidades sintéticas retiradas en el histórico).
         const users       = readUsersAdminHistorical();
         const submissions = readJSON(SUBMISSIONS_DB);
 
-        const taskSubs = submissions.filter(s => s.taskId === taskId && s.status === 'submitted');
+        const taskSubs = submissions.filter(s => s.taskId === taskId && s.status === 'submitted' && canExportSubmission(scope, s));
+        if (!scope.admin && taskSubs.length === 0) return exportDenied(res);
 
         // Enriquecer con perfil de estudiante y ordenar alfabéticamente por nombre
         const enriched = taskSubs
@@ -10291,9 +10322,14 @@ function buildStudentMetadatos(sub, student) {
 
 // GET /api/students/:studentId/export-submissions — portfolio de tareas de un estudiante
 // Ordenadas ascendente por fecha de entrega (cronología del estudiante).
-app.get('/api/students/:studentId/export-submissions', requireUserAuth, (req, res) => {
+// Administrador, el propio estudiante, o mediador de un grupo actual del estudiante.
+app.get('/api/students/:studentId/export-submissions', requireUserAuth, async (req, res) => {
     try {
         const { studentId } = req.params;
+        const scope = await resolveExportScope(req, res);
+        if (!scope) return;
+        const own = studentId === req.user.id;
+        if (!scope.admin && !own && ![...scope.rosters.values()].some((members) => members.has(studentId))) return exportDenied(res);
 
         // CHP-IDDB-GAP2-01: export = superficie ADMIN/HISTÓRICA.
         const users       = readUsersAdminHistorical();
@@ -10302,7 +10338,7 @@ app.get('/api/students/:studentId/export-submissions', requireUserAuth, (req, re
         const student = users.find(u => u.id === studentId) || null;
 
         const studentSubs = submissions
-            .filter(s => s.studentId === studentId && s.status === 'submitted')
+            .filter(s => s.studentId === studentId && s.status === 'submitted' && (own || canExportSubmission(scope, s)))
             .sort((a, b) => new Date(a.submittedAt || 0) - new Date(b.submittedAt || 0)); // ascendente
 
         const dateStr     = new Date().toISOString().slice(0, 10);

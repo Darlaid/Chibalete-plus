@@ -200,6 +200,10 @@ jobs:
       # concede puntos por token, sin canjes ni aprobaciones simuladas, Trivia
       # fuera de la navegación, corte por tiempo ≠ «Lectura Completada», y la
       # Tienda (render real con catálogo Woo) sin canje.
+      # SEC-EXPORT-PROD-01 — autorización de las dos exportaciones ZIP por HTTP real.
+      - name: Exportaciones ZIP
+        run: node server/__test__/exportSubmissionsHttp.test.mjs
+
       - name: Contención de gamificación (G0)
         run: npm run test:gamification-g0
 
