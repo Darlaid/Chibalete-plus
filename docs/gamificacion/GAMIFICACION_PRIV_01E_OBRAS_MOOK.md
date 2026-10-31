@@ -65,8 +65,7 @@ Declarar `resourceRef` en una PRODUCTION significa «esta producción evalúa es
 | `activity_not_comprehension` | No es PRODUCTION con revisión requerida |
 | `no_work_declared` | Sin `resourceRef` |
 | `work_not_in_version` | Obra no ofrecida antes en la ruta |
-| `work_not_found`, `work_unavailable` | Ausente del catálogo o no disponible |
-| `work_is_collection`, `work_is_part`, `work_not_standalone`, `work_not_classified` | No es obra según §4 |
+| `work_withdrawn` | Retirada legal explícita, o sin respuesta sobre ella (G4-05A-2) |
 | `no_access_snapshot`, `access_snapshot_mismatch`, `work_not_accessible`, `access_indeterminate`, `access_not_explicit` | Sin decisión congelada válida, o sin autorización explícita (G4-05A-1) |
 
 `mookRecognitionEvidence` añade los filtros de cuenta, actor y exclusión. Sin puerta de exclusiones no devuelve nada, y sus motivos son recuentos sin datos personales. La autorrevisión la rechaza `decideRecognition`.
@@ -74,6 +73,8 @@ Declarar `resourceRef` en una PRODUCTION significa «esta producción evalúa es
 ## 4. Qué cuenta como obra
 
 Aplica Modelo §5.1 de forma conservadora: raíz, no colección, `standalone` distinto de `false`, y `tipo` entre `libro`, `libro_album` y `video`. Lo demás queda sin elegibilidad **hasta que Editorial lo decida**: capítulos, guías, videos hijos, colecciones, podcasts y artículos pedagógicos.
+
+La elegibilidad de la obra se fija en la entrega desde G4-05A-2: `workBlock` ya no se consulta al procesar.
 
 ## 5. Garantías de idempotencia
 

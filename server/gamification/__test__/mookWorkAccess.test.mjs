@@ -38,6 +38,8 @@ const WORDS = 'una dos tres cuatro cinco seis siete ocho';
 const CATALOG = [
     { id: 'obra-a', titulo: 'Obra A', tipo: 'libro', status: 'disponible' },
     { id: 'obra-b', titulo: 'Obra B', tipo: 'libro', status: 'disponible' },
+    { id: 'podcast', titulo: 'P', tipo: 'podcast', status: 'disponible' },
+    { id: 'procesando', titulo: 'R', tipo: 'libro', status: 'procesando' },
 ];
 const bookExists = (id) => CATALOG.some((c) => c.id === id);
 const production = (id, resourceRef) => ({ id, type: 'PRODUCTION', title: id, ...(resourceRef ? { resourceRef } : {}),
@@ -54,6 +56,8 @@ function publish(slug, nodes) {
 const ONE = publish('una', [reading('r', 'obra-a'), production('p', 'obra-a')]);
 const GENERAL = publish('general', [reading('r', 'obra-a'), production('p')]);
 const MULTI = publish('multi', [reading('ra', 'obra-a'), reading('rb', 'obra-b'), production('pa', 'obra-a'), production('pb', 'obra-b')]);
+const PODCAST = publish('podcast', [reading('r', 'podcast'), production('p', 'podcast')]);
+const PROCESSING = publish('procesando', [reading('r', 'procesando'), production('p', 'procesando')]);
 const HISTORIC = publish('historica', [reading('r', 'obra-a'), production('p', 'obra-a')]);
 { // Evidencia anterior a esta unidad: aprobada y sin snapshot.
     const { run } = Store.startRun(fixture, { userId: 'u-hist', experienceId: HISTORIC });
@@ -64,20 +68,23 @@ const HISTORIC = publish('historica', [reading('r', 'obra-a'), production('p', '
 
 const lector = (id, extra = {}) => ({ id, email: `${id}@t.test`, nombre_completo: id, roles: ['lector'], accountStatus: 'active', password: 'x', ...extra });
 const USERS = [{ ...lector('u-admin'), roles: ['administrador'] },
-    ...['u-ok', 'u-exp', 'u-none', 'u-rev', 'u-late', 'u-forge', 'u-race', 'u-multi', 'u-gen', 'u-hist', 'u-ex', 'u-open', 'u-group', 'u-fail', 'u-otro'].map((u) => lector(u)),
+    ...['u-ok', 'u-exp', 'u-none', 'u-rev', 'u-late', 'u-forge', 'u-race', 'u-multi', 'u-gen', 'u-hist', 'u-ex', 'u-open', 'u-group', 'u-fail', 'u-otro', 'u-cache', 'u-gain', 'u-pod', 'u-proc', 'u-work', 'u-all', 'u-gr-off'].map((u) => lector(u)),
+    lector('u-orgall', { colegio: 'Colegio Todo' }), lector('u-orglist', { colegio: 'Colegio Lista' }),
     lector('u-inactivo', { accountStatus: 'disabled' }), lector('u-sint', { _loadtest_marker: 'lt-1' })];
 const rule = (id, scopeId, titleIds, expiresAt = null) => ({ id, scope: 'user', scopeId, titleIds, collectionIds: [], expiresAt });
 const RULES = [rule('r-ok', 'u-ok', ['obra-a']), rule('r-none', 'u-none', ['obra-b']), rule('r-rev', 'u-rev', ['obra-a'], Date.now() - 1000),
     rule('r-late', 'u-late', ['obra-a']), rule('r-forge', 'u-forge', ['obra-b']), rule('r-race', 'u-race', ['obra-a']), rule('r-multi', 'u-multi', ['obra-a']),
-    rule('r-gen', 'u-gen', ['obra-a']), rule('r-ex', 'u-ex', ['obra-a']), rule('r-sint', 'u-sint', ['obra-a'])];
+    rule('r-gen', 'u-gen', ['obra-a']), rule('r-ex', 'u-ex', ['obra-a']), rule('r-sint', 'u-sint', ['obra-a']), rule('r-cache', 'u-cache', ['obra-a']), rule('r-gain', 'u-gain', ['obra-b']),
+    rule('r-pod', 'u-pod', ['podcast']), rule('r-proc', 'u-proc', ['procesando']), rule('r-work', 'u-work', ['obra-a'])];
 
-function makeEnv(name, { rules = RULES, groups = [] } = {}) {
+function makeEnv(name, { rules = RULES, groups = [], schools = [] } = {}) {
     const dir = path.join(tmp, name); const data = path.join(dir, 'data'); const sqlite = path.join(dir, 'sqlite');
     fs.mkdirSync(data, { recursive: true }); fs.mkdirSync(path.join(dir, 'uploads')); fs.mkdirSync(sqlite);
     fs.writeFileSync(path.join(data, 'mook_db.json'), JSON.stringify(fixture));
     fs.writeFileSync(path.join(data, 'content.json'), JSON.stringify(CATALOG));
     fs.writeFileSync(path.join(data, 'access_db.json'), JSON.stringify(rules));
     fs.writeFileSync(path.join(data, 'groups_db.json'), JSON.stringify(groups));
+    fs.writeFileSync(path.join(data, 'school_configs.json'), JSON.stringify(schools));
     for (const f of ['progress_db.json', 'schools_db.json', 'leo_evidence_db.json']) fs.writeFileSync(path.join(data, f), '[]');
     fs.writeFileSync(path.join(dir, 'users.json'), JSON.stringify(USERS));
     return { dir, data, sqlite };
@@ -123,7 +130,7 @@ async function begin(s, e, user, exp, reads = ['r']) {
 }
 const deliver = (s, user, runId, node = 'p', extra = {}) => s.call('POST', `/api/experiences/runs/${runId}/nodes/${node}/evidence`, user, { text: WORDS, ...extra });
 const approve = (s, id) => s.call('POST', `/api/experiences/review/${id}`, 'u-admin', { decision: 'aprobado', feedback: 'bien' });
-const resolve = (doc, ev) => W.resolveEvidenceWork(doc, ev, { catalog: new Map(CATALOG.map((c) => [c.id, c])), workRefOf: Store.productionWorkRef, sinceMs: SINCE });
+const resolve = (doc, ev, isWithdrawn = () => false) => W.resolveEvidenceWork(doc, ev, { isWithdrawn, workRefOf: Store.productionWorkRef, sinceMs: SINCE });
 const access = (s, user, id = 'obra-a') => s.call('GET', `/api/content/${id}/access?userId=${user}`, user);
 
 /**
@@ -263,6 +270,41 @@ try {
         ok('decisiones distintas en carrera: la primera escritura gana y la segunda no sobrescribe', won.created && !lost.created && lost.evidence.workAccess.decision === 'allowed');
     }
 
+    section('[4c] caché obsoleta de la réplica');
+    {
+        const runC = await begin(b, e, 'u-cache', ONE);
+        const runG = await begin(b, e, 'u-gain', ONE);
+        ok('b tiene las reglas en caché', (await access(b, 'u-cache')).status === 200 && (await access(b, 'u-gain')).status === 403);
+        writeRules(e, [rule('r-cache', 'u-cache', []), rule('r-gain', 'u-gain', ['obra-a'])]);
+        ok('la caché de b sigue obsoleta', (await access(b, 'u-cache')).status === 200);
+        await deliver(b, 'u-cache', runC);
+        await deliver(b, 'u-gain', runG);
+        ok('revocada: no registra la autorización obsoleta', evidenceOf(e, 'u-cache')[0]?.workAccess.decision === 'denied', JSON.stringify(evidenceOf(e, 'u-cache')[0]?.workAccess));
+        ok('concedida: registra la decisión actual', evidenceOf(e, 'u-gain')[0]?.workAccess.decision === 'allowed', JSON.stringify(evidenceOf(e, 'u-gain')[0]?.workAccess));
+    }
+
+    section('[4d] obra elegible en la entrega y cambios posteriores');
+    {
+        const runW = await begin(b, e, 'u-work', ONE);
+        await deliver(b, 'u-work', runW);
+        await approve(b, evidenceOf(e, 'u-work')[0].id);
+        const content = path.join(e.data, 'content.json');
+        const original = fs.readFileSync(content);
+        fs.writeFileSync(content, JSON.stringify(CATALOG.map((x) => (x.id === 'obra-a' ? { ...x, status: 'procesando', tipo: 'podcast' } : x))));
+        const later = await (await boot(e, await (await import('../../__test__/helpers/freePort.mjs')).freePort())).call('GET', '/api/health', 'u-work');
+        ok('el catálogo cambió después', later.status === 200);
+        const [ev] = evidenceOf(e, 'u-work');
+        ok('la decisión de la entrega no cambia', ev.workAccess.decision === 'allowed' && resolve(store(e), ev).workRef === 'obra-a');
+        ok('una retirada legal explícita bloquea lo pendiente', resolve(store(e), ev, () => true).reasons[0] === 'work_withdrawn');
+        fs.writeFileSync(content, original);
+        const runP = await begin(b, e, 'u-pod', PODCAST);
+        await deliver(b, 'u-pod', runP);
+        const runR = await begin(b, e, 'u-proc', PROCESSING);
+        await deliver(b, 'u-proc', runR);
+        ok('tipo no clasificado al entregar: queda fijado', evidenceOf(e, 'u-pod')[0]?.workAccess.decision === 'denied' && evidenceOf(e, 'u-pod')[0].workAccess.via === 'WORK_NOT_CLASSIFIED', JSON.stringify(evidenceOf(e, 'u-pod')[0]?.workAccess));
+        ok('no disponible al entregar: queda fijado', evidenceOf(e, 'u-proc')[0]?.workAccess.via === 'WORK_UNAVAILABLE', JSON.stringify(evidenceOf(e, 'u-proc')[0]?.workAccess));
+    }
+
     section('[4b] run creado en otra réplica');
     {
         await b.call('GET', `/api/experiences/${ONE}`, 'u-multi'); // b deja MOOK en su caché de 30 s
@@ -322,7 +364,7 @@ try {
         await approve(a, evidenceOf(e, 'u-sint')[0].id);
         await approve(a, evidenceOf(e, 'u-ex')[0].id);
         const byId = new Map(USERS.map((u) => [u.id, { exists: true, active: u.accountStatus === 'active', synthetic: !!u._loadtest_marker }]));
-        const r = W.mookRecognitionEvidence(store(e), { catalog: CATALOG, workRefOf: Store.productionWorkRef, resolveUser: (id) => byId.get(id) ?? null, gate: { excludes: (id) => id === 'u-ex' }, sinceMs: SINCE });
+        const r = W.mookRecognitionEvidence(store(e), { isWithdrawn: () => false, workRefOf: Store.productionWorkRef, resolveUser: (id) => byId.get(id) ?? null, gate: { excludes: (id) => id === 'u-ex' }, sinceMs: SINCE });
         ok('sintético y excluido no pasan aunque el snapshot permita', !r.evidence.some((x) => ['u-sint', 'u-ex'].includes(x.userId)) && r.unattributed.subject_not_eligible >= 1 && r.unattributed.subject_excluded === 1, JSON.stringify(r.unattributed));
         ok('sin identidad en los recuentos', !JSON.stringify(r.unattributed).includes('u-'));
     }
@@ -333,7 +375,11 @@ try {
 
     section('[8] fallback abierto e indeterminado');
     {
-        const oe = makeEnv('open', { rules: [], groups: [{ id: 'g1', nombre: 'G', type: 'course', studentIds: ['u-group'], memberIds: ['u-group'], mediatorIds: [], availableContentIds: ['obra-a'] }] });
+        const GROUPS = [{ id: 'g1', nombre: 'G', type: 'course', studentIds: ['u-group'], memberIds: ['u-group'], mediatorIds: [], availableContentIds: ['obra-a'] },
+            { id: 'g2', nombre: 'T', type: 'course', studentIds: ['u-all'], memberIds: ['u-all'], mediatorIds: [], availableContentIds: 'all' },
+            { id: 'g3', nombre: 'V', type: 'course', studentIds: ['u-gr-off'], memberIds: ['u-gr-off'], mediatorIds: [], availableContentIds: 'all', accessEndsAt: '2020-01-01T00:00:00.000Z' }];
+        const SCHOOLS = [{ schoolName: 'Colegio Todo', availableContentIds: 'all' }, { schoolName: 'Colegio Lista', availableContentIds: ['obra-a'] }];
+        const oe = makeEnv('open', { rules: [], groups: GROUPS, schools: SCHOOLS });
         const open = await boot(oe, p3, 'open');
         const run = await begin(open, oe, 'u-open', ONE);
         await deliver(open, 'u-open', run);
@@ -344,7 +390,21 @@ try {
         const runG = await begin(open, oe, 'u-group', ONE);
         await deliver(open, 'u-group', runG);
         const [eg] = evidenceOf(oe, 'u-group');
-        ok('catálogo explícito de grupo: elegible', eg?.workAccess.via === 'GROUP_CATALOG', JSON.stringify(eg?.workAccess));
+        ok('catálogo explícito de grupo: elegible', eg?.workAccess.via === 'GROUP_CATALOG' && W.EXPLICIT_ACCESS_VIAS.includes('GROUP_CATALOG'), JSON.stringify(eg?.workAccess));
+        const viaOf = async (user) => { const r = await begin(open, oe, user, ONE); await deliver(open, user, r); return evidenceOf(oe, user)[0]?.workAccess; };
+        const all = await viaOf('u-all');
+        ok('GROUP_ALL: concesión explícita vigente, elegible', all?.decision === 'allowed' && all.via === 'GROUP_ALL' && W.EXPLICIT_ACCESS_VIAS.includes('GROUP_ALL'), JSON.stringify(all));
+        const off = await viaOf('u-gr-off');
+        ok('GROUP_ALL vencido: cae al fallback y no es elegible', off?.via === 'LEGACY_OPEN' && !W.EXPLICIT_ACCESS_VIAS.includes(off.via), JSON.stringify(off));
+        const orgAll = await viaOf('u-orgall');
+        const orgList = await viaOf('u-orglist');
+        ok('ORG_ALL: por texto del colegio, no elegible', orgAll?.via === 'ORG_ALL' && !W.EXPLICIT_ACCESS_VIAS.includes('ORG_ALL'), JSON.stringify(orgAll));
+        ok('catálogo de organización: no se confunde con grupo', orgList?.via === 'ORG_CATALOG' && !W.EXPLICIT_ACCESS_VIAS.includes('ORG_CATALOG'), JSON.stringify(orgList));
+        const re = makeEnv('restr', { rules: [], groups: GROUPS, schools: SCHOOLS });
+        const restr = await boot(re, await (await import('../../__test__/helpers/freePort.mjs')).freePort());
+        const rg = await begin(restr, re, 'u-all', ONE);
+        await deliver(restr, 'u-all', rg);
+        ok('en restricted, GROUP_ALL no se alcanza: denegado', evidenceOf(re, 'u-all')[0]?.workAccess.via === 'SCOPE_NO_RULES', JSON.stringify(evidenceOf(re, 'u-all')[0]?.workAccess));
 
         const be = makeEnv('broken', { rules: {} }); // access_db ilegible para el motor
         const broken = await boot(be, p4);

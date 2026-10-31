@@ -87,6 +87,18 @@ export function capabilityVerdict(versions, capability, at = new Date()) {
     return { regime: true, allowed: true, reason: 'AUTHORIZED', versionId: v.id };
 }
 
+/** Estados legales que retiran una obra de forma explícita y auditada. */
+export const WITHDRAWN_LEGAL_STATUSES = Object.freeze(['suspended', 'revoked', 'disputed']);
+
+/**
+ * ¿Está la obra retirada por un acto legal en `at`? Una licencia vencida no es
+ * una retirada y una obra sin versiones no tiene régimen. Solo lectura.
+ */
+export function isWorkWithdrawn(versions, at = new Date()) {
+    const v = effectiveVersion(versions, at);
+    return !!v && WITHDRAWN_LEGAL_STATUSES.includes(v.legalStatus);
+}
+
 // ── puro: elegibilidad económica ────────────────────────────────────────────
 
 /**

@@ -93,7 +93,7 @@ try {
     process.env.GAMIFICATION_DB = RESTORED;
     const rdb = D.getGamificationDb();
     ok('integrity_check de la base restaurada = ok', rdb.pragma('integrity_check', { simple: true }) === 'ok');
-    ok('la base restaurada no reaplica migraciones', rdb.prepare('SELECT COUNT(*) n FROM _migrations').get().n === 2);
+    ok('la base restaurada no reaplica migraciones', rdb.prepare('SELECT COUNT(*) n FROM _migrations').get().n === 3);
     const diff = TABLES.filter((t) => tableHash(rdb, t) !== hashesBefore[t]);
     ok('historial idéntico en las 11 tablas (hash por tabla)', diff.length === 0, diff.join(','));
     ok('el hecho escrito DESPUÉS de la captura no está (punto de restauración exacto)', !rdb.prepare("SELECT 1 FROM gm_source_facts WHERE source_event_id='bk-999'").get());

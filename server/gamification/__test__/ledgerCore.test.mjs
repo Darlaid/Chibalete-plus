@@ -74,14 +74,14 @@ try {
     ok('exactamente las 13 tablas gm_ del modelo', JSON.stringify(tables) === JSON.stringify(['gm_achievements', 'gm_admin_audit', 'gm_erasures', 'gm_pm_balances', 'gm_pm_movements', 'gm_redemption_transitions', 'gm_redemptions', 'gm_reward_grants', 'gm_rule_sets', 'gm_source_facts', 'gm_subjects', 'gm_work_cycles', 'gm_xp_entries']), tables.join(','));
     const allTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
     ok('sin tablas auxiliares (solo _migrations y sqlite_sequence)', allTables.filter((t) => !t.startsWith('gm_')).join(',') === '_migrations,sqlite_sequence', allTables.join(','));
-    ok('dos migraciones registradas', JSON.stringify(db.prepare('SELECT version FROM _migrations ORDER BY version').all().map((r) => r.version)) === '["0001_ledger","0002_subject_model"]');
+    ok('tres migraciones registradas', JSON.stringify(db.prepare('SELECT version FROM _migrations ORDER BY version').all().map((r) => r.version)) === '["0001_ledger","0002_subject_model","0003_work_cycle_acts"]');
     ok('la segunda apertura devuelve la misma conexión', D.getGamificationDb() === db);
     D.closeGamificationDb();
     const db2 = D.getGamificationDb();
-    ok('reabrir no reaplica (siguen 2 migraciones)', db2.prepare('SELECT COUNT(*) n FROM _migrations').get().n === 2);
+    ok('reabrir no reaplica (siguen 3 migraciones)', db2.prepare('SELECT COUNT(*) n FROM _migrations').get().n === 3);
     const { runMigrations } = await import('../../db/migrate.js');
     const again = runMigrations(db2, () => {}, { dir: path.join(HERE, '..', 'migrations'), tag: 't' });
-    ok('runMigrations explícito sobre una base migrada es no-op', again.applied.length === 0 && again.already.length === 2);
+    ok('runMigrations explícito sobre una base migrada es no-op', again.applied.length === 0 && again.already.length === 3);
 
     section('[3] reglas versionadas (validadas, append-only, prospectivas)');
     ok('sin reglas vigentes ⇒ NO_ACTIVE_RULES', throwsCode(() => L.recordFact(db2, { source: 'mission', sourceEventId: 'ev-0', factType: 'mission_completed', userId: 'u-x', occurredAt: T0, eligibility: 'eligible', now: T0 }, { env: EARN }), 'NO_ACTIVE_RULES'));
@@ -287,7 +287,7 @@ try {
         !/readFileSync|from\s+['"][^'"]*(progressService|experienceStore|eventsService)[^'"]*['"]|USERS_DB|mook_db\.json/.test(modFiles.filter((f) => f !== 'exclusions.mjs').map(srcOf).join('\n')));
     const serverSrc = read('server/server.js');
     ok('server.js importa del motor SOLO mookSource.mjs', (serverSrc.match(/from '\.\/gamification\/[^']+'/g) || []).join() === "from './gamification/mookSource.mjs'");
-    ok('server.js engancha solo revisión MOOK, experiencia completada y el reconciliador', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler');
+    ok('server.js engancha solo revisión MOOK, experiencia completada, el reconciliador y la elegibilidad de obra', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler,gamificationMook.workBlock');
     ok('el gancho de revisión va DESPUÉS de res.json', /res\.json\(\{ id: ev\.id, review: ev\.review \}\);\s*\n\s*\/\/[^\n]*\n\s*gamificationMook\.onMookEvidenceReviewed/.test(serverSrc));
     ok('ni lectura, ni progreso, ni Leo, ni acceso enganchados al motor', !/scheduleFact|recordFact|reading_completion/.test(serverSrc));
     ok('progressService no depende del motor', !/gamification/.test(read('server/progressService.js')));

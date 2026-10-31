@@ -46,6 +46,9 @@ export const LAYERS = Object.freeze({
     EXCLUDED: 'excluded',
 });
 
+/** Actos que se registran por obra y ciclo. Coincide con el `CHECK` de `gm_work_cycles`. */
+export const WORK_CYCLE_ACTS = Object.freeze(['reading', 'reflection']);
+
 /** Fuentes reconocibles. Los grados deben coincidir con SOURCE_GRADE de policy.mjs (hay prueba). */
 const SOURCES = Object.freeze({
     reading_completion: { grade: 'B' },

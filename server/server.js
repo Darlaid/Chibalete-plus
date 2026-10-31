@@ -2908,18 +2908,23 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth,
 // G4-05A-1: comprueba el acceso a la obra declarada antes de tomar el lock de
 // MOOK. El snapshot solo se escribe si esta petición crea la evidencia. No
 // concede acceso a nada y un fallo nunca impide entregar.
+// G4-05A-2: lectura autoritativa, sin las cachés por réplica, y la elegibilidad
+// de la obra queda fijada aquí junto con el acceso.
 async function checkWorkAccess(userId, runId, nodeId) {
     let workRef = null;
     try {
-        _jsonCache.delete(MOOK_DB); // el run puede venir de la otra réplica
-        const doc = readMook();
+        const fresh = (file) => { _jsonCache.delete(file); return readJSON(file); };
+        const doc = experienceStore.normalizeMookStore(fresh(MOOK_DB));
         const run = doc.runs.find(r => r.id === runId);
         if (!run || run.userId !== userId || run.nodeStates?.[nodeId]?.status === 'completed') return null;
         const v = doc.versions.find(x => x.id === run.experienceVersionId);
         const declared = v ? experienceStore.productionWorkRef(v, nodeId) : null;
         if (!declared?.workRef || declared.issue) return null;
         workRef = declared.workRef;
-        const d = await decideContentAccess(userId, workRef, { logDecision: false });
+        const blocked = gamificationMook.workBlock(fresh(DB_FILE).find(c => c.id === workRef));
+        if (blocked) return experienceStore.buildWorkAccess(workRef, { status: 403, via: blocked.toUpperCase(), body: { allowed: false } });
+        rightsGate.invalidate();
+        const d = await decideContentAccess(userId, workRef, { logDecision: false, readStore: fresh });
         return experienceStore.buildWorkAccess(workRef, d);
     } catch {
         return workRef ? experienceStore.buildWorkAccess(workRef, null) : null;
@@ -3370,6 +3375,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         // 7. Evaluar reglas de acceso por grupo
         let unionAccess = null;
         let hasAnyActiveGroupRule = false;
+        const groupCatalogIds = new Set(); // G4-05A-2: separa grupo de organización en `via`
 
         for (const g of userGroups) {
             if (!isEntityActive(g.accessStartsAt, g.accessEndsAt)) continue;
@@ -3396,6 +3402,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
             }
 
             if (effectiveIds.length > 0) {
+                effectiveIds.forEach(id => groupCatalogIds.add(id));
                 if (unionAccess === null) {
                     unionAccess = [...effectiveIds];
                 } else {
@@ -3456,7 +3463,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         if (unionAccess !== null && Array.isArray(unionAccess)) {
             if (unionAccess.includes(contentId)) {
                 say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_CATALOG`, 'ACCESS');
-                return { status: 200, via: 'GROUP_CATALOG', body: { allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' } };
+                return { status: 200, via: groupCatalogIds.has(contentId) ? 'GROUP_CATALOG' : 'ORG_CATALOG', body: { allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' } };
             } else {
                 say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via CATALOG_RESTRICTION`, 'ACCESS');
                 return { status: 403, via: 'CATALOG_RESTRICTION', body: { allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' } };

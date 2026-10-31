@@ -54,7 +54,6 @@ const CATALOG = [
     { id: 'procesando', tipo: 'libro', status: 'procesando' },
     { id: 'con-error', tipo: 'libro', status: 'error' },
 ];
-const catalogMap = (list = CATALOG) => new Map(list.map((c) => [c.id, c]));
 const bookExists = (id) => CATALOG.some((c) => c.id === id);
 const WORDS = 'una dos tres cuatro cinco seis siete ocho';
 const production = (id, resourceRef) => ({ id, type: 'PRODUCTION', title: `Producir ${id}`, ...(resourceRef !== undefined ? { resourceRef } : {}),
@@ -81,7 +80,7 @@ function walk(doc, exp, v, userId = 'lector', reviewerId = 'mediador') {
     return out;
 }
 const workRefOf = Store.productionWorkRef;
-const opts = (over = {}) => ({ catalog: catalogMap(), workRefOf, sinceMs: SINCE, ...over });
+const opts = (over = {}) => ({ isWithdrawn: () => false, workRefOf, sinceMs: SINCE, ...over });
 const reason = (r) => r.reasons[0];
 
 const AMOUNTS = { xp: { reading: 10, reflection: 20, validated: 20, route: 5 }, pm: { reviewed: 7, validated: 7 } };
@@ -126,31 +125,29 @@ try {
         const [ev] = walk(doc, exp, v);
         const r = W.resolveEvidenceWork(doc, ev, opts());
         ok('obra válida: se atribuye con su actividad', r.workRef === 'obra-a' && r.activityRef === `${v.id}:p` && r.reasons.length === 0, JSON.stringify(r));
-        const gone = W.resolveEvidenceWork(doc, ev, opts({ catalog: catalogMap(CATALOG.filter((c) => c.id !== 'obra-a')) }));
-        ok('inexistente hoy: nada', gone.workRef === null && reason(gone) === 'work_not_found');
+        ok('inexistente: no es obra', W.workBlock(undefined) === 'work_not_found');
+        ok('la elegibilidad es la de la entrega: el catálogo posterior no interviene', W.resolveEvidenceWork(doc, ev, opts()).workRef === 'obra-a' && W.resolveEvidenceWork.length === 2);
         for (const status of ['procesando', 'error', 'retirado', undefined]) {
-            const c = W.resolveEvidenceWork(doc, ev, opts({ catalog: catalogMap(CATALOG.map((x) => (x.id === 'obra-a' ? { ...x, status } : x))) }));
-            ok(`retirada o no disponible (${status}): nada`, c.workRef === null && reason(c) === 'work_unavailable');
+            ok(`no disponible (${status}): no es elegible`, W.workBlock({ id: 'x', tipo: 'libro', status }) === 'work_unavailable');
         }
         const frozen = (over) => W.resolveEvidenceWork(doc, { ...ev, workAccess: { ...ev.workAccess, ...over } }, opts());
         ok('no accesible al entregar: nada', reason(frozen({ decision: 'denied', via: 'SCOPE_ENGINE' })) === 'work_not_accessible');
         ok('indeterminado: nada', reason(frozen({ decision: 'indeterminate', via: 'INDETERMINATE' })) === 'access_indeterminate');
-        for (const via of ['LEGACY_OPEN', 'ADMIN_ROLE', 'MEDIATOR_ROLE', 'GROUP_ALL', 'ORG_ALL', undefined]) ok(`procedencia ${via}: no es explícita`, reason(frozen({ via })) === 'access_not_explicit');
+        for (const via of ['LEGACY_OPEN', 'ADMIN_ROLE', 'MEDIATOR_ROLE', 'ORG_ALL', 'ORG_CATALOG', 'WORK_NOT_CLASSIFIED', undefined]) ok(`procedencia ${via}: no es explícita`, reason(frozen({ via })) === 'access_not_explicit');
         for (const via of W.EXPLICIT_ACCESS_VIAS) ok(`procedencia ${via}: explícita`, frozen({ via }).workRef === 'obra-a');
         ok('snapshot de otra obra: nada', reason(frozen({ workRef: 'obra-b' })) === 'access_snapshot_mismatch');
         ok('sin el resolutor de obra inyectado: nada', W.resolveEvidenceWork(doc, ev, opts({ workRefOf: undefined })).workRef === null);
         const { workAccess: _omit, ...historic } = ev;
         ok('evidencia histórica sin snapshot: nada', reason(W.resolveEvidenceWork(doc, historic, opts())) === 'no_access_snapshot');
         const blocks = { coleccion: 'work_is_collection', parte: 'work_is_part', guia: 'work_is_part', podcast: 'work_not_classified', articulo: 'work_not_classified', pieza: 'work_not_standalone' };
-        for (const [id, why] of Object.entries(blocks)) {
-            const d = Store.emptyMookStore();
-            const p = publish(d, 'k', [reading('r', id), production('p', id)]);
-            const [e] = walk(d, p.exp, p.v);
-            ok(`${id}: no cuenta como obra`, reason(W.resolveEvidenceWork(d, e, opts())) === why);
-        }
+        for (const [id, why] of Object.entries(blocks)) ok(`${id}: no cuenta como obra`, W.workBlock(CATALOG.find((c) => c.id === id)) === why);
         ok('los tipos admitidos son los del modelo', JSON.stringify(W.WORK_TIPOS) === JSON.stringify(['libro', 'libro_album', 'video']));
-        const r2 = W.resolveEvidenceWork(doc, ev, opts({ catalog: catalogMap(CATALOG.filter((c) => c.id !== 'obra-a')) }));
+        const r2 = W.resolveEvidenceWork(doc, ev, opts({ isWithdrawn: () => true }));
+        ok('retirada legal: nada', reason(r2) === 'work_withdrawn');
         ok('rechazar no altera la evidencia ni la versión', ev.review.decision === 'aprobado' && Store.productionWorkRef(v, 'p').workRef === 'obra-a' && r2.activityRef === `${v.id}:p`);
+        ok('retirada levantada: vuelve a atribuirse', W.resolveEvidenceWork(doc, ev, opts()).workRef === 'obra-a');
+        ok('sin respuesta sobre la retirada: nada', reason(W.resolveEvidenceWork(doc, ev, opts({ isWithdrawn: undefined }))) === 'work_withdrawn');
+        ok('si la consulta falla: nada', reason(W.resolveEvidenceWork(doc, ev, opts({ isWithdrawn: () => { throw new Error('x'); } }))) === 'work_withdrawn');
     }
 
     section('[3] varias obras');
@@ -161,7 +158,7 @@ try {
         const cov = W.versionWorkCoverage(v, workRefOf);
         ok('la versión declara varias asociaciones', cov.coverage === 'multi' && cov.associations.length === 2);
         ok('cada evidencia va solo a la obra de su nodo', W.resolveEvidenceWork(doc, ea, opts()).workRef === 'obra-a' && W.resolveEvidenceWork(doc, eb, opts()).workRef === 'obra-b');
-        const { evidence } = W.mookRecognitionEvidence(doc, { catalog: CATALOG, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
+        const { evidence } = W.mookRecognitionEvidence(doc, { isWithdrawn: () => false, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
         ok('dos evidencias, dos entradas, sin repartir ninguna', evidence.length === 2 && new Set(evidence.map((e) => e.evidenceId)).size === 2);
         const blockedB = W.resolveEvidenceWork(doc, { ...eb, workAccess: { ...eb.workAccess, decision: 'denied' } }, opts());
         ok('una obra no accesible no afecta a la otra', blockedB.workRef === null && W.resolveEvidenceWork(doc, ea, opts()).workRef === 'obra-a');
@@ -235,7 +232,7 @@ try {
         ok('misma obra, actividades distintas', ra.workRef === rb.workRef && ra.activityRef !== rb.activityRef);
         ok('el resolutor no decide el ciclo', !('cycle' in ra));
         const snapshot = JSON.stringify(doc);
-        const run = () => W.mookRecognitionEvidence(doc, { catalog: CATALOG, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
+        const run = () => W.mookRecognitionEvidence(doc, { isWithdrawn: () => false, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
         const a = run(); const b = run();
         ok('determinista: repetir da lo mismo', JSON.stringify(a) === JSON.stringify(b) && a.evidence.length === 2);
         ok('no escribe en el documento MOOK', JSON.stringify(doc) === snapshot);
@@ -291,7 +288,7 @@ try {
             walk(d, p.exp, p.v, userId, reviewerId);
             return d;
         };
-        const gather = (d, gate) => W.mookRecognitionEvidence(d, { catalog: CATALOG, workRefOf, resolveUser, gate, sinceMs: SINCE });
+        const gather = (d, gate) => W.mookRecognitionEvidence(d, { isWithdrawn: () => false, workRefOf, resolveUser, gate, sinceMs: SINCE });
         const gateOpen = () => X.exclusionGate(db, env);
         ok('sin exclusiones: pasa', gather(scenario('lector', 'mediador'), gateOpen()).evidence.length === 1);
         for (const [who, u, a] of [['inactivo', 'inactivo', 'mediador'], ['sintético', 'sintetico', 'mediador'], ['inexistente', 'nadie', 'mediador'], ['revisor inactivo', 'lector', 'inactivo']]) {

@@ -4090,6 +4090,7 @@ GAMIFICATION_MIGRATIONS_DIR = os.path.join(
 GAMIFICATION_TABLES = (
     "gm_rule_sets", "gm_subjects", "gm_source_facts", "gm_xp_entries", "gm_achievements", "gm_redemptions",
     "gm_pm_movements", "gm_pm_balances", "gm_redemption_transitions", "gm_reward_grants", "gm_admin_audit",
+    "gm_work_cycles",
 )
 
 
@@ -4119,6 +4120,8 @@ def _build_gamification_db(base_dir: str) -> str:
                      (f"fact-fx-{i}", f"evid-fx-{i}", t + i, t + i))
         conn.execute("INSERT INTO gm_xp_entries VALUES (?, 'u-fx', 'award', 30, ?, NULL, 'gm-fx-v1', ?)",
                      (f"xp-fx-{i}", f"fact-fx-{i}", t + i))
+    conn.execute("INSERT INTO gm_work_cycles VALUES ('fact-fx-0', 'u-fx', 'obra-fx', 1, 'reading', 10, 0)")
+    conn.execute("INSERT INTO gm_work_cycles VALUES ('fact-fx-0', 'u-fx', 'obra-fx', 1, 'reflection', 20, 5)")
     conn.execute("INSERT INTO gm_redemptions VALUES ('red-fx', 'u-fx', 'idem-fx', 'avatar-fx', 'digital_asset', 15,"
                  " 'gm-fx-v1', 'RESERVED', ?, ?)", (t + 10, t + 10))
     movs = [
@@ -4234,7 +4237,8 @@ def test_gm_restore_logical():
     origen = _build_gamification_db(env.base)
     esperado = _gamification_logical_digest(origen)
     assert esperado["integrity"] == "ok", esperado
-    assert esperado["migrations"] == ["0001_ledger", "0002_subject_model"], esperado["migrations"]
+    assert esperado["migrations"] == ["0001_ledger", "0002_subject_model", "0003_work_cycle_acts"], esperado["migrations"]
+    assert esperado["counts"]["gm_work_cycles"] == 2, esperado["counts"]
     # 8 tablas append-only (2 triggers c/u) + balances sin DELETE + canjes (transicion y DELETE).
     assert sum("TRIGGER" in sql for sql in esperado["schema"]) == 21, esperado["schema"]
     assert esperado["counts"]["gm_pm_movements"] == 7 and esperado["counts"]["gm_source_facts"] == 3, esperado["counts"]

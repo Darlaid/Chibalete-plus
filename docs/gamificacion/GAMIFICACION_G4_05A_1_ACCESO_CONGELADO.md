@@ -1,6 +1,7 @@
 # GAMIFICACION-G4-05A-1: acceso congelado en evidencias MOOK
 
 **Fecha:** 2026-10-31 · **Base:** `137a5a8` sobre `757280e` · **Producción:** sin cambios.
+**Actualizado por [G4-05A-2](GAMIFICACION_G4_05A_2_ACTOS_Y_ELEGIBILIDAD.md):** procedencias elegibles, lectura autoritativa y elegibilidad de la obra.
 **Alcance:** registrar la decisión de acceso en la primera entrega. Sin migración, flags, XP ni PM. Resuelve el §2 de [G4-05A STOP](GAMIFICACION_G4_05A_STOP.md); los §3 y §4 siguen abiertos.
 
 ## 1. Recorrido

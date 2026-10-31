@@ -91,7 +91,7 @@ try {
     section('[1] arranque simultáneo (4 procesos) sobre una base inexistente');
     const mig = await runReplicas(path.join(tmp, 'mig', 'gamification.db'), ['migrate-a', 'migrate-b', 'migrate-c', 'migrate-d']);
     ok('los 4 procesos terminan sin error', mig.every((r) => r.code === 0 && r.errors.length === 0), JSON.stringify(mig));
-    ok('todos ven exactamente 2 migraciones aplicadas', mig.every((r) => r.migrations === 2), JSON.stringify(mig.map((r) => r.migrations)));
+    ok('todos ven exactamente 3 migraciones aplicadas', mig.every((r) => r.migrations === 3), JSON.stringify(mig.map((r) => r.migrations)));
 
     section('[2] dos réplicas escribiendo a la vez');
     const DB2 = path.join(tmp, 'w', 'gamification.db');

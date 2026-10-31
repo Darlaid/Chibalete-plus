@@ -11,12 +11,14 @@
  *  - Evidencia: `evidence.id`, la clave de idempotencia ya vigente.
  *  - Ciclo: NO se resuelve aquí. Lo calcula `decideRecognition` con el historial.
  *
- * El acceso no se vuelve a consultar: vale la decisión congelada en la primera
- * entrega (`evidence.workAccess`). Sin ella no hay reconocimiento.
+ * Acceso y elegibilidad de la obra no se vuelven a consultar: vale la decisión
+ * congelada en la primera entrega (`evidence.workAccess`). Sin ella no hay
+ * reconocimiento. Lo único posterior que bloquea es una retirada legal explícita
+ * de la obra, que llega como `isWithdrawn`: sin esa respuesta no se atribuye.
  *
  * Nunca lee `payload`, títulos, texto ni campos del cliente, ni deduce la obra
  * desde otros nodos. Ante cualquier duda no atribuye nada. Sin escrituras: los
- * documentos MOOK y el catálogo llegan como argumentos, y el ledger sigue sin
+ * documentos MOOK llegan como argumentos, y el ledger sigue sin
  * emitir por `mook_review`. Nada del producto llama a este módulo hasta G4-05.
  * `workRefOf` es `experienceStore.productionWorkRef`: se inyecta, como toda fuente
  * de este motor, y sin él no se atribuye nada.
@@ -35,7 +37,7 @@ const versionNodes = (version) => (version.modules ?? []).flatMap((m) => m.nodes
  * Procedencias que autorizan esta obra de forma explícita. `via` queda guardada
  * tal cual: ampliar esta lista no exige recalcular ninguna decisión.
  */
-export const EXPLICIT_ACCESS_VIAS = Object.freeze(['SCOPE_TITLE', 'SCOPE_COLLECTION', 'GROUP_CATALOG']);
+export const EXPLICIT_ACCESS_VIAS = Object.freeze(['SCOPE_TITLE', 'SCOPE_COLLECTION', 'GROUP_CATALOG', 'GROUP_ALL']);
 
 /** Motivo por el que un contenido no es una obra reconocible, o null. */
 export function workBlock(content) {
@@ -77,9 +79,10 @@ function boundContext(doc, evidence) {
  * Obra de una evidencia, o ninguna con su motivo.
  * @param {object} doc  documento MOOK normalizado
  * @param {object} evidence
- * @param {{ catalog: Map<string, object>, workRefOf: Function, sinceMs: number }} opts
+ * @param {{ workRefOf: Function, isWithdrawn: Function, sinceMs: number }} opts
+ *        `isWithdrawn(contentId)` debe responder `false` para atribuir.
  */
-export function resolveEvidenceWork(doc, evidence, { catalog, workRefOf, sinceMs } = {}) {
+export function resolveEvidenceWork(doc, evidence, { workRefOf, isWithdrawn, sinceMs } = {}) {
     const result = (reason, workRef = null, activityRef = null) => ({ evidenceId: evidence?.id ?? null, activityRef, workRef, reasons: reason ? [reason] : [] });
     if (evidence?.review?.status !== 'REVIEWED' || evidence.review.decision !== 'aprobado') return result('evidence_not_approved');
     const ctx = boundContext(doc, evidence);
@@ -94,14 +97,15 @@ export function resolveEvidenceWork(doc, evidence, { catalog, workRefOf, sinceMs
     const { workRef, issue } = workRefOf(version, node.id);
     if (workRef === null) return result('no_work_declared', null, activityRef);
     if (issue) return result('work_not_in_version', null, activityRef);
-    const blocked = workBlock(catalog?.get(workRef));
-    if (blocked) return result(blocked, null, activityRef);
     const frozen = evidence.workAccess;
     if (!frozen) return result('no_access_snapshot', null, activityRef);
     if (frozen.workRef !== workRef) return result('access_snapshot_mismatch', null, activityRef);
     if (frozen.decision === 'indeterminate') return result('access_indeterminate', null, activityRef);
     if (frozen.decision !== 'allowed') return result('work_not_accessible', null, activityRef);
     if (!EXPLICIT_ACCESS_VIAS.includes(frozen.via)) return result('access_not_explicit', null, activityRef);
+    let withdrawn = true;
+    try { withdrawn = isWithdrawn?.(workRef) !== false; } catch { withdrawn = true; }
+    if (withdrawn) return result('work_withdrawn', null, activityRef);
     return result(null, workRef, activityRef);
 }
 
@@ -111,17 +115,16 @@ export function resolveEvidenceWork(doc, evidence, { catalog, workRefOf, sinceMs
  * nada. Los motivos son recuentos: ningún dato personal sale de aquí.
  * @returns {{ evidence: object[], unattributed: Record<string, number> }}
  */
-export function mookRecognitionEvidence(doc, { catalog = [], workRefOf, resolveUser, gate, sinceMs } = {}) {
+export function mookRecognitionEvidence(doc, { workRefOf, isWithdrawn, resolveUser, gate, sinceMs } = {}) {
     const out = { evidence: [], unattributed: {} };
     if (!sinceMs || typeof resolveUser !== 'function' || typeof gate?.excludes !== 'function') return out;
-    const byId = new Map(catalog.map((c) => [c.id, c]));
     const docs = new Map((doc?.evidence ?? []).map((e) => [e.id, e]));
     const count = (reason) => { out.unattributed[reason] = (out.unattributed[reason] ?? 0) + 1; };
     for (const c of mookReviewCandidates(doc)) {
         if (c.occurredAt < sinceMs) continue;
         if (candidateEligibility(resolveUser, c) !== 'eligible') { count('subject_not_eligible'); continue; }
         if (gate.excludes(c.userId) || (c.actorId && gate.excludes(c.actorId))) { count('subject_excluded'); continue; }
-        const { workRef, reasons } = resolveEvidenceWork(doc, docs.get(c.sourceEventId), { catalog: byId, workRefOf, sinceMs });
+        const { workRef, reasons } = resolveEvidenceWork(doc, docs.get(c.sourceEventId), { workRefOf, isWithdrawn, sinceMs });
         if (!workRef) { count(reasons[0]); continue; }
         out.evidence.push({ source: 'mook_review', evidenceId: c.sourceEventId, userId: c.userId, actorId: c.actorId,
             at: c.occurredAt, decision: 'aprobado', workRef });

@@ -25,6 +25,9 @@ import { scheduleFact } from './intake.mjs';
 import { candidateEligibility, mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
+/** Única puerta de `server.js` al motor: la entrega fija la elegibilidad de la obra (G4-05A-2). */
+export { workBlock } from './mookWorks.mjs';
+
 export const RECONCILE_BUSY_MS = 250;
 export const DEFAULT_INTERVAL_MS = 15 * 60_000;
 export const MIN_INTERVAL_MS = 60_000;

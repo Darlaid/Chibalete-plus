@@ -64,6 +64,8 @@ let _failedUntil = 0;
 
 const OPEN_ATTEMPTS = 12;
 const isBusy = (e) => e?.code === 'SQLITE_BUSY' || e?.code === 'SQLITE_LOCKED' || /database is locked|database is busy/i.test(e?.message || '');
+/** Otra réplica confirmó la misma versión: la transacción se revirtió y reabrir ya la ve aplicada. */
+const isMigrationRace = (e) => /UNIQUE constraint failed: _migrations.version/.test(e?.message ?? '');
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
@@ -77,7 +79,7 @@ function openAndMigrate(dbPath, log) {
         try {
             return openAndMigrateOnce(dbPath, log);
         } catch (e) {
-            if (!isBusy(e) || attempt >= OPEN_ATTEMPTS) throw e;
+            if (!(isBusy(e) || isMigrationRace(e)) || attempt >= OPEN_ATTEMPTS) throw e;
             log(`[gamification-migrate] busy at open (attempt ${attempt}), retrying`);
             sleepSync(25 + Math.floor(Math.random() * 75 * attempt));
         }

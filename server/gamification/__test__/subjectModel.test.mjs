@@ -186,7 +186,7 @@ try {
     D.closeGamificationDb({ resetBackoff: true });
     const empty = new Database(path.join(tmp, 'empty.db'));
     const ap = runMigrations(empty, () => {}, { dir: DIR, tag: 't' });
-    ok('sobre una base vacía se aplica', ap.applied.join() === '0001_ledger,0002_subject_model');
+    ok('sobre una base vacía se aplica', ap.applied.join() === '0001_ledger,0002_subject_model,0003_work_cycle_acts');
     empty.close();
 
     section('[7] flags OFF');
