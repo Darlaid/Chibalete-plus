@@ -199,6 +199,21 @@ export function validateRecognitionConfig(config) {
     return { ok: errors.length === 0, errors };
 }
 
+/**
+ * G4-05A-4. Configuración que puede activar emisión: la de `validateRecognitionConfig`
+ * más una referencia al acta de aprobación, XP real por lectura y reflexión, techo
+ * positivo y PM en cero, porque esta ruta no emite PM. Sin valores por defecto.
+ */
+export function validateApprovedRecognition(config) {
+    const { errors } = validateRecognitionConfig(config);
+    if (!isId(config?.approvalRef)) errors.push('approvalRef');
+    for (const k of ['reading', 'reflection']) if (!(config?.amounts?.xp?.[k] > 0)) errors.push(`amounts.xp.${k}.zero`);
+    if (!(config?.xpCeilingPerWorkCycle > 0)) errors.push('xpCeilingPerWorkCycle.zero');
+    for (const k of ['reviewed', 'validated']) if (config?.amounts?.pm?.[k] !== 0) errors.push(`amounts.pm.${k}.must_be_zero`);
+    if ((config?.reread?.pmFactors ?? []).some((f) => f !== 0)) errors.push('reread.pmFactors.must_be_zero');
+    return { ok: errors.length === 0, errors };
+}
+
 function outcomeOf(outcome, cls, reasons, extra = {}) {
     return { outcome, source: cls?.source ?? null, layer: cls?.layer ?? LAYERS.EXCLUDED, grade: cls?.grade ?? null, cycle: null,
         xp: 0, pm: 0, entries: [], reasons, alternativeRouteOpen: false, ruleVersion: RECOGNITION_RULE_VERSION, ...extra };

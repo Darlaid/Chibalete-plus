@@ -4,6 +4,7 @@
  * imprime su resultado. Lo lanza workRecognition.test.mjs.
  */
 import '../../__test__/helpers/testMode.mjs';
+import './helpers/xpRecognitionHarness.mjs';
 import fs from 'node:fs';
 
 const { productionWorkRef } = await import('../../lib/experienceStore.js');

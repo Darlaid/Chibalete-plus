@@ -1,6 +1,7 @@
 # GAMIFICACION-G4-05A-3: registro por obra y ciclo
 
 **Fecha:** 2026-10-31 · **Base:** `4d8f629` · **Producción:** sin cambios.
+**Corregido por [G4-05A-4](GAMIFICACION_G4_05A_4_REGISTRO_A_CERO.md):** el registro a cero descrito aquí se retiró; ya no se escriben filas sin emisión.
 **Alcance:** conectar evidencias MOOK elegibles con `gm_work_cycles` por el ledger. Sin importes, flags activos, XP ni PM. Solo funciona con `XP_EARNING_ENABLED`, que sigue OFF.
 
 ## 1. Sin cifras aprobadas: registro sin importes

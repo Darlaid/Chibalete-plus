@@ -61,7 +61,8 @@ const isAmount = (n) => Number.isSafeInteger(n) && n >= 0 && n <= MAX_RULE_AMOUN
 export function validateRules(rules, { featureAllowlist }) {
     if (!rules || typeof rules !== 'object' || Array.isArray(rules)) throw bad('INVALID_RULES', 'objeto requerido');
     if (rules.schema !== 1) throw bad('INVALID_RULES', 'schema debe ser 1');
-    const extra = Object.keys(rules).filter((k) => !['schema', 'facts', 'caps'].includes(k));
+    // `recognition` (G4-05A-4) lo valida `ledger.createRuleSet`, junto al núcleo que lo usa.
+    const extra = Object.keys(rules).filter((k) => !['schema', 'facts', 'caps', 'recognition'].includes(k));
     if (extra.length) throw bad('INVALID_RULES', `claves desconocidas: ${extra.join(',')}`);
     const facts = rules.facts ?? {};
     if (typeof facts !== 'object' || Array.isArray(facts)) throw bad('INVALID_RULES', 'facts');

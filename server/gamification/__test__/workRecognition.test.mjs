@@ -1,16 +1,20 @@
 /**
- * workRecognition.test.mjs — CHP-GAMIFICACION-G4-05A-3.
+ * workRecognition.test.mjs — CHP-GAMIFICACION-G4-05A-3 y G4-05A-4.
  *
  * Registro por obra y ciclo, con store MOOK real, derechos reales de solo lectura
  * y bases temporales:
  *  [1] fuente de derechos  [2] estados legales  [3] evidencia y corte
  *  [4] actos, ciclo e idempotencia  [5] dos procesos  [6] reinicio y restauración
- *  [7] sujetos  [8] flags, intake y bloqueos  [9] server.js real
+ *  [7] sujetos  [8] flags, intake y bloqueos  [9] server.js real sin arnés
+ *  [10] configuración ausente: ninguna clave consumida
+ * Los importes son de prueba y solo existen aquí; el arnés libera `mook_review`
+ * en este proceso para ejercitar la emisión. `server.js` corre sin él.
  * Nunca toca data/ ni data-critical/.
  *
  *   node server/gamification/__test__/workRecognition.test.mjs
  */
 import '../../__test__/helpers/testMode.mjs';
+import './helpers/xpRecognitionHarness.mjs';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -45,6 +49,8 @@ const S = await import('../subjects.mjs');
 
 const SINCE = Date.now() - 60_000;
 const WORDS = 'una dos tres cuatro cinco seis siete ocho';
+const TEST_RECOGNITION = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 3, reflection: 4, validated: 4, route: 1 }, pm: { reviewed: 0, validated: 0 } },
+    xpCeilingPerWorkCycle: 20, reread: { windowDays: 30, xpFactors: [0.5], pmFactors: [0] } };
 const NOW = Date.now();
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const bookExists = () => true;
@@ -81,7 +87,7 @@ function setRight(contentId, legalStatus) {
 }
 
 const dirs = { n: 0 };
-function fresh() {
+function fresh(recognition = TEST_RECOGNITION) {
     dirs.n += 1;
     const dir = path.join(tmp, `g${dirs.n}`);
     fs.mkdirSync(path.join(dir, 'db'), { recursive: true }); fs.mkdirSync(path.join(dir, 'reg'));
@@ -91,13 +97,14 @@ function fresh() {
     process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
     D.closeGamificationDb({ resetBackoff: true });
     const db = D.getGamificationDb({ env });
-    L.createRuleSet(db, { ruleVersion: 'gm-r-v1', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {} } });
+    if (recognition) L.createRuleSet(db, { ruleVersion: 'gm-r-v1', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition } });
     return { db, env };
 }
 const everyone = () => ({ exists: true, active: true, synthetic: false });
 const sweep = (db, doc, env, over = {}) => M.recognizeMookWorks(db, doc, { workRefOf: Store.productionWorkRef, readRights: () => Rights.readWithdrawnWorks(), resolveUser: everyone, sinceMs: SINCE, env, now: Date.now(), ...over });
 const count = (db, t, where = '1=1', ...a) => db.prepare(`SELECT COUNT(*) c FROM ${t} WHERE ${where}`).get(...a).c;
-const noMoney = (db) => count(db, 'gm_xp_entries') === 0 && count(db, 'gm_pm_movements') === 0 && count(db, 'gm_pm_balances') === 0 && count(db, 'gm_work_cycles', 'xp <> 0 OR pm <> 0') === 0;
+const noPm = (db) => count(db, 'gm_pm_movements') === 0 && count(db, 'gm_pm_balances') === 0 && count(db, 'gm_work_cycles', 'pm <> 0') === 0;
+const xpMatches = (db) => db.prepare('SELECT COALESCE(SUM(xp),0) n FROM gm_xp_entries').get().n === db.prepare('SELECT COALESCE(SUM(xp),0) n FROM gm_work_cycles').get().n;
 
 const realFiles = ['data/mook_db.json', 'data/content.json', 'data/access_db.json'].map((f) => path.join(REPO, f)).filter((f) => fs.existsSync(f));
 const realBefore = realFiles.map(sha);
@@ -158,7 +165,7 @@ try {
         const px = publish(expired, 'e', [reading('r', 'obra-a'), production('p', 'obra-a')]);
         deliver(expired, px.exp, px.v);
         ok('la decisión de acceso no se recalcula: no hay consulta de acceso', sweep(db, expired, env).recognized === 1);
-        ok('sin XP ni PM', noMoney(db));
+        ok('sin PM, y el XP cuadra con los actos', noPm(db) && xpMatches(db));
     }
 
     section('[3] evidencia y corte');
@@ -202,11 +209,13 @@ try {
         ok('multiobra: cada evidencia en su obra', count(db, 'gm_source_facts') === 4 && count(db, 'gm_work_cycles') === 7 && db.prepare('SELECT COUNT(DISTINCT work_key) c FROM gm_work_cycles').get().c === 3);
         const dump = JSON.stringify(db.prepare('SELECT * FROM gm_work_cycles').all()) + JSON.stringify(db.prepare('SELECT * FROM gm_source_facts').all());
         ok('sin contentId, evidenceId ni usuario en claro', !/obra-|lector|mediador/.test(dump) && !dump.includes(ev.id));
-        ok('hecho sin emisión ni rasgos', count(db, 'gm_source_facts', "decision = 'observed' AND features_json = '{}' AND grade = 'A'") === 4);
+        ok('hecho emitido, sin rasgos ni filas observed', count(db, 'gm_source_facts', "decision = 'awarded' AND features_json = '{}' AND grade = 'A'") === 4 && count(db, 'gm_source_facts', "decision = 'observed'") === 0);
+        ok('un asiento de XP por hecho', count(db, 'gm_xp_entries') === 4);
+        ok('importes por acto de la regla', count(db, 'gm_work_cycles', "act = 'reading' AND xp = 3") === 3 && count(db, 'gm_work_cycles', "act = 'reflection' AND xp = 4") === 4);
         ok('sujeto y revisor seudónimos', count(db, 'gm_subjects') === 2);
-        ok('el ledger cuadra y no hay dinero', L.verifyLedger(db).ok && noMoney(db));
+        ok('el ledger cuadra, sin PM', L.verifyLedger(db).ok && noPm(db) && xpMatches(db));
         ok('SQL: mismo acto rechazado', throwsCode(() => db.prepare("INSERT INTO gm_work_cycles SELECT fact_id, subject_ref, work_key, cycle, act, xp, pm FROM gm_work_cycles WHERE act = 'reflection' LIMIT 1").run(), 'SQLITE_CONSTRAINT_PRIMARYKEY'));
-        ok('el llamador no fija montos, ciclo ni acto', (() => { const r = L.recordWorkRecognition(db, { evidenceId: 'ev-x', userId: 'lector', actorId: 'mediador', at: Date.now(), workRef: 'obra-z', decision: 'aprobado', xp: 99, pm: 99, cycle: 7, act: 'route' }, { env }); return r.inserted && r.acts.join() === 'reading,reflection' && noMoney(db); })());
+        ok('el llamador no fija montos, ciclo ni acto', (() => { const r = L.recordWorkRecognition(db, { evidenceId: 'ev-x', userId: 'lector', actorId: 'mediador', at: Date.now(), workRef: 'obra-z', decision: 'aprobado', xp: 99, pm: 99, cycle: 7, act: 'route' }, { env }); return r.inserted && r.acts.join() === 'reading,reflection' && r.xp === 7 && noPm(db); })());
         ok('decisión distinta de aprobado: no', L.recordWorkRecognition(db, { evidenceId: 'ev-y', userId: 'lector', actorId: 'mediador', at: Date.now(), workRef: 'obra-z', decision: 'con_comentarios' }, { env }).inserted === false);
     }
 
@@ -310,12 +319,14 @@ try {
         ok('padre OFF: nada', sweep(db, doc, parentOff).skipped === 'disabled');
         const onPm = { ...env, PM_EARNING_ENABLED: '1' };
         sweep(db, doc, onPm);
-        ok('PM ON: sigue sin PM', count(db, 'gm_work_cycles') === 2 && count(db, 'gm_work_cycles', 'pm > 0') === 0 && noMoney(db));
+        ok('PM ON: sigue sin PM', count(db, 'gm_work_cycles') === 2 && noPm(db) && xpMatches(db));
         const P = await import('../policy.mjs');
-        ok('los bloqueos de emisión siguen', P.PM_LOCKED_SOURCES.includes('mook_review') && P.XP_LOCKED_SOURCES.includes('mook_review'));
-        ok('ninguna regla puede pagar por revisión', throwsCode(() => P.validateRules({ schema: 1, caps: { pmPerDay: 1, pmPerWeek: 1 }, facts: { 'mook_review/evidence_reviewed': { xp: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST }), 'XP_SOURCE_LOCKED'));
+        ok('PM sigue bloqueado aun con el arnés', P.PM_LOCKED_SOURCES.includes('mook_review'));
+        const policySrc = fs.readFileSync(path.join(HERE, '..', 'policy.mjs'), 'utf8');
+        ok('en el código real `mook_review` sigue bloqueada para XP', /XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policySrc));
+        ok('ninguna regla puede pagar PM por revisión', throwsCode(() => P.validateRules({ schema: 1, caps: { pmPerDay: 1, pmPerWeek: 1 }, facts: { 'mook_review/evidence_reviewed': { pm: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST }), 'PM_SOURCE_LOCKED'));
         const src = fs.readFileSync(path.join(HERE, '..', 'ledger.mjs'), 'utf8').split('export function recordWorkRecognition')[1].split('/** ¿Ya existe este hecho?')[0];
-        ok('el registro no escribe XP ni PM', !/gm_xp_entries|gm_pm_movements|insertMovement/.test(src));
+        ok('el registro no escribe PM', !/gm_pm_movements|insertMovement/.test(src));
         ok('solo reconoce fuentes del servidor: sin clics, tiempo ni Leo', !/mook_reading_node|leo|activeMinutes/i.test(src));
 
         const dir = path.join(tmp, 'v2', 'db'); fs.mkdirSync(dir, { recursive: true });
@@ -347,7 +358,56 @@ try {
         D.closeGamificationDb({ resetBackoff: true });
     }
 
-    section('[9] server.js real');
+    section('[10] configuración ausente: ninguna clave consumida');
+    {
+        const { db, env } = fresh(null);
+        const doc = Store.emptyMookStore();
+        const p = publish(doc, 'a', [reading('r', 'obra-a'), production('p', 'obra-a')]);
+        const [ev] = deliver(doc, p.exp, p.v);
+        const direct = (over = {}, e = env) => L.recordWorkRecognition(db, { evidenceId: ev.id, userId: 'lector', actorId: 'mediador', at: Date.parse(ev.review.reviewedAt), workRef: 'obra-a', decision: 'aprobado', ...over }, { env: e });
+        const clean = () => ['gm_source_facts', 'gm_work_cycles', 'gm_xp_entries', 'gm_subjects'].every((t) => count(db, t) === 0);
+        ok('sin reglas: nada', direct().reason === 'no_active_rules' && clean());
+        L.createRuleSet(db, { ruleVersion: 'gm-sin', createdBy: 'migration', now: SINCE - 9000, effectiveFrom: SINCE - 9000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {} } });
+        const r = sweep(db, doc, env);
+        ok('regla sin parámetros: ningún hecho, acto ni sujeto', r.recognized === 0 && r.notRecorded.recognition_not_configured === 1 && clean(), JSON.stringify(r));
+        const bad = (recognition) => { try { L.createRuleSet(db, { ruleVersion: 'gm-mal', createdBy: 'migration', now: SINCE, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition } }); return false; } catch (e) { return e.code === 'INVALID_RULES'; } };
+        const without = (k) => { const { [k]: _, ...rest } = TEST_RECOGNITION; return rest; };
+        ok('rechazada: sin acta de aprobación', bad(without('approvalRef')));
+        ok('rechazada: sin techo', bad(without('xpCeilingPerWorkCycle')));
+        ok('rechazada: sin relectura', bad(without('reread')));
+        ok('rechazada: sin importes', bad(without('amounts')));
+        ok('rechazada: XP en cero', bad({ ...TEST_RECOGNITION, amounts: { ...TEST_RECOGNITION.amounts, xp: { reading: 0, reflection: 0, validated: 0, route: 0 } } }));
+        ok('rechazada: techo en cero', bad({ ...TEST_RECOGNITION, xpCeilingPerWorkCycle: 0 }));
+        ok('rechazada: PM distinto de cero', bad({ ...TEST_RECOGNITION, amounts: { ...TEST_RECOGNITION.amounts, pm: { reviewed: 1, validated: 0 } } }));
+        ok('rechazada: PM en relectura', bad({ ...TEST_RECOGNITION, reread: { ...TEST_RECOGNITION.reread, pmFactors: [0.5] } }));
+        const raw = { ...TEST_RECOGNITION, amounts: { ...TEST_RECOGNITION.amounts, xp: { reading: 0, reflection: 0, validated: 0, route: 0 } } };
+        db.prepare("INSERT INTO gm_rule_sets VALUES ('gm-raw', ?, 'migration', ?, ?, ?)").run(SINCE - 8000, JSON.stringify({ schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: raw }), 'c'.repeat(64), SINCE - 8000);
+        ok('regla guardada e incompleta: tampoco escribe', direct().reason === 'recognition_not_configured' && clean());
+        const off = { ...env, XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '' };
+        ok('flags OFF: nada', direct({}, off).reason === 'disabled' && sweep(db, doc, off).skipped === 'disabled' && clean());
+        ok('solo PM ON: nada', direct({}, { ...off, PM_EARNING_ENABLED: '1' }).reason === 'disabled' && clean());
+        L.createRuleSet(db, { ruleVersion: 'gm-ok', createdBy: 'migration', now: SINCE - 7000, effectiveFrom: SINCE - 7000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: TEST_RECOGNITION } });
+        const late = sweep(db, doc, env);
+        ok('con parámetros válidos la misma evidencia se reconoce: la clave seguía libre', late.recognized === 1 && count(db, 'gm_work_cycles') === 2 && count(db, 'gm_xp_entries') === 1, JSON.stringify(late));
+        const tiny = { ...TEST_RECOGNITION, xpCeilingPerWorkCycle: 3 };
+        const c2 = fresh(tiny);
+        const d2 = Store.emptyMookStore();
+        const pa = publish(d2, 'a', [reading('r', 'obra-a'), production('p', 'obra-a')]);
+        const pb = publish(d2, 'b', [reading('r', 'obra-a'), production('p', 'obra-a')]);
+        deliver(d2, pa.exp, pa.v);
+        sweep(c2.db, d2, c2.env);
+        deliver(d2, pb.exp, pb.v);
+        const capped = sweep(c2.db, d2, c2.env);
+        ok('techo agotado: sin fila a cero y sin consumir la clave', capped.notRecorded.no_xp_to_emit === 1 && count(c2.db, 'gm_source_facts') === 1, JSON.stringify(capped));
+        ok('el techo se respeta', c2.db.prepare('SELECT SUM(xp) n FROM gm_xp_entries').get().n === 3 && xpMatches(c2.db));
+        const c3 = fresh(null);
+        L.createRuleSet(c3.db, { ruleVersion: 'gm-fut', createdBy: 'migration', now: Date.now() + 60_000, effectiveFrom: Date.now() + 60_000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: TEST_RECOGNITION } });
+        const old = L.recordWorkRecognition(c3.db, { evidenceId: 'e-old', userId: 'lector', actorId: 'mediador', at: Date.now(), workRef: 'obra-a', decision: 'aprobado' }, { env: c3.env, now: Date.now() + 120_000 });
+        ok('evidencia anterior a la regla: sin premio retroactivo ni fila', old.reason === 'predates_rules' && count(c3.db, 'gm_source_facts') === 0);
+        D.closeGamificationDb({ resetBackoff: true });
+    }
+
+    section('[9] server.js real, sin arnés');
     {
         const dir = path.join(tmp, 'http'); const data = path.join(dir, 'data'); const sqlite = path.join(dir, 'sqlite');
         fs.mkdirSync(data, { recursive: true }); fs.mkdirSync(path.join(dir, 'uploads')); fs.mkdirSync(sqlite); fs.mkdirSync(path.join(dir, 'reg')); fs.mkdirSync(path.join(dir, 'gam'));
@@ -357,7 +417,7 @@ try {
         const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: gamDb, GAMIFICATION_EXCLUSION_REGISTRY: reg };
         process.env.GAMIFICATION_DB = gamDb; process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
         const db = D.getGamificationDb({ env });
-        L.createRuleSet(db, { ruleVersion: 'gm-h-v1', createdBy: 'migration', now: Date.now() - 5000, effectiveFrom: Date.now() - 5000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {} } });
+        L.createRuleSet(db, { ruleVersion: 'gm-h-v1', createdBy: 'migration', now: Date.now() - 5000, effectiveFrom: Date.now() - 5000, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: TEST_RECOGNITION } });
         D.closeGamificationDb({ resetBackoff: true });
         const fixture = Store.emptyMookStore();
         const { exp } = publish(fixture, 'http', [reading('r', 'obra-a'), production('p', 'obra-a')]);
@@ -396,9 +456,9 @@ try {
         const rev = await call('POST', `/api/experiences/review/${sub.body?.evidenceId}`, 'u-admin', { decision: 'aprobado', feedback: 'bien' });
         ok('la respuesta de revisión no cambia', rev.status === 200 && JSON.stringify(Object.keys(rev.body)) === '["id","review"]');
         const look = () => { const c = new Database(gamDb, { readonly: true }); const r = { cycles: c.prepare('SELECT COUNT(*) n FROM gm_work_cycles').get().n, xp: c.prepare('SELECT COUNT(*) n FROM gm_xp_entries').get().n, pm: c.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n }; c.close(); return r; };
-        let seen = look();
-        for (let i = 0; i < 40 && seen.cycles === 0; i++) { await sleep(150); seen = look(); }
-        ok('servidor real: dos actos sin XP ni PM', seen.cycles === 2 && seen.xp === 0 && seen.pm === 0, `${JSON.stringify(seen)} ${logs.slice(-400)}`);
+        await sleep(1500); // margen para el gancho posterior a la respuesta
+        const seen = look();
+        ok('flags ON y parámetros válidos: el bloqueo de código impide escribir', seen.cycles === 0 && seen.xp === 0 && seen.pm === 0, `${JSON.stringify(seen)} ${logs.slice(-400)}`);
     }
 
     section('[aislamiento]');
