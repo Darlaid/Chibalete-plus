@@ -40,7 +40,7 @@ function hookDb(env, now) {
         db.pragma('synchronous = FULL');
         db.pragma('foreign_keys = ON');
         // Corrupción ⇒ lanza; base sin migrar ⇒ sin fila. En ambos casos se desiste.
-        if (!db.prepare("SELECT 1 FROM _migrations WHERE version = '0002_subject_model'").get()) throw new Error('sin migrar');
+        if (!db.prepare("SELECT 1 FROM _migrations WHERE version = '0003_work_cycle_acts'").get()) throw new Error('sin migrar');
         closeIntake();
         _hookDb = db;
         _hookPath = p;
@@ -70,6 +70,26 @@ export function scheduleFact(fact, { env = process.env, log = () => {}, onDone }
             outcome = { ok: false, code: e?.code || 'GAMIFICATION_ERROR' };
         }
         if (!outcome.ok && outcome.code !== 'GAMIFICATION_DISABLED') log(`[gamification] intake desistió: ${outcome.code}`);
+        try { onDone?.(outcome); } catch { /* el observador nunca rompe nada */ }
+    });
+}
+
+/**
+ * G4-05A-3. Como `scheduleFact`, para trabajo que necesita la base: `run(db)`
+ * corre después de la respuesta, con la conexión de ganchos. Nunca lanza; lo que
+ * se pierda aquí lo recupera el barrido.
+ */
+export function scheduleOnHookDb(run, { env = process.env, log = () => {}, onDone } = {}) {
+    if (!isGamificationEnabled(env)) { onDone?.({ ok: false, code: 'GAMIFICATION_DISABLED' }); return; }
+    setImmediate(() => {
+        let outcome;
+        try {
+            const db = hookDb(env, Date.now());
+            outcome = db ? { ok: true, result: run(db) } : { ok: false, code: 'GAMIFICATION_DB_UNAVAILABLE' };
+        } catch (e) {
+            outcome = { ok: false, code: e?.code || 'GAMIFICATION_ERROR' };
+        }
+        if (!outcome.ok) log(`[gamification] intake desistió: ${outcome.code}`);
         try { onDone?.(outcome); } catch { /* el observador nunca rompe nada */ }
     });
 }

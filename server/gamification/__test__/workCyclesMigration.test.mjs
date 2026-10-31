@@ -188,8 +188,10 @@ try {
     z.db.close();
     const off = path.join(tmp, 'off', 'gamification.db');
     ok('flag OFF: no se abre ni se crea', throwsCode(() => D.getGamificationDb({ env: { GAMIFICATION_DB: off } }), 'GAMIFICATION_DISABLED') && !fs.existsSync(off));
-    const src = fs.readFileSync(path.join(HERE, '..', 'ledger.mjs'), 'utf8') + fs.readFileSync(path.join(HERE, '..', 'mookWorks.mjs'), 'utf8');
-    ok('ningún código de producto escribe en gm_work_cycles', !/gm_work_cycles/.test(src));
+    const ledgerSrc = fs.readFileSync(path.join(HERE, '..', 'ledger.mjs'), 'utf8');
+    const others = fs.readdirSync(path.join(HERE, '..')).filter((f) => f.endsWith('.mjs') && f !== 'ledger.mjs').map((f) => fs.readFileSync(path.join(HERE, '..', f), 'utf8')).join('\n');
+    ok('solo recordWorkRecognition escribe en gm_work_cycles', ledgerSrc.match(/INSERT INTO gm_work_cycles/g)?.length === 1
+        && ledgerSrc.split('export function recordWorkRecognition')[1].split('export function hasFact')[0].includes('INSERT INTO gm_work_cycles') && !/INSERT INTO gm_work_cycles/.test(others));
     ok('sin gamification.db real', fs.existsSync(path.join(REPO, 'data-critical', 'gamification.db')) === realGam);
     a.db.close();
 } catch (e) {

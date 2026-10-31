@@ -16,7 +16,8 @@
  * Fechas de vigencia (valid_from/valid_until, YYYY-MM-DD, inclusivas) en día
  * contractual America/Bogota (P6, UTC−5 sin horario de verano).
  */
-import { getRoyaltiesDb, getPublisher, PublisherError } from './publishersStore.mjs';
+import Database from 'better-sqlite3';
+import { getRoyaltiesDb, getPublisher, PublisherError, resolveRoyaltiesDbPath } from './publishersStore.mjs';
 import { ulid } from '../ulid.js';
 
 export const RIGHTS_CAPABILITIES = Object.freeze([
@@ -97,6 +98,23 @@ export const WITHDRAWN_LEGAL_STATUSES = Object.freeze(['suspended', 'revoked', '
 export function isWorkWithdrawn(versions, at = new Date()) {
     const v = effectiveVersion(versions, at);
     return !!v && WITHDRAWN_LEGAL_STATUSES.includes(v.legalStatus);
+}
+
+/**
+ * Consulta de solo lectura de las retiradas legales vigentes. No usa
+ * `getRoyaltiesDb`, que crea y migra: abre el archivo existente en modo lectura.
+ * Sin archivo o sin esquema legible lanza: quien llama lo trata como no verificable.
+ * @returns {(contentId: string) => boolean}
+ */
+export function readWithdrawnWorks(at = new Date()) {
+    const db = new Database(resolveRoyaltiesDbPath(), { readonly: true, fileMustExist: true });
+    try {
+        db.pragma('busy_timeout = 250');
+        const index = rightsIndex(db);
+        return (contentId) => isWorkWithdrawn(index.get(contentId) ?? [], at);
+    } finally {
+        db.close();
+    }
 }
 
 // ── puro: elegibilidad económica ────────────────────────────────────────────

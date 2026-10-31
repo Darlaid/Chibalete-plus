@@ -360,9 +360,9 @@ section('[12] privacidad y pureza');
     const h = Object.freeze([]);
     ok('no muta el historial', decide(reading(), h).outcome === 'recognized');
     ok('determinista', same(decide(reading({ evidenceId: 'd' })), decide(reading({ evidenceId: 'd' }))));
-    const consumers = ['server/server.js', 'server/gamification/ledger.mjs', 'server/gamification/policy.mjs', 'server/gamification/intake.mjs',
+    const consumers = ['server/server.js', 'server/gamification/policy.mjs', 'server/gamification/intake.mjs',
         'server/gamification/mookSource.mjs', 'server/gamification/reconcile.mjs', 'server/gamification/db.mjs'];
-    ok('nada del producto llama al módulo', consumers.every((f) => !fs.readFileSync(path.join(REPO, f), 'utf8').includes('recognition.mjs')));
+    ok('solo ledger.mjs lo consume', consumers.every((f) => !fs.readFileSync(path.join(REPO, f), 'utf8').includes('recognition.mjs')));
     ok('sin migraciones ajenas a 0001, 0002 y 0003', fs.readdirSync(path.join(HERE, '..', 'migrations')).length === 3);
     ok('stores reales sin cambios', same(fingerprint(), realBefore));
 }

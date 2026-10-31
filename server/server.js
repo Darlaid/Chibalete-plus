@@ -2638,6 +2638,8 @@ function emitCompletionEvents(out, nodeId, nodeType, moduleId, ctx) {
 
 // G3-03: sujeto de un hecho de gamificación con el padrón canónico (activo y no sintético).
 const gamificationResolveUser = (id) => gamificationMook.makeResolveUser(readJSON(USERS_DB), isUserActive, isSyntheticUser)(id);
+// G4-05A-3: fuentes del registro por obra. Inerte sin XP_EARNING_ENABLED.
+const gamificationRecognition = { readMook, workRefOf: experienceStore.productionWorkRef, readRights: () => rightsStore.readWithdrawnWorks() };
 
 // Resumen de evidencias del PROPIO run (el dueño ve estado/retroalimentación/
 // historial de SUS entregas — REVIEW-01: proyección sin reviewerId).
@@ -3089,7 +3091,7 @@ app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res
         log(`[MOOK] evidence reviewed: ${ev.id} -> ${ev.review.decision}`);
         res.json({ id: ev.id, review: ev.review });
         // G3-03: aditivo y posterior a la respuesta; nunca lanza ni espera.
-        gamificationMook.onMookEvidenceReviewed(ev, { resolveUser: gamificationResolveUser, log: (m) => log(m, 'WARN') });
+        gamificationMook.onMookEvidenceReviewed(ev, { resolveUser: gamificationResolveUser, recognition: gamificationRecognition, log: (m) => log(m, 'WARN') });
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
@@ -12831,7 +12833,7 @@ app.listen(PORT, '0.0.0.0', () => {
     // G3-03: reconciliación MOOK programada. No programa nada sin
     // GAMIFICATION_ENABLED y GAMIFICATION_MOOK_SINCE; una sola réplica por barrido.
     gamificationMook.startMookReconciler(
-        { readMook, readUsers: () => readJSON(USERS_DB), isUserActive, isSyntheticUser },
+        { ...gamificationRecognition, readUsers: () => readJSON(USERS_DB), isUserActive, isSyntheticUser },
         { log: (m) => log(m, 'WARN') });
     // Build upload dedup index in background — never blocks startup
     buildHashIndex(UPLOAD_DIR, UPLOAD_DIR)

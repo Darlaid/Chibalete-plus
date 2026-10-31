@@ -19,9 +19,12 @@
  */
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
-import { isGamificationEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
+import { isGamificationEnabled, isXpEarningEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
 import { replayExclusions } from './erasure.mjs';
-import { scheduleFact } from './intake.mjs';
+import { exclusionGate } from './exclusions.mjs';
+import { scheduleFact, scheduleOnHookDb } from './intake.mjs';
+import { recordWorkRecognition } from './ledger.mjs';
+import { mookRecognitionEvidence } from './mookWorks.mjs';
 import { candidateEligibility, mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
@@ -69,6 +72,30 @@ export function makeResolveUser(users, isUserActive, isSyntheticUser) {
     };
 }
 
+/**
+ * G4-05A-3. Registra por obra y ciclo las evidencias aprobadas y atribuidas.
+ * Idempotente: se reevalúa en cada barrido. La retirada legal se consulta aquí,
+ * al reconocer; si no se puede verificar, nada avanza y la evidencia sigue pendiente.
+ * @param {{ workRefOf: Function, readRights: () => Function, resolveUser: Function }} deps
+ */
+export function recognizeMookWorks(db, doc, { workRefOf, readRights, resolveUser, sinceMs, onlyEvidenceId = null, env = process.env, now = Date.now() } = {}) {
+    if (!isXpEarningEnabled(env)) return { skipped: 'disabled' };
+    if (typeof workRefOf !== 'function' || typeof readRights !== 'function') return { skipped: 'not_wired' };
+    const gate = exclusionGate(db, env);
+    let isWithdrawn;
+    try { isWithdrawn = readRights(); } catch { isWithdrawn = () => true; }
+    const scope = onlyEvidenceId ? { ...doc, evidence: (doc.evidence ?? []).filter((e) => e.id === onlyEvidenceId) } : doc;
+    const { evidence, unattributed } = mookRecognitionEvidence(scope, { workRefOf, isWithdrawn, resolveUser, gate, sinceMs });
+    const res = { recognized: 0, already: 0, unattributed, notRecorded: {} };
+    for (const e of evidence) {
+        const r = recordWorkRecognition(db, e, { env, gate, now });
+        if (r.inserted) res.recognized++;
+        else if (r.factId) res.already++;
+        else res.notRecorded[r.reason] = (res.notRecorded[r.reason] ?? 0) + 1;
+    }
+    return res;
+}
+
 function scheduleCandidates(cands, resolveUser, opts) {
     for (const c of cands) scheduleFact({ ...c, eligibility: candidateEligibility(resolveUser, c) }, opts);
 }
@@ -77,12 +104,15 @@ function scheduleCandidates(cands, resolveUser, opts) {
  * Gancho tras una revisión MOOK. Recibe la evidencia ya revisada (lo que el
  * servidor acaba de escribir). Nunca lanza; si no aplica, no hace nada.
  */
-export function onMookEvidenceReviewed(evidence, { resolveUser, env = process.env, log = () => {}, onDone } = {}) {
+export function onMookEvidenceReviewed(evidence, { resolveUser, recognition = null, env = process.env, log = () => {}, onDone } = {}) {
     try {
         if (!isGamificationEnabled(env)) return;
         const since = mookActivationSince(env);
         if (!since || typeof resolveUser !== 'function') return;
         scheduleCandidates(mookApprovedReviewCandidates({ evidence: [evidence] }, since), resolveUser, { env, log, onDone });
+        if (recognition && isXpEarningEnabled(env)) {
+            scheduleOnHookDb((db) => recognizeMookWorks(db, recognition.readMook(), { ...recognition, resolveUser, sinceMs: since, onlyEvidenceId: evidence.id, env }), { env, log, onDone: recognition.onDone });
+        }
     } catch (e) {
         log(`[gamification] gancho MOOK review omitido: ${e?.code || 'ERROR'}`);
     }
@@ -130,7 +160,7 @@ const unlock = (lockFile) => { try { fs.unlinkSync(lockFile); } catch { /* noop 
  * Usa una conexión propia con busy corto: ante contención el barrido se corta
  * y el siguiente lo retoma (idempotente).
  */
-export function runMookReconcileOnce({ readMook, readUsers, isUserActive, isSyntheticUser, env = process.env, now = Date.now } = {}) {
+export function runMookReconcileOnce({ readMook, readUsers, isUserActive, isSyntheticUser, workRefOf, readRights, env = process.env, now = Date.now } = {}) {
     if (!isGamificationEnabled(env)) return { skipped: 'disabled' };
     const since = mookActivationSince(env);
     if (!since) return { skipped: 'no_activation_cutoff' };
@@ -149,7 +179,9 @@ export function runMookReconcileOnce({ readMook, readUsers, isUserActive, isSynt
         const doc = readMook();
         const cands = [...mookApprovedReviewCandidates(doc, since), ...mookCompletedExperienceCandidates(doc, since)];
         const resolveUser = makeResolveUser(readUsers(), isUserActive, isSyntheticUser);
-        return { ok: true, ...reconcile(db, cands, { resolveUser, env }) };
+        const swept = reconcile(db, cands, { resolveUser, env });
+        const recognition = recognizeMookWorks(db, doc, { workRefOf, readRights, resolveUser, sinceMs: since, env, now: now() });
+        return { ok: true, ...swept, recognition };
     } catch (e) {
         return { ok: false, code: e?.code || 'RECONCILE_ERROR' };
     } finally {

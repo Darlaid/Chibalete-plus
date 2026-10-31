@@ -29,8 +29,9 @@
 import crypto from 'node:crypto';
 import { GamificationError, isEarningEnabled, isXpEarningEnabled } from './db.mjs';
 import { ELIGIBILITY, SOURCE_GRADE, decideEmission, isEmissionLocked, validateRules } from './policy.mjs';
+import { WORK_CYCLE_ACTS, decideRecognition } from './recognition.mjs';
 import { exclusionGate } from './exclusions.mjs';
-import { deriveSourceKey, ensureSubject, findSubject, isExcluded } from './subjects.mjs';
+import { deriveSourceKey, deriveWorkKey, ensureSubject, findSubject, isExcluded } from './subjects.mjs';
 import { getSubjectKey } from './subjectKey.mjs';
 
 export const FACT_SOURCES = Object.freeze(Object.keys(SOURCE_GRADE));
@@ -256,6 +257,74 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
                 factId, reasonCode: `${source}.${factType}`.slice(0, MAX_ID), actorRef: 'system', ruleVersion: active.ruleVersion, createdAt: now });
         }
         return { inserted: true, persisted: true, factId, decision: d.decision, xp: d.xp, pm: d.pm, xpEntryId, movementId };
+    }).immediate();
+}
+
+/**
+ * G4-05A-3. Sin importes aprobados (A7, A12) el motor decide actos y ciclo con
+ * todo en cero. El ciclo de una evidencia MOOK no depende de estos valores: solo
+ * un recorrido nuevo abriría otro, y MOOK no lo declara.
+ */
+const UNPRICED_RECOGNITION = Object.freeze({
+    amounts: { xp: { reading: 0, reflection: 0, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
+    xpCeilingPerWorkCycle: 0,
+    reread: { windowDays: 1, xpFactors: [], pmFactors: [] },
+});
+const REVIEW_SOURCE = 'mook_review';
+const REVIEW_FACT = 'evidence_reviewed';
+
+/**
+ * Registra una evidencia MOOK ya atribuida por obra y ciclo, en una transacción
+ * `IMMEDIATE`: un hecho sin emisión y sus actos en `gm_work_cycles`.
+ *
+ * No emite: nunca escribe en `gm_xp_entries` ni `gm_pm_movements`, y rechaza
+ * cualquier acto con importe. Solo funciona con `XP_EARNING_ENABLED`. Los actos y
+ * el ciclo los decide `decideRecognition`; el llamador solo aporta la evidencia.
+ * @param {{ evidenceId, userId, actorId, at, workRef, decision }} evidence
+ * @returns {{ inserted: boolean, factId: string|null, acts: string[], reason: string|null }}
+ */
+export function recordWorkRecognition(db, evidence, { env = process.env, gate = null, now = Date.now() } = {}) {
+    const { evidenceId, userId, actorId, at, workRef, decision } = evidence ?? {};
+    if (!isId(evidenceId) || !isId(userId) || !isId(actorId) || !isId(workRef) || !isInt(at) || at <= 0) throw bad('INVALID_FACT');
+    const none = (reason) => ({ inserted: false, factId: null, acts: [], reason });
+    if (!isXpEarningEnabled(env)) return none('disabled');
+    getSubjectKey();
+    const open = gate ?? exclusionGate(db, env);
+    if (open.excludes(userId) || open.excludes(actorId)) return none('subject_excluded');
+    return db.transaction(() => {
+        if (isExcluded(db, userId) || isExcluded(db, actorId)) return none('subject_excluded');
+        let subject = findSubject(db, userId);
+        const keyOf = (s) => deriveSourceKey(s, REVIEW_SOURCE, REVIEW_FACT, evidenceId);
+        const prior = subject && db.prepare('SELECT fact_id FROM gm_source_facts WHERE source = ? AND source_event_id = ? AND fact_type = ?')
+            .get(REVIEW_SOURCE, keyOf(subject), REVIEW_FACT);
+        if (prior) {
+            const acts = db.prepare('SELECT act FROM gm_work_cycles WHERE fact_id = ? ORDER BY act').all(prior.fact_id).map((r) => r.act);
+            return { inserted: false, factId: prior.fact_id, acts, reason: null };
+        }
+        const active = getActiveRuleSet(db, now);
+        if (!active) return none('no_active_rules');
+        if (at < active.effectiveFrom) return none('predates_rules');
+        const workKey = subject ? deriveWorkKey(subject, workRef) : 'new-subject';
+        const history = subject ? db.prepare(`SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp, c.pm, f.occurred_at AS at
+            FROM gm_work_cycles c JOIN gm_source_facts f USING (fact_id) WHERE c.subject_ref = ? AND c.work_key = ?`).all(subject.subject_ref, workKey) : [];
+        const d = decideRecognition({
+            evidence: { source: REVIEW_SOURCE, userId, actorId, evidenceId, at, workRef: workKey, decision },
+            subject: { exists: true, active: true, synthetic: false },
+            history, config: UNPRICED_RECOGNITION, flags: { xpEarning: true, pmEarning: false },
+        });
+        if (d.outcome !== 'recognized') return none(d.reasons[0] ?? d.outcome);
+        if (d.entries.some((e) => e.xp !== 0 || e.pm !== 0 || !WORK_CYCLE_ACTS.includes(e.act))) throw bad('AMOUNT_WRITER_NOT_CONNECTED');
+        const day = periodsFor(now).day;
+        subject ??= ensureSubject(db, userId, { roleClass: 'reader', day });
+        const actorRef = ensureSubject(db, actorId, { roleClass: 'actor', day }).subject_ref;
+        const factId = randomId();
+        db.prepare(`INSERT INTO gm_source_facts (fact_id, source, source_event_id, fact_type, subject_ref, actor_ref, occurred_at,
+            recorded_at, grade, decision, rule_version, features_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, '{}')`)
+            .run(factId, REVIEW_SOURCE, keyOf(subject), REVIEW_FACT, subject.subject_ref, actorRef, dayStart(at), dayStart(now), SOURCE_GRADE[REVIEW_SOURCE], active.ruleVersion);
+        const finalKey = deriveWorkKey(subject, workRef);
+        const row = db.prepare('INSERT INTO gm_work_cycles VALUES (?, ?, ?, ?, ?, 0, 0)');
+        for (const e of d.entries) row.run(factId, subject.subject_ref, finalKey, e.cycle, e.act);
+        return { inserted: true, factId, acts: d.entries.map((e) => e.act), reason: null };
     }).immediate();
 }
 
