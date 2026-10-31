@@ -1,0 +1,293 @@
+// Prueba visual real de MOOK-STUDIO-WORKREF-01: Chromium + server.js + Vite, datos sintéticos.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright-core';
+import { AxeBuilder } from '@axe-core/playwright';
+import { up, WEB, ELIGIBLE, INELIGIBLE, CATALOG } from './env.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SHOTS = path.join(HERE, 'shots'); fs.mkdirSync(SHOTS, { recursive: true });
+const CHROME = path.join(os.homedir(), 'AppData/Local/ms-playwright/chromium-1228/chrome-win64/chrome.exe');
+let pass = 0, fail = 0;
+const results = [];
+const ok = (l, c, h = '') => { results.push({ l, c: !!c, h }); console.log(c ? '  ✓' : '  ✗', l, c ? '' : h); c ? pass++ : fail++; };
+const section = (t) => console.log(`\n${t}`);
+
+const env = await up();
+const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+const consoleErrors = [];
+const newPage = async (viewport = { width: 1280, height: 900 }) => {
+    const ctx = await browser.newContext({ viewport, reducedMotion: 'reduce' });
+    await ctx.addInitScript(() => localStorage.setItem('chibalete_user_id', 'u-admin'));
+    // Solo arnés: la cookie firmada no funciona en Windows nativo (O_NOFOLLOW).
+    await ctx.route(/\/(api|uploads)\//, (route) => route.continue({ headers: { ...route.request().headers(), 'x-user-id': 'u-admin' } }).catch(() => {}));
+    const p = await ctx.newPage();
+    p.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text().slice(0, 240)); });
+    p.on('pageerror', (e) => consoleErrors.push(`pageerror ${String(e).slice(0, 240)}`));
+    p.on('dialog', (d) => d.dismiss());
+    return p;
+};
+const shot = (p, n) => p.screenshot({ path: path.join(SHOTS, `${n}.png`), fullPage: false });
+const openStudio = async (p) => {
+    await p.goto(`${WEB}/#/subir-contenido`);
+    await p.getByText('Subir').first().waitFor({ timeout: 30000 }).catch(() => {});
+    await p.getByRole('button', { name: /experiencia/i }).first().click({ timeout: 30000 });
+    await p.getByText('E2E Flujo').first().waitFor({ timeout: 20000 });
+};
+const openDraft = async (p, title) => {
+    const row = p.locator('tr, li, article, div.rounded-xl').filter({ hasText: title }).last();
+    await row.getByRole('button', { name: /^Editar/ }).first().click();
+    await p.getByRole('tab', { name: 'Ruta' }).click();
+};
+const prodNode = (s, key) => s.versions.find((v) => v.id === key).modules[0].nodes.find((n) => n.type === 'PRODUCTION');
+const saveDraft = (p) => p.getByRole('button', { name: /^Guardar/ }).first().click();
+const WORK = 'Obra que evalúa (opcional)';
+
+try {
+    const p = await newPage();
+
+    section('[1] borrador con PRODUCTION');
+    await openStudio(p);
+    await shot(p, '01-listado');
+    await openDraft(p, 'E2E Flujo');
+    await p.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+    ok('aparece el campo opcional', await p.getByText(WORK).isVisible());
+    ok('sin obra: experiencia general', await p.getByText('Sin obra: experiencia general').isVisible());
+    await shot(p, '02-produccion-sin-obra');
+
+    section('[2] ContentPicker filtrado');
+    await p.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+    const dlg = p.getByRole('dialog', { name: /obra que evalúa/i });
+    await dlg.waitFor();
+    const text = await dlg.innerText();
+    ok('muestra las 3 obras elegibles', ELIGIBLE.every((t) => text.includes(t)), text);
+    ok('oculta todo lo no elegible', INELIGIBLE.every((t) => !text.includes(t)), text);
+    ok('el foco entra en el buscador', await dlg.locator('input').first().evaluate((e) => e === document.activeElement));
+    await shot(p, '03-picker-filtrado');
+    await dlg.locator('input').first().fill('Podcast');
+    ok('buscar un no elegible: mensaje vacío', await dlg.getByText('Sin obras elegibles con esos filtros.').isVisible());
+    await shot(p, '04-picker-vacio');
+    await dlg.locator('input').first().fill('');
+    ok('sin atajo a crear contenido', !(await dlg.getByText('+ Crear contenido').count()));
+
+    section('[3] obra no ofrecida y obra canónica');
+    await dlg.getByRole('button', { name: /Obra Beta/ }).click();
+    ok('elegible pero no ofrecida: aviso', await p.getByText('La obra debe aparecer antes en la ruta').first().isVisible());
+    await saveDraft(p);
+    await p.waitForTimeout(600);
+    ok('no ofrecida: el guardado se bloquea', prodNode(env.stored(), env.ids.flujo.ver).resourceRef == null);
+    await shot(p, '05-no-ofrecida-bloqueada');
+    await p.getByRole('button', { name: 'Cambiar', exact: true }).last().click();
+    await p.getByRole('dialog').getByRole('button', { name: /Obra Alfa/ }).click();
+    await p.waitForTimeout(200);
+    ok('obra válida: estado elegible', await p.getByText('Obra elegible, ofrecida antes en la ruta.').isVisible());
+    const stale = await p.getByText('La obra debe aparecer antes en la ruta').count();
+    ok('corregida la obra, desaparece el error anterior', stale === 0, `quedan ${stale} mensajes`);
+    await shot(p, '06-obra-valida');
+    await saveDraft(p);
+    await p.waitForTimeout(800);
+    ok('guardado: contentId en resourceRef', prodNode(env.stored(), env.ids.flujo.ver).resourceRef === 'obra-a');
+
+    section('[4] persistencia al reabrir');
+    await p.reload();
+    await openStudio(p);
+    await openDraft(p, 'E2E Flujo');
+    ok('lista: Evalúa: Obra Alfa', await p.getByText('· Evalúa: Obra Alfa').isVisible());
+    await p.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+    ok('reabierto: elegible', await p.getByText('Obra elegible, ofrecida antes en la ruta.').isVisible());
+    await shot(p, '07-reabierto');
+
+    section('[5] quitar');
+    await p.getByRole('button', { name: 'Quitar', exact: true }).last().click();
+    ok('vuelve a general', await p.getByText('Sin obra: experiencia general').isVisible());
+    await saveDraft(p);
+    await p.waitForTimeout(800);
+    ok('persistido sin obra', prodNode(env.stored(), env.ids.flujo.ver).resourceRef == null);
+    await p.reload();
+    await openStudio(p);
+    await openDraft(p, 'E2E Flujo');
+    await p.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+    ok('tras recargar sigue general', await p.getByText('Sin obra: experiencia general').isVisible() && !(await p.getByText('· Evalúa:').count()));
+    await shot(p, '08-quitada');
+
+    section('[6] obra inválida');
+    await p.goto(`${WEB}/#/`); await p.reload();
+    await openStudio(p);
+    await openDraft(p, 'E2E Legado');
+    await p.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+    ok('borrador legado: motivo visible', await p.getByText('Este tipo de contenido no cuenta como obra.').first().isVisible());
+    await shot(p, '09-legado-invalido');
+    await p.getByRole('tab', { name: 'Información' }).click();
+    await p.getByRole('tab', { name: 'Ruta' }).click();
+    await saveDraft(p);
+    await p.waitForTimeout(600);
+    ok('borrador legado: el cliente bloquea el guardado', await p.getByText('Revisa los campos marcados.').first().isVisible());
+    // Atacante con la sesión de la propia página, saltándose el selector.
+    const forge = await p.evaluate(async ({ ver, mods }) => { const r = await fetch(`/api/experiences/versions/${ver}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ modules: mods }) }); return { s: r.status, b: await r.json() }; }, { ver: env.ids.flujo.ver, mods: env.mods(env.reading('r1', 'podcast'), env.production('p1', 'podcast')) });
+    ok('PUT directo con obra no elegible: 400', forge.s === 400 && forge.b.code === 'WORK_NOT_ELIGIBLE', JSON.stringify(forge));
+    // El servidor rechaza aunque la petición del navegador se altere en vuelo.
+    await p.goto(`${WEB}/#/`); await p.reload();
+    await openStudio(p);
+    await openDraft(p, 'E2E Flujo');
+    await p.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+    await p.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+    await p.getByRole('dialog').getByRole('button', { name: /Obra Alfa/ }).click();
+    await p.route('**/api/experiences/versions/*', async (route) => {
+        if (route.request().method() !== 'PUT') return route.fallback();
+        const b = route.request().postDataJSON();
+        b.modules[0].nodes[1].resourceRef = 'capitulo';
+        await route.continue({ postData: JSON.stringify(b), headers: { ...route.request().headers(), 'x-user-id': 'u-admin' } });
+    }, { times: 1 });
+    await saveDraft(p);
+    await p.waitForTimeout(800);
+    const serverMsg = await p.getByText('Un capítulo o material asociado no cuenta como obra.').first().isVisible().catch(() => false);
+    ok('alterada en vuelo: el servidor rechaza y Studio muestra el motivo', serverMsg);
+    ok('el borrador no cambió', prodNode(env.stored(), env.ids.flujo.ver).resourceRef == null);
+    await shot(p, '10-rechazo-servidor');
+    await p.unrouteAll();
+
+    section('[7] publicar');
+    await saveDraft(p);
+    await p.waitForTimeout(800);
+    ok('guardado limpio tras el rechazo', prodNode(env.stored(), env.ids.flujo.ver).resourceRef === 'obra-a');
+    await p.getByRole('tab', { name: 'Publicación' }).click();
+    await p.getByRole('button', { name: /^Publicar v1…/ }).click();
+    await shot(p, '11-confirmar-publicar');
+    await p.getByRole('button', { name: 'Publicar v1', exact: true }).click();
+    await p.waitForTimeout(1000);
+    const pub = env.stored().versions.find((v) => v.id === env.ids.flujo.ver);
+    ok('publicada con el vínculo', pub.status === 'published' && prodNode(env.stored(), pub.id).resourceRef === 'obra-a');
+    const detail = await env.call('GET', `/api/experiences/admin/${env.ids.flujo.exp}`);
+    ok('el detalle de Studio devuelve la versión con la obra', JSON.stringify(detail.body ?? {}).includes('obra-a'), `${detail.status}`);
+    await shot(p, '12-publicada');
+
+    section('[8] publicada inmutable');
+    await p.getByRole('tab', { name: 'Ruta' }).click();
+    ok('aviso de inmutable', await p.getByText(/publicada —/).first().isVisible());
+    ok('muestra Evalúa también en publicada', await p.getByText('· Evalúa: Obra Alfa').isVisible());
+    ok('sin editar paso', !(await p.getByRole('button', { name: /Editar paso/ }).count()));
+    ok('sin selector de obra', !(await p.getByText(WORK).count()));
+    await shot(p, '13-publicada-inmutable');
+    const put = await env.call('PUT', `/api/experiences/versions/${pub.id}`, { modules: env.mods(env.reading('r1', 'obra-a'), env.production('p1')) });
+    ok('PUT a publicada: 409', put.status === 409, String(put.status));
+    await p.getByRole('button', { name: 'Crear nueva versión', exact: true }).click();
+    await p.waitForTimeout(800);
+    const v2 = env.stored().versions.filter((v) => v.experienceId === env.ids.flujo.exp).find((v) => v.version === 2);
+    ok('nueva versión hereda el vínculo como borrador', v2?.status === 'draft' && prodNode(env.stored(), v2.id).resourceRef === 'obra-a');
+    ok('v1 sigue con su obra', prodNode(env.stored(), pub.id).resourceRef === 'obra-a');
+
+    section('[9] retirada al publicar');
+    await p.goto(`${WEB}/#/`); await p.reload();
+    await openStudio(p);
+    await openDraft(p, 'E2E Retiro');
+    fs.writeFileSync(env.contentFile, JSON.stringify(CATALOG.map((c) => (c.id === 'obra-b' ? { ...c, status: 'error' } : c))));
+    await p.getByRole('tab', { name: 'Publicación' }).click();
+    await p.getByRole('button', { name: /^Publicar v1…/ }).click();
+    await p.getByRole('button', { name: 'Publicar v1', exact: true }).click();
+    await p.waitForTimeout(800);
+    ok('obra retirada con Studio abierto: no publica', env.stored().versions.find((v) => v.id === env.ids.retiro.ver).status === 'draft');
+    ok('Studio muestra el motivo', await p.getByText(/La obra no está disponible/).first().isVisible());
+    await shot(p, '14-retirada-publicar');
+    fs.writeFileSync(env.contentFile, JSON.stringify(CATALOG));
+
+    section('[10] teclado');
+    const k = await newPage();
+    await openStudio(k);
+    await openDraft(k, 'E2E Cerrado');
+    const editBtn = k.getByRole('button', { name: 'Editar paso Producir p1' });
+    await editBtn.focus(); await k.keyboard.press('Enter');
+    const pick = k.getByRole('button', { name: 'Seleccionar', exact: true });
+    ok('Enter abre el editor', await pick.isVisible());
+    await pick.focus(); await k.keyboard.press('Enter');
+    const kd = k.getByRole('dialog');
+    await kd.waitFor();
+    await k.keyboard.press('Escape');
+    await k.waitForTimeout(200);
+    ok('Escape cierra', !(await kd.count()));
+    ok('Escape devuelve el foco a Seleccionar', await pick.evaluate((e) => e === document.activeElement));
+    await k.keyboard.press('Enter');
+    await kd.waitFor();
+    // Tab recorre el diálogo: ¿queda contenido el foco?
+    const trail = [];
+    for (let i = 0; i < 12; i++) {
+        await k.keyboard.press('Tab');
+        trail.push(await k.evaluate(() => { const a = document.activeElement; return { d: !!a?.closest('[role=dialog]'), t: (a?.getAttribute('aria-label') || a?.innerText || a?.tagName || '').slice(0, 30) }; }));
+    }
+    ok('Tab permanece dentro del diálogo', trail.every((t) => t.d), JSON.stringify(trail.filter((t) => !t.d).slice(0, 3)));
+    await k.getByRole('dialog').getByRole('button', { name: /Obra Alfa/ }).focus();
+    await k.keyboard.press('Enter');
+    await k.waitForTimeout(200);
+    ok('Enter selecciona la obra', await k.getByText('Obra elegible, ofrecida antes en la ruta.').isVisible());
+    const focusAfter = await k.evaluate(() => (document.activeElement?.innerText || document.activeElement?.tagName || '').slice(0, 30));
+    ok('tras seleccionar, el foco vuelve al editor', /Cambiar|Seleccionar/.test(focusAfter), focusAfter);
+    await k.getByRole('button', { name: 'Quitar', exact: true }).last().focus();
+    await k.keyboard.press('Enter');
+    await k.waitForTimeout(200);
+    const focusRemoved = await k.evaluate(() => (document.activeElement?.tagName || ''));
+    ok('tras Quitar, el foco no cae a body', focusRemoved !== 'BODY', focusRemoved);
+
+    section('[11] pantalla estrecha y axe');
+    for (const [w, h] of [[360, 740], [768, 1024]]) {
+        const m = await newPage({ width: w, height: h });
+        await openStudio(m);
+        await openDraft(m, 'E2E Cerrado');
+        await m.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+        const over = () => m.evaluate(() => ({ s: document.documentElement.scrollWidth, c: document.documentElement.clientWidth }));
+        const a = await over();
+        ok(`${w}px: sin scroll horizontal en el editor`, a.s <= a.c, JSON.stringify(a));
+        await shot(m, `15-editor-${w}`);
+        await m.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+        const box = await m.getByRole('dialog').locator('> div').boundingBox();
+        ok(`${w}px: el selector cabe en pantalla`, box.x >= 0 && box.x + box.width <= w && box.y >= 0 && box.y + box.height <= h, JSON.stringify(box));
+        await shot(m, `16-picker-${w}`);
+        if (w === 360) {
+            const axe = await new AxeBuilder({ page: m }).include('[role=dialog]').withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa']).analyze();
+            const v = axe.violations.filter((x) => ['critical', 'serious'].includes(x.impact));
+            ok('axe selector: 0 critical/serious', v.length === 0, JSON.stringify(v.map((x) => ({ id: x.id, n: x.nodes.map((n) => n.target) }))));
+            await m.getByRole('dialog').getByRole('button', { name: /Obra Video/ }).click();
+            await m.waitForTimeout(200);
+            await shot(m, '17-aviso-360');
+            const b = await over();
+            ok('360px: aviso sin desbordar', b.s <= b.c, JSON.stringify(b));
+            const axe2 = await new AxeBuilder({ page: m }).include('section[aria-label^="Módulo"]').withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa']).analyze();
+            const v2x = axe2.violations.filter((x) => ['critical', 'serious'].includes(x.impact));
+            ok('axe editor: 0 critical/serious', v2x.length === 0, JSON.stringify(v2x.map((x) => ({ id: x.id, n: x.nodes.map((n) => n.target).slice(0, 3) }))));
+        }
+    }
+
+    section('[12] regresión del selector y sin emisión');
+    const r = await newPage();
+    await openStudio(r);
+    await openDraft(r, 'E2E Cerrado');
+    await r.getByRole('button', { name: 'Editar paso Leer r1' }).click();
+    await r.getByRole('button', { name: 'Cambiar', exact: true }).click();
+    const rd = r.getByRole('dialog', { name: 'Seleccionar contenido del catálogo' });
+    await rd.waitFor();
+    const rt = await rd.innerText();
+    ok('un paso de lectura conserva el catálogo completo', rt.includes('NE Podcast') && rt.includes('Bandeja de recursos'), rt.slice(0, 200));
+    await shot(r, '18-lectura-catalogo-completo');
+    await rd.getByRole('button', { name: 'Cerrar selector' }).click();
+    await r.getByRole('button', { name: 'Editar paso Producir p1' }).click();
+    await r.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+    await r.getByRole('dialog').getByRole('button', { name: /Obra Alfa/ }).click();
+    await r.getByRole('button', { name: 'Bajar paso Leer r1' }).click();
+    await saveDraft(r);
+    await r.waitForTimeout(500);
+    ok('reordenar y guardar: el campo con el error queda visible', await r.getByText('La obra debe aparecer antes en la ruta').first().isVisible().catch(() => false));
+    await shot(r, '19-reorden-guardar');
+    ok('reordenar: no se guardó', prodNode(env.stored(), env.ids.cerrado.ver).resourceRef == null);
+    ok('flags OFF: sin gamification.db', !fs.existsSync(env.gam));
+    const rel = consoleErrors.filter((e) => !/favicon|tailwind|Failed to load resource/i.test(e));
+    console.log('\nerrores de consola:', [...new Set(rel)].slice(0, 12));
+} catch (e) {
+    fail++;
+    console.error('  ✗ excepción', e);
+} finally {
+    await browser.close();
+    fs.writeFileSync(path.join(HERE, 'results.json'), JSON.stringify({ pass, fail, results, consoleErrors: [...new Set(consoleErrors)] }, null, 1));
+    await env.down();
+}
+console.log(`\nstudio e2e: ${pass} ✓, ${fail} ✗`);
+process.exit(fail ? 1 : 0);

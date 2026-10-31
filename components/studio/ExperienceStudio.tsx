@@ -103,6 +103,16 @@ const ContentPicker: React.FC<{
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // El diálogo es modal: Tab no sale de él.
+    const trapTab = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key !== 'Tab') return;
+        const items = Array.from<HTMLElement>(e.currentTarget.querySelectorAll('button, input, select'));
+        const edge = e.shiftKey ? items[0] : items[items.length - 1];
+        if (document.activeElement !== edge) return;
+        e.preventDefault();
+        (e.shiftKey ? items[items.length - 1] : items[0])?.focus();
+    };
+
     const tipos = [...new Set(catalog.map(c => c.tipo))];
     const shown = catalog.filter(c =>
         (!tipo || c.tipo === tipo) &&
@@ -110,7 +120,7 @@ const ContentPicker: React.FC<{
     ).slice(0, 60);
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-label={eligibleOnly ? 'Seleccionar la obra que evalúa la producción' : 'Seleccionar contenido del catálogo'}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" onKeyDown={trapTab} aria-label={eligibleOnly ? 'Seleccionar la obra que evalúa la producción' : 'Seleccionar contenido del catálogo'}>
             <div className="bg-white dark:bg-gray-800 rounded-xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl">
                 <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
                     <h3 className="font-bold text-gray-800 dark:text-gray-100">{eligibleOnly ? 'Obras elegibles — catálogo canónico' : 'Bandeja de recursos — catálogo canónico'}</h3>
@@ -180,6 +190,7 @@ const NodeEditor: React.FC<{
     const set = (patch: Partial<StudioNode>) => onChange({ ...node, ...patch });
     const setCfg = (patch: any) => onChange({ ...node, config: { ...node.config, ...patch } });
     const res = node.resourceRef ? catalogById.get(node.resourceRef) : null;
+    const pickerButton = useRef<HTMLButtonElement | null>(null);
     const err = (k: string) => errors[`${errKey}.${k}`];
     const field = (k: string) => err(k) ? { 'aria-invalid': true as const, 'aria-describedby': `${errKey}-${k}-err` } : {};
     const ErrMsg: React.FC<{ k: string }> = ({ k }) => err(k)
@@ -204,32 +215,33 @@ const NodeEditor: React.FC<{
                     <span className="block text-sm font-medium text-gray-700 dark:text-gray-200">
                         {needsResource ? 'Contenido canónico (referencia)' : isProduction ? 'Obra que evalúa (opcional)' : 'Lectura asociada (opcional)'}
                     </span>
-                    <div className="flex items-center gap-3 mt-1">
+                    <div className="flex flex-wrap items-center gap-3 mt-1">
                         {res
                             ? <span className="text-sm text-gray-700 dark:text-gray-200 inline-flex items-center gap-2">
                                 {res.portada_url && <img src={res.portada_url} alt="" className="w-6 h-8 object-cover rounded" />}
-                                {res.titulo} <span className="text-gray-400">· {res.tipo}</span>
+                                {res.titulo} <span className="text-gray-500 dark:text-gray-400">· {res.tipo}</span>
                                 {res.standalone === false && <span className="text-[10px] font-bold bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Para Experiencias</span>}
                             </span>
                             : node.resourceRef
                                 ? <span className="text-sm text-amber-700 inline-flex items-center gap-1"><AlertTriangle size={14} aria-hidden /> Referencia {node.resourceRef} (no está en el catálogo local)</span>
-                                : <span className="text-sm text-gray-400">{isProduction ? 'Sin obra: experiencia general' : 'Sin contenido seleccionado'}</span>}
-                        <button type="button" onClick={onOpenPicker} className="px-3 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-indigo-300 text-indigo-700 dark:text-indigo-300 text-sm font-bold">
+                                : <span className="text-sm text-gray-500 dark:text-gray-400">{isProduction ? 'Sin obra: experiencia general' : 'Sin contenido seleccionado'}</span>}
+                        <button type="button" ref={pickerButton} onClick={onOpenPicker} className="px-3 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-indigo-300 text-indigo-700 dark:text-indigo-300 text-sm font-bold">
                             {node.resourceRef ? 'Cambiar' : 'Seleccionar'}
                         </button>
                         {node.resourceRef && !needsResource && (
-                            <button type="button" onClick={() => set({ resourceRef: null })} className="text-sm text-gray-500 hover:underline">Quitar</button>
+                            <button type="button" onClick={() => { set({ resourceRef: null }); pickerButton.current?.focus(); }} className="text-sm text-gray-500 hover:underline">Quitar</button>
                         )}
                     </div>
-                    <ErrMsg k="resourceRef" />
+                    {!isProduction && <ErrMsg k="resourceRef" />}
                     {isProduction && !node.resourceRef && (
                         <p className="text-xs text-gray-500 mt-1">Una experiencia general no atribuye la evidencia a ninguna obra. Selecciona una solo si esta producción la evalúa.</p>
                     )}
                     {isProduction && node.resourceRef && !workIssue && catalogById.size > 0 && (
                         <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1 inline-flex items-center gap-1"><CheckCircle2 size={14} aria-hidden /> Obra elegible, ofrecida antes en la ruta.</p>
                     )}
-                    {isProduction && workIssue && !err('resourceRef') && (
-                        <p className="text-xs text-amber-700 mt-1 inline-flex items-center gap-1"><AlertTriangle size={14} aria-hidden /> {workIssue}</p>
+                    {/* Se calcula con la obra actual: un error de un guardado anterior no sobrevive al cambio. */}
+                    {isProduction && workIssue && (
+                        <p id={`${errKey}-resourceRef-err`} role={err('resourceRef') ? 'alert' : undefined} className={`text-xs mt-1 inline-flex items-center gap-1 ${err('resourceRef') ? 'text-red-600' : 'text-amber-700'}`}><AlertTriangle size={14} aria-hidden /> {workIssue}</p>
                     )}
                     {!isProduction && res && res.status !== 'disponible' && (
                         <p className="text-xs text-amber-700 mt-1">Este contenido aún no está disponible (estado: {res.status}). El nodo mostrará candado hasta que lo esté.</p>
@@ -634,6 +646,9 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
         if (Object.keys(errs).length > 0) {
             setSaveState('error'); setSaveError('Revisa los campos marcados.');
             if (Object.keys(errs).some(k => k.startsWith('info.'))) setTab('info'); else setTab('ruta');
+            // El error de un paso solo se ve con su editor abierto.
+            const firstNode = Object.keys(errs).map(k => k.match(/^node\.(\d+)\.(\d+)\./)).find(Boolean);
+            if (firstNode) setEditingNode({ mi: Number(firstNode[1]), ni: Number(firstNode[2]) });
             return false;
         }
         setSaveState('saving'); setSaveError(null);

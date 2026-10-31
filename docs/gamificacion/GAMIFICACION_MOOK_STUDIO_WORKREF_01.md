@@ -34,5 +34,24 @@ Un borrador con una obra no ofrecida todavía se guarda por API: el orden se exi
 ## 3. Pendiente
 
 - **Regla editorial:** el selector solo ofrece lo que hoy cuenta como obra; capítulos, podcasts y artículos siguen fuera.
-- **Verificación visual:** la interfaz se validó con tipos, build y pruebas estructurales, no en navegador.
+- **Verificación visual:** hecha en Chromium, ver §4.
 - **Despliegue:** `utils/workEligibility.mjs` es nuevo; backend y frontend necesitan imagen nueva.
+
+## 4. Verificación en navegador (MOOK-STUDIO-WORKREF-01-CLOSE)
+
+Chromium real, `server.js` real y Vite dev con stores temporales y contenido sintético, a 1280, 768 y 360 px, con axe sobre selector y editor. Resultado: 47 ✓ y 5 ✗ antes de corregir, 52 ✓ y 0 ✗ después. Evidencia en [`evidence/mook-studio-workref-01/`](evidence/mook-studio-workref-01/).
+
+**Límite:** sesión simulada. La cookie firmada no funciona en Windows nativo porque `secretFile` abre con `O_NOFOLLOW`, así que el arnés usa `SESSION_AUTH_MODE=off` e inyecta `x-user-id` en la red. No se probó el flujo con cookie ni la imagen Docker.
+
+Defectos corregidos, todos en `ExperienceStudio.tsx`:
+
+| Defecto | Corrección |
+|---|---|
+| El error de un guardado seguía visible tras elegir una obra válida | El mensaje se calcula con la obra actual |
+| Al reordenar y guardar decía «Revisa los campos marcados» sin ningún campo visible | Se abre el primer paso con error |
+| Tab salía del diálogo modal hacia la página | El foco queda dentro del selector |
+| Quitar dejaba el foco en `body` | El foco pasa a Seleccionar |
+| Contraste insuficiente en el tipo de obra y en «Sin obra» (axe) | `text-gray-500` |
+| A 360 px, «Quitar» invadía el margen de la tarjeta | La fila admite salto de línea |
+
+Pendiente menor, sin corregir: el tipo se muestra en crudo (`libro_album`), el selector ofrece obras aún no ofrecidas en la ruta (avisa después de elegir) y una versión publicada conserva «Guardar borrador», que solo guarda Información.

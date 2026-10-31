@@ -1,0 +1,266 @@
+{
+ "pass": 52,
+ "fail": 0,
+ "results": [
+  {
+   "l": "aparece el campo opcional",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "sin obra: experiencia general",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "muestra las 3 obras elegibles",
+   "c": true,
+   "h": "Obras elegibles — catálogo canónico\nBuscar por título\nFiltrar por tipo\nTodos los tipos\nvideo\nlibro_album\nlibro\nObra Video\nvideo · Sintética\nListo\nObra Beta\nlibro_album · Sintética\nListo\nObra Alfa\nlibro · Sintética\nListo"
+  },
+  {
+   "l": "oculta todo lo no elegible",
+   "c": true,
+   "h": "Obras elegibles — catálogo canónico\nBuscar por título\nFiltrar por tipo\nTodos los tipos\nvideo\nlibro_album\nlibro\nObra Video\nvideo · Sintética\nListo\nObra Beta\nlibro_album · Sintética\nListo\nObra Alfa\nlibro · Sintética\nListo"
+  },
+  {
+   "l": "el foco entra en el buscador",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "buscar un no elegible: mensaje vacío",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "sin atajo a crear contenido",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "elegible pero no ofrecida: aviso",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "no ofrecida: el guardado se bloquea",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "obra válida: estado elegible",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "corregida la obra, desaparece el error anterior",
+   "c": true,
+   "h": "quedan 0 mensajes"
+  },
+  {
+   "l": "guardado: contentId en resourceRef",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "lista: Evalúa: Obra Alfa",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "reabierto: elegible",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "vuelve a general",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "persistido sin obra",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "tras recargar sigue general",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "borrador legado: motivo visible",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "borrador legado: el cliente bloquea el guardado",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "PUT directo con obra no elegible: 400",
+   "c": true,
+   "h": "{\"s\":400,\"b\":{\"error\":\"nodo 1: Este tipo de contenido no cuenta como obra.\",\"code\":\"WORK_NOT_ELIGIBLE\"}}"
+  },
+  {
+   "l": "alterada en vuelo: el servidor rechaza y Studio muestra el motivo",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "el borrador no cambió",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "guardado limpio tras el rechazo",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "publicada con el vínculo",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "el detalle de Studio devuelve la versión con la obra",
+   "c": true,
+   "h": "200"
+  },
+  {
+   "l": "aviso de inmutable",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "muestra Evalúa también en publicada",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "sin editar paso",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "sin selector de obra",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "PUT a publicada: 409",
+   "c": true,
+   "h": "409"
+  },
+  {
+   "l": "nueva versión hereda el vínculo como borrador",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "v1 sigue con su obra",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "obra retirada con Studio abierto: no publica",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "Studio muestra el motivo",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "Enter abre el editor",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "Escape cierra",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "Escape devuelve el foco a Seleccionar",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "Tab permanece dentro del diálogo",
+   "c": true,
+   "h": "[]"
+  },
+  {
+   "l": "Enter selecciona la obra",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "tras seleccionar, el foco vuelve al editor",
+   "c": true,
+   "h": "Cambiar"
+  },
+  {
+   "l": "tras Quitar, el foco no cae a body",
+   "c": true,
+   "h": "BUTTON"
+  },
+  {
+   "l": "360px: sin scroll horizontal en el editor",
+   "c": true,
+   "h": "{\"s\":360,\"c\":360}"
+  },
+  {
+   "l": "360px: el selector cabe en pantalla",
+   "c": true,
+   "h": "{\"x\":16,\"y\":199,\"width\":328,\"height\":342}"
+  },
+  {
+   "l": "axe selector: 0 critical/serious",
+   "c": true,
+   "h": "[]"
+  },
+  {
+   "l": "360px: aviso sin desbordar",
+   "c": true,
+   "h": "{\"s\":360,\"c\":360}"
+  },
+  {
+   "l": "axe editor: 0 critical/serious",
+   "c": true,
+   "h": "[]"
+  },
+  {
+   "l": "768px: sin scroll horizontal en el editor",
+   "c": true,
+   "h": "{\"s\":768,\"c\":768}"
+  },
+  {
+   "l": "768px: el selector cabe en pantalla",
+   "c": true,
+   "h": "{\"x\":48,\"y\":342,\"width\":672,\"height\":340}"
+  },
+  {
+   "l": "un paso de lectura conserva el catálogo completo",
+   "c": true,
+   "h": "Bandeja de recursos — catálogo canónico\nBuscar por título\nFiltrar por tipo\nTodos los tipos\nlibro\narticulo_pedagogico\npodcast\nguia\nvideo\nlibro_album\nNE Procesando\nlibro · x\nNo disponible aún\nNE Pieza\nl"
+  },
+  {
+   "l": "reordenar y guardar: el campo con el error queda visible",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "reordenar: no se guardó",
+   "c": true,
+   "h": ""
+  },
+  {
+   "l": "flags OFF: sin gamification.db",
+   "c": true,
+   "h": ""
+  }
+ ]
+}

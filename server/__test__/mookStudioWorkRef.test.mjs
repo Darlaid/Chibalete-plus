@@ -198,6 +198,10 @@ try {
         ok('muestra elegibilidad', /Obra elegible, ofrecida antes en la ruta/.test(src));
         ok('valida antes de guardar', /e\[`\$\{k\}\.resourceRef`\] = issue/.test(src));
         ok('guarda por el contrato existente', /\.\.\.\(n\.resourceRef \? \{ resourceRef: n\.resourceRef \} : \{\}\)/.test(src));
+        ok('el error de obra se calcula con la obra actual', /isProduction && workIssue && \(/.test(src) && /\{!isProduction && <ErrMsg k="resourceRef" \/>\}/.test(src));
+        ok('Tab no sale del selector', /onKeyDown=\{trapTab\}/.test(src));
+        ok('Quitar conserva el foco', /pickerButton\.current\?\.focus\(\)/.test(src));
+        ok('un error de paso abre su editor', /setEditingNode\(\{ mi: Number\(firstNode\[1\]\)/.test(src));
         ok('el editor no se abre en una versión publicada', /editingNode\?\.mi === mi && editingNode\?\.ni === ni && !readOnlyRoute/.test(src));
     }
 
