@@ -46,6 +46,21 @@ export function versionNodes(version) {
     return (version.modules ?? []).flatMap(m => m.nodes);
 }
 
+/**
+ * PRIV-01E — obra que declara un nodo PRODUCTION de una versión. Solo lee ese
+ * nodo: nunca deduce la obra de títulos ni de otros nodos del módulo. El recurso
+ * debe haberse ofrecido antes en la ruta (READING, VIDEO o AUDIO).
+ * @returns {{ workRef: string|null, issue: 'WORK_NOT_IN_VERSION'|null }}
+ */
+export function productionWorkRef(version, nodeId) {
+    const flat = versionNodes(version);
+    const idx = flat.findIndex(n => n.id === nodeId);
+    const workRef = flat[idx]?.type === 'PRODUCTION' ? (flat[idx].resourceRef ?? null) : null;
+    if (workRef === null) return { workRef: null, issue: null };
+    const offered = flat.slice(0, idx).some(n => ['READING', 'VIDEO', 'AUDIO'].includes(n.type) && n.resourceRef === workRef);
+    return { workRef, issue: offered ? null : 'WORK_NOT_IN_VERSION' };
+}
+
 /** Módulo al que pertenece un nodo (contexto para UI/telemetría). */
 export function moduleOfNode(version, nodeId) {
     return (version.modules ?? []).find(m => m.nodes.some(n => n.id === nodeId)) ?? null;
@@ -128,6 +143,13 @@ function validateNode(node, i, bookExists) {
     };
     if (['READING', 'VIDEO', 'AUDIO'].includes(out.type)) {
         if (!out.resourceRef) throw err('INVALID_NODE', `nodo ${i}: ${out.type} exige resourceRef (contentId canónico)`);
+        if (typeof bookExists === 'function' && !bookExists(out.resourceRef)) {
+            throw err('RESOURCE_NOT_FOUND', `nodo ${i}: contentId no existe en el catálogo: ${out.resourceRef}`);
+        }
+    }
+    // PRIV-01E: en PRODUCTION, `resourceRef` declara la única obra que evalúa.
+    if (out.type === 'PRODUCTION' && out.resourceRef !== null) {
+        if (typeof out.resourceRef !== 'string' || !out.resourceRef) throw err('INVALID_NODE', `nodo ${i}: PRODUCTION admite una sola obra (contentId canónico)`);
         if (typeof bookExists === 'function' && !bookExists(out.resourceRef)) {
             throw err('RESOURCE_NOT_FOUND', `nodo ${i}: contentId no existe en el catálogo: ${out.resourceRef}`);
         }
@@ -228,6 +250,9 @@ export function publishVersion(doc, versionId) {
         for (const n of m.nodes) {
             if (['VIDEO', 'AUDIO'].includes(n.type) && !String(n.config?.transcripcion ?? '').trim()) {
                 throw err('TRANSCRIPTION_REQUIRED', `módulo «${m.title}» (${m.id}) · nodo «${n.title}» (${n.id}): ${n.type} exige transcripción para publicar`);
+            }
+            if (n.type === 'PRODUCTION' && productionWorkRef(v, n.id).issue) {
+                throw err('WORK_NOT_IN_VERSION', `módulo «${m.title}» (${m.id}) · nodo «${n.title}» (${n.id}): la obra debe aparecer en un nodo de lectura, video o audio anterior`);
             }
         }
     }
