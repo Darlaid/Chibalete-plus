@@ -223,6 +223,7 @@ Con `implausible` no hay XP automático, no hay acusación ni mensaje negativo, 
 
 - **Duplicado de PM imposible por construcción:** la lectura sola no emite PM (§6.1 y R-PM-1), así que no hay pago por lectura que se sume a uno por MOOK.
 - **Independencia del orden:** cada hecho conserva su clave. El primero que llega para esa cobertura emite; el siguiente se registra como `observed`, sin necesidad de compensar.
+  - **Aclaración (XP-RULES-01):** en la ruta de reconocimiento por obra y ciclo (`recordWorkRecognition`, G4-05A-4), **sin emisión no se registra ninguna fila `observed`**: no hay hecho, acto ni sujeto, y la clave sigue libre. Las rutas anteriores conservan su semántica.
 - **Obra cubierta por una evidencia:** se resuelve desde la versión fijada del run, con las `resourceRef` del **mismo módulo**. Si un módulo cubre varias obras, la autoría debe indicar cuál se evalúa; si no lo indica, la evidencia cubre solo la primera `READING` y lo demás no se corrobora.
 - **`mook_experience`:** PM = 0 en la primera regla, porque completar una ruta puede ser solo clics más respuestas no vacías (H4 y H5). Se aparta de Contratos §3, que preveía «menor peso», y requiere aprobación.
 

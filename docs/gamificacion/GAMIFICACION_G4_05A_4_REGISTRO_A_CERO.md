@@ -38,7 +38,7 @@ Los documentos dan dos interpretaciones. **No cambié la semántica:** `recordFa
 | Efecto | Se reevalúa en cada barrido | Consume la clave y nunca emite |
 | Cumple minimización | Sí | Exige justificarla en la DPIA |
 
-**Recomendación: A,** que es lo implementado. Reconocimiento §6.3 («el siguiente se registra como `observed`») debería enmendarse. **Pendiente de Dirección y DPO.** Una tercera lectura, «pendiente de pago», no es viable: exigiría actualizar filas append-only.
+**Resuelto para la ruta nueva:** sin emisión no hay fila, y Reconocimiento §6.3 ya lo aclara (XP-RULES-01). Las rutas anteriores no cambian. Una tercera lectura, «pendiente de pago», no es viable: exigiría actualizar filas append-only.
 
 ## 4. Contrato de parámetros (A7, A12)
 
