@@ -2905,13 +2905,35 @@ app.post('/api/experiences/runs/:runId/nodes/:nodeId/complete', requireUserAuth,
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
 });
 
+// G4-05A-1: comprueba el acceso a la obra declarada antes de tomar el lock de
+// MOOK. El snapshot solo se escribe si esta petición crea la evidencia. No
+// concede acceso a nada y un fallo nunca impide entregar.
+async function checkWorkAccess(userId, runId, nodeId) {
+    let workRef = null;
+    try {
+        _jsonCache.delete(MOOK_DB); // el run puede venir de la otra réplica
+        const doc = readMook();
+        const run = doc.runs.find(r => r.id === runId);
+        if (!run || run.userId !== userId || run.nodeStates?.[nodeId]?.status === 'completed') return null;
+        const v = doc.versions.find(x => x.id === run.experienceVersionId);
+        const declared = v ? experienceStore.productionWorkRef(v, nodeId) : null;
+        if (!declared?.workRef || declared.issue) return null;
+        workRef = declared.workRef;
+        const d = await decideContentAccess(userId, workRef, { logDecision: false });
+        return experienceStore.buildWorkAccess(workRef, d);
+    } catch {
+        return workRef ? experienceStore.buildWorkAccess(workRef, null) : null;
+    }
+}
+
 app.post('/api/experiences/runs/:runId/nodes/:nodeId/evidence', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
     try {
         let out;
+        const workAccess = await checkWorkAccess(req.user.id, req.params.runId, req.params.nodeId);
         await mutateMook((doc) => {
             out = experienceStore.submitEvidence(doc, {
                 runId: req.params.runId, nodeId: req.params.nodeId,
-                userId: req.user.id, payload: req.body ?? {},
+                userId: req.user.id, payload: req.body ?? {}, workAccess,
             });
         });
         // Reintento de la misma entrega inicial: misma evidencia, sin transición
@@ -3213,6 +3235,7 @@ async function authenticatedUserIdOf(req) {
 // extraída TAL CUAL del handler GET /api/content/:id/access para que /access y
 // /api/content/:id/epub compartan una única autoridad (sin duplicar reglas).
 // Devuelve { status, body } con exactamente las respuestas históricas de /access.
+// G4-05A-1: `via` es la procedencia, solo para el servidor: nunca va en `body`.
 async function decideContentAccess(userId, contentId, { logDecision = true, readStore = readJSON } = {}) {
     // CP-3A: `logDecision: false` silencia las líneas de decisión ([ACCESS],
     // [ACCESS_DECISION]) para la evaluación masiva del catálogo. Las líneas de
@@ -3222,7 +3245,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
     // de UNA request (createRequestStoreReader). Default: readJSON, idéntico a hoy.
     // 1. Input guard
     if (!contentId || !userId) {
-        return { status: 400, body: { allowed: false, reason: 'Parámetros incompletos.' } };
+        return { status: 400, via: 'INVALID_INPUT', body: { allowed: false, reason: 'Parámetros incompletos.' } };
     }
 
     try {
@@ -3230,7 +3253,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         const users = readStore(USERS_DB);
         const user = users.find(u => u.id === userId);
         if (!user) {
-            return { status: 403, body: { allowed: false, reason: 'Usuario no encontrado.' } };
+            return { status: 403, via: 'USER_NOT_FOUND', body: { allowed: false, reason: 'Usuario no encontrado.' } };
         }
 
         // Jerarquía de acceso (orden de evaluación):
@@ -3250,14 +3273,14 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         const privilegedDecision = privilegedAccess ? privilegedAccess(contentId) : null;
         if (privilegedDecision?.via === 'ADMIN_ROLE') {
             say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ADMIN_ROLE`, 'ACCESS');
-            return { status: 200, body: { allowed: true, reason: 'Acceso administrativo total.' } };
+            return { status: 200, via: 'ADMIN_ROLE', body: { allowed: true, reason: 'Acceso administrativo total.' } };
         }
 
         // 4. Verificar que el contenido existe
         const contentList = readStore(DB_FILE);
         const content = contentList.find(c => c.id === contentId);
         if (!content) {
-            return { status: 404, body: { allowed: false, reason: 'Contenido no encontrado.' } };
+            return { status: 404, via: 'CONTENT_NOT_FOUND', body: { allowed: false, reason: 'Contenido no encontrado.' } };
         }
 
         // F2-A (P15): una obra bajo régimen de derechos sin lectura autorizada
@@ -3265,7 +3288,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         // obras sin versión de derechos no pasan por aquí con efecto.
         if (rightsGate(contentId, 'subscription_reading', { silent: !logDecision }).deny) {
             say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via RIGHTS_NOT_AUTHORIZED`, 'ACCESS');
-            return { status: 403, body: { allowed: false, errorCode: 'RIGHTS_NOT_AUTHORIZED', reason: 'Esta obra no está autorizada para lectura.' } };
+            return { status: 403, via: 'RIGHTS_NOT_AUTHORIZED', body: { allowed: false, errorCode: 'RIGHTS_NOT_AUTHORIZED', reason: 'Esta obra no está autorizada para lectura.' } };
         }
 
         // 5. Helper de vigencia temporal server-side (árbitro real de tiempo)
@@ -3284,15 +3307,15 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
             const { via, school: mediatorSchool } = privilegedDecision;
             if (via === 'MEDIATOR_ORG') {
                 say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ORG (${mediatorSchool})`, 'ACCESS');
-                return { status: 200, body: { allowed: true, reason: 'Acceso de mediador por catálogo institucional.' } };
+                return { status: 200, via: 'MEDIATOR_ORG', body: { allowed: true, reason: 'Acceso de mediador por catálogo institucional.' } };
             }
             if (via === 'MEDIATOR_ORG_RESTRICTION') {
                 say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via MEDIATOR_ORG_RESTRICTION (${mediatorSchool})`, 'ACCESS');
-                return { status: 403, body: { allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' } };
+                return { status: 403, via: 'MEDIATOR_ORG_RESTRICTION', body: { allowed: false, reason: 'Contenido fuera del catálogo de tu institución.' } };
             }
             // Sin restricción institucional activa → acceso total (legado para mediadores sin configuración)
             say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via MEDIATOR_ROLE (sin restricción institucional)`, 'ACCESS');
-            return { status: 200, body: { allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' } };
+            return { status: 200, via: 'MEDIATOR_ROLE', body: { allowed: true, reason: 'Acceso de mediador (sin restricciones institucionales activas).' } };
         }
 
         // CHP-ACCESS-PEDAGOGY-01D-B: llegados aquí el usuario NO es administrador
@@ -3302,7 +3325,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         // son PEDAGOGY_RESTRICTED, así que siguen su camino habitual.
         if (isPedagogyRestrictedItem(content)) {
             say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via PEDAGOGY_RESTRICTED`, 'ACCESS');
-            return { status: 403, body: { allowed: false, reason: 'Material pedagógico reservado a mediadores.' } };
+            return { status: 403, via: 'PEDAGOGY_RESTRICTED', body: { allowed: false, reason: 'Material pedagógico reservado a mediadores.' } };
         }
 
         // 6. Verificar excepción por asignación pedagógica (Aula Viva)
@@ -3327,7 +3350,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
 
         if (hasAssignment) {
             say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ASSIGNMENT`, 'ACCESS');
-            return { status: 200, body: { allowed: true, reason: 'Acceso por asignación pedagógica.' } };
+            return { status: 200, via: 'GROUP_ASSIGNMENT', body: { allowed: true, reason: 'Acceso por asignación pedagógica.' } };
         }
 
         // --- FASE E7: MOTOR DE ACCESO ESTRICTO POR SCOPES ---
@@ -3337,9 +3360,9 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         if (!scopeDecision.legacyFallback) {
             // El Scope Engine dictaminó en modo estricto.
             if (scopeDecision.allowed) {
-                return { status: 200, body: { allowed: true, reason: scopeDecision.reason } };
+                return { status: 200, via: scopeDecision.via, body: { allowed: true, reason: scopeDecision.reason } };
             } else {
-                return { status: 403, body: { allowed: false, reason: scopeDecision.reason } };
+                return { status: 403, via: scopeDecision.via, body: { allowed: false, reason: scopeDecision.reason } };
             }
         }
         // Si hay legacyFallback, continuamos con las políticas heredadas (Fase 5/6)
@@ -3362,7 +3385,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
             if (available === 'all') {
                 // Shortcut: acceso total explícito desde cualquier grupo activo
                 say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_ALL (${g.id})`, 'ACCESS');
-                return { status: 200, body: { allowed: true, reason: 'Acceso total por grupo activo.' } };
+                return { status: 200, via: 'GROUP_ALL', body: { allowed: true, reason: 'Acceso total por grupo activo.' } };
             }
 
             let effectiveIds = [];
@@ -3400,7 +3423,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
                     if (isEntityActive(schoolConfig.accessStartsAt, schoolConfig.accessEndsAt)) {
                         if (orgAccess === 'all') {
                             say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via ORG_ALL (${schoolName})`, 'ACCESS');
-                            return { status: 200, body: { allowed: true, reason: 'Acceso total por organización.' } };
+                            return { status: 200, via: 'ORG_ALL', body: { allowed: true, reason: 'Acceso total por organización.' } };
                         }
                         if (Array.isArray(orgAccess) && orgAccess.length > 0) {
                             if (unionAccess === null) {
@@ -3424,25 +3447,25 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         if (!hasAnyActiveGroupRule) {
             if (ACCESS_FALLBACK_MODE === 'restricted') {
                 say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via LEGACY_NO_RULES (restricted mode)`, 'ACCESS');
-                return { status: 403, body: { allowed: false, reason: 'Acceso restringido: sin catálogo activo para este usuario.' } };
+                return { status: 403, via: 'LEGACY_NO_RULES', body: { allowed: false, reason: 'Acceso restringido: sin catálogo activo para este usuario.' } };
             }
             say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via LEGACY_OPEN (no active rules)`, 'ACCESS');
-            return { status: 200, body: { allowed: true, reason: 'Sin restricciones comerciales activas (modo legacy).' } };
+            return { status: 200, via: 'LEGACY_OPEN', body: { allowed: true, reason: 'Sin restricciones comerciales activas (modo legacy).' } };
         }
 
         if (unionAccess !== null && Array.isArray(unionAccess)) {
             if (unionAccess.includes(contentId)) {
                 say(`[ACCESS] user ${userId} → content ${contentId} → GRANTED via GROUP_CATALOG`, 'ACCESS');
-                return { status: 200, body: { allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' } };
+                return { status: 200, via: 'GROUP_CATALOG', body: { allowed: true, reason: 'Contenido en catálogo autorizado del grupo.' } };
             } else {
                 say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via CATALOG_RESTRICTION`, 'ACCESS');
-                return { status: 403, body: { allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' } };
+                return { status: 403, via: 'CATALOG_RESTRICTION', body: { allowed: false, reason: 'Contenido fuera de tu catálogo autorizado.' } };
             }
         }
 
         // Todos los grupos activos tenían bloqueo total ([]) → acceso denegado
         say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via GROUP_BLOCK`, 'ACCESS');
-        return { status: 403, body: { allowed: false, reason: 'Acceso bloqueado por reglas del grupo.' } };
+        return { status: 403, via: 'GROUP_BLOCK', body: { allowed: false, reason: 'Acceso bloqueado por reglas del grupo.' } };
 
     } catch (err) {
         log(`[access-check] Error inesperado: ${err.message}`, 'ERROR');
@@ -3450,7 +3473,7 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         // de denegación legítima (403 + errorCode ACCESS_DENIED). El frontend
         // los muestra distinto: error técnico ofrece reintentar, denegación
         // dice "no tienes acceso". Mantenemos `allowed: false` por compat.
-        return { status: 500, body: {
+        return { status: 500, via: 'ACCESS_CHECK_FAILED', body: {
             allowed:   false,
             errorCode: 'ACCESS_CHECK_FAILED',
             reason:    'Error de servidor al verificar acceso.',

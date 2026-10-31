@@ -13,7 +13,7 @@
 | Run | Fija `experienceVersionId` y registra `evidenceIds` por nodo | Comprueba que la evidencia pertenece a esa ruta |
 | Evidencia | Guarda run, versión, nodo y `payload`. El store solo copia `text` o `answers` | Nunca aporta la obra |
 | Revisión | `reviewerId`, `decision`, `reviewedAt` | Solo `aprobado` |
-| Acceso | `decideContentAccess` es **asíncrona** y `/api/experiences` no la consulta | Se inyecta como `canAccess` |
+| Acceso | `decideContentAccess` es **asíncrona** y `/api/experiences` no la consultaba | Decisión congelada en la evidencia desde G4-05A-1 |
 
 **Uso actual (copia local, sin contrastar con producción):** 12 versiones; 6 nodos PRODUCTION, ninguno con `resourceRef`; 2 evidencias aprobadas.
 
@@ -67,7 +67,7 @@ Declarar `resourceRef` en una PRODUCTION significa «esta producción evalúa es
 | `work_not_in_version` | Obra no ofrecida antes en la ruta |
 | `work_not_found`, `work_unavailable` | Ausente del catálogo o no disponible |
 | `work_is_collection`, `work_is_part`, `work_not_standalone`, `work_not_classified` | No es obra según §4 |
-| `work_not_accessible` | `canAccess` no devolvió exactamente `true`, faltó o falló |
+| `no_access_snapshot`, `access_snapshot_mismatch`, `work_not_accessible`, `access_indeterminate`, `access_not_explicit` | Sin decisión congelada válida, o sin autorización explícita (G4-05A-1) |
 
 `mookRecognitionEvidence` añade los filtros de cuenta, actor y exclusión. Sin puerta de exclusiones no devuelve nada, y sus motivos son recuentos sin datos personales. La autorrevisión la rechaza `decideRecognition`.
 
@@ -101,7 +101,7 @@ No se migró ni se modificó nada.
 2. El acceso se evalúa al procesar, no al entregar. Si vence entre gancho y barrido, el resultado depende del momento; no duplica, pero puede omitir un reconocimiento. Hay que decidir el instante de referencia.
 3. `GAMIFICATION_MOOK_SINCE` debe fijarse antes de publicar las versiones que declaren obra.
 4. Studio no ofrece el selector en PRODUCTION. Hoy se declara por API de administración; Studio conserva el valor al guardar.
-5. El llamador debe inyectar `workRefOf` y `canAccess`; sin ellos no se atribuye nada.
+5. El llamador debe inyectar `workRefOf`; sin él no se atribuye nada.
 6. Escribir `gm_work_cycles` y desbloquear `mook_review` exigen las condiciones de Implementación V1 §6.
 
 ## 8. Pruebas

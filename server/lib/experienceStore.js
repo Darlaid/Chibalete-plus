@@ -358,7 +358,18 @@ function finalize(doc, run) {
 
 const countWords = (t) => String(t || '').trim().split(/\s+/).filter(Boolean).length;
 
-export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
+/**
+ * G4-05A-1 — decisión de acceso de la primera entrega, ya resuelta por el
+ * servidor. Sin decisión legible queda `indeterminate`. Es un registro histórico:
+ * el motor de acceso no la lee, así que nunca concede acceso.
+ */
+export function buildWorkAccess(workRef, decision, at = nowIso()) {
+    const allowed = decision?.status === 200 && decision.body?.allowed === true;
+    const known = typeof decision?.via === 'string' && decision.via !== '' && Number.isInteger(decision.status) && decision.status < 500;
+    return { workRef, decision: !known ? 'indeterminate' : allowed ? 'allowed' : 'denied', via: known ? decision.via : 'INDETERMINATE', at };
+}
+
+export function submitEvidence(doc, { runId, nodeId, userId, payload, workAccess = null }) {
     const run = doc.runs.find(r => r.id === runId);
     if (!run) throw err('RUN_NOT_FOUND', `run no existe: ${runId}`);
     if (run.userId !== userId) throw err('NOT_RUN_OWNER', 'la evidencia solo puede enviarla el dueño del run');
@@ -392,6 +403,11 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
             throw err('PRODUCTION_LENGTH', `la producción exige ${node.config.minPalabras}–${node.config.maxPalabras} palabras (lleva ${words})`);
         }
     }
+    // Solo aquí, al crear la evidencia: reintentos y carreras salen antes, y
+    // ninguna otra función escribe este campo. Nunca viene del cliente.
+    const sealedAccess = node.type === 'PRODUCTION' && workAccess?.workRef && workAccess.workRef === productionWorkRef(v, nodeId).workRef
+        ? { workRef: workAccess.workRef, decision: workAccess.decision, via: workAccess.via, at: workAccess.at }
+        : null;
     const at = nowIso();
     const ev = {
         id: rid('evid'), runId, userId,
@@ -400,6 +416,7 @@ export function submitEvidence(doc, { runId, nodeId, userId, payload }) {
         payload: node.type === 'ACTIVITY' ? { answers: payload.answers.map(String) } : { text: String(payload.text) },
         requiresReview: node.type === 'PRODUCTION',
         submittedAt: at,
+        ...(sealedAccess ? { workAccess: sealedAccess } : {}),
         review: { status: 'SUBMITTED' },
         // REVIEW-01 — historial APPEND-ONLY: la entrega original nunca se
         // sobrescribe; los reenvíos y acciones de revisión se agregan.

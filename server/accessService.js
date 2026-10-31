@@ -617,7 +617,7 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
         if (scopeData.appliedRules.length === 0) {
             if (fallbackMode === 'restricted') {
                 log(`[ACCESS] user ${userId} → content ${contentId} → DENIED via SCOPE_NO_RULES (restricted mode)`, 'ACCESS');
-                return { allowed: false, legacyFallback: false, reason: 'Sin reglas activas y modo restringido activo.' };
+                return { allowed: false, legacyFallback: false, via: 'SCOPE_NO_RULES', reason: 'Sin reglas activas y modo restringido activo.' };
             }
             log(`[ACCESS] user ${userId} → content ${contentId} → SCOPE_FALLBACK (open mode, no active rules)`, 'ACCESS');
             return { allowed: true, legacyFallback: true, reason: 'Sin reglas estrictas aplicables. Evaluando fallback legacy...' };
@@ -629,6 +629,7 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
             return {
                 allowed: true,
                 legacyFallback: false,
+                via: 'SCOPE_TITLE',
                 reason: 'Aprobado por Título explícito (Scope Engine)',
             };
         }
@@ -639,6 +640,7 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
             return {
                 allowed: true,
                 legacyFallback: false,
+                via: 'SCOPE_COLLECTION',
                 reason: 'Aprobado por Colección autorizada (Scope Engine)',
             };
         }
@@ -648,6 +650,7 @@ export function createAccessService({ readJSON, log: logFn, normalizeUser, norma
         return {
             allowed: false,
             legacyFallback: false,
+            via: 'SCOPE_ENGINE',
             reason: 'Acceso denegado. Posee política restrictiva que no autoriza este contenido.',
         };
     }

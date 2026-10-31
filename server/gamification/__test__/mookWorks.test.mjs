@@ -56,12 +56,12 @@ const CATALOG = [
 ];
 const catalogMap = (list = CATALOG) => new Map(list.map((c) => [c.id, c]));
 const bookExists = (id) => CATALOG.some((c) => c.id === id);
-const allow = () => true;
 const WORDS = 'una dos tres cuatro cinco seis siete ocho';
 const production = (id, resourceRef) => ({ id, type: 'PRODUCTION', title: `Producir ${id}`, ...(resourceRef !== undefined ? { resourceRef } : {}),
     config: { consigna: 'c', criterioRevision: 'cr', minPalabras: 3, maxPalabras: 30 } });
 const reading = (id, resourceRef, required = true) => ({ id, type: 'READING', title: `Leer ${id}`, required, resourceRef });
 
+const frozenAccess = (workRef, over = {}) => ({ workRef, decision: 'allowed', via: 'SCOPE_TITLE', at: new Date().toISOString(), ...over });
 function publish(doc, slug, nodes) {
     const exp = Store.createExperience(doc, { slug, title: slug });
     const v = Store.createDraftVersion(doc, exp.id, { modules: [{ id: 'm1', title: 'M', nodes }] }, bookExists);
@@ -74,14 +74,14 @@ function walk(doc, exp, v, userId = 'lector', reviewerId = 'mediador') {
     const out = [];
     for (const n of Store.versionNodes(v)) {
         if (n.type !== 'PRODUCTION') { Store.completeNode(doc, run.id, n.id); continue; }
-        const { evidence } = Store.submitEvidence(doc, { runId: run.id, nodeId: n.id, userId, payload: { text: WORDS } });
+        const { evidence } = Store.submitEvidence(doc, { runId: run.id, nodeId: n.id, userId, payload: { text: WORDS }, workAccess: n.resourceRef ? frozenAccess(n.resourceRef) : null });
         Store.reviewEvidence(doc, evidence.id, { reviewerId, decision: 'aprobado' });
         out.push(evidence);
     }
     return out;
 }
 const workRefOf = Store.productionWorkRef;
-const opts = (over = {}) => ({ catalog: catalogMap(), canAccess: allow, workRefOf, sinceMs: SINCE, ...over });
+const opts = (over = {}) => ({ catalog: catalogMap(), workRefOf, sinceMs: SINCE, ...over });
 const reason = (r) => r.reasons[0];
 
 const AMOUNTS = { xp: { reading: 10, reflection: 20, validated: 20, route: 5 }, pm: { reviewed: 7, validated: 7 } };
@@ -132,14 +132,15 @@ try {
             const c = W.resolveEvidenceWork(doc, ev, opts({ catalog: catalogMap(CATALOG.map((x) => (x.id === 'obra-a' ? { ...x, status } : x))) }));
             ok(`retirada o no disponible (${status}): nada`, c.workRef === null && reason(c) === 'work_unavailable');
         }
-        ok('no accesible: nada', reason(W.resolveEvidenceWork(doc, ev, opts({ canAccess: () => false }))) === 'work_not_accessible');
-        ok('solo `true` concede acceso', reason(W.resolveEvidenceWork(doc, ev, opts({ canAccess: () => 'si' }))) === 'work_not_accessible');
+        const frozen = (over) => W.resolveEvidenceWork(doc, { ...ev, workAccess: { ...ev.workAccess, ...over } }, opts());
+        ok('no accesible al entregar: nada', reason(frozen({ decision: 'denied', via: 'SCOPE_ENGINE' })) === 'work_not_accessible');
+        ok('indeterminado: nada', reason(frozen({ decision: 'indeterminate', via: 'INDETERMINATE' })) === 'access_indeterminate');
+        for (const via of ['LEGACY_OPEN', 'ADMIN_ROLE', 'MEDIATOR_ROLE', 'GROUP_ALL', 'ORG_ALL', undefined]) ok(`procedencia ${via}: no es explícita`, reason(frozen({ via })) === 'access_not_explicit');
+        for (const via of W.EXPLICIT_ACCESS_VIAS) ok(`procedencia ${via}: explícita`, frozen({ via }).workRef === 'obra-a');
+        ok('snapshot de otra obra: nada', reason(frozen({ workRef: 'obra-b' })) === 'access_snapshot_mismatch');
         ok('sin el resolutor de obra inyectado: nada', W.resolveEvidenceWork(doc, ev, opts({ workRefOf: undefined })).workRef === null);
-        ok('sin decisión de acceso: nada', reason(W.resolveEvidenceWork(doc, ev, opts({ canAccess: undefined }))) === 'work_not_accessible');
-        ok('si el acceso falla: nada', reason(W.resolveEvidenceWork(doc, ev, opts({ canAccess: () => { throw new Error('x'); } }))) === 'work_not_accessible');
-        let asked = null;
-        W.resolveEvidenceWork(doc, ev, opts({ canAccess: (u, c) => { asked = [u, c]; return true; } }));
-        ok('el acceso se pregunta por el dueño de la evidencia y la obra', asked?.[0] === 'lector' && asked?.[1] === 'obra-a');
+        const { workAccess: _omit, ...historic } = ev;
+        ok('evidencia histórica sin snapshot: nada', reason(W.resolveEvidenceWork(doc, historic, opts())) === 'no_access_snapshot');
         const blocks = { coleccion: 'work_is_collection', parte: 'work_is_part', guia: 'work_is_part', podcast: 'work_not_classified', articulo: 'work_not_classified', pieza: 'work_not_standalone' };
         for (const [id, why] of Object.entries(blocks)) {
             const d = Store.emptyMookStore();
@@ -160,10 +161,10 @@ try {
         const cov = W.versionWorkCoverage(v, workRefOf);
         ok('la versión declara varias asociaciones', cov.coverage === 'multi' && cov.associations.length === 2);
         ok('cada evidencia va solo a la obra de su nodo', W.resolveEvidenceWork(doc, ea, opts()).workRef === 'obra-a' && W.resolveEvidenceWork(doc, eb, opts()).workRef === 'obra-b');
-        const { evidence } = W.mookRecognitionEvidence(doc, { catalog: CATALOG, canAccess: allow, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
+        const { evidence } = W.mookRecognitionEvidence(doc, { catalog: CATALOG, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
         ok('dos evidencias, dos entradas, sin repartir ninguna', evidence.length === 2 && new Set(evidence.map((e) => e.evidenceId)).size === 2);
-        const blockedB = W.resolveEvidenceWork(doc, eb, opts({ canAccess: (_, c) => c === 'obra-a' }));
-        ok('una obra no accesible no afecta a la otra', blockedB.workRef === null && W.resolveEvidenceWork(doc, ea, opts({ canAccess: (_, c) => c === 'obra-a' })).workRef === 'obra-a');
+        const blockedB = W.resolveEvidenceWork(doc, { ...eb, workAccess: { ...eb.workAccess, decision: 'denied' } }, opts());
+        ok('una obra no accesible no afecta a la otra', blockedB.workRef === null && W.resolveEvidenceWork(doc, ea, opts()).workRef === 'obra-a');
         const doc2 = Store.emptyMookStore();
         const two = publish(doc2, 'dos', [reading('ra', 'obra-a'), reading('rb', 'obra-b'), production('p', 'obra-b')]);
         const [e2] = walk(doc2, two.exp, two.v);
@@ -193,8 +194,8 @@ try {
         const other = publish(doc, 'otra', [reading('rb', 'obra-b'), production('p', 'obra-b')]);
         const { run } = Store.startRun(doc, { userId: 'lector', experienceId: exp.id });
         Store.completeNode(doc, run.id, 'ra');
-        const { evidence: ev } = Store.submitEvidence(doc, { runId: run.id, nodeId: 'p', userId: 'lector',
-            payload: { text: WORDS, workRef: 'obra-b', resourceRef: 'obra-b', contentId: 'obra-b', cycle: 9, config: { recognition: {} } } });
+        const { evidence: ev } = Store.submitEvidence(doc, { runId: run.id, nodeId: 'p', userId: 'lector', workAccess: frozenAccess('obra-a'),
+            payload: { text: WORDS, workRef: 'obra-b', resourceRef: 'obra-b', contentId: 'obra-b', cycle: 9, workAccess: frozenAccess('obra-b'), config: { recognition: {} } } });
         Store.reviewEvidence(doc, ev.id, { reviewerId: 'mediador', decision: 'aprobado' });
         ok('el store solo conserva el texto entregado', JSON.stringify(Object.keys(ev.payload)) === '["text"]');
         ok('los campos enviados no cambian la obra', W.resolveEvidenceWork(doc, ev, opts()).workRef === 'obra-a');
@@ -234,7 +235,7 @@ try {
         ok('misma obra, actividades distintas', ra.workRef === rb.workRef && ra.activityRef !== rb.activityRef);
         ok('el resolutor no decide el ciclo', !('cycle' in ra));
         const snapshot = JSON.stringify(doc);
-        const run = () => W.mookRecognitionEvidence(doc, { catalog: CATALOG, canAccess: allow, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
+        const run = () => W.mookRecognitionEvidence(doc, { catalog: CATALOG, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE });
         const a = run(); const b = run();
         ok('determinista: repetir da lo mismo', JSON.stringify(a) === JSON.stringify(b) && a.evidence.length === 2);
         ok('no escribe en el documento MOOK', JSON.stringify(doc) === snapshot);
@@ -290,7 +291,7 @@ try {
             walk(d, p.exp, p.v, userId, reviewerId);
             return d;
         };
-        const gather = (d, gate) => W.mookRecognitionEvidence(d, { catalog: CATALOG, canAccess: allow, workRefOf, resolveUser, gate, sinceMs: SINCE });
+        const gather = (d, gate) => W.mookRecognitionEvidence(d, { catalog: CATALOG, workRefOf, resolveUser, gate, sinceMs: SINCE });
         const gateOpen = () => X.exclusionGate(db, env);
         ok('sin exclusiones: pasa', gather(scenario('lector', 'mediador'), gateOpen()).evidence.length === 1);
         for (const [who, u, a] of [['inactivo', 'inactivo', 'mediador'], ['sintético', 'sintetico', 'mediador'], ['inexistente', 'nadie', 'mediador'], ['revisor inactivo', 'lector', 'inactivo']]) {
