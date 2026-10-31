@@ -10,6 +10,7 @@
  *   node server/royalties/__test__/publisherActorSession.test.mjs   (POSIX: clave 0400)
  */
 import '../../__test__/helpers/testMode.mjs';
+import { freePort } from '../../__test__/helpers/freePort.mjs';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { spawn } from 'node:child_process';
@@ -57,7 +58,7 @@ fs.writeFileSync(P.content, JSON.stringify([BOOK], null, 2));
 fs.writeFileSync(P.key, crypto.randomBytes(48).toString('hex'));
 fs.chmodSync(P.key, 0o400);
 
-const PORT = 6600 + (process.pid % 200);
+const PORT = await freePort();
 const base = `http://127.0.0.1:${PORT}`;
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,

@@ -20,6 +20,7 @@
  *   node scripts/identity/__test__/retireSyntheticCohort.test.mjs
  */
 import '../../../server/__test__/helpers/testMode.mjs';
+import { freePort } from '../../../server/__test__/helpers/freePort.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -193,7 +194,7 @@ let basePlan;
 }
 
 // ── Server real ──────────────────────────────────────────────────────────────
-const PORT = 4900 + (process.pid % 200);
+const PORT = await freePort();
 const base = `http://127.0.0.1:${PORT}`;
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,

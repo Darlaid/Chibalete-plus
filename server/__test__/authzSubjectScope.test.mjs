@@ -22,6 +22,7 @@
  * `/api/users` y `/api/groups`, que se acotarán filtrando por tenant.
  */
 import './helpers/testMode.mjs';
+import { freePort } from './helpers/freePort.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -136,10 +137,7 @@ async function waitHealthy(base, child) {
     throw new Error(`nunca healthy\n${child._boot().slice(-2000)}`);
 }
 
-// 5040 lo ocupa en Windows el servicio Connected Devices Platform (escucha en
-// 0.0.0.0): el hijo se enlazaba en `::` y las peticiones a 127.0.0.1 iban a ese
-// servicio → fallo intermitente cuando pid % 80 === 60. Se salta ese puerto.
-const PORT = ((p) => (p === 5040 ? 5041 : p))(4980 + (process.pid % 80));
+const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 let api;
 

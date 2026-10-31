@@ -18,6 +18,7 @@
  *   node server/royalties/__test__/publisherMandatoryHttp.test.mjs
  */
 import '../../__test__/helpers/testMode.mjs';
+import { freePort } from '../../__test__/helpers/freePort.mjs';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -69,7 +70,7 @@ fs.writeFileSync(P.content, JSON.stringify([...SEED, LEGACY, LEGACY_EPUB], null,
 fs.writeFileSync(P.access, JSON.stringify([{ id: 'r-lec', scope: 'user', scopeId: 'LEC', titleIds: SEED.map((c) => c.id), collectionIds: [], expiresAt: null }], null, 2));
 for (const f of ['groups', 'schools']) fs.writeFileSync(path.join(tmp, `${f}.json`), '[]');
 
-const PORT = 5900 + (process.pid % 100);
+const PORT = await freePort();
 const base = `http://127.0.0.1:${PORT}`;
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,

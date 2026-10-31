@@ -21,6 +21,7 @@
  *   node server/__test__/identityMutationCanonicalRead.test.mjs
  */
 import './helpers/testMode.mjs';
+import { freePort } from './helpers/freePort.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -137,7 +138,7 @@ const snapshotRepoData = () => {
 const dataBefore = snapshotRepoData();
 
 // ── Server real, flags de cutover simulado en LOS TRES dominios ──────────────
-const PORT = 4100 + (process.pid % 400);
+const PORT = await freePort();
 const base = `http://127.0.0.1:${PORT}`;
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,

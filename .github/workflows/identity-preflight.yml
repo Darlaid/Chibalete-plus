@@ -200,6 +200,10 @@ jobs:
       # concede puntos por token, sin canjes ni aprobaciones simuladas, Trivia
       # fuera de la navegación, corte por tiempo ≠ «Lectura Completada», y la
       # Tienda (render real con catálogo Woo) sin canje.
+      # CHP-TECH-STABILITY-01 — las dos exportaciones ZIP por HTTP real.
+      - name: Exportaciones ZIP
+        run: npm run test:exports
+
       - name: Contención de gamificación (G0)
         run: npm run test:gamification-g0
 

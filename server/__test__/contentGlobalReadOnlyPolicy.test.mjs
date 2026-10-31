@@ -24,6 +24,7 @@
  *   node server/__test__/contentGlobalReadOnlyPolicy.test.mjs
  */
 import './helpers/testMode.mjs';
+import { freePorts } from './helpers/freePort.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -128,10 +129,10 @@ const mk = (port) => {
     return { get, post, authz };
 };
 
-const PORT = 6600 + (process.pid % 80);
+const [PORT, PORT_LEGACY] = await freePorts(2);
 const strictApi = spawnApi(PORT, 'strict');
-const legacyApi = spawnApi(PORT + 100, null);
-const S = mk(PORT), L = mk(PORT + 100);
+const legacyApi = spawnApi(PORT_LEGACY, null);
+const S = mk(PORT), L = mk(PORT_LEGACY);
 const byId = (list, id) => list.find(c => c.id === id);
 
 try {

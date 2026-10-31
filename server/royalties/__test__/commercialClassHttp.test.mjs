@@ -16,6 +16,7 @@
  *   node server/royalties/__test__/commercialClassHttp.test.mjs
  */
 import '../../__test__/helpers/testMode.mjs';
+import { freePort } from '../../__test__/helpers/freePort.mjs';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -75,7 +76,7 @@ const RULES = [
 fs.writeFileSync(P.access, JSON.stringify(RULES, null, 2));
 const IDS = ['content-c1', 'content-c2', 'content-c3'];
 
-const PORT = 6000 + (process.pid % 90);
+const PORT = await freePort();
 const base = `http://127.0.0.1:${PORT}`;
 let child = null, boot = '';
 async function start() {

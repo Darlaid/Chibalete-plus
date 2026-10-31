@@ -14,6 +14,7 @@
  *   node server/__test__/catalogResourceLocators.test.mjs
  */
 import './helpers/testMode.mjs';
+import { freePort } from './helpers/freePort.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -145,7 +146,7 @@ async function login(base, id) {
     return `chp_session=${m[1]}`;
 }
 
-const PORT = 6400 + (process.pid % 200);
+const PORT = await freePort();
 const base = `http://127.0.0.1:${PORT}`;
 let api;
 const C = {};

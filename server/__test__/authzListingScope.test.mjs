@@ -21,6 +21,7 @@
  * se re-verifica con el mismo fixture de dos organizaciones.
  */
 import './helpers/testMode.mjs';
+import { freePorts } from './helpers/freePort.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -151,9 +152,8 @@ async function waitHealthy(base, child) {
     throw new Error(`nunca healthy\n${child._boot().slice(-2000)}`);
 }
 
-const PORT = 5060 + (process.pid % 80);
+const [PORT, PORT_BAD] = await freePorts(2);
 const BASE = `http://127.0.0.1:${PORT}`;
-const PORT_BAD = PORT + 100;
 const BASE_BAD = `http://127.0.0.1:${PORT_BAD}`;
 let api, apiBad;
 
