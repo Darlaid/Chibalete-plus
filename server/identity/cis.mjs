@@ -249,6 +249,28 @@ export function resolveScope(principalId) {
 }
 
 /**
+ * Nómina actual de cada grupo ACTIVE_REAL que el principal media, para decidir
+ * sobre registros concretos. Sin rol de mediador no hay nómina, aunque el grupo
+ * lo liste. Solo pertenencia explícita, sin fallback por nombre de colegio.
+ * @returns {Map<string, Set<string>>}  groupId → ids de miembros
+ * @throws {IdentityUnavailableError}
+ */
+export function mediatedGroupRosters(principalId) {
+    const rosters = new Map();
+    const principal = getPrincipal(principalId);
+    if (!principal?.mediatorRole) return rosters;
+    const users  = readIdentityArray(USERS_DB, 'users');
+    const groups = readIdentityArray(GROUPS_DB, 'groups');
+    const ctx    = organizationContext(users);
+    for (const g of groups) {
+        if (!g?.id || !isMediatorOfGroup(g, principal.id)) continue;
+        if (classifyGroup(g, ctx).class !== GROUP_CLASS.ACTIVE_REAL) continue;
+        rosters.set(g.id, new Set(getGroupMembers(g, users, { allGroups: groups, useLegacyColegioFallback: false })));
+    }
+    return rosters;
+}
+
+/**
  * Decisión de acceso tipificada (CHP-ADR-01 §I-2). NUNCA lanza por
  * indisponibilidad del canónico: la devuelve como decision:'unavailable'.
  * Errores de programación sí se propagan (sin catch-all).
