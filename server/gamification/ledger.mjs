@@ -164,6 +164,10 @@ export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom
     if (rules.recognition !== undefined && !validateApprovedRecognition(rules.recognition).ok) {
         throw bad('INVALID_RULES', `recognition: ${validateApprovedRecognition(rules.recognition).errors.join(',')}`);
     }
+    // Revisión y ruta comparten clave con `recordFact`: pagarlas por `facts` esquivaría el techo por obra.
+    if (rules.recognition !== undefined && Object.entries(rules.facts ?? {}).some(([k, r]) => /^mook_(review|experience)\//.test(k) && ((r.xp ?? 0) > 0 || (r.pm ?? 0) > 0))) {
+        throw bad('RECOGNITION_RULE_CONFLICT', 'con recognition, MOOK no paga por facts');
+    }
     const rulesJson = JSON.stringify(rules);
     const digest = sha256(rulesJson);
     const from = effectiveFrom ?? now;
