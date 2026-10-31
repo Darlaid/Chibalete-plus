@@ -1,5 +1,7 @@
 # Aprobación de parámetros A7 y A12 — versión 1
 
+**SUSTITUIDA por la [versión 2](GAMIFICACION_A7_A12_APROBACION_V2.md).**
+
 **ESTADO: PENDIENTE DE DIRECCIÓN.** Sin aprobar. No constituye configuración productiva.
 
 | Campo | Valor |
