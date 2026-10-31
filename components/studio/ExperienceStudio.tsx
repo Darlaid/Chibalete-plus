@@ -26,6 +26,7 @@ import {
     COVER_HELP_TEXT,
 } from '../../utils/coverContract.js';
 import { optimizeCover, browserDeps } from '../../utils/coverOptimizer.mjs';
+import { WORK_BLOCK_LABELS, workBlock, workOfferedBefore } from '../../utils/workEligibility.mjs';
 
 const NODE_TYPES = ['READING', 'VIDEO', 'AUDIO', 'LEO', 'ACTIVITY', 'PRODUCTION'] as const;
 type NodeType = typeof NODE_TYPES[number];
@@ -62,13 +63,22 @@ function defaultNode(type: NodeType): StudioNode {
     return base;
 }
 
+/** Motivo por el que una producción no puede declarar esa obra, o null. Mismo criterio que el servidor. */
+function productionWorkIssue(route: StudioNode[], index: number, workRef: string, catalogById: Map<string, Content>): string | null {
+    const block = workBlock(catalogById.get(workRef));
+    if (block) return (WORK_BLOCK_LABELS as Record<string, string>)[block] ?? 'La obra no es elegible.';
+    return workOfferedBefore(route, index, workRef) ? null : 'La obra debe aparecer antes en la ruta, en un paso de lectura, video o audio.';
+}
+
 // ── Selector de contenido (C7) — catálogo canónico único, solo referencia ───
 const ContentPicker: React.FC<{
     currentId: string | null;
     onSelect: (c: Content) => void;
     onClose: () => void;
     onCreateContent?: () => void;
-}> = ({ currentId, onSelect, onClose, onCreateContent }) => {
+    /** Solo obras que una producción puede evaluar (misma regla que el servidor). */
+    eligibleOnly?: boolean;
+}> = ({ currentId, onSelect, onClose, onCreateContent, eligibleOnly = false }) => {
     const [catalog, setCatalog] = useState<Content[]>([]);
     const [query, setQuery] = useState('');
     const [tipo, setTipo] = useState('');
@@ -80,7 +90,8 @@ const ContentPicker: React.FC<{
         prevFocus.current = document.activeElement;
         // getContenidos es síncrono (catálogo canónico ya cacheado por dataService).
         // Muestra autónomo Y no-autónomo (C7); los más recientes arriba.
-        setCatalog([...dataService.getContenidos(['administrador'])].reverse());
+        const all = [...dataService.getContenidos(['administrador'])].reverse();
+        setCatalog(eligibleOnly ? all.filter(c => workBlock(c) === null) : all);
         setLoading(false);
         searchRef.current?.focus();
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -99,10 +110,10 @@ const ContentPicker: React.FC<{
     ).slice(0, 60);
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-label="Seleccionar contenido del catálogo">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-label={eligibleOnly ? 'Seleccionar la obra que evalúa la producción' : 'Seleccionar contenido del catálogo'}>
             <div className="bg-white dark:bg-gray-800 rounded-xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl">
                 <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-                    <h3 className="font-bold text-gray-800 dark:text-gray-100">Bandeja de recursos — catálogo canónico</h3>
+                    <h3 className="font-bold text-gray-800 dark:text-gray-100">{eligibleOnly ? 'Obras elegibles — catálogo canónico' : 'Bandeja de recursos — catálogo canónico'}</h3>
                     <button type="button" onClick={onClose} aria-label="Cerrar selector" className="text-gray-400 hover:text-gray-600 p-1"><X size={18} /></button>
                 </div>
                 <div className="p-4 flex flex-col sm:flex-row gap-3">
@@ -121,7 +132,7 @@ const ContentPicker: React.FC<{
                 </div>
                 <div className="overflow-y-auto px-4 pb-2 flex-1">
                     {loading && <p className="text-sm text-gray-500 p-2">Cargando catálogo…</p>}
-                    {!loading && shown.length === 0 && <p className="text-sm text-gray-500 p-2">Sin resultados en el catálogo.</p>}
+                    {!loading && shown.length === 0 && <p className="text-sm text-gray-500 p-2">{eligibleOnly ? 'Sin obras elegibles con esos filtros.' : 'Sin resultados en el catálogo.'}</p>}
                     <ul className="space-y-2">
                         {shown.map(c => (
                             <li key={c.id}>
@@ -162,7 +173,10 @@ const NodeEditor: React.FC<{
     catalogById: Map<string, Content>;
     onChange: (n: StudioNode) => void;
     onOpenPicker: () => void;
-}> = ({ node, errors, errKey, catalogById, onChange, onOpenPicker }) => {
+    /** Secuencia global de la ruta y posición de este nodo. */
+    routeNodes: StudioNode[];
+    routeIndex: number;
+}> = ({ node, errors, errKey, catalogById, onChange, onOpenPicker, routeNodes, routeIndex }) => {
     const set = (patch: Partial<StudioNode>) => onChange({ ...node, ...patch });
     const setCfg = (patch: any) => onChange({ ...node, config: { ...node.config, ...patch } });
     const res = node.resourceRef ? catalogById.get(node.resourceRef) : null;
@@ -173,6 +187,8 @@ const NodeEditor: React.FC<{
         : null;
 
     const needsResource = node.type === 'READING' || node.type === 'VIDEO' || node.type === 'AUDIO';
+    const isProduction = node.type === 'PRODUCTION';
+    const workIssue = isProduction && node.resourceRef && catalogById.size > 0 ? productionWorkIssue(routeNodes, routeIndex, node.resourceRef, catalogById) : null;
 
     return (
         <div className="rounded-xl border-2 border-indigo-200 dark:border-indigo-800 bg-indigo-50/40 dark:bg-indigo-900/10 p-4 space-y-3">
@@ -183,10 +199,10 @@ const NodeEditor: React.FC<{
                 <ErrMsg k="title" />
             </div>
 
-            {(needsResource || node.type === 'LEO') && (
+            {(needsResource || node.type === 'LEO' || isProduction) && (
                 <div>
                     <span className="block text-sm font-medium text-gray-700 dark:text-gray-200">
-                        {needsResource ? 'Contenido canónico (referencia)' : 'Lectura asociada (opcional)'}
+                        {needsResource ? 'Contenido canónico (referencia)' : isProduction ? 'Obra que evalúa (opcional)' : 'Lectura asociada (opcional)'}
                     </span>
                     <div className="flex items-center gap-3 mt-1">
                         {res
@@ -197,7 +213,7 @@ const NodeEditor: React.FC<{
                             </span>
                             : node.resourceRef
                                 ? <span className="text-sm text-amber-700 inline-flex items-center gap-1"><AlertTriangle size={14} aria-hidden /> Referencia {node.resourceRef} (no está en el catálogo local)</span>
-                                : <span className="text-sm text-gray-400">Sin contenido seleccionado</span>}
+                                : <span className="text-sm text-gray-400">{isProduction ? 'Sin obra: experiencia general' : 'Sin contenido seleccionado'}</span>}
                         <button type="button" onClick={onOpenPicker} className="px-3 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-indigo-300 text-indigo-700 dark:text-indigo-300 text-sm font-bold">
                             {node.resourceRef ? 'Cambiar' : 'Seleccionar'}
                         </button>
@@ -206,7 +222,16 @@ const NodeEditor: React.FC<{
                         )}
                     </div>
                     <ErrMsg k="resourceRef" />
-                    {res && res.status !== 'disponible' && (
+                    {isProduction && !node.resourceRef && (
+                        <p className="text-xs text-gray-500 mt-1">Una experiencia general no atribuye la evidencia a ninguna obra. Selecciona una solo si esta producción la evalúa.</p>
+                    )}
+                    {isProduction && node.resourceRef && !workIssue && catalogById.size > 0 && (
+                        <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1 inline-flex items-center gap-1"><CheckCircle2 size={14} aria-hidden /> Obra elegible, ofrecida antes en la ruta.</p>
+                    )}
+                    {isProduction && workIssue && !err('resourceRef') && (
+                        <p className="text-xs text-amber-700 mt-1 inline-flex items-center gap-1"><AlertTriangle size={14} aria-hidden /> {workIssue}</p>
+                    )}
+                    {!isProduction && res && res.status !== 'disponible' && (
                         <p className="text-xs text-amber-700 mt-1">Este contenido aún no está disponible (estado: {res.status}). El nodo mostrará candado hasta que lo esté.</p>
                     )}
                 </div>
@@ -582,6 +607,11 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                 if (n.type === 'PRODUCTION') {
                     if (!(n.config.consigna ?? '').trim()) e[`${k}.consigna`] = 'La producción necesita consigna.';
                     if ((n.config.minPalabras ?? 0) >= (n.config.maxPalabras ?? 0)) e[`${k}.palabras`] = 'El mínimo de palabras debe ser menor que el máximo.';
+                    if (n.resourceRef && catalogById.size > 0) {
+                        const route = modules.flatMap(x => x.nodes);
+                        const issue = productionWorkIssue(route, route.indexOf(n), n.resourceRef, catalogById);
+                        if (issue) e[`${k}.resourceRef`] = issue;
+                    }
                 }
             });
         });
@@ -1011,6 +1041,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                                             <span className="text-sm font-medium text-gray-700 dark:text-gray-200 inline-flex items-center gap-2 flex-1 min-w-40">
                                                 {NODE_ICON[n.type]} {n.title || <span className="text-gray-400 italic">sin título</span>}
                                                 <span className="text-xs text-gray-600 dark:text-gray-400">· {NODE_TYPE_LABEL[n.type]}</span>
+                                                {n.type === 'PRODUCTION' && n.resourceRef && <span className="text-xs text-indigo-700 dark:text-indigo-300">· Evalúa: {catalogById.get(n.resourceRef)?.titulo ?? n.resourceRef}</span>}
                                             </span>
                                             <span className="text-xs text-gray-500">{n.required ? 'Requerido' : 'Opcional'}</span>
                                             {!readOnlyRoute && expStatus !== 'archived' && (
@@ -1034,7 +1065,7 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                                         </div>
                                         {editingNode?.mi === mi && editingNode?.ni === ni && !readOnlyRoute && expStatus !== 'archived' && (
                                             <div className="mt-2">
-                                                <NodeEditor node={n} errors={errors} errKey={`node.${mi}.${ni}`} catalogById={catalogById}
+                                                <NodeEditor node={n} errors={errors} errKey={`node.${mi}.${ni}`} catalogById={catalogById} routeNodes={modules.flatMap(x => x.nodes)} routeIndex={modules.flatMap(x => x.nodes).indexOf(n)}
                                                     onChange={x => setNode(mi, ni, x)} onOpenPicker={() => setPicker({ mi, ni })} />
                                             </div>
                                         )}
@@ -1161,7 +1192,8 @@ export const ExperienceStudio: React.FC<{ onCreateContent?: () => void }> = ({ o
                 <ContentPicker
                     currentId={modules[picker.mi]?.nodes[picker.ni]?.resourceRef ?? null}
                     onClose={() => setPicker(null)}
-                    onCreateContent={onCreateContent ? () => { setPicker(null); onCreateContent(); } : undefined}
+                    eligibleOnly={modules[picker.mi]?.nodes[picker.ni]?.type === 'PRODUCTION'}
+                    onCreateContent={onCreateContent && modules[picker.mi]?.nodes[picker.ni]?.type !== 'PRODUCTION' ? () => { setPicker(null); onCreateContent(); } : undefined}
                     onSelect={(c) => {
                         const n = modules[picker.mi].nodes[picker.ni];
                         setNode(picker.mi, picker.ni, { ...n, resourceRef: c.id });

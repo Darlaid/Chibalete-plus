@@ -37,6 +37,7 @@ import {
 // CHP-GAMIFICACION-G3-03 — MOOK como fuente de hechos. Inerte con
 // GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
 import * as gamificationMook from './gamification/mookSource.mjs';
+import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
 import { recordCanonicalEvent } from './services/analyticsShadow.mjs';
@@ -2657,6 +2658,9 @@ const mookErrStatus = (e) => (
     : e.code ? 400 : 500
 );
 
+// MOOK-STUDIO-WORKREF-01: elegibilidad de la obra que declara una PRODUCTION.
+const mookWorkBlockOf = (contentList) => (id) => workBlock(contentList.find(c => c.id === id));
+
 // ── Editorial/admin (mecanismo administrativo canónico) ─────────────────────
 app.post('/api/experiences', requireAdminAccess, async (req, res) => {
     try {
@@ -2672,7 +2676,7 @@ app.post('/api/experiences/:id/versions', requireAdminAccess, async (req, res) =
         const contentList = readJSON(DB_FILE);
         let v;
         await mutateMook((doc) => {
-            v = experienceStore.createDraftVersion(doc, req.params.id, req.body ?? {}, (id) => contentList.some(c => c.id === id));
+            v = experienceStore.createDraftVersion(doc, req.params.id, req.body ?? {}, (id) => contentList.some(c => c.id === id), mookWorkBlockOf(contentList));
         });
         log(`[MOOK] draft v${v.version} created for ${req.params.id}`);
         res.status(201).json(v);
@@ -2684,7 +2688,7 @@ app.put('/api/experiences/versions/:vid', requireAdminAccess, async (req, res) =
         const contentList = readJSON(DB_FILE);
         let v;
         await mutateMook((doc) => {
-            v = experienceStore.updateDraftVersion(doc, req.params.vid, req.body ?? {}, (id) => contentList.some(c => c.id === id));
+            v = experienceStore.updateDraftVersion(doc, req.params.vid, req.body ?? {}, (id) => contentList.some(c => c.id === id), mookWorkBlockOf(contentList));
         });
         res.json(v);
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
@@ -2692,8 +2696,11 @@ app.put('/api/experiences/versions/:vid', requireAdminAccess, async (req, res) =
 
 app.post('/api/experiences/versions/:vid/publish', requireAdminAccess, async (req, res) => {
     try {
+        // Lectura directa: una obra retirada no debe publicarse por la caché de 30 s.
+        _jsonCache.delete(DB_FILE);
+        const contentList = readJSON(DB_FILE);
         let v;
-        await mutateMook((doc) => { v = experienceStore.publishVersion(doc, req.params.vid); });
+        await mutateMook((doc) => { v = experienceStore.publishVersion(doc, req.params.vid, { workBlockOf: mookWorkBlockOf(contentList) }); });
         log(`[MOOK] published ${v.experienceId} v${v.version}`);
         res.json(v);
     } catch (e) { res.status(mookErrStatus(e)).json({ error: e.message, code: e.code }); }
@@ -2923,7 +2930,7 @@ async function checkWorkAccess(userId, runId, nodeId) {
         const declared = v ? experienceStore.productionWorkRef(v, nodeId) : null;
         if (!declared?.workRef || declared.issue) return null;
         workRef = declared.workRef;
-        const blocked = gamificationMook.workBlock(fresh(DB_FILE).find(c => c.id === workRef));
+        const blocked = workBlock(fresh(DB_FILE).find(c => c.id === workRef));
         if (blocked) return experienceStore.buildWorkAccess(workRef, { status: 403, via: blocked.toUpperCase(), body: { allowed: false } });
         rightsGate.invalidate();
         const d = await decideContentAccess(userId, workRef, { logDecision: false, readStore: fresh });

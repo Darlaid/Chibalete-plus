@@ -15,6 +15,7 @@
  *    porcentaje mutable independiente).
  *  - Este módulo NO conoce el access engine ni concede acceso a nada.
  */
+import { WORK_BLOCK_LABELS, workOfferedBefore } from '../../utils/workEligibility.mjs';
 
 export const NODE_TYPES = Object.freeze(['READING', 'VIDEO', 'AUDIO', 'LEO', 'ACTIVITY', 'PRODUCTION']);
 
@@ -57,8 +58,7 @@ export function productionWorkRef(version, nodeId) {
     const idx = flat.findIndex(n => n.id === nodeId);
     const workRef = flat[idx]?.type === 'PRODUCTION' ? (flat[idx].resourceRef ?? null) : null;
     if (workRef === null) return { workRef: null, issue: null };
-    const offered = flat.slice(0, idx).some(n => ['READING', 'VIDEO', 'AUDIO'].includes(n.type) && n.resourceRef === workRef);
-    return { workRef, issue: offered ? null : 'WORK_NOT_IN_VERSION' };
+    return { workRef, issue: workOfferedBefore(flat, idx, workRef) ? null : 'WORK_NOT_IN_VERSION' };
 }
 
 /** Módulo al que pertenece un nodo (contexto para UI/telemetría). */
@@ -130,7 +130,14 @@ export function archiveExperience(doc, experienceId) {
     return exp;
 }
 
-function validateNode(node, i, bookExists) {
+/** Rechaza una obra que no se puede declarar. `workBlockOf(contentId)` da el motivo, o null. */
+function assertWorkEligible(workRef, workBlockOf, where) {
+    if (typeof workBlockOf !== 'function') return;
+    const block = workBlockOf(workRef);
+    if (block) throw err('WORK_NOT_ELIGIBLE', `${where}: ${WORK_BLOCK_LABELS[block] ?? block}`);
+}
+
+function validateNode(node, i, bookExists, workBlockOf) {
     if (!node || !NODE_TYPES.includes(node.type)) throw err('INVALID_NODE_TYPE', `nodo ${i}: type inválido`);
     if (!node.title || !String(node.title).trim()) throw err('INVALID_NODE', `nodo ${i}: title requerido`);
     const out = {
@@ -153,6 +160,7 @@ function validateNode(node, i, bookExists) {
         if (typeof bookExists === 'function' && !bookExists(out.resourceRef)) {
             throw err('RESOURCE_NOT_FOUND', `nodo ${i}: contentId no existe en el catálogo: ${out.resourceRef}`);
         }
+        assertWorkEligible(out.resourceRef, workBlockOf, `nodo ${i}`);
     }
     if (out.type === 'LEO') {
         out.config.minIntercambios = Number.isFinite(out.config.minIntercambios) ? out.config.minIntercambios : 3;
@@ -183,7 +191,7 @@ function validateNode(node, i, bookExists) {
  * Valida y congela la estructura de módulos (V4). Acepta `modules[]` o, por
  * compat trivial, `nodes[]` planos (se envuelven en un módulo único).
  */
-function buildModules({ modules, nodes }, bookExists) {
+function buildModules({ modules, nodes }, bookExists, workBlockOf) {
     let mods = modules;
     if (!Array.isArray(mods) || mods.length === 0) {
         if (!Array.isArray(nodes) || nodes.length === 0) throw err('INVALID_NODES', 'la versión exige módulos con nodos');
@@ -203,7 +211,7 @@ function buildModules({ modules, nodes }, bookExists) {
             title: String(m.title).trim(),
             ...(m.description ? { description: String(m.description) } : {}),
             nodes: m.nodes.map((n) => {
-                const v = validateNode(n, globalIdx++, bookExists);
+                const v = validateNode(n, globalIdx++, bookExists, workBlockOf);
                 if (nodeIds.has(v.id)) throw err('INVALID_NODE', `nodo ${v.id}: id duplicado global`);
                 nodeIds.add(v.id);
                 return v;
@@ -212,11 +220,11 @@ function buildModules({ modules, nodes }, bookExists) {
     });
 }
 
-export function createDraftVersion(doc, experienceId, { objectives = [], nodes, modules }, bookExists) {
+export function createDraftVersion(doc, experienceId, { objectives = [], nodes, modules }, bookExists, workBlockOf) {
     const exp = doc.experiences.find(e => e.id === experienceId);
     if (!exp) throw err('EXPERIENCE_NOT_FOUND', `experience no existe: ${experienceId}`);
     if (exp.status === 'archived') throw err('EXPERIENCE_ARCHIVED', 'una Experiencia archivada no recibe versiones nuevas');
-    const frozenModules = buildModules({ modules, nodes }, bookExists);
+    const frozenModules = buildModules({ modules, nodes }, bookExists, workBlockOf);
     const maxV = Math.max(0, ...doc.versions.filter(v => v.experienceId === experienceId).map(v => v.version));
     const version = {
         id: rid('expv'), experienceId, version: maxV + 1, status: 'draft',
@@ -226,18 +234,18 @@ export function createDraftVersion(doc, experienceId, { objectives = [], nodes, 
     return version;
 }
 
-export function updateDraftVersion(doc, versionId, { objectives, nodes, modules }, bookExists) {
+export function updateDraftVersion(doc, versionId, { objectives, nodes, modules }, bookExists, workBlockOf) {
     const v = doc.versions.find(x => x.id === versionId);
     if (!v) throw err('VERSION_NOT_FOUND', `versión no existe: ${versionId}`);
     if (v.status !== 'draft') throw err('VERSION_IMMUTABLE', 'una versión publicada es INMUTABLE (crea una versión nueva)');
     if (objectives !== undefined) v.objectives = objectives.map(String);
     if (nodes !== undefined || modules !== undefined) {
-        v.modules = buildModules({ modules, nodes }, bookExists);
+        v.modules = buildModules({ modules, nodes }, bookExists, workBlockOf);
     }
     return v;
 }
 
-export function publishVersion(doc, versionId) {
+export function publishVersion(doc, versionId, { workBlockOf } = {}) {
     const v = doc.versions.find(x => x.id === versionId);
     if (!v) throw err('VERSION_NOT_FOUND', `versión no existe: ${versionId}`);
     if (v.status !== 'draft') throw err('VERSION_IMMUTABLE', 'solo un draft puede publicarse');
@@ -254,6 +262,8 @@ export function publishVersion(doc, versionId) {
             if (n.type === 'PRODUCTION' && productionWorkRef(v, n.id).issue) {
                 throw err('WORK_NOT_IN_VERSION', `módulo «${m.title}» (${m.id}) · nodo «${n.title}» (${n.id}): la obra debe aparecer en un nodo de lectura, video o audio anterior`);
             }
+            // El catálogo pudo cambiar desde que se guardó el borrador.
+            if (n.type === 'PRODUCTION' && n.resourceRef) assertWorkEligible(n.resourceRef, workBlockOf, `módulo «${m.title}» (${m.id}) · nodo «${n.title}» (${n.id})`);
         }
     }
     v.status = 'published';

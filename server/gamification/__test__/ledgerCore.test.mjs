@@ -287,7 +287,7 @@ try {
         !/readFileSync|from\s+['"][^'"]*(progressService|experienceStore|eventsService)[^'"]*['"]|USERS_DB|mook_db\.json/.test(modFiles.filter((f) => f !== 'exclusions.mjs').map(srcOf).join('\n')));
     const serverSrc = read('server/server.js');
     ok('server.js importa del motor SOLO mookSource.mjs', (serverSrc.match(/from '\.\/gamification\/[^']+'/g) || []).join() === "from './gamification/mookSource.mjs'");
-    ok('server.js engancha solo revisión MOOK, experiencia completada, el reconciliador y la elegibilidad de obra', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler,gamificationMook.workBlock');
+    ok('server.js engancha solo revisión MOOK, experiencia completada y el reconciliador', (serverSrc.match(/gamificationMook\.\w+/g) || []).sort().join() === 'gamificationMook.makeResolveUser,gamificationMook.onMookEvidenceReviewed,gamificationMook.onMookRunUpdated,gamificationMook.startMookReconciler');
     ok('el gancho de revisión va DESPUÉS de res.json', /res\.json\(\{ id: ev\.id, review: ev\.review \}\);\s*\n\s*\/\/[^\n]*\n\s*gamificationMook\.onMookEvidenceReviewed/.test(serverSrc));
     ok('ni lectura, ni progreso, ni Leo, ni acceso enganchados al motor', !/scheduleFact|recordFact|reading_completion/.test(serverSrc));
     ok('progressService no depende del motor', !/gamification/.test(read('server/progressService.js')));

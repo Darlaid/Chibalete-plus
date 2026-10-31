@@ -25,11 +25,8 @@
  */
 import { candidateEligibility, mookReviewCandidates } from './reconcile.mjs';
 
-/**
- * Tipos que cuentan como obra mientras Editorial no decida otra cosa
- * (Modelo PRIV-01 §5.1). Colecciones, partes, guías, podcasts y artículos no.
- */
-export const WORK_TIPOS = Object.freeze(['libro', 'libro_album', 'video']);
+/** La regla de obra vive en un módulo puro compartido con Studio. */
+export { WORK_TIPOS, workBlock } from '../../utils/workEligibility.mjs';
 
 const versionNodes = (version) => (version.modules ?? []).flatMap((m) => m.nodes);
 
@@ -38,17 +35,6 @@ const versionNodes = (version) => (version.modules ?? []).flatMap((m) => m.nodes
  * tal cual: ampliar esta lista no exige recalcular ninguna decisión.
  */
 export const EXPLICIT_ACCESS_VIAS = Object.freeze(['SCOPE_TITLE', 'SCOPE_COLLECTION', 'GROUP_CATALOG', 'GROUP_ALL']);
-
-/** Motivo por el que un contenido no es una obra reconocible, o null. */
-export function workBlock(content) {
-    if (!content) return 'work_not_found';
-    if (content.status !== 'disponible') return 'work_unavailable';
-    if (content.isCollection === true) return 'work_is_collection';
-    if (content.parentId) return 'work_is_part';
-    if (content.standalone === false) return 'work_not_standalone';
-    if (!WORK_TIPOS.includes(content.tipo)) return 'work_not_classified';
-    return null;
-}
 
 /**
  * Cobertura de una versión. `multi` significa varias asociaciones, una por nodo:
