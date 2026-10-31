@@ -1,5 +1,7 @@
 # Contrato de XP A7/A12 — versión 2
 
+**SUSTITUIDA por la [versión 3](GAMIFICACION_A7_A12_APROBACION_V3.md).** Su análisis sigue vigente; su estado no.
+
 **ESTADO: PENDIENTE DE APROBACIÓN DE DIRECCIÓN.** Las cifras son una propuesta. Ninguna está aprobada ni cargada. Sustituye a la [versión 1](GAMIFICACION_A7_A12_APROBACION_V1.md).
 
 | Campo | Valor |
