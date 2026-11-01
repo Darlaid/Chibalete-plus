@@ -22,6 +22,7 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { armRenameFailure } from './helpers/failRename.mjs';
 
 import { makeEpub, xhtml, IMG } from './helpers/epubFixture.mjs';
 import { computeContentFingerprint as fp } from '../contentFingerprint.js';
@@ -208,6 +209,7 @@ const put = (rel, data) => { const p = path.join(up, rel); fs.mkdirSync(path.dir
 
 const PORT = 5500 + (process.pid % 100);
 const base = `http://127.0.0.1:${PORT}`;
+const contentWrite = armRenameFailure(P.content);
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,
     env: {
@@ -353,9 +355,9 @@ try {
 
     // content.json no llega a escribirse → artefactos previos repuestos.
     const snapE1 = snapshot('e-1'); const beforeRec = JSON.stringify(rec('e-1'));
-    fs.mkdirSync(`${P.content}.tmp`);
+    contentWrite.on();
     r = await save({ ...rec('e-1'), epub_url: put('e-1/v4.epub', E_BASIC) });
-    fs.rmSync(`${P.content}.tmp`, { recursive: true, force: true });
+    contentWrite.off();
     ok('content.json falla → 500, artefactos y Content previos intactos', r.status === 500 && JSON.stringify(snapshot('e-1')) === JSON.stringify(snapE1) && JSON.stringify(rec('e-1')) === beforeRec && consistentEpub('e-1'));
 
     // TXT → EPUB y EPUB → TXT sobre el mismo Content.

@@ -25,6 +25,7 @@
  *   node server/__test__/contentStoreRmwConcurrency.test.mjs
  */
 import './helpers/testMode.mjs';
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -265,7 +266,7 @@ async function main() {
     ok('0 ids duplicados en todo el store',
         new Set(disco().map(c => c.id)).size === disco().length);
     ok('no queda ningún lock huérfano', !fs.existsSync(`${P.content}.lock`));
-    ok('no queda ningún temporal de escritura', !fs.existsSync(`${P.content}.tmp`));
+    ok('no queda ningún temporal de escritura', writeTempsOf(P.content).length === 0);
 
     // ── [9] Ningún otro store fue tocado ─────────────────────────────────
     console.log('\n[9] stores ajenos intactos');

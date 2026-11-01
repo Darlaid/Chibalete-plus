@@ -1197,6 +1197,13 @@ const readJSON = (file) => {
     return official;
 };
 
+// SEC-AUTH-ATOMIC-01 — temporal propio de cada escritura. Con un nombre fijo, dos
+// escritores compartían inodo: el JSON corto quedaba sobre el largo y su cola
+// sobrevivía en el archivo real. El temporal evita esa mezcla, no la pérdida de
+// actualizaciones: eso lo impide el lock del store.
+const uniqueTempPath = (file) => `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+const removeOwnTemp = (tempFile) => { try { fs.unlinkSync(tempFile); } catch { /* no llegó a crearse */ } };
+
 const writeJSON = (file, data) => {
     try {
         // CHP-IDDB-READ-RMW-SEAM-01 — guard de regresión: jamás persistir en un
@@ -1204,9 +1211,14 @@ const writeJSON = (file, data) => {
         // assertWritableIdentityPayload). Con IDENTITY_READ=json es un no-op.
         assertWritableIdentityPayload(file, data,
             { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB });
-        const tempFile = `${file}.tmp`;
-        fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
-        fs.renameSync(tempFile, file); // Atomic move
+        const tempFile = uniqueTempPath(file);
+        try {
+            fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+            fs.renameSync(tempFile, file); // Atomic move
+        } catch (e) {
+            removeOwnTemp(tempFile);
+            throw e;
+        }
         _jsonCache.delete(file); // invalidate cache immediately after write
         // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
         try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSON' })(file, data); } catch { /* shadow nunca rompe el write */ }
@@ -1220,9 +1232,14 @@ const writeJSONAsync = async (file, data) => {
     // CHP-IDDB-READ-RMW-SEAM-01 — mismo guard que writeJSON.
     assertWritableIdentityPayload(file, data,
         { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB });
-    const tmp = `${file}.tmp`;
-    await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
-    await fs.promises.rename(tmp, file);
+    const tmp = uniqueTempPath(file);
+    try {
+        await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
+        await fs.promises.rename(tmp, file);
+    } catch (e) {
+        removeOwnTemp(tmp);
+        throw e;
+    }
     _jsonCache.delete(file);
     // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
     try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSONAsync' })(file, data); } catch { /* shadow nunca rompe el write */ }
@@ -5550,21 +5567,9 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
 
     if (userIndex !== -1) {
         const user = normalizeUser(users[userIndex]);
-        let isValid = false;
-
-        if (user.password && user.password.startsWith('$2')) {
-            isValid = await bcrypt.compare(password, user.password);
-        } else {
-            // Legacy plain text comparison
-            if (user.password === password) {
-                isValid = true;
-                // Auto-upgrade security: Hash it and save immediately
-                user.password = await hashPasswordIfNeeded(password);
-                users[userIndex] = user;
-                writeJSONAsync(USERS_DB, users).catch(e => log(`Auto-upgrade write error: ${e.message}`, 'ERROR'));
-                log(`Auto-upgraded password hash for legacy user: user=${user.id}`, 'ACCESS');
-            }
-        }
+        const isBcrypt = !!user.password && user.password.startsWith('$2');
+        // Legacy plain text comparison en la rama no bcrypt.
+        const isValid = isBcrypt ? await bcrypt.compare(password, user.password) : user.password === password;
 
         if (isValid) {
             // Auth Pro: bloquear cuentas no activas DESPUÉS de validar credenciales.
@@ -5575,19 +5580,38 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
                 log(`Login bloqueado para user=${user.id}: accountStatus=${user.accountStatus}`, 'ACCESS');
                 return res.status(401).json({ error: 'Credenciales inválidas' });
             }
-            // Sprint Modo Accesible — persistir lastLoginAt en el momento exacto
-            // del login exitoso. GET /api/students/:id/status lee este campo;
-            // sin esto, todos los estudiantes aparecen como REGISTERED_NO_LOGIN
-            // aunque hayan ingresado. Best-effort async: mismo patrón que el
-            // auto-upgrade del password — no bloqueamos la respuesta del login.
-            user.lastLoginAt = new Date().toISOString();
-            users[userIndex] = user;
-            writeJSONAsync(USERS_DB, users).catch(e => log(`lastLoginAt write error: ${e.message}`, 'ERROR'));
+            // Auto-upgrade security: se hashea fuera del lock para no retenerlo.
+            const upgradedHash = isBcrypt ? null : await hashPasswordIfNeeded(password);
+
+            // SEC-AUTH-ATOMIC-01 — bcrypt tarda y otra réplica pudo cambiar la cuenta
+            // mientras tanto. Se relee bajo el lock y solo se escribe sobre el registro
+            // vigente, en una única escritura esperada: un login jamás restaura estado,
+            // credenciales ni roles antiguos. Si la cuenta cambió, la credencial
+            // comprobada ya no vale y no se abre sesión.
+            // Sprint Modo Accesible — lastLoginAt se persiste aquí porque
+            // GET /api/students/:id/status lo lee; sin él, los estudiantes aparecen
+            // como REGISTERED_NO_LOGIN aunque hayan ingresado.
+            const current = await mutateUsers((freshUsers) => {
+                const index = freshUsers.findIndex(u => u.id === user.id);
+                const fresh = index === -1 ? null : normalizeUser(freshUsers[index]);
+                if (!fresh || normalizeEmail(fresh.email) !== normalizedEmail || !isUserActive(fresh)
+                    || fresh.password !== user.password
+                    || credentialVersionOf(fresh) !== credentialVersionOf(user)) return null;
+                const next = { ...fresh, ...(upgradedHash ? { password: upgradedHash } : {}), lastLoginAt: new Date().toISOString() };
+                freshUsers[index] = next;
+                writeJSON(USERS_DB, freshUsers);
+                return next;
+            });
+            if (!current) {
+                log(`Login rechazado: la cuenta cambió durante la verificación: user=${user.id}`, 'ACCESS');
+                return res.status(401).json({ error: 'Credenciales inválidas' });
+            }
+            if (upgradedHash) log(`Auto-upgraded password hash for legacy user: user=${user.id}`, 'ACCESS');
             log(`Login exitoso: user=${user.id} ip=${req.ip}`, 'ACCESS');
             // CHP-IDDB-M1-A: emite sesión firmada (cookie HttpOnly) si el modo lo
             // habilita. En 'off' es no-op y el cliente sigue con x-user-id.
-            await issueSessionCookie(res, user);
-            return res.json({ success: true, user: sanitizeUserForClient(user) });
+            await issueSessionCookie(res, current);
+            return res.json({ success: true, user: sanitizeUserForClient(current) });
         }
     }
 

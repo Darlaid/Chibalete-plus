@@ -18,6 +18,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { armRenameFailure } from './helpers/failRename.mjs';
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 
 import { computeContentFingerprint as fp } from '../contentFingerprint.js';
 import { validateCanonicalBook, CANONICAL_SCHEMA_VERSION } from '../content/canonicalBook.js';
@@ -139,6 +141,7 @@ fs.writeFileSync(P.content, JSON.stringify([LEGACY, LEGACY_NOTXT, LEGACY_BROKEN]
 
 const PORT = 5400 + (process.pid % 100);
 const base = `http://127.0.0.1:${PORT}`;
+const contentWrite = armRenameFailure(P.content);
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,
     env: {
@@ -242,12 +245,12 @@ try {
     ok('I11 write falla → TTS no encolado', !fs.existsSync(audioDir('c-10')));
 
     // content.json no llega a escribirse → el artefacto previo se repone.
-    const tmpBlock = `${P.content}.tmp`;
-    fs.mkdirSync(tmpBlock);
+    contentWrite.on();
     const beforeDb = JSON.stringify(rec('c-1')); const rawDb = bookRaw('c-1');
     r = await save({ ...rec('c-1'), texto_plano_url: putText('c-1/c.txt', 'Texto que no llegará.') });
-    fs.rmSync(tmpBlock, { recursive: true, force: true });
+    contentWrite.off();
     ok('content.json falla → 500, artefacto previo repuesto, Content intacto', r.status === 500 && bookRaw('c-1') === rawDb && JSON.stringify(rec('c-1')) === beforeDb && consistent('c-1'));
+    ok('el fallo no deja temporal', writeTempsOf(P.content).length === 0);
     r = await save({ id: 'c-11', titulo: 'Once', tipo: 'libro', texto_plano_url: putText('c-11/a.txt', 'Once.') });
     ok('tras el bloqueo el servidor sigue guardando', r.status === 200 && consistent('c-11'));
 

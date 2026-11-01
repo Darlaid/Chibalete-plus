@@ -17,6 +17,7 @@
  *   node server/__test__/libraryInstitutionalPersonal.test.mjs
  */
 import './helpers/testMode.mjs';
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -548,7 +549,7 @@ async function main() {
         ok('library_db sigue siendo JSON válido con las dos colecciones raíz',
             Array.isArray(disk().references) && Array.isArray(disk().collections));
         ok('no queda lock huérfano', !fs.existsSync(`${LIBRARY}.lock`));
-        ok('no queda temporal de escritura', !fs.existsSync(`${LIBRARY}.tmp`));
+        ok('no queda temporal de escritura', writeTempsOf(LIBRARY).length === 0);
     }
 
     // ── 11D: frescura HTTP de las tres vistas ───────────────────────────────
@@ -633,7 +634,7 @@ async function main() {
         ok('11D · access_db sigue byte-idéntico al fixture',
             fs.readFileSync(P.access, 'utf8') === JSON.stringify(ACCESS, null, 2));
         ok('11D · no queda lock ni temporal',
-            !fs.existsSync(`${LIBRARY}.lock`) && !fs.existsSync(`${LIBRARY}.tmp`));
+            !fs.existsSync(`${LIBRARY}.lock`) && writeTempsOf(LIBRARY).length === 0);
     }
 
     // ── M1-A: la identidad por header no basta en compat ────────────────────

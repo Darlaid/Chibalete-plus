@@ -8,6 +8,7 @@
  *   node server/__test__/landingBanner01.test.mjs
  */
 import './helpers/testMode.mjs';
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -176,7 +177,7 @@ try {
     const final = readBanner();
     const k = final.length - 1;
     ok('el archivo final es UNO de los arrays completos, sin mezclas', final.length >= 1 && final.every((s, j) => s.id === `p${k}-${j}` && s.title === `T${k}`), JSON.stringify(final));
-    ok('sin residuo .tmp', !fs.existsSync(`${BANNER}.tmp`));
+    ok('sin residuo .tmp', writeTempsOf(BANNER).length === 0);
     const retire = await req('PUT', '/api/admin/landing-banner', { uid: 'u-admin', body: [] });
     ok('retirar todos los slides → 200 [] y la imagen sigue en disco', retire.status === 200 && readBanner().length === 0 && fs.existsSync(path.join(P.uploads, path.basename(upBody.url))));
     const src = fs.readFileSync(path.join(REPO, 'server', 'server.js'), 'utf8');
