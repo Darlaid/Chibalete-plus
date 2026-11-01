@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 
 const [, , role, barrier] = process.argv;
+if (process.env.CHP_TEST_NOW) Date.now = () => Number(process.env.CHP_TEST_NOW);
 const M = await import('../mookSource.mjs');
 
 const doc = JSON.parse(fs.readFileSync(process.env.CHP_FIXTURE, 'utf8'));

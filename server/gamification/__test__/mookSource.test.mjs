@@ -41,6 +41,10 @@ const I = await import('../intake.mjs');
 const SINCE_ISO = '2026-11-01T00:00:00.000Z';
 const SINCE = Date.parse(SINCE_ISO);
 const iso = (minutesAfterSince) => new Date(SINCE + minutesAfterSince * 60_000).toISOString();
+// Reloj de la prueba, posterior a todos los eventos: el resultado no depende de la
+// fecha de ejecución. Se comparte con los workers para que cada réplica vea el mismo.
+const CLOCK = SINCE + 120 * 60_000;
+Date.now = () => CLOCK;
 const RULES = { schema: 1, caps: { pmPerDay: 1000, pmPerWeek: 5000 }, facts: {
     'mook_review/evidence_reviewed': {},
     'mook_experience/experience_completed': { xp: 20 },
@@ -67,8 +71,8 @@ function freshEnv() {
     const p = path.join(tmp, `db${++dbN}`, 'gamification.db');
     const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: p, GAMIFICATION_MOOK_SINCE: SINCE_ISO };
     const db = D.getGamificationDb({ env });
-    // Vigentes desde el reloj real: los hechos se registran con Date.now() (D48 prospectivo).
-    L.createRuleSet(db, { ruleVersion: 'gm-mook-v1', rules: RULES, createdBy: 'migration', now: Date.now() - 1000 });
+    // Vigentes justo antes del corte: `occurredAt` debe alcanzar la regla (D48 prospectivo).
+    L.createRuleSet(db, { ruleVersion: 'gm-mook-v1', rules: RULES, createdBy: 'migration', now: SINCE - 1000 });
     return { env, db, p };
 }
 const hook = (fn, arg, env) => new Promise((resolve) => {
@@ -129,7 +133,7 @@ try {
     const UF = path.join(tmp, 'users.json'); fs.writeFileSync(UF, JSON.stringify(USERS));
     const barrier = path.join(tmp, 'go5');
     const spawnW = (role) => new Promise((resolve) => {
-        const p = spawn(process.execPath, [path.join(HERE, 'mookWorker.mjs'), role, barrier], { env: { ...process.env, ...env, CHP_FIXTURE: FIX, CHP_USERS: UF }, stdio: ['ignore', 'pipe', 'pipe'] });
+        const p = spawn(process.execPath, [path.join(HERE, 'mookWorker.mjs'), role, barrier], { env: { ...process.env, ...env, CHP_FIXTURE: FIX, CHP_USERS: UF, CHP_TEST_NOW: String(CLOCK) }, stdio: ['ignore', 'pipe', 'pipe'] });
         let so = '', se = ''; p.stdout.on('data', (d) => { so += d; }); p.stderr.on('data', (d) => { se += d; });
         p.on('close', (code) => { try { resolve({ code, ...JSON.parse(so) }); } catch { resolve({ code, err: so + se }); } });
     });
@@ -163,6 +167,14 @@ try {
     ok('la reconciliación los excluye: solo ve los 2 posteriores (ya registrados)', r7.scanned === 2 && r7.recorded === 0);
     ok('ningún hecho previo al corte en la base', facts(db).length === 1);
     ok('justo en el corte sí cuenta (>=)', M.mookApprovedReviewCandidates({ evidence: [ev('evid-edge', 'u-lector', 'u-mediador', 'aprobado', SINCE_ISO)] }, SINCE).length === 1);
+    const edgeRun = (id, at) => ({ ...run(id, 'u-lector2', at), experienceVersionId: `xv-${id}` });
+    const beforeRun = edgeRun('run-before', new Date(SINCE - 1).toISOString());
+    const atRun = edgeRun('run-at', SINCE_ISO);
+    const afterRun = edgeRun('run-after', new Date(SINCE + 1).toISOString());
+    ok('1 ms antes del corte: el gancho no programa nada', (await hook(M.onMookRunUpdated, beforeRun, env)) === null);
+    ok('exactamente en el corte: se registra', (await hook(M.onMookRunUpdated, atRun, env))?.result?.decision === 'awarded');
+    ok('1 ms después del corte: se registra', (await hook(M.onMookRunUpdated, afterRun, env))?.result?.decision === 'awarded');
+    ok('solo los dos eventos elegibles dejan hecho', facts(db).length === 3);
 
     section('[+] sujetos no elegibles y lock huérfano');
     const oi = await hook(M.onMookEvidenceReviewed, ev('evid-ina', 'u-inactivo', 'u-mediador', 'aprobado', iso(50)), env);
@@ -173,6 +185,7 @@ try {
     ok('inexistente ⇒ rejected_not_eligible, sin emisión', og?.result?.decision === 'rejected_not_eligible' && og.result.pm === 0);
     const lockFile = `${env.GAMIFICATION_DB}.reconcile.lock`;
     fs.writeFileSync(lockFile, '999999');
+    fs.utimesSync(lockFile, new Date(CLOCK), new Date(CLOCK));
     ok('lock vigente de otra réplica ⇒ este barrido se salta', reconcileDoc(env, { evidence: [], runs: [] }).skipped === 'locked');
     const past = new Date(Date.now() - M.LOCK_STALE_MS - 60_000);
     fs.utimesSync(lockFile, past, past);
