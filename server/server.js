@@ -71,7 +71,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { fileTypeFromFile } from 'file-type';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 
 import { buildHealthPayload, getHealthDefaults, runtimeInstanceId } from './healthHandler.js';
 import { ingestPedagogicalFile } from './leoIngester.js';
@@ -10255,7 +10255,7 @@ app.get('/api/tasks/:taskId/export-submissions', requireUserAuth, async (req, re
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
 
-        const archive = archiver('zip', { zlib: { level: 9 } });
+        const archive = new ZipArchive({ zlib: { level: 9 } });
 
         archive.on('error', (err) => {
             log(`Archiver error for task ${taskId}: ${err.message}`, 'ERROR');
@@ -10373,7 +10373,7 @@ app.get('/api/students/:studentId/export-submissions', requireUserAuth, async (r
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
 
-        const archive = archiver('zip', { zlib: { level: 9 } });
+        const archive = new ZipArchive({ zlib: { level: 9 } });
 
         archive.on('error', (err) => {
             log(`Archiver error for student ${studentId}: ${err.message}`, 'ERROR');
