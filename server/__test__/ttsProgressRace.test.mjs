@@ -29,6 +29,7 @@
  *
  *   node server/__test__/ttsProgressRace.test.mjs
  */
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -287,7 +288,7 @@ async function noRegresion() {
     }
 
     ok('no queda ningun lock huerfano', !fs.existsSync(`${P.content}.lock`));
-    ok('no queda ningun temporal de escritura', !fs.existsSync(`${P.content}.tmp`));
+    ok('no queda ningun temporal de escritura', writeTempsOf(P.content).length === 0);
     ok('users.json intacto', JSON.parse(fs.readFileSync(P.users, 'utf8')).length === 1);
 }
 

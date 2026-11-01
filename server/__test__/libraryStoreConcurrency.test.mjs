@@ -20,6 +20,7 @@
  *
  *   node server/__test__/libraryStoreConcurrency.test.mjs
  */
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -259,7 +260,7 @@ async function main() {
         ok('§19 · sigue sin duplicados lógicos', new Set(keys).size === keys.length);
         ok('§19 · una escritura rechazada no deja documento a medias',
             Array.isArray(disk().references) && Array.isArray(disk().collections)
-            && !fs.existsSync(`${LIBRARY}.tmp`));
+            && writeTempsOf(LIBRARY).length === 0);
     }
 
     // ── [5] Borrados concurrentes ───────────────────────────────────────────
@@ -284,7 +285,7 @@ async function main() {
     section('[6] sin residuos de lock ni de escritura');
     {
         ok('no queda lock huérfano', !fs.existsSync(`${LIBRARY}.lock`));
-        ok('no queda temporal de escritura', !fs.existsSync(`${LIBRARY}.tmp`));
+        ok('no queda temporal de escritura', writeTempsOf(LIBRARY).length === 0);
         ok('content.json no fue tocado',
             JSON.parse(fs.readFileSync(P.content, 'utf8')).length === N);
         ok('access_db no fue tocado',

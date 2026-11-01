@@ -13,6 +13,7 @@
  *   - elegibilidad (open / no open), idempotencia y administrador: sin cambios;
  *   - store canónico ilegible → 503.
  */
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -244,7 +245,7 @@ async function main() {
         const b = await json(r);
         ok('grupos ilegibles → 503 identity_unavailable', r.status === 503 && b?.error === 'identity_unavailable', `${r.status} ${JSON.stringify(b)}`);
         ok('   nada escrito', fs.readFileSync(BAD.groups, 'utf8') + fs.readFileSync(BAD.users, 'utf8') === before);
-        ok('   sin .tmp residual', !fs.existsSync(`${BAD.groups}.tmp`) && !fs.existsSync(`${BAD.users}.tmp`));
+        ok('   sin .tmp residual', writeTempsOf(BAD.groups).length === 0 && writeTempsOf(BAD.users).length === 0);
     }
 }
 

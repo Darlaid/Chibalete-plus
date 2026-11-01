@@ -20,6 +20,7 @@
  *
  *   node server/__test__/libraryClientContract.test.mjs
  */
+import { writeTempsOf } from './helpers/writeTemps.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -423,7 +424,7 @@ async function main() {
         ok('library_db es JSON válido con su forma contractual',
             Array.isArray(doc.references) && Array.isArray(doc.collections));
         ok('no queda lock huérfano', !fs.existsSync(`${LIBRARY}.lock`));
-        ok('no queda temporal de escritura', !fs.existsSync(`${LIBRARY}.tmp`));
+        ok('no queda temporal de escritura', writeTempsOf(LIBRARY).length === 0);
         ok('el padrón de usuarios no fue tocado',
             fs.readFileSync(P.users, 'utf8') === JSON.stringify(USERS, null, 2));
     }
