@@ -48,12 +48,28 @@ export function versionWorkCoverage(version, workRefOf) {
     return { coverage: valid.size === 0 ? 'general' : valid.size === 1 ? 'single' : 'multi', associations };
 }
 
+/**
+ * Primer elemento por id: con ids repetidos gana el primero, igual que `find`.
+ * Tras una entrada nula un fallo de búsqueda vuelve a `find`, que decide como siempre.
+ */
+function firstById(items) {
+    const byId = new Map();
+    for (const item of items ?? []) {
+        if (item == null) return { get: (id) => (byId.has(id) ? byId.get(id) : items.find((x) => x.id === id)) };
+        if (!byId.has(item.id)) byId.set(item.id, item);
+    }
+    return byId;
+}
+
+/** Índices de un documento. Viven lo que dura una pasada: nunca se guardan entre barridos. */
+const contextIndex = (doc) => ({ runs: firstById(doc?.runs), versions: firstById(doc?.versions) });
+
 /** Evidencia, run, versión y nodo deben coincidir con lo fijado al iniciar el run. */
-function boundContext(doc, evidence) {
-    const run = doc?.runs?.find((r) => r.id === evidence?.runId);
+function boundContext(index, evidence) {
+    const run = index.runs.get(evidence?.runId);
     if (!run || run.userId !== evidence.userId || run.experienceId !== evidence.experienceId
         || run.experienceVersionId !== evidence.experienceVersionId) return null;
-    const version = doc.versions?.find((v) => v.id === run.experienceVersionId);
+    const version = index.versions.get(run.experienceVersionId);
     if (!version || version.experienceId !== run.experienceId) return null;
     const node = versionNodes(version).find((n) => n.id === evidence.nodeId);
     if (!node || node.type !== evidence.nodeType) return null;
@@ -67,11 +83,12 @@ function boundContext(doc, evidence) {
  * @param {object} evidence
  * @param {{ workRefOf: Function, isWithdrawn: Function, sinceMs: number }} opts
  *        `isWithdrawn(contentId)` debe responder `false` para atribuir.
+ *        `index` evita recorrer el documento en cada llamada de una misma pasada.
  */
-export function resolveEvidenceWork(doc, evidence, { workRefOf, isWithdrawn, sinceMs } = {}) {
+export function resolveEvidenceWork(doc, evidence, { workRefOf, isWithdrawn, sinceMs, index } = {}) {
     const result = (reason, workRef = null, activityRef = null) => ({ evidenceId: evidence?.id ?? null, activityRef, workRef, reasons: reason ? [reason] : [] });
     if (evidence?.review?.status !== 'REVIEWED' || evidence.review.decision !== 'aprobado') return result('evidence_not_approved');
-    const ctx = boundContext(doc, evidence);
+    const ctx = boundContext(index ?? contextIndex(doc), evidence);
     if (!ctx) return result('evidence_binding_mismatch');
     const { version, node } = ctx;
     const activityRef = `${version.id}:${node.id}`;
@@ -106,11 +123,13 @@ export function mookRecognitionEvidence(doc, { workRefOf, isWithdrawn, resolveUs
     if (!sinceMs || typeof resolveUser !== 'function' || typeof gate?.excludes !== 'function') return out;
     const docs = new Map((doc?.evidence ?? []).map((e) => [e.id, e]));
     const count = (reason) => { out.unattributed[reason] = (out.unattributed[reason] ?? 0) + 1; };
+    let index = null;
     for (const c of mookReviewCandidates(doc)) {
         if (c.occurredAt < sinceMs) continue;
         if (candidateEligibility(resolveUser, c) !== 'eligible') { count('subject_not_eligible'); continue; }
         if (gate.excludes(c.userId) || (c.actorId && gate.excludes(c.actorId))) { count('subject_excluded'); continue; }
-        const { workRef, reasons } = resolveEvidenceWork(doc, docs.get(c.sourceEventId), { workRefOf, isWithdrawn, sinceMs });
+        index ??= contextIndex(doc);
+        const { workRef, reasons } = resolveEvidenceWork(doc, docs.get(c.sourceEventId), { workRefOf, isWithdrawn, sinceMs, index });
         if (!workRef) { count(reasons[0]); continue; }
         out.evidence.push({ source: 'mook_review', evidenceId: c.sourceEventId, userId: c.userId, actorId: c.actorId,
             at: c.occurredAt, decision: 'aprobado', workRef });

@@ -6,7 +6,7 @@
  *  [1] autoría  [2] obra válida, inexistente, retirada, no accesible o no obra
  *  [3] varias obras  [4] experiencia general  [5] asociación falsificada
  *  [6] obra, actividad, ciclo e idempotencia  [7] sujetos  [8] reglas vigentes
- *  [9] HTTP real
+ *  [9] HTTP real  [10] índices de una pasada (G4-PERF-01A)  [11] aislamiento
  * Nunca toca data/ ni data-critical/.
  *
  *   node server/gamification/__test__/mookWorks.test.mjs
@@ -376,7 +376,42 @@ try {
         }
     }
 
-    section('[10] aislamiento');
+    section('[10] índices de una pasada');
+    {
+        const doc = Store.emptyMookStore();
+        const { exp, v } = publish(doc, 'indices', [reading('r', 'obra-a'), production('p', 'obra-a')]);
+        const [e1] = walk(doc, exp, v, 'lector-1');
+        const [e2] = walk(doc, exp, v, 'lector-2');
+        const args = { isWithdrawn: () => false, workRefOf, resolveUser: () => SUBJECT, gate: { excludes: () => false }, sinceMs: SINCE };
+        const run1 = doc.runs.find((r) => r.id === e1.runId);
+
+        let reads = 0;
+        const counted = { ...doc, get runs() { reads++; return doc.runs; } };
+        const attributed = W.mookRecognitionEvidence(counted, args);
+        ok('los runs se recorren una vez, no una por evidencia', attributed.evidence.length === 2 && reads === 1, String(reads));
+
+        const shadowRun = { ...doc, runs: [{ ...run1, userId: 'otro' }, ...doc.runs] };
+        ok('run duplicado: decide el primero, como find', reason(W.resolveEvidenceWork(shadowRun, e1, opts())) === 'evidence_binding_mismatch');
+        const laterRun = { ...doc, runs: [...doc.runs, { ...run1, userId: 'otro' }] };
+        ok('un duplicado posterior no cambia la decisión', W.resolveEvidenceWork(laterRun, e1, opts()).workRef === 'obra-a');
+        const shadowVersion = { ...doc, versions: [{ ...v, status: 'draft' }, ...doc.versions] };
+        ok('versión duplicada: decide la primera, como find', reason(W.resolveEvidenceWork(shadowVersion, e1, opts())) === 'version_predates_contract');
+
+        ok('run inexistente: nada', reason(W.resolveEvidenceWork(doc, { ...e1, runId: 'fantasma' }, opts())) === 'evidence_binding_mismatch');
+        ok('versión inexistente: nada', reason(W.resolveEvidenceWork({ ...doc, versions: [] }, e1, opts())) === 'evidence_binding_mismatch');
+        ok('documento sin runs ni versiones: nada', reason(W.resolveEvidenceWork({}, e1, opts())) === 'evidence_binding_mismatch' && reason(W.resolveEvidenceWork(null, e1, opts())) === 'evidence_binding_mismatch');
+
+        ok('entrada nula tras el run: se atribuye, como find', W.resolveEvidenceWork({ ...doc, runs: [...doc.runs, null] }, e1, opts()).workRef === 'obra-a');
+        let thrown = null;
+        try { W.resolveEvidenceWork({ ...doc, runs: [null, ...doc.runs] }, e1, opts()); } catch (e) { thrown = e; }
+        ok('entrada nula antes del run: falla, como find', thrown instanceof TypeError);
+
+        const reduced = { ...doc, runs: doc.runs.filter((r) => r.id !== e2.runId) };
+        const again = W.mookRecognitionEvidence(reduced, args);
+        ok('cada pasada usa su documento: nada queda entre barridos', again.evidence.length === 1 && again.unattributed.evidence_binding_mismatch === 1, JSON.stringify(again.unattributed));
+    }
+
+    section('[11] aislamiento');
     ok('data/ intacto', realFiles.map(sha).join() === realBefore.join());
     ok('sin gamification.db real', fs.existsSync(path.join(REPO, 'data-critical', 'gamification.db')) === realDbExisted);
 } catch (e) {
