@@ -95,30 +95,55 @@ export function mookExperienceCandidates(mookDoc) {
 }
 
 /**
+ * G4-PERF-01B. Recorre un generador de pasos sin ceder nunca: el barrido síncrono.
+ * Cada `yield` de un paso marca un punto entre transacciones donde se PODRÍA ceder.
+ */
+export function drainSteps(steps) {
+    let r = steps.next(false);
+    while (!r.done) r = steps.next(false);
+    return r.value;
+}
+
+/**
+ * Barrido completo por pasos: un candidato por paso, cada uno con su propia
+ * transacción ya cerrada al llegar al `yield`. Si el conductor cedió el event
+ * loop, reanuda con `true` y la puerta de exclusiones se vuelve a leer: una
+ * exclusión aplicada mientras tanto (aquí u otra réplica) cuenta desde ese paso.
+ * `recordFact` vuelve a comprobarla dentro de su transacción en todo caso.
+ */
+export function* reconcileSteps(db, candidates, { resolveUser, env = process.env, now = Date.now, onFact } = {}) {
+    if (typeof resolveUser !== 'function') throw bad('RESOLVE_USER_REQUIRED', 'sin padrón no se reconcilia');
+    for (const c of candidates) {
+        if (!RECOVERABLE_SOURCES[c?.source]?.recoverable) throw bad('SOURCE_NOT_RECOVERABLE', String(c?.source));
+    }
+    let gate = exclusionGate(db, env); // falla cerrado: sin registro válido no se barre nada
+    const res = { scanned: candidates.length, alreadyRecorded: 0, recorded: 0, raced: 0, byDecision: {} };
+    for (const c of candidates) {
+        const eligibility = candidateEligibility(resolveUser, c);
+        if (eligibility === 'eligible' && hasFact(db, c)) {
+            res.alreadyRecorded++;
+        } else {
+            const r = recordFact(db, { ...c, eligibility, now: now() }, { env, gate });
+            if (r.inserted || !r.persisted) res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
+            if (r.inserted) {
+                res.recorded++;
+            } else if (r.persisted) {
+                res.raced++; // otra réplica lo registró entre la búsqueda y la transacción
+            }
+            onFact?.(c, r);
+        }
+        if (yield) gate = exclusionGate(db, env);
+    }
+    return res;
+}
+
+/**
  * Barrido completo: registra los candidatos que aún no existen.
  * @param {import('better-sqlite3').Database} db
  * @param {object[]} candidates  de los adaptadores de arriba
  * @param {{ resolveUser: Function, env?: object, now?: () => number, onFact?: Function }} opts
  * @returns {{ scanned, alreadyRecorded, recorded, raced, byDecision }}
  */
-export function reconcile(db, candidates, { resolveUser, env = process.env, now = Date.now, onFact } = {}) {
-    if (typeof resolveUser !== 'function') throw bad('RESOLVE_USER_REQUIRED', 'sin padrón no se reconcilia');
-    for (const c of candidates) {
-        if (!RECOVERABLE_SOURCES[c?.source]?.recoverable) throw bad('SOURCE_NOT_RECOVERABLE', String(c?.source));
-    }
-    const gate = exclusionGate(db, env); // falla cerrado: sin registro válido no se barre nada
-    const res = { scanned: candidates.length, alreadyRecorded: 0, recorded: 0, raced: 0, byDecision: {} };
-    for (const c of candidates) {
-        const eligibility = candidateEligibility(resolveUser, c);
-        if (eligibility === 'eligible' && hasFact(db, c)) { res.alreadyRecorded++; continue; }
-        const r = recordFact(db, { ...c, eligibility, now: now() }, { env, gate });
-        if (r.inserted || !r.persisted) res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
-        if (r.inserted) {
-            res.recorded++;
-        } else if (r.persisted) {
-            res.raced++; // otra réplica lo registró entre la búsqueda y la transacción
-        }
-        onFact?.(c, r);
-    }
-    return res;
+export function reconcile(db, candidates, opts = {}) {
+    return drainSteps(reconcileSteps(db, candidates, opts));
 }

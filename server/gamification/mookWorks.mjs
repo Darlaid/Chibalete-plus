@@ -118,21 +118,33 @@ export function resolveEvidenceWork(doc, evidence, { workRefOf, isWithdrawn, sin
  * nada. Los motivos son recuentos: ningún dato personal sale de aquí.
  * @returns {{ evidence: object[], unattributed: Record<string, number> }}
  */
-export function mookRecognitionEvidence(doc, { workRefOf, isWithdrawn, resolveUser, gate, sinceMs } = {}) {
+export function mookRecognitionEvidence(doc, opts = {}) {
     const out = { evidence: [], unattributed: {} };
-    if (!sinceMs || typeof resolveUser !== 'function' || typeof gate?.excludes !== 'function') return out;
+    for (const e of attributedEvidence(doc, opts, out.unattributed)) if (e) out.evidence.push(e);
+    return out;
+}
+
+/**
+ * G4-PERF-01B. La misma atribución, una evidencia por paso y en el mismo orden:
+ * produce la entrada atribuida o `null`, y suma los motivos en `unattributed`.
+ * `opts.gate` y `opts.isWithdrawn` se leen en cada paso: quien conduce el barrido
+ * puede renovarlos entre pasos. Índices y mapas viven solo durante esta pasada.
+ */
+export function* attributedEvidence(doc, opts, unattributed) {
+    const { workRefOf, resolveUser, sinceMs } = opts;
+    if (!sinceMs || typeof resolveUser !== 'function' || typeof opts.gate?.excludes !== 'function') return;
     const docs = new Map((doc?.evidence ?? []).map((e) => [e.id, e]));
-    const count = (reason) => { out.unattributed[reason] = (out.unattributed[reason] ?? 0) + 1; };
+    const count = (reason) => { unattributed[reason] = (unattributed[reason] ?? 0) + 1; return null; };
     let index = null;
     for (const c of mookReviewCandidates(doc)) {
         if (c.occurredAt < sinceMs) continue;
-        if (candidateEligibility(resolveUser, c) !== 'eligible') { count('subject_not_eligible'); continue; }
-        if (gate.excludes(c.userId) || (c.actorId && gate.excludes(c.actorId))) { count('subject_excluded'); continue; }
+        if (candidateEligibility(resolveUser, c) !== 'eligible') { yield count('subject_not_eligible'); continue; }
+        const { gate, isWithdrawn } = opts;
+        if (gate.excludes(c.userId) || (c.actorId && gate.excludes(c.actorId))) { yield count('subject_excluded'); continue; }
         index ??= contextIndex(doc);
         const { workRef, reasons } = resolveEvidenceWork(doc, docs.get(c.sourceEventId), { workRefOf, isWithdrawn, sinceMs, index });
-        if (!workRef) { count(reasons[0]); continue; }
-        out.evidence.push({ source: 'mook_review', evidenceId: c.sourceEventId, userId: c.userId, actorId: c.actorId,
-            at: c.occurredAt, decision: 'aprobado', workRef });
+        if (!workRef) { yield count(reasons[0]); continue; }
+        yield { source: 'mook_review', evidenceId: c.sourceEventId, userId: c.userId, actorId: c.actorId,
+            at: c.occurredAt, decision: 'aprobado', workRef };
     }
-    return out;
 }

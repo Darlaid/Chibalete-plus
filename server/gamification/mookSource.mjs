@@ -18,14 +18,15 @@
  * No modifica reglas ni permisos de MOOK: solo LEE el documento ya escrito.
  */
 import Database from 'better-sqlite3';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { isGamificationEnabled, isXpEarningEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
 import { replayExclusions } from './erasure.mjs';
 import { exclusionGate } from './exclusions.mjs';
 import { scheduleFact, scheduleOnHookDb } from './intake.mjs';
 import { recordWorkRecognition } from './ledger.mjs';
-import { mookRecognitionEvidence } from './mookWorks.mjs';
-import { candidateEligibility, mookReviewCandidates, mookExperienceCandidates, reconcile } from './reconcile.mjs';
+import { attributedEvidence } from './mookWorks.mjs';
+import { candidateEligibility, drainSteps, mookReviewCandidates, mookExperienceCandidates, reconcileSteps } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
 export const RECONCILE_BUSY_MS = 250;
@@ -75,20 +76,38 @@ export function makeResolveUser(users, isUserActive, isSyntheticUser) {
  * al reconocer; si no se puede verificar, nada avanza y la evidencia sigue pendiente.
  * @param {{ workRefOf: Function, readRights: () => Function, resolveUser: Function }} deps
  */
-export function recognizeMookWorks(db, doc, { workRefOf, readRights, resolveUser, sinceMs, onlyEvidenceId = null, env = process.env, now = Date.now() } = {}) {
+export function recognizeMookWorks(db, doc, deps = {}) {
+    return drainSteps(recognizeMookWorksSteps(db, doc, deps));
+}
+
+/** Derechos vigentes; si no se pueden leer, toda obra cuenta como retirada. */
+function withdrawnReader(readRights) {
+    try { return readRights(); } catch { return () => true; }
+}
+
+/**
+ * G4-PERF-01B. `recognizeMookWorks` por pasos: atribuye y registra una evidencia
+ * por paso, en el orden del documento, cada registro en su propia transacción.
+ * Tras una cesión (`yield` devuelve `true`) relee exclusiones y derechos: una
+ * retirada legal o una exclusión posterior al inicio del barrido cuenta desde ahí.
+ */
+function* recognizeMookWorksSteps(db, doc, { workRefOf, readRights, resolveUser, sinceMs, onlyEvidenceId = null, env = process.env, now = Date.now() } = {}) {
     if (!isXpEarningEnabled(env)) return { skipped: 'disabled' };
     if (typeof workRefOf !== 'function' || typeof readRights !== 'function') return { skipped: 'not_wired' };
-    const gate = exclusionGate(db, env);
-    let isWithdrawn;
-    try { isWithdrawn = readRights(); } catch { isWithdrawn = () => true; }
+    const live = { workRefOf, resolveUser, sinceMs, gate: exclusionGate(db, env), isWithdrawn: withdrawnReader(readRights) };
     const scope = onlyEvidenceId ? { ...doc, evidence: (doc.evidence ?? []).filter((e) => e.id === onlyEvidenceId) } : doc;
-    const { evidence, unattributed } = mookRecognitionEvidence(scope, { workRefOf, isWithdrawn, resolveUser, gate, sinceMs });
-    const res = { recognized: 0, already: 0, unattributed, notRecorded: {} };
-    for (const e of evidence) {
-        const r = recordWorkRecognition(db, e, { env, gate, now });
-        if (r.inserted) res.recognized++;
-        else if (r.factId) res.already++;
-        else res.notRecorded[r.reason] = (res.notRecorded[r.reason] ?? 0) + 1;
+    const res = { recognized: 0, already: 0, unattributed: {}, notRecorded: {} };
+    for (const e of attributedEvidence(scope, live, res.unattributed)) {
+        if (e) {
+            const r = recordWorkRecognition(db, e, { env, gate: live.gate, now });
+            if (r.inserted) res.recognized++;
+            else if (r.factId) res.already++;
+            else res.notRecorded[r.reason] = (res.notRecorded[r.reason] ?? 0) + 1;
+        }
+        if (yield) {
+            live.gate = exclusionGate(db, env);
+            live.isWithdrawn = withdrawnReader(readRights);
+        }
     }
     return res;
 }
@@ -131,59 +150,162 @@ export function onMookRunUpdated(run, { resolveUser, env = process.env, log = ()
 }
 
 // ── Lock entre réplicas (O_EXCL sobre el bind mount, como usersLock.js) ─────
+//
+// G4-PERF-01B. El lock lleva un testigo propio (pid + uuid: en contenedores el pid
+// se repite). El barrido por lotes lo renueva (mtime) en cada cesión, solo si el
+// testigo sigue siendo el suyo; si no lo es, otra réplica lo dio por muerto y el
+// barrido se detiene. Al terminar, solo se borra un lock propio.
 
 function tryLock(lockFile, now) {
+    const token = `${process.pid}:${crypto.randomUUID()}`;
     try {
         const fd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
-        fs.writeSync(fd, String(process.pid));
+        fs.writeSync(fd, token);
         fs.closeSync(fd);
-        return true;
+        return token;
     } catch (e) {
-        if (e.code !== 'EEXIST') return false;
+        if (e.code !== 'EEXIST') return null;
         try {
             if (now - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS) { // dueño muerto: se libera
                 fs.unlinkSync(lockFile);
                 return tryLock(lockFile, now);
             }
         } catch { /* otro lo liberó o lo tomó entre medio */ }
-        return false;
+        return null;
     }
 }
-const unlock = (lockFile) => { try { fs.unlinkSync(lockFile); } catch { /* noop */ } };
 
-/**
- * Un barrido de reconciliación MOOK. Una sola ejecución efectiva entre
- * réplicas: si otra tiene el lock, esta se salta (`skipped: 'locked'`).
- * Usa una conexión propia con busy corto: ante contención el barrido se corta
- * y el siguiente lo retoma (idempotente).
- */
-export function runMookReconcileOnce({ readMook, readUsers, isUserActive, isSyntheticUser, workRefOf, readRights, env = process.env, now = Date.now } = {}) {
+/** Testigo escrito en el lock, o null si no existe o no se puede leer. */
+function lockHolder(lockFile) {
+    let fd = null;
+    try {
+        fd = fs.openSync(lockFile, 'r');
+        const buf = Buffer.alloc(128);
+        return buf.toString('utf8', 0, fs.readSync(fd, buf, 0, buf.length, 0));
+    } catch {
+        return null;
+    } finally {
+        if (fd !== null) { try { fs.closeSync(fd); } catch { /* noop */ } }
+    }
+}
+
+/** Renueva un lock propio. `false` si ya no es nuestro. */
+function renewLock(lockFile, token, now) {
+    if (lockHolder(lockFile) !== token) return false;
+    try { const t = new Date(now); fs.utimesSync(lockFile, t, t); return true; } catch { return false; }
+}
+
+const unlock = (lockFile, token) => {
+    if (lockHolder(lockFile) !== token) return; // lo tomó otra réplica: no es nuestro
+    try { fs.unlinkSync(lockFile); } catch { /* noop */ }
+};
+
+/** Precondiciones comunes a los dos conductores. */
+function reconcilePlan(env) {
     if (!isGamificationEnabled(env)) return { skipped: 'disabled' };
     const since = mookActivationSince(env);
     if (!since) return { skipped: 'no_activation_cutoff' };
     const dbPath = resolveGamificationDbPath(env);
     if (!fs.existsSync(dbPath)) return { skipped: 'db_absent' };
     const lockFile = `${dbPath}.reconcile.lock`;
-    if (!tryLock(lockFile, now())) return { skipped: 'locked' };
+    return { since, dbPath, lockFile };
+}
+
+function openReconcileDb(dbPath) {
+    const db = new Database(dbPath, { fileMustExist: true });
+    db.pragma(`busy_timeout = ${RECONCILE_BUSY_MS}`);
+    db.pragma('synchronous = FULL');
+    db.pragma('foreign_keys = ON');
+    db.pragma('secure_delete = ON');
+    return db;
+}
+
+/**
+ * Pasos de un barrido. Cada `yield` cae entre transacciones: ninguna queda
+ * abierta mientras el conductor cede el event loop.
+ */
+function* sweepSteps(db, { readMook, readUsers, isUserActive, isSyntheticUser, workRefOf, readRights, since, env, now }) {
+    replayExclusions(db, { env }); // antes de leer la fuente: la puerta de restauración
+    const doc = readMook();
+    yield;
+    const cands = [...mookApprovedReviewCandidates(doc, since), ...mookCompletedExperienceCandidates(doc, since)];
+    const resolveUser = makeResolveUser(readUsers(), isUserActive, isSyntheticUser);
+    yield;
+    const swept = yield* reconcileSteps(db, cands, { resolveUser, env });
+    const recognition = yield* recognizeMookWorksSteps(db, doc, { workRefOf, readRights, resolveUser, sinceMs: since, env, now: now() });
+    return { ok: true, ...swept, recognition };
+}
+
+/**
+ * Un barrido de reconciliación MOOK, síncrono y sin cesiones. Una sola ejecución
+ * efectiva entre réplicas: si otra tiene el lock, esta se salta (`skipped: 'locked'`).
+ * Usa una conexión propia con busy corto: ante contención el barrido se corta
+ * y el siguiente lo retoma (idempotente).
+ */
+export function runMookReconcileOnce(deps = {}) {
+    const { env = process.env, now = Date.now } = deps;
+    const plan = reconcilePlan(env);
+    if (plan.skipped) return plan;
+    const token = tryLock(plan.lockFile, now());
+    if (!token) return { skipped: 'locked' };
     let db = null;
     try {
-        db = new Database(dbPath, { fileMustExist: true });
-        db.pragma(`busy_timeout = ${RECONCILE_BUSY_MS}`);
-        db.pragma('synchronous = FULL');
-        db.pragma('foreign_keys = ON');
-        db.pragma('secure_delete = ON');
-        replayExclusions(db, { env }); // antes de leer la fuente: la puerta de restauración
-        const doc = readMook();
-        const cands = [...mookApprovedReviewCandidates(doc, since), ...mookCompletedExperienceCandidates(doc, since)];
-        const resolveUser = makeResolveUser(readUsers(), isUserActive, isSyntheticUser);
-        const swept = reconcile(db, cands, { resolveUser, env });
-        const recognition = recognizeMookWorks(db, doc, { workRefOf, readRights, resolveUser, sinceMs: since, env, now: now() });
-        return { ok: true, ...swept, recognition };
+        db = openReconcileDb(plan.dbPath);
+        return drainSteps(sweepSteps(db, { ...deps, since: plan.since, env, now }));
     } catch (e) {
         return { ok: false, code: e?.code || 'RECONCILE_ERROR' };
     } finally {
         if (db) { try { db.close(); } catch { /* noop */ } }
-        unlock(lockFile);
+        unlock(plan.lockFile, token);
+    }
+}
+
+export const RECONCILE_SLICE_MS = 20;
+export const RECONCILE_SLICE_MAX = 500;
+const yieldEventLoop = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * G4-PERF-01B. El mismo barrido, en lotes acotados por tiempo (`sliceMs`) y por
+ * pasos (`sliceMax`), cediendo el event loop con `setImmediate` entre lotes.
+ * Mismas decisiones, mismo orden y mismas transacciones que `runMookReconcileOnce`.
+ * En cada cesión: renueva el lock (o se detiene si ya no es suyo) y, al reanudar,
+ * relee exclusiones y derechos. Sin cursor ni estado entre barridos: un barrido
+ * cortado (error, parada, SIGKILL) lo retoma entero el siguiente, idempotente.
+ * `onPause` existe para las pruebas.
+ */
+export async function runMookReconcileBatched(deps = {}, { sliceMs = RECONCILE_SLICE_MS, sliceMax = RECONCILE_SLICE_MAX, shouldStop = () => false, onPause = null } = {}) {
+    const { env = process.env, now = Date.now } = deps;
+    const plan = reconcilePlan(env);
+    if (plan.skipped) return plan;
+    const token = tryLock(plan.lockFile, now());
+    if (!token) return { skipped: 'locked' };
+    let db = null;
+    let steps = null;
+    try {
+        db = openReconcileDb(plan.dbPath);
+        steps = sweepSteps(db, { ...deps, since: plan.since, env, now });
+        let slices = 1;
+        let n = 0;
+        let sliceStart = performance.now();
+        let r = steps.next(false);
+        while (!r.done) {
+            if (++n < sliceMax && performance.now() - sliceStart < sliceMs) { r = steps.next(false); continue; }
+            await yieldEventLoop();
+            if (onPause) await onPause({ db, slices });
+            if (shouldStop()) return { ok: false, code: 'RECONCILE_STOPPED' };
+            if (!renewLock(plan.lockFile, token, now())) return { ok: false, code: 'RECONCILE_LOCK_LOST' };
+            slices++;
+            n = 0;
+            sliceStart = performance.now();
+            r = steps.next(true);
+        }
+        return { ...r.value, slices };
+    } catch (e) {
+        return { ok: false, code: e?.code || 'RECONCILE_ERROR' };
+    } finally {
+        try { steps?.return(); } catch { /* noop */ }
+        if (db) { try { db.close(); } catch { /* noop */ } }
+        unlock(plan.lockFile, token);
     }
 }
 
@@ -192,6 +314,7 @@ export function runMookReconcileOnce({ readMook, readUsers, isUserActive, isSynt
  * cada `intervalMs` (mínimo 1 min, por defecto 15). Sin flag o sin corte no
  * programa nada. Timers `unref`: nunca retienen el proceso. Devuelve `stop()`.
  * La base se abre y migra AQUÍ, al arrancar (fuera de peticiones).
+ * G4-PERF-01B: cada barrido va por lotes y cede el event loop.
  */
 export function startMookReconciler(deps, { env = process.env, log = () => {} } = {}) {
     if (!isGamificationEnabled(env)) return null;
@@ -204,14 +327,17 @@ export function startMookReconciler(deps, { env = process.env, log = () => {} } 
     const intervalMs = Math.max(MIN_INTERVAL_MS, Number(env.GAMIFICATION_RECONCILE_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
     const initialDelayMs = Math.max(0, Number(env.GAMIFICATION_RECONCILE_INITIAL_DELAY_MS ?? DEFAULT_INITIAL_DELAY_MS));
     let running = false;
-    const sweep = () => {
-        if (running) return; // nunca dos barridos superpuestos en la misma réplica
+    let stopped = false;
+    const sweep = async () => {
+        if (running || stopped) return; // nunca dos barridos superpuestos en la misma réplica, tampoco entre lotes
         running = true;
         try {
-            const r = runMookReconcileOnce({ ...deps, env });
+            const r = await runMookReconcileBatched({ ...deps, env }, { shouldStop: () => stopped });
             if (r.ok && r.recorded) log(`[gamification] reconciliación MOOK: ${r.recorded} hechos recuperados`);
             else if (r.ok === false) log(`[gamification] reconciliación MOOK abortada: ${r.code}`);
             deps.onSweep?.(r);
+        } catch (e) {
+            log(`[gamification] reconciliación MOOK abortada: ${e?.code || 'RECONCILE_ERROR'}`);
         } finally {
             running = false;
         }
@@ -219,11 +345,11 @@ export function startMookReconciler(deps, { env = process.env, log = () => {} } 
     const timers = [];
     timers.push(setTimeout(() => {
         try { getGamificationDb({ log }); } catch (e) { log(`[gamification] base no disponible: ${e.code}`); }
-        sweep();
-        const iv = setInterval(sweep, intervalMs);
+        void sweep();
+        const iv = setInterval(() => { void sweep(); }, intervalMs);
         iv.unref?.();
         timers.push(iv);
     }, initialDelayMs));
     timers[0].unref?.();
-    return { stop: () => timers.forEach((t) => { clearTimeout(t); clearInterval(t); }), intervalMs, initialDelayMs };
+    return { stop: () => { stopped = true; timers.forEach((t) => { clearTimeout(t); clearInterval(t); }); }, intervalMs, initialDelayMs };
 }
