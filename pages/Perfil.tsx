@@ -4,7 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { User, Resena, Content, Bookmark, Group } from '../types';
-import { Award, BookOpen, Heart, Users, Shield, Share2, Facebook, Linkedin, Instagram, Check, Loader2, X, Sparkles, Plus, Edit2, Trash2, Globe, GraduationCap, Smartphone } from 'lucide-react';
+import { BookOpen, Heart, Users, Shield, Share2, Facebook, Linkedin, Instagram, Check, Loader2, X, Plus, Edit2, Trash2, Globe, GraduationCap, Smartphone } from 'lucide-react';
 import BookmarkManager from '../components/BookmarkManager';
 import StarRating from '../components/StarRating';
 import ClubFormModal from '../components/ClubFormModal';
@@ -288,14 +288,12 @@ const Perfil: React.FC = () => {
                 </div>
             </header>
 
-            <div className={`grid gap-4 p-4 bg-white dark:bg-gray-800 rounded-lg shadow-md mb-8 ${isOwnProfile ? 'grid-cols-2 md:grid-cols-5' : 'grid-cols-2 md:grid-cols-4'}`}>
+            {/* G4-UX-U0: sin «Nivel» (nivel_lectura estático, visible a terceros) ni
+                «Puntos de Magia» (inertes). El progreso real irá en /mi-progreso, privado. */}
+            <div className="grid gap-4 p-4 bg-white dark:bg-gray-800 rounded-lg shadow-md mb-8 grid-cols-3">
                 <StatItem icon={<BookOpen />} value={user.libros_leidos} label="Leídos" />
                 <StatItem icon={<Users />} value={user.seguidores} label="Seguidores" />
                 <StatItem icon={<Users />} value={user.seguidos} label="Seguidos" />
-                <StatItem icon={<Award />} value={user.nivel_lectura} label="Nivel" />
-                {isOwnProfile && (
-                    <StatItem icon={<Sparkles className="text-yellow-500" />} value={user.puntos ?? 0} label="Puntos de Magia" />
-                )}
             </div>
 
             {/* ── Widget Chibalete LU — perfil propio, todos los roles ────────── */}

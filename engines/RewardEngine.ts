@@ -1,33 +1,24 @@
 /**
- * RewardEngine — reading-block progression system.
+ * RewardEngine — continuidad de lectura del Modo Inmersivo (señal técnica).
  *
  * Pure TypeScript. Zero React. Zero side effects at import time.
  *
- * Subscribes directly to a BlockEngine instance and transforms block
- * completions into XP, streaks, and level progression.
+ * G4-UX-U0: ya no otorga XP, niveles ni rachas. Esos reconocimientos vivían en
+ * el localStorage del navegador y contradecían al ledger del servidor (único
+ * origen de verdad del XP). El nombre del archivo y de la clase se conserva por
+ * compatibilidad con los guards del inmersivo (`scripts/lint-immersive-guards.mjs`)
+ * y las pruebas estructurales que lo referencian.
  *
- * Design principles:
- *   - Non-intrusive: reward events are emitted, never forced onto the UI.
- *   - Deterministic: same inputs always produce same outputs.
- *   - Persistent: state survives page refreshes via localStorage.
- *   - Streak-aware: tracks inter-block timing to reward consistency.
+ * Lo único que queda es una medida técnica, en memoria y solo durante la sesión:
+ * cuántos bloques de lectura seguidos completó el lector, sin pausas largas
+ * entre ellos. La usan:
+ *   - TranceEngine, para atenuar la interfaz cuando hay concentración sostenida;
+ *   - la telemetría de lectura (campo `streak` de los eventos, que el servidor
+ *     usa para `tranceEntryRate` y `streakBreakRate`).
+ * Nada se muestra al lector como premio y nada se persiste en el navegador.
  *
- * XP formula:
- *   xpGained = BASE_XP * streakMultiplier(streak)
- *
- * Level thresholds (cumulative XP):
- *   threshold(n) = 25 * (n-1) * n
- *   Level 1: 0  |  2: 50  |  3: 150  |  4: 300  |  5: 500  |  6: 750 …
- *   Each level requires 50 more XP than the previous one.
- *
- * Streak multipliers:
- *   1 block  → 1.0×
- *   2 blocks → 1.5×
- *   3 blocks → 1.75×
- *   4+ blocks → 2.0×
- *
- * Streak window: next block must start within STREAK_WINDOW_MS of the
- * previous block completing, otherwise the streak resets.
+ * Continuidad: el siguiente bloque debe empezar dentro de CONTINUITY_WINDOW_MS
+ * desde que terminó el anterior; si no, la cuenta vuelve a 1.
  */
 
 import type { BlockEngine, BlockEvent } from './BlockEngine';
@@ -36,53 +27,26 @@ import type { BlockEngine, BlockEvent } from './BlockEngine';
 // CONSTANTS
 // ---------------------------------------------------------------------------
 
-const BASE_XP = 10;
-const STREAK_WINDOW_MS = 30_000; // 30 seconds between blocks to maintain streak
-
-const STREAK_MULTIPLIERS: Record<number, number> = {
-  1: 1.0,
-  2: 1.5,
-  3: 1.75,
-};
-const MAX_STREAK_MULTIPLIER = 2.0; // applied at streak 4+
+const CONTINUITY_WINDOW_MS = 30_000; // pausa máxima entre bloques para seguir contando
+const FOCUS_FLOW_MIN_BLOCKS = 3;     // bloques seguidos que activan la atenuación
 
 // ---------------------------------------------------------------------------
 // TYPES
 // ---------------------------------------------------------------------------
 
-/** Persisted subset of state — stored to localStorage. */
-interface PersistedRewardState {
-  xp: number;
-  level: number;
-  streak: number;
-  blocksCompleted: number;
-  lastBlockTimestamp: number; // Date.now() at last block completion
+/** Estado técnico de la sesión. Solo en memoria. */
+export interface RewardState {
+  consecutiveBlocks: number;   // bloques seguidos sin pausa larga
+  blocksCompleted: number;     // bloques completados en esta sesión
+  lastBlockTimestamp: number;  // Date.now() del último bloque completado (0 = ninguno)
 }
 
-/** Full runtime state — includes computed fields for convenience. */
-export interface RewardState extends PersistedRewardState {
-  xpInCurrentLevel: number;   // XP earned within the current level span
-  xpForCurrentLevel: number;  // total XP span for the current level
-  levelProgress: number;      // 0–1 fraction of progress through current level
-  xpToNextLevel: number;      // XP still needed to reach next level
-  multiplier: number;         // active streak multiplier
-}
-
-export type RewardEventType = 'xp' | 'levelUp' | 'streakChange';
+export type RewardEventType = 'continuity';
 
 export interface RewardEvent {
   type: RewardEventType;
   state: RewardState;
-  // xp
-  xpGained?: number;
-  multiplier?: number;
-  // levelUp
-  oldLevel?: number;
-  newLevel?: number;
-  // streakChange
-  oldStreak?: number;
-  newStreak?: number;
-  newMultiplier?: number;
+  previousConsecutiveBlocks: number;
 }
 
 type RewardListener = (event: RewardEvent) => void;
@@ -92,24 +56,18 @@ type RewardListener = (event: RewardEvent) => void;
 // ---------------------------------------------------------------------------
 
 export class RewardEngine {
-  private state: PersistedRewardState;
-  private readonly storageKey: string;
+  private state: RewardState = { consecutiveBlocks: 0, blocksCompleted: 0, lastBlockTimestamp: 0 };
   private readonly listeners: Set<RewardListener> = new Set();
   private readonly unsubscribeFromBlock: () => void;
 
-  // Set true in onBlockStart if the block started within the streak window.
-  // Read in onBlockComplete to decide whether to increment or reset streak.
-  private pendingStreakContinuation = false;
+  // Set true in onBlockStart if the block started within the continuity window.
+  private pendingContinuation = false;
 
-  // True when the reader has been in a continuous reading flow (streak >= 3
-  // with no gaps). Internal only — no UI driven from this yet.
+  // True when the reader has completed FOCUS_FLOW_MIN_BLOCKS blocks in a row
+  // without long pauses. Read by TranceEngine.
   private isInFocusFlow = false;
 
-  constructor(blockEngine: BlockEngine, userId?: string) {
-    this.storageKey = `chibalete_rewards_${userId || 'guest'}`;
-    this.state = this.loadState();
-
-    // Subscribe to block events. Unsubscribe handle is stored for destroy().
+  constructor(blockEngine: BlockEngine) {
     this.unsubscribeFromBlock = blockEngine.subscribe((event: BlockEvent) => {
       if (event.type === 'start') {
         this.onBlockStart();
@@ -129,21 +87,17 @@ export class RewardEngine {
   }
 
   getState(): RewardState {
-    return this.buildRuntimeState(this.state);
+    return { ...this.state };
   }
 
-  /** True when streak >= 3 and blocks have been continuous. UI hook for future Trance Mode. */
+  /** True con FOCUS_FLOW_MIN_BLOCKS o más bloques seguidos. Lo consume TranceEngine. */
   getIsInFocusFlow(): boolean {
     return this.isInFocusFlow;
   }
 
-  /**
-   * Clean up: unsubscribe from BlockEngine, save state, clear listeners.
-   * Call when the owning component unmounts.
-   */
+  /** Unsubscribe from BlockEngine and clear listeners. Call on unmount. */
   destroy(): void {
     this.unsubscribeFromBlock();
-    this.saveState();
     this.listeners.clear();
   }
 
@@ -152,177 +106,26 @@ export class RewardEngine {
   // -------------------------------------------------------------------------
 
   private onBlockStart(): void {
-    const now = Date.now();
-    const gap = now - this.state.lastBlockTimestamp;
-    // A timestamp of 0 means this is the very first block ever — start a fresh streak.
-    this.pendingStreakContinuation =
-      this.state.lastBlockTimestamp > 0 && gap < STREAK_WINDOW_MS;
+    const gap = Date.now() - this.state.lastBlockTimestamp;
+    // A timestamp of 0 means no block completed yet in this session.
+    this.pendingContinuation = this.state.lastBlockTimestamp > 0 && gap < CONTINUITY_WINDOW_MS;
   }
 
   private onBlockComplete(): void {
-    const oldLevel = this.state.level;
-    const oldStreak = this.state.streak;
-
-    // --- Streak ---
-    const wasContinuing = this.pendingStreakContinuation;
-    const newStreak = wasContinuing ? this.state.streak + 1 : 1;
-    this.pendingStreakContinuation = false;
-
-    // --- XP ---
-    const multiplier = this.getMultiplier(newStreak);
-    const xpGained = Math.round(BASE_XP * multiplier);
-    const newXp = this.state.xp + xpGained;
-
-    // --- Level ---
-    const newLevel = this.computeLevel(newXp);
+    const previous = this.state.consecutiveBlocks;
+    const wasContinuing = this.pendingContinuation;
+    this.pendingContinuation = false;
 
     this.state = {
-      xp: newXp,
-      level: newLevel,
-      streak: newStreak,
+      consecutiveBlocks: wasContinuing ? previous + 1 : 1,
       blocksCompleted: this.state.blocksCompleted + 1,
       lastBlockTimestamp: Date.now(),
     };
 
-    this.saveState();
+    // Updated BEFORE emitting, so listeners (TranceEngine) read the new value.
+    this.isInFocusFlow = this.state.consecutiveBlocks >= FOCUS_FLOW_MIN_BLOCKS && wasContinuing;
 
-    // Update focus-flow flag: engaged when streak is high and continuation was unbroken
-    this.isInFocusFlow = newStreak >= 3 && wasContinuing;
-
-    // Emit events in order: streakChange → xp → levelUp
-    if (newStreak !== oldStreak) {
-      const oldMult = this.getMultiplier(oldStreak);
-      const newMult = this.getMultiplier(newStreak);
-      // Only emit when the multiplier tier actually changes.
-      // At streak 4+ (all 2.0×), no further streakChange events are needed.
-      if (oldMult !== newMult) {
-        this.emit({
-          type: 'streakChange',
-          state: this.buildRuntimeState(this.state),
-          oldStreak,
-          newStreak,
-          newMultiplier: newMult,
-        });
-      }
-    }
-
-    this.emit({
-      type: 'xp',
-      state: this.buildRuntimeState(this.state),
-      xpGained,
-      multiplier,
-    });
-
-    if (newLevel > oldLevel) {
-      this.emit({
-        type: 'levelUp',
-        state: this.buildRuntimeState(this.state),
-        oldLevel,
-        newLevel,
-      });
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // PRIVATE — XP / level math
-  // -------------------------------------------------------------------------
-
-  /**
-   * Cumulative XP threshold to reach level n.
-   * threshold(1) = 0, threshold(2) = 50, threshold(3) = 150 …
-   * Each level requires 50 more XP than the previous.
-   * Formula: 25 * (n-1) * n
-   */
-  private xpThreshold(level: number): number {
-    if (level <= 1) return 0;
-    return 25 * (level - 1) * level;
-  }
-
-  /** XP span (width) of a given level. Level n spans xpThreshold(n+1) - xpThreshold(n). */
-  private xpSpanForLevel(level: number): number {
-    return this.xpThreshold(level + 1) - this.xpThreshold(level);
-  }
-
-  /** Highest level whose threshold ≤ totalXp. */
-  private computeLevel(totalXp: number): number {
-    let level = 1;
-    while (this.xpThreshold(level + 1) <= totalXp) {
-      level++;
-    }
-    return level;
-  }
-
-  private getMultiplier(streak: number): number {
-    if (streak >= 4) return MAX_STREAK_MULTIPLIER;
-    return STREAK_MULTIPLIERS[streak] ?? 1.0;
-  }
-
-  // -------------------------------------------------------------------------
-  // PRIVATE — runtime state builder (adds computed fields)
-  // -------------------------------------------------------------------------
-
-  private buildRuntimeState(s: PersistedRewardState): RewardState {
-    const levelStart = this.xpThreshold(s.level);
-    const levelSpan = this.xpSpanForLevel(s.level);
-    const xpInCurrentLevel = s.xp - levelStart;
-    const levelProgress = levelSpan > 0 ? Math.min(1, xpInCurrentLevel / levelSpan) : 1;
-
-    return {
-      ...s,
-      xpInCurrentLevel,
-      xpForCurrentLevel: levelSpan,
-      levelProgress,
-      xpToNextLevel: Math.max(0, levelSpan - xpInCurrentLevel),
-      multiplier: this.getMultiplier(s.streak),
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // PRIVATE — persistence
-  // -------------------------------------------------------------------------
-
-  private loadState(): PersistedRewardState {
-    try {
-      const raw = localStorage.getItem(this.storageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<PersistedRewardState>;
-        // Validate required fields to guard against corrupt/stale data
-        if (
-          typeof parsed.xp === 'number' &&
-          typeof parsed.level === 'number' &&
-          typeof parsed.streak === 'number'
-        ) {
-          return {
-            xp: parsed.xp,
-            level: parsed.level,
-            streak: parsed.streak,
-            blocksCompleted: parsed.blocksCompleted ?? 0,
-            lastBlockTimestamp: parsed.lastBlockTimestamp ?? 0,
-          };
-        }
-      }
-    } catch { /* localStorage unavailable or corrupt */ }
-
-    return {
-      xp: 0,
-      level: 1,
-      streak: 0,
-      blocksCompleted: 0,
-      lastBlockTimestamp: 0,
-    };
-  }
-
-  private saveState(): void {
-    try {
-      const toSave: PersistedRewardState = {
-        xp: this.state.xp,
-        level: this.state.level,
-        streak: this.state.streak,
-        blocksCompleted: this.state.blocksCompleted,
-        lastBlockTimestamp: this.state.lastBlockTimestamp,
-      };
-      localStorage.setItem(this.storageKey, JSON.stringify(toSave));
-    } catch { /* localStorage full or unavailable */ }
+    this.emit({ type: 'continuity', state: this.getState(), previousConsecutiveBlocks: previous });
   }
 
   // -------------------------------------------------------------------------

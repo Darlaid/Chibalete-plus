@@ -4,7 +4,8 @@
  * Pure TypeScript. Zero React. Zero side effects at import time.
  *
  * Subscribes to RewardEngine and gradually increases an intensity value
- * (0 → 1) when the reader enters a focus flow (streak >= 3, continuous).
+ * (0 → 1) when the reader enters a focus flow (3+ consecutive blocks).
+ * G4-UX-U0: RewardEngine only provides that technical continuity count now.
  * Deactivates instantly when the flow breaks or playback stops.
  *
  * The UI layer uses `intensity` to proportionally reduce the opacity of
@@ -16,7 +17,7 @@
  *   idle (intensity=0) ←→ active (intensity ramps 0→1 over RAMP_DURATION_MS)
  *
  * Activation:  rewardEngine.getIsInFocusFlow() === true  (after a block completes)
- * Deactivation: streak breaks  OR  notifyPlayback(false) called
+ * Deactivation: continuity breaks  OR  notifyPlayback(false) called
  */
 
 import type { RewardEngine } from './RewardEngine';
@@ -76,16 +77,16 @@ export class TranceEngine {
   private readonly listeners: Set<TranceListener> = new Set();
   private readonly unsubscribeFromReward: () => void;
 
-  // Current streak carried from RewardEngine for sessionMomentum calculation.
-  private currentStreak = 0;
+  // Consecutive blocks carried from RewardEngine for sessionMomentum calculation.
+  private consecutiveBlocks = 0;
 
   constructor(rewardEngine: RewardEngine) {
     // Subscribe to all reward events.
     // isInFocusFlow is updated in RewardEngine *before* the xp event fires,
     // so by the time we read it here the flag already reflects the new state.
     this.unsubscribeFromReward = rewardEngine.subscribe((event) => {
-      // Keep streak in sync — used by getSessionMomentum()
-      if (event.state) this.currentStreak = event.state.streak ?? 0;
+      // Keep continuity in sync — used by getSessionMomentum()
+      if (event.state) this.consecutiveBlocks = event.state.consecutiveBlocks ?? 0;
 
       const inFlow = rewardEngine.getIsInFocusFlow();
       if (inFlow && !this.state.isActive) {
@@ -103,7 +104,7 @@ export class TranceEngine {
   /**
    * Notify the engine that playback state changed.
    * Stopping playback immediately deactivates trance — we don't wait for the
-   * next block completion to confirm the streak is broken.
+   * next block completion to confirm the continuity is broken.
    */
   notifyPlayback(playing: boolean): void {
     if (!playing && this.state.isActive) {
@@ -124,15 +125,15 @@ export class TranceEngine {
 
   /**
    * Composite 0–1 score reflecting how deep the reader is in a focus session.
-   * Combines streak depth (40%), time-in-flow (25%), and current trance intensity (35%).
+   * Combines continuity depth (40%), time-in-flow (25%), and current trance intensity (35%).
    * Returns 0 when no flow is active.
    */
   getSessionMomentum(): number {
-    const streakFactor = Math.min(1, this.currentStreak / 10);
+    const continuityFactor = Math.min(1, this.consecutiveBlocks / 10);
     const flowDurationFactor = this.state.isActive
       ? Math.min(1, (Date.now() - this.activationTime) / RAMP_DURATION_MS)
       : 0;
-    return streakFactor * 0.40 + flowDurationFactor * 0.25 + this.state.intensity * 0.35;
+    return continuityFactor * 0.40 + flowDurationFactor * 0.25 + this.state.intensity * 0.35;
   }
 
   /**

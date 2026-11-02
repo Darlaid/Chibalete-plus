@@ -34,8 +34,8 @@ interface ProductMetrics {
     autoTransitionRate: number;
     completionRate: number;
     avgProgressPercentage: number;
-    avgPeakStreak: number;
-    streakBreakRate: number;
+    // G4-UX-U0: `avgPeakStreak` y `streakBreakRate` (rachas) siguen en la respuesta
+    // del servidor por compatibilidad, pero este panel no los usa ni los muestra.
     distinctContentsRead: number;
     rereadsRate: number;
 }
@@ -1709,7 +1709,7 @@ const DashboardMediador: React.FC = () => {
                         icon={<Zap size={18} />}
                         label="Flujo de concentración"
                         value={pct(pm.tranceEntryRate)}
-                        sub="sesiones donde el lector alcanzó ritmo sostenido (streak ≥ 3)"
+                        sub="sesiones con 3 o más bloques de lectura seguidos, sin pausas largas"
                     />
                     <MetricCard
                         primary

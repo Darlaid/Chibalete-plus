@@ -379,7 +379,7 @@ const Home: React.FC = () => {
                                 <ClipboardList className="mr-3" />
                                 <div>
                                     <p className="font-bold">¡Tienes tareas pendientes!</p>
-                                    <p className="text-sm">{pendingTasks.length} actividades por entregar. ¡No pierdas la racha!</p>
+                                    <p className="text-sm">{pendingTasks.length} actividades por entregar.</p>
                                 </div>
                             </div>
                             <button onClick={() => {

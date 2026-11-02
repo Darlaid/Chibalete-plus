@@ -17,8 +17,6 @@ import { RewardEngine } from '../engines/RewardEngine';
 import { TranceEngine } from '../engines/TranceEngine';
 import { getNextContent, preloadContentText } from '../engines/ContentQueue';
 import * as analyticsService from '../services/analyticsService';
-import { useRewardFeedback } from '../hooks/useRewardFeedback';
-import RewardToasts from '../components/RewardToasts';
 import { shouldTriggerLeo } from '../utils/leoTriggerEngine';
 import type { LeoTriggerReason } from '../utils/leoTriggerEngine';
 import { derivePedagogicalStage, deriveInitialDifficulty } from '../utils/leoStage';
@@ -57,12 +55,15 @@ import { computeVisualDensityPlan, computeVisualPacing } from '../utils/visualDe
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2.0];
 const PREFETCH_WINDOW = 5;
 
+// Duración de la sesión inmersiva (D44): organiza la sesión, no es un nivel ni
+// un premio. G4-UX-U0: etiquetas descriptivas; claves y duraciones sin cambios
+// (las claves corresponden a `user.immersive_level`).
 const LEVELS = {
-    1: { duration: 40, label: "Nivel 1: Novato" },
-    2: { duration: 180, label: "Nivel 2: Aprendiz" },
-    3: { duration: 300, label: "Nivel 3: Explorador" },
-    4: { duration: 1200, label: "Nivel 4: Maestro" },
-    5: { duration: Infinity, label: "Nivel 5: Leyenda" }
+    1: { duration: 40, label: "Sesión de 40 s" },
+    2: { duration: 180, label: "Sesión de 3 min" },
+    3: { duration: 300, label: "Sesión de 5 min" },
+    4: { duration: 1200, label: "Sesión de 20 min" },
+    5: { duration: Infinity, label: "Sesión libre" }
 };
 
 
@@ -168,9 +169,10 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
 
     // RewardEngine — subscribes to BlockEngine internally. Instantiated once.
     // blockEngineRef must already be initialized at this point (declared above).
+    // G4-UX-U0: solo mide continuidad técnica en memoria (sin XP, nivel ni racha).
     const rewardEngineRef = useRef<RewardEngine | null>(null);
     if (!rewardEngineRef.current) {
-        rewardEngineRef.current = new RewardEngine(blockEngineRef.current!, user?.id);
+        rewardEngineRef.current = new RewardEngine(blockEngineRef.current!);
     }
 
     // TranceEngine — subscribes to RewardEngine, drives gradual UI fade.
@@ -359,8 +361,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 userId: analyticsUserIdRef.current,
                 contentId: analyticsContentIdRef.current,
                 timestamp: Date.now(),
-                streak: _rs?.streak ?? 0,
-                level: _rs?.level ?? 1,
+                streak: _rs?.consecutiveBlocks ?? 0,
+                level: 0,
                 sessionDuration: Date.now() - sessionStartRef.current,
                 source: 'completion',
                 progressPercentage: progressPercentageRef.current,
@@ -407,8 +409,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             userId: analyticsUserIdRef.current,
             contentId: analyticsContentIdRef.current,
             timestamp: Date.now(),
-            streak: _rState?.streak ?? 0,
-            level: _rState?.level ?? 1,
+            streak: _rState?.consecutiveBlocks ?? 0,
+            level: 0,
             sessionDuration: _dur,
             source: 'transition',
             progressPercentage: progressPercentageRef.current,
@@ -418,8 +420,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             userId: analyticsUserIdRef.current,
             contentId: analyticsContentIdRef.current,
             timestamp: Date.now(),
-            streak: _rState?.streak ?? 0,
-            level: _rState?.level ?? 1,
+            streak: _rState?.consecutiveBlocks ?? 0,
+            level: 0,
             sessionDuration: _dur,
             nextContentId: next.id,
         });
@@ -440,9 +442,6 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
             navigate(`/leer/inmersivo/${encodeURIComponent(next.id)}`, { replace: true });
         }, transitionDelayMs);
     };
-
-    // Lightweight reward toasts — no logic here, just state from the engine
-    const rewardToasts = useRewardFeedback(rewardEngineRef.current);
 
 
     // Hydration-based overlay removal: dismiss the transition overlay as soon as
@@ -1079,8 +1078,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 userId: analyticsUserIdRef.current,
                 contentId: analyticsContentIdRef.current,
                 timestamp: Date.now(),
-                streak: rewardEngineRef.current?.getState().streak ?? 0,
-                level: rewardEngineRef.current?.getState().level ?? 1,
+                streak: rewardEngineRef.current?.getState().consecutiveBlocks ?? 0,
+                level: 0,
                 sessionDuration: Date.now() - sessionStartRef.current,
                 source: 'unmount',
             });
@@ -1189,44 +1188,33 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 userId: analyticsUserIdRef.current,
                 contentId: analyticsContentIdRef.current,
                 timestamp: Date.now(),
-                streak: s.streak,
-                level: s.level,
+                streak: s.consecutiveBlocks,
+                level: 0,
                 sessionDuration: Date.now() - sessionStartRef.current,
                 blocksCompleted: s.blocksCompleted,
             });
         });
 
+        // G4-UX-U0: `streak` en la telemetría = bloques consecutivos de la sesión
+        // (señal técnica de continuidad que usa el servidor para concentración);
+        // `level` = 0, sin niveles. Ya no se emite `level_up`.
         const unsubReward = rewardEngine.subscribe((ev) => {
-            if (ev.type === 'xp') {
-                const currentStreak = ev.state.streak;
-                // streak_break: streak reset to 1 after being on a meaningful run
-                if (analyticsPrevStreakRef.current > 1 && currentStreak === 1) {
+            if (ev.type === 'continuity') {
+                const currentRun = ev.state.consecutiveBlocks;
+                // streak_break: continuity reset to 1 after a meaningful run
+                if (analyticsPrevStreakRef.current > 1 && currentRun === 1) {
                     analyticsService.track({
                         event: 'streak_break',
                         userId: analyticsUserIdRef.current,
                         contentId: analyticsContentIdRef.current,
                         timestamp: Date.now(),
-                        streak: currentStreak,
-                        level: ev.state.level,
+                        streak: currentRun,
+                        level: 0,
                         sessionDuration: Date.now() - sessionStartRef.current,
                         previousStreak: analyticsPrevStreakRef.current,
                     });
                 }
-                analyticsPrevStreakRef.current = currentStreak;
-            }
-
-            if (ev.type === 'levelUp') {
-                analyticsService.track({
-                    event: 'level_up',
-                    userId: analyticsUserIdRef.current,
-                    contentId: analyticsContentIdRef.current,
-                    timestamp: Date.now(),
-                    streak: ev.state.streak,
-                    level: ev.newLevel ?? ev.state.level,
-                    sessionDuration: Date.now() - sessionStartRef.current,
-                    oldLevel: ev.oldLevel,
-                    xp: ev.state.xp,
-                });
+                analyticsPrevStreakRef.current = currentRun;
             }
         });
 
@@ -1379,7 +1367,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
         }
 
         // On content transitions (not the initial mount), reset content-specific
-        // state. Engine state (XP, streak, trance intensity) is intentionally
+        // state. Engine state (block continuity, trance intensity) is intentionally
         // preserved across transitions.
         if (!isFirstContentRenderRef.current) {
             setSentences([content.titulo || 'Preparando tu lectura...']);
@@ -1555,8 +1543,8 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                 userId: analyticsUserIdRef.current,
                 contentId: content.id,
                 timestamp: Date.now(),
-                streak: rewardEngineRef.current?.getState().streak ?? 0,
-                level: rewardEngineRef.current?.getState().level ?? 1,
+                streak: rewardEngineRef.current?.getState().consecutiveBlocks ?? 0,
+                level: 0,
                 sessionDuration: 0,
                 isTransition: isAutoTransition,
             });
@@ -3137,9 +3125,6 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
                     </button>
                 </div>
             )}
-
-            {/* REWARD TOASTS — bottom-left, non-blocking, never interrupts reading */}
-            <RewardToasts toasts={rewardToasts} />
 
             {/* NEXT CONTENT INDICATOR — appears near session end, pointer-events enabled for skip */}
             {nextContentRef.current && leoMemory.sessionReadingProgress >= 93 && !isTransitioning && (

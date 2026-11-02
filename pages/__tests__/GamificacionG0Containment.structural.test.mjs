@@ -117,7 +117,9 @@ ok('overlay: la rama timer no dice «Lectura Completada»',
 ok('overlay: aria-label depende del motivo', /aria-label=\{sessionEndReason === 'timer' \? 'Fin del tiempo de sesión' : 'Lectura completada'\}/.test(visor));
 ok('overlay: sigue siendo dialog modal con +5 Minutos y Salir',
    /role="dialog"/.test(overlay) && /aria-modal="true"/.test(overlay) && /\+5 Minutos/.test(visor) && /PB_BLOCK_EXIT/.test(visor));
-ok('LEVELS y su duración por defecto sin cambios (40 s en nivel 1)', /1: \{ duration: 40, label: "Nivel 1: Novato" \}/.test(visor));
+// G4-UX-U0 renombró las etiquetas (D44: la duración de sesión no es un «nivel»);
+// la duración por defecto sigue fijada.
+ok('LEVELS y su duración por defecto sin cambios (40 s en la clave 1)', /1: \{ duration: 40, label: "Sesión de 40 s" \}/.test(visor));
 
 console.log('\n[M] MOOK y progreso canónico intactos (G0 no toca sus archivos)');
 for (const p of ['server/server.js', 'server/progressService.js', 'server/experienceBackboneEmitter.mjs', 'hooks/useImmersivePlayback.ts', 'engines/RewardEngine.ts']) {
