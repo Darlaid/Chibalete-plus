@@ -38,8 +38,27 @@ Reentrada en la misma réplica durante una cesión: `skipped: 'locked'` (síncro
 **Corrección de 01B-CLOSE (renovación y liberación).** En `74495bd` la comprobación del testigo (lectura por ruta) y la operación (`utimes`/`unlink` por ruta) eran dos pasos. Si otra réplica daba el lock por obsoleto y lo reemplazaba entre ambos, el dueño antiguo renovaba el lock **nuevo** (y seguía creyéndose dueño) o lo **borraba**. `mookReconcileLock.test.mjs` lo reproduce con dos procesos reales: 3 ✗ con `74495bd` en Linux y en Windows. Contrato corregido, sin cambiar el mecanismo:
 
 - `renewLock`: abre el lock, lee el testigo y renueva con `futimes` **por el mismo descriptor** (mismo inodo). Después confirma que la ruta sigue apuntando a ese inodo (`dev`+`ino`). Si lo reemplazaron entre medio, la renovación cae en el inodo desvinculado (inocuo) y devuelve `false` ⇒ `RECONCILE_LOCK_LOST` en ese mismo paso.
-- `unlock`: renueva y confirma así justo antes del `unlink`. Con la vigencia recién puesta, ninguna réplica puede darlo por obsoleto entre la confirmación y el borrado.
+- `unlock` (corregido en 01B-LOCK-FINAL): renueva y confirma así, pero ya **no borra por ruta**.
+  1. Aparta el lock con `rename` atómico a `<lock>.<testigo>.release`.
+  2. Comprueba que lo apartado lleva **su testigo** (no basta con comparar inodos: sin un descriptor abierto, Linux reutiliza el número de inodo al instante).
+  3. Si es suyo, borra ese nombre apartado.
+  4. Si es ajeno (otra réplica lo sustituyó entre la confirmación y la liberación), lo devuelve con `link`, que falla si la ruta ya está ocupada y nunca pisa un lock creado entre medio. Después borra el nombre apartado.
+  - El dueño sustituido conserva el mismo archivo y lo sigue renovando.
+  - Si una tercera réplica ocupó la ruta en ese instante, su lock queda intacto y la segunda detecta la pérdida en su siguiente cesión.
+  - Si falla el `rename`, el lock propio se queda y caduca en 10 min: solo se retrasa el siguiente barrido. La liberación ocurre siempre después de terminar el barrido, así que ninguna ruta de error deja a nadie barriendo sin lock.
 - En Windows, un nombre con un descriptor abierto no se puede recrear: la toma concurrente falla y nadie queda con el lock (fallo cerrado). En Linux (producción) la toma ocurre y el lock nuevo queda intacto.
+
+Con `80b357f`, la sustitución forzada entre la última confirmación y el `unlink` hacía que el dueño anterior borrara el lock del nuevo. Reproducido con dos procesos ([4b]): Linux 5 ✗ y Windows 1 ✗. Corregido: `mookReconcileLock` pasa 42/42, 10 de 10 ejecuciones en Linux, incluida la carrera de restitución con tres réplicas ([4c]).
+
+**Salvaguarda estructural** (`ledgerCore.test.mjs`, [11]). La prohibición textual de `rename` en `mookSource.mjs` se sustituyó por comprobaciones sobre el código sin comentarios:
+- exactamente un `rename`, `fs.renameSync(lockFile, aside)`, con `aside` derivado del lock;
+- exactamente un `link`, `fs.linkSync(aside, lockFile)`;
+- `unlinkSync` solo sobre `lockFile` o `aside`;
+- `unlock` solo recibe `plan.lockFile`;
+- ningún `rename`, `link` ni `unlink` fuera del código del lock;
+- el código del lock no nombra stores, padrones, uploads ni respaldos.
+
+Siguen intactas las demás aserciones, incluida la prohibición de `renameSync` y `unlinkSync` en el resto de `server/gamification`. Se verificaron tres mutaciones (renombrar la base, `rename` a otro destino y borrar un store) y todas hacen fallar la prueba.
 
 Ventanas que quedan (documentadas, no cerradas; cerrarlas exige rediseñar la toma compartida):
 
@@ -159,4 +178,4 @@ En Windows, 27/27.
 
 **Stores reales.** Ningún archivo modificado en `data/`, `data-critical/`, `public/uploads/` ni en las carpetas protegidas sin rastrear.
 
-**Veredicto:** `GREEN_CI_PERF_PILOT` cuando la CI del commit de corrección esté verde.
+**Veredicto:** `GREEN_CI_PERF_PILOT` cuando la CI de `80b357f` y del commit de liberación atómica (01B-LOCK-FINAL) esté verde.

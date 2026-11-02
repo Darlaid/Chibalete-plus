@@ -202,7 +202,7 @@ function renewLock(lockFile, token, now) {
         fd = fs.openSync(lockFile, 'r+');
         const buf = Buffer.alloc(128);
         if (buf.toString('utf8', 0, fs.readSync(fd, buf, 0, buf.length, 0)) !== token) return false;
-        lockRaceHook?.();
+        lockRaceHook?.('renew');
         const t = new Date(now);
         fs.futimesSync(fd, t, t);
         const held = fs.fstatSync(fd, { bigint: true });
@@ -216,13 +216,29 @@ function renewLock(lockFile, token, now) {
 }
 
 /**
- * Libera solo un lock propio. Se renueva (y confirma) justo antes de borrar:
- * con la vigencia recién puesta, ninguna réplica puede darlo por obsoleto y
- * reemplazarlo entre esa confirmación y el borrado.
+ * Libera solo un lock propio. Se renueva y confirma justo antes de liberarlo.
+ * G4-PERF-01B-FINAL: no se borra por ruta. El lock se aparta con `rename`
+ * (atómico) a un nombre propio de este testigo y se comprueba que lo apartado
+ * lleva nuestro testigo. Si en ese instante otra réplica ya lo había reemplazado
+ * (solo posible si este proceso se congeló más de LOCK_STALE_MS justo antes),
+ * lo apartado es el lock de ella (otro testigo): se devuelve a su sitio con
+ * `link`, que nunca pisa un lock creado entre medio, y su dueño lo conserva.
  */
 const unlock = (lockFile, token) => {
     if (!renewLock(lockFile, token, Date.now())) return; // lo tomó otra réplica: no es nuestro
-    try { fs.unlinkSync(lockFile); } catch { /* noop */ }
+    lockRaceHook?.('release');
+    const aside = `${lockFile}.${token.replace(/[^0-9A-Za-z-]/g, '-')}.release`;
+    try { fs.renameSync(lockFile, aside); } catch { return; }
+    // Por testigo y no por inodo: sin descriptor abierto, un inodo liberado se
+    // reutiliza (Linux) y el lock nuevo podría tener el mismo número.
+    if (lockHolder(aside) !== token) {
+        lockRaceHook?.('restore');
+        // `link` falla si la ruta ya está ocupada: nunca pisa un lock creado entre
+        // medio. Si falla, el lock vigente es el de quien ocupó la ruta; el dueño
+        // apartado lo detecta en su siguiente cesión (`RECONCILE_LOCK_LOST`).
+        try { fs.linkSync(aside, lockFile); } catch { /* ruta ocupada */ }
+    }
+    try { fs.unlinkSync(aside); } catch { /* noop */ } // solo el nombre apartado, nunca la ruta del lock
 };
 
 // Solo pruebas: `setRaceHook` corre una función entre la comprobación del testigo

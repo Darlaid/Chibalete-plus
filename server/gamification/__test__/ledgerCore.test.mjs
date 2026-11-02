@@ -279,7 +279,30 @@ try {
     ok('server/gamification no escribe archivos (salvo el lock del reconciliador y el registro de exclusiones)', !/writeFile|appendFile|renameSync|unlinkSync|rmSync|copyFile|openSync/.test(nonLockSrc));
     ok('el registro de exclusiones solo añade: no renombra, trunca ni borra', /openSync\(p, 'a'\)/.test(srcOf('exclusions.mjs')) && !/writeFile|rename|unlink|rmSync|truncate|copyFile/.test(srcOf('exclusions.mjs')));
     ok('mookSource solo escribe/borra su lock `<base>.reconcile.lock`', /const lockFile = `\$\{dbPath\}\.reconcile\.lock`/.test(srcOf('mookSource.mjs'))
-        && !/writeFile|appendFile|rename|rmSync|copyFile/.test(srcOf('mookSource.mjs')));
+        && !/writeFile|appendFile|rmSync|copyFile|truncate|cpSync/.test(srcOf('mookSource.mjs')));
+    // G4-PERF-01B-LOCK-FINAL: la ÚNICA operación de movimiento autorizada es la
+    // liberación atómica del lock: `rename` del lock a su nombre de liberación
+    // (`<lock>.<testigo>.release`) y, si lo apartado era ajeno, `link` de vuelta
+    // (nunca sobrescribe). Ningún otro rename/link/unlink, ni sobre otras rutas.
+    {
+        const ms = srcOf('mookSource.mjs');
+        const code = ms.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/;\s*\/\/.*$/gm, ';');
+        const calls = (re) => code.match(re) ?? [];
+        const lockRegion = code.match(/function tryLock[\s\S]*?let lockRaceHook/)?.[0] ?? '';
+        ok('mookSource: un solo rename, del lock a su nombre de liberación',
+            calls(/\brename\w*\s*\(/g).length === 1 && calls(/\bfs\.renameSync\(lockFile, aside\)/g).length === 1
+            && calls(/\bconst aside = `\$\{lockFile\}\.\$\{token\.replace\(\/\[\^0-9A-Za-z-\]\/g, '-'\)\}\.release`;/g).length === 1);
+        ok('mookSource: un solo link, de vuelta a la ruta del lock (sin sobrescribir)',
+            calls(/\b(link|symlink)\w*\s*\(/g).length === 1 && calls(/\bfs\.linkSync\(aside, lockFile\)/g).length === 1);
+        ok('mookSource: unlink solo sobre el lock o su nombre de liberación',
+            calls(/\bunlinkSync\(/g).length === 2 && calls(/\bunlinkSync\([^)]*\)/g).every((c) => /^unlinkSync\((lockFile|aside)\)$/.test(c)));
+        ok('mookSource: la liberación solo recibe el lock del plan',
+            calls(/\bunlock\([^)]*\)/g).length >= 1 && calls(/\bunlock\([^)]*\)/g).every((c) => c === 'unlock(plan.lockFile, token)'));
+        ok('mookSource: rename/link/unlink solo dentro del código del lock',
+            lockRegion.length > 0 && !/\b(rename|link|unlink)\w*\s*\(/.test(code.replace(lockRegion, '')));
+        ok('mookSource: el código del lock no nombra stores, padrones, uploads ni respaldos',
+            lockRegion.length > 0 && !/data-critical|data\/|mook_db|usuarios_|users_db|\.json|\.db['"`]|uploads|backup|restic/i.test(lockRegion));
+    }
     ok('server/gamification no registra rutas HTTP', !/app\.(get|post|put|delete|use)\s*\(|express\.Router/.test(modSrc));
     // Imports y lecturas reales, no menciones en comentarios: readingValidator
     // documenta que sus lectores (eventsService/progressService) se le INYECTAN.

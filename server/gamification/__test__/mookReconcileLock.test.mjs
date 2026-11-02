@@ -8,6 +8,11 @@
  *  [3] carrera: la otra réplica toma el lock ENTRE la comprobación del testigo
  *      y la renovación → la renovación no toca el lock nuevo y se da por perdido
  *  [4] carrera: lo mismo entre la comprobación y la liberación → no lo borra
+ *  [4b] sustitución forzada entre la última comprobación y el borrado: la
+ *      liberación aparta el lock con rename, ve otro testigo y lo devuelve
+ *  [4c] carrera en la restitución: una tercera réplica ocupa la ruta entre el
+ *      rename y el link → el link no la pisa; la segunda detecta la pérdida
+ *  [4d] liberación normal sin restos; testigo ajeno vigente intacto
  *  [5] barrido por lotes: expiración y toma por otra réplica a mitad, sin
  *      transacción abierta en las cesiones; recuperación sin duplicados ni pérdidas
  * Libera `mook_review` solo en este proceso. Nunca toca data/ ni data-critical/.
@@ -126,6 +131,66 @@ try {
         ok('la liberación no borra el lock nuevo', other?.token ? read(lock) === other.token : read(lock) === null);
         if (other?.token) replica('release', lock, other.token);
         ok('…que su dueño libera después', !fs.existsSync(lock));
+    }
+
+    section('[4b] sustitución forzada entre la última comprobación y el borrado');
+    {
+        // La otra réplica solo puede reemplazar un lock que ve obsoleto. Aquí se
+        // fuerza: el lock recién renovado se envejece (como un dueño congelado más
+        // de LOCK_STALE_MS justo antes del unlink) y la otra réplica lo toma.
+        const lock = path.join(tmp, 'l4b.lock');
+        const mine = K.tryLock(lock, Date.now());
+        let other = null;
+        K.setRaceHook((phase) => { if (phase !== 'release') return; K.setRaceHook(null); ageOut(lock); other = replica('steal', lock); });
+        K.unlock(lock, mine);
+        K.setRaceHook(null);
+        ok(...stoleInWindow(other));
+        ok('el dueño anterior no borra el lock del nuevo dueño', other?.token ? read(lock) === other.token : true, JSON.stringify({ other, now: read(lock) }));
+        ok('…y el nuevo dueño lo sigue renovando', other?.token ? K.renewLock(lock, other.token, Date.now()) === true : true);
+        if (other?.token && read(lock) === other.token) replica('release', lock, other.token);
+        ok('…que su dueño libera después', !fs.existsSync(lock));
+        ok('sin restos del borrado', fs.readdirSync(tmp).every((f) => !f.startsWith('l4b.lock.')), fs.readdirSync(tmp).join());
+    }
+
+    section('[4c] carrera en la restitución: una tercera réplica ocupa la ruta');
+    {
+        // Tras apartar el lock ajeno con rename, la ruta queda libre un instante;
+        // una tercera réplica la ocupa antes del link. El link no la pisa.
+        const lock = path.join(tmp, 'l4c.lock');
+        const mine = K.tryLock(lock, Date.now());
+        let second = null, third = null;
+        K.setRaceHook((phase) => {
+            if (phase === 'release') { ageOut(lock); second = replica('steal', lock); }
+            if (phase === 'restore') { K.setRaceHook(null); third = replica('steal', lock); }
+        });
+        K.unlock(lock, mine);
+        K.setRaceHook(null);
+        if (process.platform === 'win32' && !second?.token) {
+            ok(...stoleInWindow(second));
+        } else {
+            ok('la segunda réplica tomó el lock antes del borrado', TOKEN.test(second?.token ?? ''), JSON.stringify(second));
+            ok('la tercera tomó la ruta libre antes de la restitución', TOKEN.test(third?.token ?? '') && third.token !== second.token, JSON.stringify(third));
+            ok('la restitución no sobrescribe el lock de la tercera', read(lock) === third?.token);
+            ok('la segunda detecta la pérdida (no puede renovar)', K.renewLock(lock, second.token, Date.now()) === false);
+            ok('la tercera conserva y renueva su lock', K.renewLock(lock, third.token, Date.now()) === true);
+            replica('release', lock, second.token);
+            ok('la segunda no puede liberar el lock de la tercera', read(lock) === third.token);
+            replica('release', lock, third.token);
+            ok('la tercera lo libera', !fs.existsSync(lock));
+        }
+        ok('sin restos del borrado', fs.readdirSync(tmp).every((f) => !f.startsWith('l4c.lock')), fs.readdirSync(tmp).join());
+    }
+
+    section('[4d] sin carrera: la liberación normal no deja restos');
+    {
+        const lock = path.join(tmp, 'l4d.lock');
+        const mine = K.tryLock(lock, Date.now());
+        K.unlock(lock, mine);
+        ok('lock liberado y sin nombre de liberación', fs.readdirSync(tmp).every((f) => !f.startsWith('l4d.lock')));
+        const theirs = replica('steal', lock);
+        K.unlock(lock, mine);
+        ok('un testigo ajeno vigente: no se aparta ni se borra', read(lock) === theirs.token && fs.readdirSync(tmp).filter((f) => f.startsWith('l4d.lock')).length === 1);
+        replica('release', lock, theirs.token);
     }
 
     section('[5] barrido por lotes: expiración y toma a mitad');
