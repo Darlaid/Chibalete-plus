@@ -35,10 +35,18 @@ Mismo `O_EXCL` sobre `<base>.reconcile.lock` y mismo `LOCK_STALE_MS` (10 min). M
 
 Reentrada en la misma réplica durante una cesión: `skipped: 'locked'` (síncrono y por lotes). Entre réplicas, igual.
 
-Ventanas que quedan (documentadas, no cerradas):
+**Corrección de 01B-CLOSE (renovación y liberación).** En `74495bd` la comprobación del testigo (lectura por ruta) y la operación (`utimes`/`unlink` por ruta) eran dos pasos. Si otra réplica daba el lock por obsoleto y lo reemplazaba entre ambos, el dueño antiguo renovaba el lock **nuevo** (y seguía creyéndose dueño) o lo **borraba**. `mookReconcileLock.test.mjs` lo reproduce con dos procesos reales: 3 ✗ con `74495bd` en Linux y en Windows. Contrato corregido, sin cambiar el mecanismo:
 
-- Toma de un lock obsoleto por dos réplicas a la vez: es la misma carrera que antes. La que pierde lo detecta en su siguiente cesión.
-- Una réplica congelada más de 10 min (por ejemplo, SIGSTOP) puede escribir hasta un lote después de que otra tome el lock. En ambos casos el resultado es inocuo por diseño: `BEGIN IMMEDIATE` y claves únicas.
+- `renewLock`: abre el lock, lee el testigo y renueva con `futimes` **por el mismo descriptor** (mismo inodo). Después confirma que la ruta sigue apuntando a ese inodo (`dev`+`ino`). Si lo reemplazaron entre medio, la renovación cae en el inodo desvinculado (inocuo) y devuelve `false` ⇒ `RECONCILE_LOCK_LOST` en ese mismo paso.
+- `unlock`: renueva y confirma así justo antes del `unlink`. Con la vigencia recién puesta, ninguna réplica puede darlo por obsoleto entre la confirmación y el borrado.
+- En Windows, un nombre con un descriptor abierto no se puede recrear: la toma concurrente falla y nadie queda con el lock (fallo cerrado). En Linux (producción) la toma ocurre y el lock nuevo queda intacto.
+
+Ventanas que quedan (documentadas, no cerradas; cerrarlas exige rediseñar la toma compartida):
+
+- Toma de un lock obsoleto por dos réplicas a la vez (`stat` y `unlink` en `tryLock`): es la misma carrera de antes de 01B. La que pierde lo detecta en su siguiente cesión.
+- Toda réplica congelada más de 10 min (SIGSTOP, pausa de VM) entre dos llamadas consecutivas puede escribir como mucho un lote después de que otra tome el lock. Es inherente a un lock con caducidad.
+
+En ambos casos el resultado es inocuo por diseño: `BEGIN IMMEDIATE` por escritura y claves únicas. Probado: dos réplicas, toma a mitad, recuperación con el mismo ledger y reintento sin cambios.
 
 ## 3. Mediciones (Linux)
 
@@ -111,3 +119,44 @@ Producción hoy: 0 evidencias, 2 runs y 5 versiones. Ninguna de las dos operacio
 ## 6. Límites respetados
 
 Sin cambios de política XP/PM, Studio ni interfaces. `mook_review` sigue en `XP_LOCKED_SOURCES`. Sin flags, despliegue ni servicios nuevos. Los bancos (`mookReconcileBench.mjs`, `mookReconcileHttpBench.mjs`) no forman parte de la CI.
+
+## 7. Cierre (G4-PERF-01B-CLOSE)
+
+**`74495bd` publicado** sobre `e0468ee`. CI 3/3 verde: `security` (8 jobs), `identity-preflight` (incluye MOOK, exportaciones, G0, núcleo G3, typecheck y build) y `content-rmw`.
+
+**Lock.** La auditoría con dos procesos encontró la carrera de §2 (comprobación y operación separadas) y la corrigió en un commit aparte. `mookReconcileLock.test.mjs` (27 aserciones) entra en `test:gamification-core`:
+
+1. Testigo `pid:uuid` y exclusión entre procesos.
+2. Quien perdió la propiedad no renueva ni borra.
+3. Carrera en la renovación.
+4. Carrera en la liberación.
+5. Expiración y toma a mitad de un barrido por lotes, sin transacción abierta en las cesiones, con recuperación al mismo ledger y reintento sin cambios.
+
+Resultados en Linux:
+
+| Código | Resultado |
+|---|---|
+| `74495bd` | 24 ✓ / 3 ✗ (defecto reproducido) |
+| Corrección | 27/27, 10 de 10 ejecuciones |
+
+En Windows, 27/27.
+
+**Repetición en Linux, 20 000 evidencias, con la corrección** (mismo arnés que §3):
+
+| Versión | Barrido | Duración | Pausa p95 / máx. | `/api/health` p95 / máx. | Salud |
+|---|---|---|---|---|---|
+| 01A | primero | 178,7 s | — / 178 654 ms | — | 1 fallida |
+| 01B | primero | 186,2 s | 34 / 137 ms | 29 / 132 ms | 7 515 OK, 0 fallidas |
+| 01A | repetido | 17,1 s | — / 17 054 ms | — | 1 fallida |
+| 01B | repetido | 8,2 s | 38 / 54 ms | 33 / 47 ms | 373 OK, 0 fallidas |
+| 01B `server.js` real | barrido programado | — | — | 38 / 272 ms (p99 50; 1 de 1 594 > 100 ms) | 0 fallidas |
+
+- **Ledger:** 01A = 01B (`ffa13ef5…`). Totales: 20 000 hechos, 20 000 asientos XP, 24 000 actos, 210 sujetos y 0 PM.
+- **Exclusión y retirada legal durante el barrido:** [6] y [7] verdes en Linux.
+- **Límites (sin garantía general de 100 ms):**
+  - `readMook()` (un `JSON.parse` de unos 26 MB) explica el máximo de 272 ms en `server.js`.
+  - Los picos de `fsync` explican los máximos del primer barrido, que varían entre ejecuciones: 137 ms aquí; 78–473 ms en §3.
+
+**Stores reales.** Ningún archivo modificado en `data/`, `data-critical/`, `public/uploads/` ni en las carpetas protegidas sin rastrear.
+
+**Veredicto:** `GREEN_CI_PERF_PILOT` cuando la CI del commit de corrección esté verde.

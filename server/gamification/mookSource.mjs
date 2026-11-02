@@ -189,16 +189,48 @@ function lockHolder(lockFile) {
     }
 }
 
-/** Renueva un lock propio. `false` si ya no es nuestro. */
+/**
+ * Renueva un lock propio. `false` si ya no es nuestro.
+ * G4-PERF-01B-CLOSE: testigo y renovación van por el MISMO descriptor (el mismo
+ * inodo), y después se confirma que la ruta sigue apuntando a él. Si otra
+ * réplica lo dio por obsoleto y lo reemplazó entre medio, la renovación cae en
+ * el inodo ya desvinculado (inocuo) y se da por perdida: el lock nuevo no se toca.
+ */
 function renewLock(lockFile, token, now) {
-    if (lockHolder(lockFile) !== token) return false;
-    try { const t = new Date(now); fs.utimesSync(lockFile, t, t); return true; } catch { return false; }
+    let fd = null;
+    try {
+        fd = fs.openSync(lockFile, 'r+');
+        const buf = Buffer.alloc(128);
+        if (buf.toString('utf8', 0, fs.readSync(fd, buf, 0, buf.length, 0)) !== token) return false;
+        lockRaceHook?.();
+        const t = new Date(now);
+        fs.futimesSync(fd, t, t);
+        const held = fs.fstatSync(fd, { bigint: true });
+        const atPath = fs.statSync(lockFile, { bigint: true });
+        return held.ino === atPath.ino && held.dev === atPath.dev;
+    } catch {
+        return false;
+    } finally {
+        if (fd !== null) { try { fs.closeSync(fd); } catch { /* noop */ } }
+    }
 }
 
+/**
+ * Libera solo un lock propio. Se renueva (y confirma) justo antes de borrar:
+ * con la vigencia recién puesta, ninguna réplica puede darlo por obsoleto y
+ * reemplazarlo entre esa confirmación y el borrado.
+ */
 const unlock = (lockFile, token) => {
-    if (lockHolder(lockFile) !== token) return; // lo tomó otra réplica: no es nuestro
+    if (!renewLock(lockFile, token, Date.now())) return; // lo tomó otra réplica: no es nuestro
     try { fs.unlinkSync(lockFile); } catch { /* noop */ }
 };
+
+// Solo pruebas: `setRaceHook` corre una función entre la comprobación del testigo
+// y la operación (renovar o liberar), para reproducir la toma por otra réplica.
+let lockRaceHook = null;
+export const __reconcileLockForTest = Object.freeze({
+    tryLock, renewLock, unlock, lockHolder, setRaceHook: (fn) => { lockRaceHook = fn; },
+});
 
 /** Precondiciones comunes a los dos conductores. */
 function reconcilePlan(env) {
