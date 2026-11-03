@@ -197,24 +197,19 @@ echo "[CASO 4] Cleanup retention de server.old-* / .staging-* / .failed-*"
 # CASO 5 — CLI: argumentos y exit codes
 # ────────────────────────────────────────────────────────────────────
 echo ""
-echo "[CASO 5] CLI: argumentos y exit codes"
+echo "[CASO 5] CLI: el script está neutralizado (G4-RELEASE-GATE-02A)"
 {
-    out=$(bash "$DEPLOY_SCRIPT" --help 2>&1)
-    rc=$?
-    assert "--help exit 0" '[ "$rc" = "0" ]'
-    assert "--help NO muestra DEPLOY EXITOSO banner" '! echo "$out" | grep -q "DEPLOY BACKEND EXITOSO"'
-
-    set +e
-    bash "$DEPLOY_SCRIPT" --xyz >/dev/null 2>&1
-    rc=$?
-    set -e
-    assert "argumento inválido → exit 1" '[ "$rc" = "1" ]'
-
-    set +e
-    bash "$DEPLOY_SCRIPT" --actor x >/dev/null 2>&1
-    rc=$?
-    set -e
-    assert "sin --release-tag → exit 1" '[ "$rc" = "1" ]'
+    # El modelo bind mount ya no existe: TODA ejecución aborta con 64 antes
+    # de leer argumentos, sin banner de éxito y remitiendo a la guía vigente.
+    for args in "--help" "--xyz" "--actor x" "--release-tag rel-2026-05-07-mocktest --dry-run"; do
+        set +e
+        out=$(bash "$DEPLOY_SCRIPT" $args 2>&1)
+        rc=$?
+        set -e
+        assert "[$args] exit 64" '[ "$rc" = "64" ]'
+        assert "[$args] remite a deployment_guide.md §12" 'echo "$out" | grep -q "deployment_guide.md §12"'
+        assert "[$args] sin banner DEPLOY EXITOSO" '! echo "$out" | grep -q "DEPLOY BACKEND EXITOSO"'
+    done
 }
 
 # ────────────────────────────────────────────────────────────────────

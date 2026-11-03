@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────
+# OBSOLETO — G4-RELEASE-GATE-02A (2026-11-03). NO EJECUTAR.
+# Este script implementa el modelo antiguo: swap de /var/www/chibalete/server
+# como bind mount + restart. Ese directorio YA NO está montado en las APIs
+# (el código va dentro de la imagen chibalete/api:<tag>): ejecutarlo sería un
+# deploy fantasma. Aborta antes de leer argumentos, tocar archivos o abrir SSH.
+# Procedimiento vigente: deployment_guide.md §12 (deploy por imagen),
+# §13 (réplica a réplica) y §15 (rollback por imagen).
+# Única excepción: la suite mock lo carga con `source` y
+# DEPLOY_BACKEND_TEST_NO_MAIN=1, que nunca ejecuta main.
+# ─────────────────────────────────────────────────────────────────────
+if [ "${BASH_SOURCE[0]}" = "$0" ] || [ "${DEPLOY_BACKEND_TEST_NO_MAIN:-0}" != "1" ]; then
+    echo "deploy-backend.sh: OBSOLETO. El backend se despliega por imagen." >&2
+    echo "Ver deployment_guide.md §12 (deploy), §13 (réplica a réplica) y §15 (rollback)." >&2
+    echo "No se ha modificado nada." >&2
+    # shellcheck disable=SC2317
+    return 64 2>/dev/null || exit 64
+fi
+# ─────────────────────────────────────────────────────────────────────
 # Chibalete+ — Deploy backend canónico
 # Sprint 022 / Fase 2B.7
 #
