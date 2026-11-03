@@ -16,6 +16,7 @@ import {
 } from '../utils/groupAnalytics.mjs';
 import { GroupDiagnosisPanel } from '../components/aula-viva/GroupDiagnosisPanel';
 import { ProduccionesTab } from '../components/review/ProduccionesTab';
+import { GroupRecognitionBlock } from '../components/aula-viva/GroupRecognitionBlock';
 import type { GroupDiagnosis } from '../utils/groupDiagnosis';
 import { StudentStatusPanel } from '../components/aula-viva/StudentStatusPanel';
 import type { StudentStatus } from '../utils/studentStatus';
@@ -1559,6 +1560,9 @@ const AulaViva: React.FC = () => {
 
                     {/* KPIs del grupo — GET /api/groups/:id/analytics-summary (1B) */}
                     <GroupAnalyticsKpis state={groupAnalytics} />
+
+                    {/* G4-UX-U4: reconocimiento agregado (solo con gamificación y XP activos) */}
+                    <GroupRecognitionBlock state={groupAnalytics} onReview={() => setActiveTab('producciones')} />
 
                     {/* UX-3B — md:grid-cols-2 para tablet:
                           mobile  → 1 columna (analytics + panel apilados)

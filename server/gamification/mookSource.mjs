@@ -26,7 +26,7 @@ import { exclusionGate } from './exclusions.mjs';
 import { scheduleFact, scheduleOnHookDb } from './intake.mjs';
 import { recordWorkRecognition } from './ledger.mjs';
 import { attributedEvidence } from './mookWorks.mjs';
-import { catalogActivities, readWorkProgress } from './progress.mjs';
+import { catalogActivities, readGroupRecognitionCounts, readWorkProgress, recognitionActive, workAccessCounts } from './progress.mjs';
 import { candidateEligibility, drainSteps, mookReviewCandidates, mookExperienceCandidates, reconcileSteps } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
@@ -157,6 +157,47 @@ export async function readMyProgress(userId, deps = {}) {
             isWithdrawn: withdrawnReader(deps.readRights),
         });
         return { enabled: true, ...out };
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * G4-UX-U4. Agregados de reconocimiento de un grupo para su mediador. Solo lectura.
+ *  - sin `GAMIFICATION_ENABLED` o sin `XP_EARNING_ENABLED` ⇒ `null` (el bloque no existe);
+ *  - si no, `{ studentsWithRecognizedWork, suppressed, eligibleWorks }`, solo conteos.
+ * Misma apertura que `readMyProgress`: readonly + query_only y solo con escritor
+ * vivo; si falta, lanza `GAMIFICATION_DB_NOT_LIVE` sin crear nada.
+ * `studentIds` y el alcance del grupo los resuelve el servidor, nunca el cliente.
+ * @param {string[]} studentIds
+ * @param {{ readMook, workRefOf, readRights, accessDecisionOf: (userId, workRef) => Promise<{decision, via}|null>, env?, now? }} deps
+ */
+export async function readGroupRecognition(studentIds, deps = {}) {
+    const { env = process.env, now = Date.now() } = deps;
+    if (!isGamificationEnabled(env) || !isXpEarningEnabled(env)) return null;
+    const dbPath = resolveGamificationDbPath(env);
+    if (!fs.existsSync(`${dbPath}-wal`) || !fs.existsSync(`${dbPath}-shm`)) throw new GamificationError('GAMIFICATION_DB_NOT_LIVE');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+        db.pragma('query_only = ON');
+        // Obras del catálogo actual con acceso explícito para al menos una persona del
+        // grupo. Solo se evalúan si hoy una revisión puede sumar XP.
+        const eligibleWorkRefs = [];
+        if (recognitionActive(db, now)) {
+            const isWithdrawn = withdrawnReader(deps.readRights);
+            const works = new Set(catalogActivities(deps.readMook(), null, { workRefOf: deps.workRefOf, sinceMs: mookActivationSince(env) }).map((a) => a.workRef));
+            for (const workRef of works) {
+                let withdrawn = true;
+                try { withdrawn = isWithdrawn(workRef) !== false; } catch { withdrawn = true; }
+                if (withdrawn) continue;
+                for (const id of studentIds) {
+                    let access = null;
+                    try { access = await deps.accessDecisionOf(id, workRef); } catch { access = null; }
+                    if (workAccessCounts(access)) { eligibleWorkRefs.push(workRef); break; }
+                }
+            }
+        }
+        return readGroupRecognitionCounts(db, studentIds, { eligibleWorkRefs, env, now });
     } finally {
         db.close();
     }

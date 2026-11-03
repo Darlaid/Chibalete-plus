@@ -9014,6 +9014,46 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
 // scope se resuelve SIEMPRE antes de mirar la caché: un HIT nunca salta authz.
 // ─────────────────────────────────────────────────────────────────────────────
 const groupAnalyticsCache = createGroupAnalyticsCache();
+
+/**
+ * G4-UX-U4 — reconocimiento agregado del grupo para su mediador. Solo conteos:
+ *  - `pedagogy`: entregas de la cohorte que esperan revisión (MOOK, sin ledger);
+ *  - `ledger`: estudiantes con al menos una obra reconocida; suprimido con menos
+ *    de 5 estudiantes; `unavailable` ante cualquier fallo (nunca 0 inventado);
+ *  - `catalog`: obras con experiencias que hoy pueden sumar XP para el grupo.
+ * Sin gamificación o sin XP ⇒ null y el campo no existe. Ni nombres, ni XP,
+ * ni niveles, ni exclusiones.
+ */
+async function groupRecognitionBlock(studentIds) {
+    let counts;
+    try {
+        counts = await gamificationMook.readGroupRecognition(studentIds, {
+            ...gamificationRecognition,
+            accessDecisionOf: async (userId, workRef) => {
+                if (workBlock(readJSON(DB_FILE).find(c => c.id === workRef))) return null;
+                return experienceStore.buildWorkAccess(workRef, await decideContentAccess(userId, workRef, { logDecision: false }));
+            },
+        });
+        if (counts === null) return null;
+    } catch (e) {
+        log(`[gamification] reconocimiento de grupo no disponible: ${e?.code || 'ERROR'}`, 'WARN');
+        counts = undefined;
+    }
+    const members = new Set(studentIds);
+    let pendingReview = null;
+    try {
+        pendingReview = readMook().evidence.filter(e => e.requiresReview && members.has(e.userId)
+            && ['SUBMITTED', 'RESUBMITTED'].includes(e.review?.status)).length;
+    } catch { pendingReview = null; }
+    return {
+        pedagogy: { pendingReview },
+        ledger: counts === undefined
+            ? { status: 'unavailable', studentsWithRecognizedWork: null }
+            : { status: counts.suppressed ? 'suppressed' : 'ok', studentsWithRecognizedWork: counts.studentsWithRecognizedWork },
+        catalog: { eligibleWorks: counts === undefined ? null : counts.eligibleWorks },
+        minGroupSize: 5,
+    };
+}
 app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, async (req, res) => {
     try {
         const { id } = req.params;
@@ -9033,7 +9073,10 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         log(r.cache === 'miss'
             ? `[GROUP_ANALYTICS] group=${id} cache=miss ms=${ms} computeMs=${Math.round(r.computeMs)} readers=${r.data.readerCount} rows=${r.rowsConsidered}`
             : `[GROUP_ANALYTICS] group=${id} cache=${r.cache} ms=${ms}`);
-        res.json(r.data);
+        // G4-UX-U4: bloque de reconocimiento, FUERA de la caché (las entregas
+        // pendientes cambian a cada revisión) y sin tocar el objeto cacheado.
+        const recognition = await groupRecognitionBlock((r.data.readers || []).map(x => x.userId));
+        res.json(recognition ? { ...r.data, recognition } : r.data);
     } catch (e) {
         log(`GET /api/groups/${req.params.id}/analytics-summary error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'group_analytics_unavailable' });

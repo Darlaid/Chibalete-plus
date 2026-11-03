@@ -323,3 +323,33 @@ export function readWorkProgress(db, userId, { doc, workRefOf, resolveUser, isWi
         works: list,
     };
 }
+
+// ── G4-UX-U4: agregados de reconocimiento de un grupo (vista del mediador) ────
+//
+// Solo conteos: ningún id, nombre, XP ni nivel individual sale de aquí. Una
+// persona excluida cuenta igual que alguien sin reconocimiento.
+
+/** Tamaño mínimo del grupo para mostrar agregados del ledger (UX-01 §D.6). */
+export const GROUP_MIN_SIZE = 5;
+
+/** ¿Puede hoy `mook_review` sumar XP con la regla vigente? Solo lectura. */
+export const recognitionActive = (db, now = Date.now()) => projectionRule(db, now) !== null;
+
+/**
+ * Agregados del grupo. Solo lectura.
+ * @param {import('better-sqlite3').Database} db  conexión de solo lectura
+ * @param {string[]} studentIds  cohorte lectora del grupo (la resuelve el servidor)
+ * @param {{ eligibleWorkRefs: Iterable<string>, env?, now? }} opts
+ *        `eligibleWorkRefs`: obras del catálogo con acceso explícito para el grupo,
+ *        ya filtradas por retirada legal (las resuelve el llamador).
+ * @returns {{ studentsWithRecognizedWork: number|null, suppressed: boolean, eligibleWorks: number }}
+ * @throws errores del registro de exclusiones o de la clave
+ */
+export function readGroupRecognitionCounts(db, studentIds, { eligibleWorkRefs = [], env = process.env, now = Date.now() } = {}) {
+    const ids = [...new Set((Array.isArray(studentIds) ? studentIds : []).filter((id) => typeof id === 'string' && id))];
+    const eligibleWorks = recognitionActive(db, now) ? new Set(eligibleWorkRefs).size : 0;
+    if (ids.length < GROUP_MIN_SIZE) return { studentsWithRecognizedWork: null, suppressed: true, eligibleWorks };
+    const gate = exclusionGate(db, env);
+    const recognized = ids.filter((id) => readProgressStats(db, id, gate).works >= 1).length;
+    return { studentsWithRecognizedWork: recognized, suppressed: false, eligibleWorks };
+}
