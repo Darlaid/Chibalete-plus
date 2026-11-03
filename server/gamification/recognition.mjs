@@ -326,7 +326,21 @@ export function summarizeRecognition(history) {
         rereadWorks: distinct(rows.filter((e) => e.act === 'reading' && e.cycle >= 2).map((e) => e.workRef)),
         routes: distinct(rows.filter((e) => e.act === 'route').map((e) => e.evidenceId)),
         validated: distinct(rows.filter((e) => e.via === 'offline').map((e) => e.evidenceId)),
+        // G4-UX-U1: obras con dos o más reflexiones reconocidas (evidencias distintas).
+        deepWorks: deepWorksOf(rows),
     };
+}
+
+function deepWorksOf(rows) {
+    const byWork = new Map();
+    for (const e of rows) {
+        if (e.act !== 'reflection') continue;
+        if (!byWork.has(e.workRef)) byWork.set(e.workRef, new Set());
+        byWork.get(e.workRef).add(e.evidenceId);
+    }
+    let n = 0;
+    for (const ids of byWork.values()) if (ids.size >= 2) n += 1;
+    return n;
 }
 
 /**
@@ -374,7 +388,7 @@ export function deriveLevel(stats, levels, { floorIndex = -1 } = {}) {
 }
 
 /** Únicas métricas admitidas en un logro. Ninguna mide tiempo, velocidad ni interacciones. */
-export const ACHIEVEMENT_METRICS = Object.freeze(['works', 'reflections', 'rereadWorks', 'routes', 'validated']);
+export const ACHIEVEMENT_METRICS = Object.freeze(['works', 'reflections', 'rereadWorks', 'routes', 'validated', 'deepWorks']);
 
 /**
  * Catálogo V1. `atLeast: null` exige un valor configurado. Exploración y Varios
