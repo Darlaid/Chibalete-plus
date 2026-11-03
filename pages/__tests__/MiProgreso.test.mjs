@@ -44,15 +44,15 @@ const NO_ELIGIBLE = { ...ZERO, availability: { works: 0, activities: 0 }, achiev
 console.log('\n[V] presentación pura');
 {
     const z = buildProgressView(ZERO);
-    ok('0 XP: Semilla, 0 XP, barra 0 de 30 hacia Brote', z.level.name === 'Semilla' && z.xp === 0 && z.level.bar?.text === '0 de 30 XP para Brote' && z.level.bar.max === 30);
+    ok('0 XP: Semilla, 0 XP, barra 0 de 30 hacia Brote', z.level.name === 'Semilla' && z.xp === 0 && z.level.bar?.text === 'Avance a Brote: 0 de 30 XP' && z.level.bar.max === 30);
     ok('0 XP: requisitos en texto (30 XP y 1 obra)', z.level.requirements.map((r) => r.text).join('|') === 'Te faltan 30 XP|Escribir sobre 1 obra');
     ok('0 XP: estado inicial positivo y siguiente logro «Primera obra»', z.zero === true && z.nextAchievement?.title === 'Primera obra');
     const t = buildProgressView(XP30);
     ok('30 XP: Brote, sin barra de nivel y «¡Llegaste a Brote!»', t.level.name === 'Brote' && t.level.bar === null && t.level.reached === '¡Llegaste a Brote!');
-    ok('30 XP: obra «30 de 50 XP» con 1.ª reflexión ✓ y 2.ª pendiente', t.works[0].xp?.text === '30 de 50 XP' && t.works[0].marks.map((m) => m.done).join() === 'true,false');
+    ok('30 XP: obra «30 de 50 XP» con 1.ª reflexión ✓ y 2.ª pendiente', t.works[0].xp?.text === 'Esta obra: 30 de 50 XP' && t.works[0].marks.map((m) => m.done).join() === 'true,false');
     ok('30 XP: logro obtenido + un solo siguiente', t.earned.map((a) => a.title).join() === 'Primera obra' && t.nextAchievement?.title === 'Mirada profunda');
     const f = buildProgressView(XP50);
-    ok('50 XP: obra completa 50 de 50 con dos marcas', f.works[0].stateText === '¡Obra completa!' && f.works[0].xp.text === '50 de 50 XP' && f.works[0].marks.every((m) => m.done));
+    ok('50 XP: obra completa 50 de 50 con dos marcas', f.works[0].stateText === '¡Obra completa!' && f.works[0].xp.text === 'Esta obra: 50 de 50 XP' && f.works[0].marks.every((m) => m.done));
     ok('50 XP: dos logros y sin siguiente', f.earned.length === 2 && f.nextAchievement === null);
     const all = buildProgressView(ALL_STATES);
     ok('los ocho estados del contrato U2 tienen texto y se muestran', STATES.length === 8 && all.works.length === 8 && all.works.every((w) => w.stateText === WORK_STATE_TEXT[w.state]));
@@ -110,20 +110,22 @@ try {
     console.log('\n[R] render real');
     const z = view(ZERO);
     ok('cuatro secciones con encabezado h2 enlazado (aria-labelledby)', count(z, /<section aria-labelledby="mp-/g) === 4 && count(z, /<h2 id="mp-/g) === 4);
-    ok('barra de nivel: role=progressbar con min/max/now y aria-valuetext', /role="progressbar" aria-label="Avance hacia Brote" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0" aria-valuetext="0 de 30 XP para Brote"/.test(z));
-    ok('el valor de la barra también está en texto visible', text(z).includes('0 de 30 XP para Brote'));
+    ok('barra de nivel: role=progressbar con min/max/now y aria-valuetext', /role="progressbar" aria-label="Avance hacia Brote" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0" aria-valuetext="Avance a Brote: 0 de 30 XP"/.test(z));
+    ok('el valor de la barra también está en texto visible', text(z).includes('Avance a Brote: 0 de 30 XP'));
     ok('requisitos con marca accesible (listo/pendiente)', /Te faltan 30 XP<span class="sr-only"> \(pendiente\)<\/span>/.test(z));
     ok('0 XP: mensaje positivo y botón «Ver experiencias»', text(z).includes('Tu camino empieza aquí') && /href="\/experiencias"[^>]*>Ver experiencias/.test(z));
     ok('iconos decorativos ocultos al lector de pantalla', count(z, /<svg[^>]*aria-hidden="true"/g) >= 3 && count(z, /<svg(?![^>]*aria-hidden)/g) === 0);
     const t = view(XP30);
-    ok('30 XP: «Brote», «30 XP» y «¡Llegaste a Brote!» sin barra de nivel', text(t).includes('Brote') && text(t).includes('30 XP') && t.includes('¡Llegaste a Brote!')
+    ok('30 XP: «Brote», «30 XP» y «¡Llegaste a Brote!» sin barra de nivel', text(t).includes('Brote') && text(t).includes('Tienes 30 XP en total') && t.includes('¡Llegaste a Brote!')
         && !/aria-label="Avance hacia/.test(t));
     ok('obra: título, estado con prefijo para lector de pantalla y barra 30 de 50', t.includes('El principito') && /<span class="sr-only">Estado: <\/span>Reconocida/.test(t)
-        && /aria-valuemax="50" aria-valuenow="30" aria-valuetext="30 de 50 XP"/.test(t));
+        && /aria-valuemax="50" aria-valuenow="30" aria-valuetext="Esta obra: 30 de 50 XP"/.test(t));
     ok('enlace «Ver mi entrega» a la experiencia, con nombre accesible único', /href="\/experiencias\/exp-1"[^>]*>Ver mi entrega<span class="sr-only"> sobre El principito<\/span>/.test(t));
     ok('logros: solo el obtenido y un «Siguiente posible»', text(t).includes('Primera obra') && count(t, /Siguiente posible/g) === 1 && !text(t).includes('Lector reflexivo'));
+    ok('XP acumulado, XP por obra y avance de nivel se distinguen en texto', text(t).includes('Tienes 30 XP en total') && text(t).includes('Esta obra: 30 de 50 XP')
+        && text(z).includes('Avance a Brote: 0 de 30 XP') && !/(^| )30 XP( |$)/.test(text(t).replace('Tienes 30 XP en total', '')));
     const f = view(XP50);
-    ok('50 XP: «¡Obra completa!» 50 de 50, dos logros, sin siguiente', f.includes('¡Obra completa!') && /aria-valuetext="50 de 50 XP"/.test(f) && text(f).includes('Mirada profunda') && !/Siguiente posible/.test(f));
+    ok('50 XP: «¡Obra completa!» 50 de 50, dos logros, sin siguiente', f.includes('¡Obra completa!') && /aria-valuetext="Esta obra: 50 de 50 XP"/.test(f) && text(f).includes('Mirada profunda') && !/Siguiente posible/.test(f));
     const a = view(ALL_STATES);
     ok('los ocho estados se pintan con su texto', STATES.every((s) => a.includes(WORK_STATE_TEXT[s].replace(/&/g, '&amp;'))));
     ok('obras como lista semántica', /<ul class="mt-3 space-y-4"><li/.test(a) && count(a, /<h3 /g) === 8);

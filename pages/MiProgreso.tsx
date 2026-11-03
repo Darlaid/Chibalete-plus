@@ -71,7 +71,7 @@ export const MiProgresoView: React.FC<{ view: View }> = ({ view }) => {
                     </div>
                     <div className="min-w-0">
                         <p className="text-2xl font-extrabold text-gray-900 dark:text-white">{view.level.name}</p>
-                        <p className="text-base text-gray-700 dark:text-gray-200">{view.xp} XP</p>
+                        <p className="text-base text-gray-700 dark:text-gray-200">Tienes {view.xp} XP en total</p>
                     </div>
                 </div>
                 {view.level.bar && (

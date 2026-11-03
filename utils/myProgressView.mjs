@@ -83,7 +83,7 @@ export function buildProgressView(data) {
             state: w.state,
             stateText: WORK_STATE_TEXT[w.state],
             tone: WORK_STATE_TONE[w.state],
-            xp: showsXp ? { value: Math.min(xp, ceiling), max: ceiling, text: `${xp} de ${ceiling} XP` } : null,
+            xp: showsXp ? { value: Math.min(xp, ceiling), max: ceiling, text: `Esta obra: ${xp} de ${ceiling} XP` } : null,
             marks: showsXp ? [1, 2].map((i) => ({ label: `${i}.ª reflexión`, done: reflections >= i })) : [],
         };
     });
@@ -97,7 +97,7 @@ export function buildProgressView(data) {
             nextName: next ? LEVEL_NAMES[next.id] : null,
             // Barra hacia el siguiente nivel: solo XP, y solo si hay actividades que lo permitan.
             bar: next && canEarn ? { value: Math.min(data.xp, next.xpTarget), max: next.xpTarget,
-                text: `${Math.min(data.xp, next.xpTarget)} de ${next.xpTarget} XP para ${LEVEL_NAMES[next.id]}` } : null,
+                text: `Avance a ${LEVEL_NAMES[next.id]}: ${Math.min(data.xp, next.xpTarget)} de ${next.xpTarget} XP` } : null,
             requirements: next && canEarn ? levelRequirements(next) : [],
             reached: next ? null : `¡Llegaste a ${levelName}!`,
         },
