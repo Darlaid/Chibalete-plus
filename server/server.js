@@ -2695,7 +2695,7 @@ function myEvidenceSummary(doc, run, userId) {
 
 const mookErrStatus = (e) => (
     ['EXPERIENCE_NOT_FOUND', 'VERSION_NOT_FOUND', 'RUN_NOT_FOUND', 'NODE_NOT_FOUND', 'EVIDENCE_NOT_FOUND', 'RESOURCE_NOT_FOUND', 'NOT_PUBLISHED'].includes(e.code) ? 404
-    : ['NOT_RUN_OWNER', 'NOT_EVIDENCE_OWNER'].includes(e.code) ? 403
+    : ['NOT_RUN_OWNER', 'NOT_EVIDENCE_OWNER', 'REVIEW_FORBIDDEN', 'MEDIATOR_SCOPE_GATED'].includes(e.code) ? 403
     : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION', 'EXPERIENCE_ARCHIVED', 'ALREADY_ARCHIVED', 'INVALID_TRANSITION'].includes(e.code) ? 409
     : e.code ? 400 : 500
 );
@@ -3068,10 +3068,33 @@ function requireReviewScope(req, res, evidenceId) {
     if (access === true) return true;
     const ev = readMook().evidence.find(e => e.id === evidenceId);
     if (ev && !access.allows(ev.userId)) {
-        res.status(403).json({ error: 'Esta producción no pertenece a un grupo donde tengas membership activa de mediador', code: 'REVIEW_FORBIDDEN' });
+        res.status(403).json({ error: REVIEW_FORBIDDEN_MSG, code: 'REVIEW_FORBIDDEN' });
         return false;
     }
     return true;
+}
+
+const REVIEW_FORBIDDEN_MSG = 'Esta producción no pertenece a un grupo donde tengas membership activa de mediador';
+
+/**
+ * SEC-MOOK-REVIEW-AUTHZ-01 — reautoriza DENTRO del lock de `mutateMook`, sobre
+ * el documento que se va a escribir (leído del disco, sin caché) y con los
+ * grupos releídos. `requireReviewScope` decide con la caché de 30 s de la
+ * réplica: si la entrega aún no estaba en ella, la dejaba pasar y la escritura
+ * la encontraba en disco. Lanzar aquí aborta antes de `writeJSON`: nada se
+ * escribe. Mismos códigos y mensajes que el pre-chequeo (403).
+ */
+function assertReviewScopeInLock(req, doc, evidenceId) {
+    const roles = req.user?.roles || [];
+    if (roles.includes('administrador')) return;
+    const fail = (code, message) => { const e = new Error(message); e.code = code; throw e; };
+    if (!isMediatorRole(req.user)) fail('REVIEW_FORBIDDEN', 'No autorizado para revisar producciones');
+    _jsonCache.delete(GROUPS_DB);
+    const scope = mediatorReviewScope(req);
+    if (!scope.ok) fail('MEDIATOR_SCOPE_GATED', 'La revisión para mediadores exige sesión canónica y membership activa como mediador en un grupo.');
+    const ev = doc.evidence.find(e => e.id === evidenceId);
+    // Sin evidencia: el store responde 404 como hasta ahora.
+    if (ev && !scope.allows(ev.userId)) fail('REVIEW_FORBIDDEN', REVIEW_FORBIDDEN_MSG);
 }
 
 // Identificación MÍNIMA permitida del participante: nombre del padrón canónico
@@ -3105,6 +3128,7 @@ app.post('/api/experiences/review/:evidenceId/feedback', requireUserAuth, async 
         if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         let ev;
         await mutateMook((doc) => {
+            assertReviewScopeInLock(req, doc, req.params.evidenceId);
             ev = experienceStore.addReviewFeedback(doc, req.params.evidenceId, { reviewerId: req.user.id, comment: req.body?.comment });
         });
         res.json({ id: ev.id, status: ev.review.status, historyCount: ev.history.length });
@@ -3116,6 +3140,7 @@ app.post('/api/experiences/review/:evidenceId/request-changes', requireUserAuth,
         if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         let ev;
         await mutateMook((doc) => {
+            assertReviewScopeInLock(req, doc, req.params.evidenceId);
             ev = experienceStore.requestChanges(doc, req.params.evidenceId, { reviewerId: req.user.id, comment: req.body?.comment });
         });
         log(`[MOOK] changes requested on ${ev.id}`);
@@ -3128,6 +3153,7 @@ app.post('/api/experiences/review/:evidenceId', requireUserAuth, async (req, res
         if (!requireReviewScope(req, res, req.params.evidenceId)) return;
         let ev;
         await mutateMook((doc) => {
+            assertReviewScopeInLock(req, doc, req.params.evidenceId);
             ev = experienceStore.reviewEvidence(doc, req.params.evidenceId, {
                 reviewerId: req.user.id,
                 decision: req.body?.decision,
