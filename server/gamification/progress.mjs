@@ -21,9 +21,11 @@
  */
 import { GamificationError } from './db.mjs';
 import { exclusionGate } from './exclusions.mjs';
-import { getXp } from './ledger.mjs';
-import { deriveLevel, evaluateAchievements, summarizeRecognition, validateLevels } from './recognition.mjs';
-import { findSubject, isExcluded } from './subjects.mjs';
+import { getActiveRuleSet, getXp, REVIEW_FACT, REVIEW_SOURCE, workCycleHistory } from './ledger.mjs';
+import { attributedEvidence, EXPLICIT_ACCESS_VIAS } from './mookWorks.mjs';
+import { XP_LOCKED_SOURCES } from './policy.mjs';
+import { decideRecognition, deriveLevel, evaluateAchievements, summarizeRecognition, validateApprovedRecognition, validateLevels } from './recognition.mjs';
+import { deriveSourceKey, deriveWorkKey, findSubject, isExcluded } from './subjects.mjs';
 
 const freezeAll = (list) => Object.freeze(list.map((x) => Object.freeze({ ...x })));
 
@@ -130,5 +132,194 @@ export function readProgress(db, userId, { levels = PILOT_LEVELS, catalog = PILO
         ...Object.fromEntries(EXPOSED.map((k) => [k, stats[k]])),
         level: { id: lv.levelId, index: lv.index, next },
         achievements: achievementView(stats, catalog, capacity),
+    };
+}
+
+// ── G4-UX-U2: progreso por obra y disponibilidad desde el catálogo propio ─────
+//
+// Solo lectura, con las piezas del escritor: `attributedEvidence` (la misma
+// atribución que el barrido), `decideRecognition` con la regla vigente y
+// `workCycleHistory` (la misma entrada que `recordWorkRecognition`). No hay un
+// segundo motor: lo pendiente se PROYECTA con esas funciones y nunca se registra.
+
+/** Estados de obra visibles (GAMIFICACION_G4_UX_01 §D.3; `reviewed` = cerrada «con comentarios»). */
+export const WORK_STATES = Object.freeze(['started', 'in_review', 'revision_requested', 'pending_recognition',
+    'recognized', 'complete', 'approved_no_xp', 'reviewed']);
+/** Al combinar las entregas de una obra gana lo que pide atención. */
+const STATE_ORDER = ['revision_requested', 'in_review', 'pending_recognition', 'complete', 'recognized', 'approved_no_xp', 'reviewed', 'started'];
+/** Revisor ficticio de la proyección: solo tiene que ser distinto de la persona. */
+const PROJECTION_ACTOR = 'gm-projection-actor';
+
+const versionNodesOf = (version) => (version?.modules ?? []).flatMap((m) => m?.nodes ?? []);
+const liveRun = (doc, userId, experienceId) => (doc.runs ?? []).find((r) => r.userId === userId && r.experienceId === experienceId && r.status !== 'abandoned');
+
+/**
+ * Actividades del catálogo propio que podrían sumar XP: nodos PRODUCTION con obra
+ * declarada de experiencias publicadas, en la versión que la persona usaría (la
+ * fijada por su run vigente o, si no tiene, la actual) y publicada después del
+ * corte. `delivered`: ya hay entrega propia en ese nodo.
+ * @returns {{ experienceId, versionId, nodeId, workRef, delivered }[]}
+ */
+export function catalogActivities(doc, userId, { workRefOf, sinceMs }) {
+    if (!sinceMs || typeof workRefOf !== 'function') return [];
+    const out = [];
+    for (const exp of doc?.experiences ?? []) {
+        if (exp?.status !== 'published' || !exp.currentVersionId) continue;
+        const run = userId ? liveRun(doc, userId, exp.id) : null;
+        const versionId = run ? run.experienceVersionId : exp.currentVersionId;
+        const version = (doc.versions ?? []).find((v) => v.id === versionId && v.experienceId === exp.id);
+        if (!version || version.status !== 'published' || !(Date.parse(version.publishedAt) >= sinceMs)) continue;
+        for (const node of versionNodesOf(version)) {
+            if (node?.type !== 'PRODUCTION') continue;
+            let ref;
+            try { ref = workRefOf(version, node.id); } catch { continue; }
+            if (!ref?.workRef || ref.issue) continue;
+            const delivered = !!run && (run.nodeStates?.[node.id]?.evidenceIds?.length ?? 0) > 0;
+            out.push({ experienceId: exp.id, versionId, nodeId: node.id, workRef: ref.workRef, delivered });
+        }
+    }
+    return out;
+}
+
+/** ¿El acceso resuelto para una obra autoriza reconocerla? Mismo criterio que la atribución. */
+export const workAccessCounts = (access) => access?.decision === 'allowed' && EXPLICIT_ACCESS_VIAS.includes(access.via);
+
+/** Regla con la que se proyecta, o null si hoy nada de `mook_review` puede sumar XP. */
+function projectionRule(db, now) {
+    if (XP_LOCKED_SOURCES.includes(REVIEW_SOURCE)) return null;
+    const active = getActiveRuleSet(db, now);
+    if (!active || now < active.effectiveFrom) return null;
+    const config = active.rules?.recognition;
+    return validateApprovedRecognition(config).ok ? { config, effectiveFrom: active.effectiveFrom } : null;
+}
+
+/** Estado de una entrega propia según su revisión, sin ledger. */
+function reviewState(ev) {
+    const st = ev?.review?.status;
+    if (st === 'SUBMITTED' || st === 'RESUBMITTED') return 'in_review';
+    if (st === 'REVISION_REQUESTED') return 'revision_requested';
+    if (st === 'REVIEWED') return ev.review.decision === 'aprobado' ? 'approved' : 'reviewed';
+    return null;
+}
+
+const FACT_SQL = `SELECT f.decision, EXISTS (SELECT 1 FROM gm_xp_entries a WHERE a.fact_id = f.fact_id AND a.kind = 'award'
+        AND NOT EXISTS (SELECT 1 FROM gm_xp_entries v WHERE v.kind = 'void' AND v.voids_entry_id = a.entry_id)) AS live
+    FROM gm_source_facts f WHERE f.source = ? AND f.source_event_id = ? AND f.fact_type = ?`;
+
+/**
+ * Progreso visible de la persona de la sesión: totales y nivel (`readProgress`,
+ * U1), estado por obra y disponibilidad en su catálogo. Solo lectura.
+ * @param {import('better-sqlite3').Database} db  conexión de solo lectura
+ * @param {string} userId  la persona de la sesión (lo garantiza el llamador)
+ * @param {object} deps
+ * @param {object} deps.doc  documento MOOK normalizado
+ * @param {Function} deps.workRefOf  `experienceStore.productionWorkRef`
+ * @param {Function} deps.resolveUser  padrón del servidor (`makeResolveUser`)
+ * @param {(contentId: string) => boolean} deps.isWithdrawn  retirada legal
+ * @param {Map<string, {decision, via}>} deps.access  acceso resuelto por obra del catálogo
+ * @param {(contentId: string) => string|null} [deps.titleOf]
+ * @param {number} deps.sinceMs  corte de activación
+ * @throws errores del registro de exclusiones o de la clave: el llamador responde «no disponible», nunca 0 XP
+ */
+export function readWorkProgress(db, userId, { doc, workRefOf, resolveUser, isWithdrawn, access, titleOf = () => null, sinceMs, env = process.env, now = Date.now() } = {}) {
+    if (typeof userId !== 'string' || userId.length === 0) throw new GamificationError('INVALID_USER');
+    const gate = exclusionGate(db, env);
+    const excluded = gate.excludes(userId) || isExcluded(db, userId);
+    // Excluida = exactamente alguien sin actividad: sin runs, sin entregas, sin sujeto.
+    const mine = {
+        experiences: doc?.experiences ?? [], versions: doc?.versions ?? [],
+        runs: excluded ? [] : (doc?.runs ?? []).filter((r) => r?.userId === userId),
+        evidence: excluded ? [] : (doc?.evidence ?? []).filter((e) => e?.userId === userId),
+    };
+    const subject = excluded ? null : findSubject(db, userId);
+    const rule = projectionRule(db, now);
+    const keyOf = (workRef) => (subject ? deriveWorkKey(subject, workRef) : `new\0${workRef}`);
+    const valid = subject ? validHistory(db, subject.subject_ref) : [];
+    const histories = new Map(); // workRef → historial del escritor + proyectado
+    const historyOf = (workRef) => {
+        if (!histories.has(workRef)) histories.set(workRef, subject ? workCycleHistory(db, subject.subject_ref, keyOf(workRef)) : []);
+        return histories.get(workRef);
+    };
+    const project = (workRef, evidenceId, at) => {
+        if (!rule || at < rule.effectiveFrom) return false;
+        const h = historyOf(workRef);
+        const d = decideRecognition({
+            evidence: { source: REVIEW_SOURCE, userId, actorId: PROJECTION_ACTOR, evidenceId, at, workRef: keyOf(workRef), decision: 'aprobado' },
+            subject: { exists: true, active: true, synthetic: false }, history: h, config: rule.config, flags: { xpEarning: true, pmEarning: false },
+        });
+        if (d.outcome !== 'recognized' || !(d.xp > 0)) return false;
+        h.push(...d.entries.map((e) => ({ ...e, projected: true })));
+        return true;
+    };
+
+    // 1) Entregas propias: revisión, reconocimiento real o proyectado.
+    const works = new Map(); // workRef → { experienceId, states }
+    const touch = (workRef, experienceId, state) => {
+        const w = works.get(workRef) ?? { experienceId, states: new Set() };
+        w.experienceId = experienceId;
+        w.states.add(state);
+        works.set(workRef, w);
+    };
+    const attribution = { workRefOf, resolveUser, sinceMs, gate, isWithdrawn };
+    const factStmt = db.prepare(FACT_SQL);
+    for (const ev of mine.evidence) {
+        if (ev?.nodeType !== 'PRODUCTION' || ev.requiresReview !== true) continue;
+        const run = mine.runs.find((r) => r.id === ev.runId);
+        const version = run && mine.versions.find((v) => v.id === run.experienceVersionId);
+        let workRef = null;
+        try { workRef = version ? workRefOf(version, ev.nodeId)?.workRef ?? null : null; } catch { workRef = null; }
+        const st = reviewState(ev);
+        if (!workRef || !st) continue; // sin obra declarada: no aparece
+        if (st !== 'approved') { touch(workRef, ev.experienceId, st); continue; }
+        const fact = subject && factStmt.get(REVIEW_SOURCE, deriveSourceKey(subject, REVIEW_SOURCE, REVIEW_FACT, ev.id), REVIEW_FACT);
+        if (fact) { touch(workRef, ev.experienceId, fact.decision === 'awarded' && fact.live ? 'recognized' : 'approved_no_xp'); continue; }
+        // Sin hecho: ¿lo registraría el próximo barrido? Misma atribución, misma regla.
+        let attributed = null;
+        for (const a of attributedEvidence({ ...mine, evidence: [ev] }, attribution, {})) attributed = a;
+        const pending = !!attributed && attributed.workRef === workRef && project(workRef, ev.id, attributed.at);
+        touch(workRef, ev.experienceId, pending ? 'pending_recognition' : 'approved_no_xp');
+    }
+
+    // 2) Catálogo propio: experiencias empezadas y actividades aún disponibles.
+    const activities = catalogActivities(mine, excluded ? null : userId, { workRefOf, sinceMs });
+    for (const a of activities) if (!works.has(a.workRef) && liveRun(mine, userId, a.experienceId)) touch(a.workRef, a.experienceId, 'started');
+    const eligible = activities.filter((a) => {
+        if (!rule || !workAccessCounts(access?.get(a.workRef))) return false;
+        try { return isWithdrawn?.(a.workRef) === false; } catch { return false; }
+    });
+    let remaining = 0;
+    for (const a of eligible) {
+        if (a.delivered) continue;
+        remaining += 1;
+        project(a.workRef, `catalog\0${a.versionId}\0${a.nodeId}`, now);
+    }
+
+    // 3) Totales y nivel con U1; capacidad = reconocido + proyectado.
+    const projected = [...histories.values()].flat().filter((e) => e.projected);
+    const cap = summarizeRecognition([...valid, ...projected]);
+    const progress = readProgress(db, userId, { gate, env, capacity: { works: cap.works, reflections: cap.reflections, deepWorks: cap.deepWorks } });
+
+    // 4) Por obra, solo valores visibles: nada de claves, sujetos, ids de hechos ni motivos.
+    const ceiling = rule ? rule.config.xpCeilingPerWorkCycle : null;
+    const list = [];
+    for (const [workRef, w] of works) {
+        const acts = valid.filter((e) => e.workRef === keyOf(workRef));
+        const cycle = acts.reduce((m, e) => Math.max(m, e.cycle), 0);
+        const inCycle = acts.filter((e) => e.cycle === cycle);
+        const reflections = inCycle.filter((e) => e.act === 'reflection').length;
+        if (w.states.has('recognized') && reflections >= 2) { w.states.delete('recognized'); w.states.add('complete'); }
+        let title = null;
+        try { title = titleOf(workRef) ?? null; } catch { title = null; }
+        list.push({ contentId: workRef, title, experienceId: w.experienceId, state: STATE_ORDER.find((s) => w.states.has(s)),
+            xp: inCycle.reduce((s, e) => s + (Number.isSafeInteger(e.xp) ? e.xp : 0), 0), ceiling, reflections });
+    }
+
+    return {
+        xp: progress.xp,
+        level: progress.level,
+        stats: { works: progress.works, reflections: progress.reflections, deepWorks: progress.deepWorks },
+        achievements: { earned: progress.achievements.earned, next: progress.achievements.next },
+        availability: { works: new Set(eligible.map((a) => a.workRef)).size, activities: remaining },
+        works: list,
     };
 }

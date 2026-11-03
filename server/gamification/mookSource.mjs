@@ -26,6 +26,7 @@ import { exclusionGate } from './exclusions.mjs';
 import { scheduleFact, scheduleOnHookDb } from './intake.mjs';
 import { recordWorkRecognition } from './ledger.mjs';
 import { attributedEvidence } from './mookWorks.mjs';
+import { catalogActivities, readWorkProgress } from './progress.mjs';
 import { candidateEligibility, drainSteps, mookReviewCandidates, mookExperienceCandidates, reconcileSteps } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
@@ -110,6 +111,49 @@ function* recognizeMookWorksSteps(db, doc, { workRefOf, readRights, resolveUser,
         }
     }
     return res;
+}
+
+/**
+ * G4-UX-U2. Progreso propio para `GET /api/me/progress`. Solo lectura.
+ *  - sin `GAMIFICATION_ENABLED` ⇒ `{ status: 404 }`;
+ *  - sin `XP_EARNING_ENABLED` ⇒ `{ enabled: false }`;
+ *  - si no, `{ enabled: true, ...readWorkProgress }`.
+ * Abre la base en modo `readonly` (+ `query_only`), sin migrar ni crear nada, y la
+ * cierra al terminar. Base ausente, registro de exclusiones dañado o clave ausente
+ * ⇒ lanza: el llamador responde «no disponible», nunca 0 XP.
+ * `userId` es SIEMPRE la persona de la sesión: lo fija el servidor, nunca el cliente.
+ * @param {string} userId
+ * @param {{ readMook, workRefOf, readRights, readUsers, isUserActive, isSyntheticUser, workAccessOf, titleOf, env?, now? }} deps
+ *        `workAccessOf(workRef)` resuelve el acceso de ESTA persona a una obra del catálogo.
+ */
+export async function readMyProgress(userId, deps = {}) {
+    const { env = process.env, now = Date.now() } = deps;
+    if (!isGamificationEnabled(env)) return { status: 404 };
+    if (!isXpEarningEnabled(env)) return { enabled: false };
+    const sinceMs = mookActivationSince(env);
+    const doc = deps.readMook();
+    // Acceso por obra del catálogo, resuelto antes de abrir la base (es asíncrono).
+    // Incluye las versiones actuales: una persona excluida se ve como alguien sin runs.
+    const access = new Map();
+    const opts = { workRefOf: deps.workRefOf, sinceMs };
+    for (const a of [...catalogActivities(doc, userId, opts), ...catalogActivities(doc, null, opts)]) {
+        if (access.has(a.workRef)) continue;
+        let decision = null;
+        try { decision = await deps.workAccessOf(a.workRef); } catch { decision = null; }
+        access.set(a.workRef, decision);
+    }
+    const db = new Database(resolveGamificationDbPath(env), { readonly: true, fileMustExist: true });
+    try {
+        db.pragma('query_only = ON');
+        const out = readWorkProgress(db, userId, {
+            doc, workRefOf: deps.workRefOf, access, sinceMs, env, now, titleOf: deps.titleOf,
+            resolveUser: makeResolveUser(deps.readUsers(), deps.isUserActive, deps.isSyntheticUser),
+            isWithdrawn: withdrawnReader(deps.readRights),
+        });
+        return { enabled: true, ...out };
+    } finally {
+        db.close();
+    }
 }
 
 function scheduleCandidates(cands, resolveUser, opts) {

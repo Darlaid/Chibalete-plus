@@ -267,8 +267,18 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
     }).immediate();
 }
 
-const REVIEW_SOURCE = 'mook_review';
-const REVIEW_FACT = 'evidence_reviewed';
+export const REVIEW_SOURCE = 'mook_review';
+export const REVIEW_FACT = 'evidence_reviewed';
+
+/**
+ * Historial de una obra de un sujeto, tal como lo usa `decideRecognition`.
+ * Solo lectura. G4-UX-U2: lo comparte el progreso visible, para proyectar
+ * con la misma entrada que el escritor.
+ */
+export function workCycleHistory(db, subjectRef, workKey) {
+    return db.prepare(`SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp, c.pm, f.occurred_at AS at
+            FROM gm_work_cycles c JOIN gm_source_facts f USING (fact_id) WHERE c.subject_ref = ? AND c.work_key = ?`).all(subjectRef, workKey);
+}
 
 /**
  * G4-05A-4. Registra una evidencia MOOK ya atribuida: hecho, XP y actos por obra y
@@ -310,8 +320,7 @@ export function recordWorkRecognition(db, evidence, { env = process.env, gate = 
         if (!validateApprovedRecognition(active.rules.recognition).ok) return none('recognition_not_configured');
         if (at < active.effectiveFrom) return none('predates_rules');
         const workKey = subject ? deriveWorkKey(subject, workRef) : 'new-subject';
-        const history = subject ? db.prepare(`SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp, c.pm, f.occurred_at AS at
-            FROM gm_work_cycles c JOIN gm_source_facts f USING (fact_id) WHERE c.subject_ref = ? AND c.work_key = ?`).all(subject.subject_ref, workKey) : [];
+        const history = subject ? workCycleHistory(db, subject.subject_ref, workKey) : [];
         const d = decideRecognition({
             evidence: { source: REVIEW_SOURCE, userId, actorId, evidenceId, at, workRef: workKey, decision },
             subject: { exists: true, active: true, synthetic: false },

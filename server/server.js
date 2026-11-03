@@ -2659,6 +2659,31 @@ const gamificationResolveUser = (id) => gamificationMook.makeResolveUser(readJSO
 // G4-05A-3: fuentes del registro por obra. Inerte sin XP_EARNING_ENABLED.
 const gamificationRecognition = { readMook, workRefOf: experienceStore.productionWorkRef, readRights: () => rightsStore.readWithdrawnWorks() };
 
+// G4-UX-U2: progreso propio, solo lectura. El sujeto es SIEMPRE la sesión
+// (`req.user.id`): la ruta no lee params, query, cuerpo ni cabeceras del cliente.
+// Sin GAMIFICATION_ENABLED → 404; sin XP_EARNING_ENABLED → { enabled: false }.
+// Cualquier fallo → 503 genérico (nunca 0 XP por un error, nunca el motivo).
+app.get('/api/me/progress', requireUserAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const userId = req.user.id;
+        const out = await gamificationMook.readMyProgress(userId, {
+            ...gamificationRecognition,
+            readUsers: () => readJSON(USERS_DB), isUserActive, isSyntheticUser,
+            titleOf: (id) => readJSON(DB_FILE).find(c => c.id === id)?.titulo ?? null,
+            workAccessOf: async (workRef) => {
+                if (workBlock(readJSON(DB_FILE).find(c => c.id === workRef))) return null;
+                return experienceStore.buildWorkAccess(workRef, await decideContentAccess(userId, workRef, { logDecision: false }));
+            },
+        });
+        if (out.status === 404) return res.status(404).json({ error: 'Not Found' });
+        return res.json(out);
+    } catch (e) {
+        log(`[gamification] progreso no disponible: ${e?.code || 'ERROR'}`, 'WARN');
+        return res.status(503).json({ error: 'No pudimos cargar tu progreso. Tu avance está guardado.', code: 'PROGRESS_UNAVAILABLE' });
+    }
+});
+
 // Resumen de evidencias del PROPIO run (el dueño ve estado/retroalimentación/
 // historial de SUS entregas — REVIEW-01: proyección sin reviewerId).
 // La proyección de la evidencia propia vive en el store (única sede de la
