@@ -161,6 +161,11 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     description: 'Búsqueda de contenido',
   },
   {
+    path: '/mi-progreso',
+    access: 'authenticated',
+    description: 'Mi progreso (G4-UX-U3): privado, sin :id; el servidor decide con la sesión y oculta la ruta sin gamificación',
+  },
+  {
     path: '/perfil/:id',
     access: 'authenticated',
     description: 'Perfil de usuario (propio o ajeno)',

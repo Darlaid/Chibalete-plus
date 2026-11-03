@@ -5333,6 +5333,17 @@ class DataService {
             `${LIBRARY_PATHS.institutionalReferences}/${encodeURIComponent(referenceId)}`, 'DELETE');
     }
 
+    // --- G4-UX-U3: MI PROGRESO (sujeto = sesión; sin userId, sin caché, sin storage) ---
+    /** Estado HTTP y cuerpo de `GET /api/me/progress`. Red caída ⇒ status 0. */
+    async getMyProgress(): Promise<{ status: number; body: any }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/me/progress`, { credentials: 'include', cache: 'no-store' });
+            let body: any = null;
+            try { body = await res.json(); } catch { body = null; }
+            return { status: res.status, body };
+        } catch { return { status: 0, body: null }; }
+    }
+
     // --- CHP-MOOK-01: EXPERIENCIAS (actor = sesión; MOOK no concede acceso) ---
     async getExperiences(): Promise<any[]> {
         try {

@@ -12,6 +12,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import { useAccessCheck } from '../hooks/useAccessCheck';
+import { useMyProgressAvailable } from '../hooks/useMyProgressAvailable';
 // CHP-MOOK-CONTEXTUAL-READING-RETURN-01 — el origen del MOOK viaja por la URL.
 import { withMookContext, resolveReturnNode, MOOK_NODE_PARAM } from '../utils/mookReturn.mjs';
 import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -495,6 +496,11 @@ const Experiencias: React.FC = () => {
     }, [route]);
     const currentRef = useRef<HTMLDivElement | null>(null);
     const navigate = useNavigate();
+    // G4-UX-U3: tras una entrega APROBADA se ofrece «Mi progreso», solo si el
+    // servidor lo tiene habilitado para esta persona (sin XP no hay enlace).
+    const approvedProduction = (route?.evidence || []).some((e: any) => e.requiresReview
+        && (e.status ?? e.review?.status) === 'REVIEWED' && e.review?.decision === 'aprobado');
+    const showMyProgress = useMyProgressAvailable(user?.id, approvedProduction);
     // ESTAS-AQUI-01: bitácora privada con texto sin guardar. El texto no se
     // recupera si se pierde, así que salir de la ruta pide confirmación.
     const [unsaved, setUnsaved] = useState<{ save: () => Promise<void> } | null>(null);
@@ -597,6 +603,7 @@ const Experiencias: React.FC = () => {
                 )}
                 <div className="flex flex-wrap gap-3 mt-6">
                     <Link to="/biblioteca" className="bg-white text-emerald-700 px-5 py-3 rounded-xl font-bold">Volver a Biblioteca</Link>
+                    {showMyProgress && <Link to="/mi-progreso" className="bg-white text-emerald-800 px-5 py-3 rounded-xl font-bold">Ver mi progreso</Link>}
                     <button onClick={() => setShowRouteAfterClose(s => !s)} className="border border-white/60 px-5 py-3 rounded-xl font-bold">{showRouteAfterClose ? 'Ocultar recorrido' : 'Revisar recorrido'}</button>
                     {list.filter(e => e.id !== route.experienceId).length > 0 && (
                         <Link to="/biblioteca" className="border border-white/60 px-5 py-3 rounded-xl font-bold">Otra Experiencia →</Link>

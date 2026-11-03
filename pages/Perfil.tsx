@@ -1,10 +1,11 @@
 
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import type { User, Resena, Content, Bookmark, Group } from '../types';
-import { BookOpen, Heart, Users, Shield, Share2, Facebook, Linkedin, Instagram, Check, Loader2, X, Plus, Edit2, Trash2, Globe, GraduationCap, Smartphone } from 'lucide-react';
+import { BookOpen, Heart, Users, Shield, Share2, Facebook, Linkedin, Instagram, Check, Loader2, X, Plus, Edit2, Trash2, Globe, GraduationCap, Smartphone, Sprout } from 'lucide-react';
+import { useMyProgressAvailable } from '../hooks/useMyProgressAvailable';
 import BookmarkManager from '../components/BookmarkManager';
 import StarRating from '../components/StarRating';
 import ClubFormModal from '../components/ClubFormModal';
@@ -83,6 +84,8 @@ const SocialConnectionCard: React.FC<{
 const Perfil: React.FC = () => {
     const { id } = useParams<{ id: string }>();
     const { user: currentUser, logout } = useAuth();
+    // G4-UX-U3: «Mi progreso» solo en el perfil PROPIO; en uno ajeno ni se consulta.
+    const showMyProgress = useMyProgressAvailable(currentUser?.id, !!currentUser && currentUser.id === id);
     const [user, setUser] = useState<User | null>(null);
     const [activeTab, setActiveTab] = useState<'originales' | 'reseñas' | 'favoritos' | 'redes' | 'admin' | 'glosario' | 'seguridad'>('reseñas');
     const [vocabWords, setVocabWords] = useState<string[]>([]);
@@ -314,6 +317,27 @@ const Perfil: React.FC = () => {
                     >
                         Ver y descargar
                     </a>
+                </div>
+            )}
+
+            {/* ── G4-UX-U3: acceso privado a Mi progreso — solo perfil propio ── */}
+            {isOwnProfile && showMyProgress && (
+                <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 mb-4 border border-emerald-100 dark:border-emerald-800/40 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div className="p-2 rounded-full bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 shrink-0">
+                            <Sprout size={18} aria-hidden />
+                        </div>
+                        <div className="min-w-0">
+                            <p className="text-sm font-semibold text-gray-800 dark:text-gray-100 leading-snug">Mi progreso</p>
+                            <p className="text-xs text-gray-600 dark:text-gray-300">Tu nivel, tus obras y tus logros. Solo tú los ves.</p>
+                        </div>
+                    </div>
+                    <Link
+                        to="/mi-progreso"
+                        className="shrink-0 inline-flex items-center min-h-[44px] px-4 bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold rounded-lg transition-colors whitespace-nowrap focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400"
+                    >
+                        Ver mi progreso
+                    </Link>
                 </div>
             )}
 

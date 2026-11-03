@@ -88,6 +88,8 @@ const VisorAlbum = React.lazy(() => import('./pages/VisorAlbum'));
 const VisorAccesible = React.lazy(() => import('./pages/VisorAccesible'));
 const GaleriaIlustraciones = React.lazy(() => import('./components/GaleriaIlustraciones'));
 const Bitacora = React.lazy(() => import('./pages/Bitacora'));
+// G4-UX-U3: progreso privado del lector (sin :id; el sujeto es la sesión).
+const MiProgreso = React.lazy(() => import('./pages/MiProgreso'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
 const AdminRecompensas = React.lazy(() => import('./pages/AdminRecompensas'));
 const AdminEditoriales = React.lazy(() => import('./pages/AdminEditoriales'));
@@ -382,6 +384,9 @@ const AppContent: React.FC = () => {
                 } />
                 <Route path="/buscar" element={
                     <ProtectedRoute access={getRouteAccess('/buscar')}><Layout><Busqueda /></Layout></ProtectedRoute>
+                } />
+                <Route path="/mi-progreso" element={
+                    <ProtectedRoute access={getRouteAccess('/mi-progreso')}><Layout><MiProgreso /></Layout></ProtectedRoute>
                 } />
                 <Route path="/perfil/:id" element={
                     <ProtectedRoute access={getRouteAccess('/perfil/:id')}><Layout><Perfil /></Layout></ProtectedRoute>
