@@ -20,7 +20,7 @@
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { isGamificationEnabled, isXpEarningEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
+import { GamificationError, isGamificationEnabled, isXpEarningEnabled, resolveGamificationDbPath, getGamificationDb } from './db.mjs';
 import { replayExclusions } from './erasure.mjs';
 import { exclusionGate } from './exclusions.mjs';
 import { scheduleFact, scheduleOnHookDb } from './intake.mjs';
@@ -119,7 +119,8 @@ function* recognizeMookWorksSteps(db, doc, { workRefOf, readRights, resolveUser,
  *  - sin `XP_EARNING_ENABLED` ⇒ `{ enabled: false }`;
  *  - si no, `{ enabled: true, ...readWorkProgress }`.
  * Abre la base en modo `readonly` (+ `query_only`), sin migrar ni crear nada, y la
- * cierra al terminar. Base ausente, registro de exclusiones dañado o clave ausente
+ * cierra al terminar. Base ausente o sin escritor vivo (faltan `-wal`/`-shm`), registro de
+ * exclusiones dañado o clave ausente
  * ⇒ lanza: el llamador responde «no disponible», nunca 0 XP.
  * `userId` es SIEMPRE la persona de la sesión: lo fija el servidor, nunca el cliente.
  * @param {string} userId
@@ -142,7 +143,12 @@ export async function readMyProgress(userId, deps = {}) {
         try { decision = await deps.workAccessOf(a.workRef); } catch { decision = null; }
         access.set(a.workRef, decision);
     }
-    const db = new Database(resolveGamificationDbPath(env), { readonly: true, fileMustExist: true });
+    // U2-CLOSE: sin escritor vivo faltan `-wal`/`-shm`, y abrir en modo readonly
+    // los CREARÍA junto al store (y no podría borrarlos). Solo se lee una base
+    // viva; si no, «no disponible» sin tocar nada.
+    const dbPath = resolveGamificationDbPath(env);
+    if (!fs.existsSync(`${dbPath}-wal`) || !fs.existsSync(`${dbPath}-shm`)) throw new GamificationError('GAMIFICATION_DB_NOT_LIVE');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
         db.pragma('query_only = ON');
         const out = readWorkProgress(db, userId, {

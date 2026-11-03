@@ -122,6 +122,8 @@ fs.writeFileSync(P.mook, JSON.stringify(doc, null, 2));
 const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: P.gamDb,
     GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
 Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_REGISTRY: P.reg });
+// Este proceso hace de réplica escritora: su conexión queda ABIERTA (como
+// `getGamificationDb` en producción), así que `-wal`/`-shm` existen.
 {
     const db = D.getGamificationDb({ env: ENV });
     L.createRuleSet(db, { ruleVersion: 'gm-u2-http', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
@@ -130,7 +132,7 @@ Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_RE
         workRefOf: Store.productionWorkRef, readRights: () => () => false, sinceMs: SINCE, env: ENV,
         resolveUser: M.makeResolveUser(USERS.map((u) => ({ ...u, accountStatus: 'active' })), () => true, () => false) });
     if (res.recognized !== 4) throw new Error(`siembra inesperada: ${JSON.stringify(res)}`);
-    D.closeGamificationDb({ resetBackoff: true });
+    db.pragma('wal_checkpoint(TRUNCATE)');
 }
 // Derechos: base de regalías sana y vacía (sin retiradas). Sin ella, el servidor
 // trata toda obra como retirada (fallo cerrado), igual que el barrido.
@@ -139,7 +141,10 @@ Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_RE
     Pub.getRoyaltiesDb();
     Pub.closeRoyaltiesDb?.();
 }
-const hashDir = (d) => fs.readdirSync(d).sort().map((f) => `${f}:${crypto.createHash('sha256').update(fs.readFileSync(path.join(d, f))).digest('hex')}`).join();
+// `-shm` es el índice en memoria compartida de SQLite (marcas de lectura): cuenta su
+// presencia, no su contenido. Base y `-wal` se comparan byte a byte.
+const hashDir = (d) => fs.readdirSync(d).sort().map((f) => (f.endsWith('-shm') ? f
+    : `${f}:${crypto.createHash('sha256').update(fs.readFileSync(path.join(d, f))).digest('hex')}`)).join();
 
 // ── Servidores ────────────────────────────────────────────────────────────────
 const ORIGIN = 'https://app.test';
@@ -208,7 +213,8 @@ try {
         ok('sin GAMIFICATION_ENABLED ⇒ 404 { error: Not Found }', r.status === 404 && JSON.stringify(r.body) === '{"error":"Not Found"}', r.text);
         const x = await get(xpOff, '/api/me/progress', as('u-30'));
         ok('sin XP_EARNING_ENABLED ⇒ 200 { enabled: false }', x.status === 200 && JSON.stringify(x.body) === '{"enabled":false}', x.text);
-        ok('flags apagadas: la base no se crea ni cambia', hashDir(P.gamDir) === gamBefore);
+        ok('flags apagadas: ni la base ni sus auxiliares cambian', hashDir(P.gamDir) === gamBefore, `${gamBefore}\n${hashDir(P.gamDir)}`);
+        ok('XP apagado: ningún dato de progreso', !/"xp"|works|level|achievements/.test(x.text));
     }
 
     section('[2] identidad');
@@ -274,10 +280,24 @@ try {
         for (let i = 0; i < 6; i++) outs.push((await get(i % 2 ? locked : on, '/api/me/progress', as('u-50'))).text);
         ok('lecturas repetidas estables (por servidor)', new Set(outs.filter((_, i) => i % 2 === 0)).size === 1 && new Set(outs.filter((_, i) => i % 2 === 1)).size === 1);
         const after = hashDir(P.gamDir);
-        const strip = (s) => s.split(',').filter((x) => !/-(wal|shm):/.test(x)).join();
-        ok('gamification.db sin cambios (sin contar índices WAL)', strip(after) === strip(gamBefore), `${gamBefore}\n${after}`);
-        ok('ningún lock de barrido ni archivo nuevo junto a la base', fs.readdirSync(P.gamDir).every((f) => /^gamification\.db(-wal|-shm)?$/.test(f)), fs.readdirSync(P.gamDir).join());
+        ok('gamification.db y -wal sin cambios byte a byte', after === gamBefore, `${gamBefore}\n${after}`);
+        ok('ningún lock de barrido ni archivo nuevo junto a la base',
+            fs.readdirSync(P.gamDir).sort().join() === 'gamification.db,gamification.db-shm,gamification.db-wal', fs.readdirSync(P.gamDir).join());
         ok('mook_db.json sin cambios', fs.readFileSync(P.mook, 'utf8') === mookBefore);
+    }
+
+    section('[6b] sin escritor vivo: no se crean auxiliares');
+    {
+        D.closeGamificationDb({ resetBackoff: true }); // última conexión: SQLite borra -wal/-shm
+        const cold = fs.readdirSync(P.gamDir).sort().join();
+        const coldHash = hashDir(P.gamDir);
+        ok('sin escritor, solo queda gamification.db', cold === 'gamification.db', cold);
+        const r = await get(on, '/api/me/progress', as('u-30'));
+        ok('sin escritor vivo ⇒ 503 genérico, sin XP', r.status === 503 && r.body?.code === 'PROGRESS_UNAVAILABLE' && !/"xp"/.test(r.text), r.text);
+        ok('sin escritor vivo: ningún -wal/-shm creado, base intacta', fs.readdirSync(P.gamDir).sort().join() === cold && hashDir(P.gamDir) === coldHash,
+            fs.readdirSync(P.gamDir).join());
+        ok('el log registra solo el código', /progreso no disponible: GAMIFICATION_DB_NOT_LIVE/.test(on.logs()));
+        D.getGamificationDb({ env: ENV }); // vuelve la réplica escritora
     }
 
     section('[7] privacidad y errores');

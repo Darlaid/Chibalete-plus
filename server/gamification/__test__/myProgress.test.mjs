@@ -253,21 +253,31 @@ try {
 
     section('[8] lecturas repetidas sin escrituras');
     {
-        D.closeGamificationDb({ resetBackoff: true }); // sin conexión de escritura abierta
-        const files = fs.readdirSync(path.join(dir, 'db')).map((f) => path.join(dir, 'db', f));
-        const h0 = files.map((f) => `${f}:${fs.existsSync(f) ? sha(f) : '-'}`).join();
+        // Con escritor vivo (como una réplica en producción): `-wal`/`-shm` ya existen.
+        // `-shm` es el índice en memoria compartida de SQLite (marcas de lectura): no se compara.
+        reopen();
+        db.pragma('wal_checkpoint(TRUNCATE)');
+        const dbDir = path.join(dir, 'db');
+        const dbFile = path.join(dbDir, 'gamification.db');
+        const names0 = fs.readdirSync(dbDir).sort().join();
+        const state = () => [dbFile, `${dbFile}-wal`].map((f) => `${path.basename(f)}:${sha(f)}`).join();
+        const h0 = state();
         const docBefore = JSON.stringify(doc);
         const outs = [];
         for (let i = 0; i < 5; i++) outs.push(JSON.stringify(await M.readMyProgress('u-50', depsFor(doc, env))));
-        const h1 = files.map((f) => `${f}:${fs.existsSync(f) ? sha(f) : '-'}`).join();
         ok('cinco lecturas idénticas', new Set(outs).size === 1);
-        ok('base y WAL sin cambios', h0 === h1);
+        ok('base y WAL sin cambios', state() === h0, `${h0} → ${state()}`);
         ok('documento MOOK sin cambios', JSON.stringify(doc) === docBefore);
-        // SQLite puede crear los índices WAL (-wal/-shm) al abrir en modo lectura; nada más.
-        const extra = fs.readdirSync(path.join(dir, 'db')).filter((f) => !files.includes(path.join(dir, 'db', f)));
-        ok('ningún archivo nuevo junto a la base salvo -wal/-shm (ni lock de barrido)', extra.every((f) => /^gamification\.db-(wal|shm)$/.test(f)), extra.join());
-        const dbFile = path.join(dir, 'db', 'gamification.db');
-        ok('la base principal no cambia', h0.includes(`${dbFile}:${sha(dbFile)}`));
+        ok('ningún archivo nuevo junto a la base (ni lock de barrido)', fs.readdirSync(dbDir).sort().join() === names0, fs.readdirSync(dbDir).join());
+        // Sin escritor vivo: no se abre la base; nada se crea junto al store.
+        D.closeGamificationDb({ resetBackoff: true });
+        const cold = fs.readdirSync(dbDir).sort().join();
+        ok('sin escritor vivo, solo queda la base (SQLite borró -wal/-shm al cerrar)', cold === 'gamification.db', cold);
+        const coldHash = sha(dbFile);
+        ok('sin escritor vivo ⇒ GAMIFICATION_DB_NOT_LIVE (el servidor responde 503)',
+            await rejectsCode(M.readMyProgress('u-50', depsFor(doc, env)), 'GAMIFICATION_DB_NOT_LIVE'));
+        ok('sin escritor vivo: no se crean -wal/-shm ni cambia la base', fs.readdirSync(dbDir).sort().join() === cold && sha(dbFile) === coldHash, fs.readdirSync(dbDir).join());
+        reopen();
         const src = fs.readFileSync(path.join(HERE, '..', 'mookSource.mjs'), 'utf8');
         const fn = src.match(/export async function readMyProgress[\s\S]*?\n}\n/)?.[0] ?? '';
         ok('readMyProgress abre readonly + query_only y no migra', /readonly: true, fileMustExist: true/.test(fn) && /query_only = ON/.test(fn)
