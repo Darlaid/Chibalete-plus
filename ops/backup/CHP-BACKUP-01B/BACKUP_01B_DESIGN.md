@@ -285,3 +285,30 @@ retención:  gobernada por la política publicada (CHP_MOOK_EVENTS_EVIDENCE_RETE
 ```
 
 Es el archivo frío del log canónico de eventos: `archiveRotation.mjs` mueve allí los eventos con más de 90 días y los expira al superar 12 meses calendario. Una vez un evento sale de `events.db`, este archivo es su única copia. Se declara con nombre exacto, sin glob ni recorrido del directorio: los sidecars `-wal`/`-shm` y cualquier vecino (`*.bak.*`, copias, `data/events.archive.db`) no entran. La ausencia se anota en `stores_absent` para distinguir «la rotación aún no ha creado el archivo» de «se perdió». La ruta y el contrato quedan fijados por los casos EA01-EA10 de la suite.
+
+## 19. `gamification.db` (CHP-GAMIFICACION-G3-02, perímetro y recuperación en G4-RELEASE-GATE-01)
+
+```text
+store:      data-critical/gamification.db
+tipo:       SQLite (CANON, no reconstruible: canjes, ajustes y compensaciones no se derivan de ninguna fuente)
+presencia:  opcional; solo existe con GAMIFICATION_ENABLED=1 (hoy OFF en producción)
+backup:     obligatorio cuando existe (§6, Online Backup API, incluye lo que esté en el -wal vivo)
+restore:    aislado y verificado lógicamente (integrity_check, schema, 21 triggers, _migrations, digest de 12 tablas, saldo = suma del ledger)
+fuera:      sidecars -wal/-shm, `gamification.db.reconcile.lock` y sus `.release`, temporales, `*.bak`,
+            la clave de sujeto (/app/secrets) y el registro de exclusiones
+```
+
+**Ausente (flags OFF):** el runner no la crea ni la exige; la anota en `stores_absent` como `absent_optional` y el resto de stores no cambia (GM02). El runner con esta entrada se instala **antes** de encender la flag (ADR-GAM-G2-01 §7), así que la primera base creada ya entra en el siguiente run.
+
+**Presente:** una sola entrada `sqlite`, nombre exacto (GM01, GM03). El WAL vivo de un escritor abierto se captura en la copia y ningún vecino del directorio entra (GM05). La restauración por el procedimiento previsto (`restic restore` a un directorio aislado → verificación lógica) da una base idéntica, con los triggers append-only vigentes (GM04), y esa copia vuelve a respaldarse y verificarse igual al ocupar el lugar de la original (GM06).
+
+**Registro de exclusiones: fuera de este respaldo, por diseño.** Su ruta (`GAMIFICATION_EXCLUSION_REGISTRY`) no tiene valor por defecto y el servidor rechaza que esté en el directorio de la base. Si base y registro se restauraran juntos desde copias antiguas, una exclusión posterior se perdería sin alarma; por eso el registro tiene **custodia, destino y credenciales propios** y retención igual o mayor que la de la base (`docs/gamificacion/GAMIFICACION_PRIV_01D_SUPRESION.md` §2 y §8).
+
+**Recuperación coordinada de `gamification.db`** (operación separada, con autorización propia; nunca parte de un rollback de código):
+
+1. Flags de ganancia en OFF antes de restaurar.
+2. Restaurar el snapshot a un directorio aislado y verificarlo (integrity_check, migraciones, saldo = suma del ledger).
+3. Restaurar o confirmar el registro de exclusiones desde **su** copia independiente, al menos tan reciente como la base. Nunca crear un registro vacío para desbloquear.
+4. Sustituir la base solo con las réplicas sin escritor activo sobre ella.
+5. Dejar que el barrido reaplique las exclusiones (`EXCLUSION_REPLAY_REQUIRED` bloquea la ingesta hasta entonces; `EXCLUSION_REGISTRY_STALE` exige escalar).
+6. Un responsable contrasta el número de exclusiones del registro con el de solicitudes atendidas antes de reabrir.

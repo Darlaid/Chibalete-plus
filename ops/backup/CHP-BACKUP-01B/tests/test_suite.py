@@ -4263,6 +4263,112 @@ def test_gm_restore_logical():
         conn.close()
 
 
+# G4-RELEASE-GATE-01: perimetro exacto del ledger. Junto a gamification.db
+# conviven en produccion el lock del reconciliador (y sus apartados .release),
+# temporales, el WAL vivo y, en otros directorios, la clave de sujeto y el
+# registro de exclusiones. Solo la base entra; el registro va aparte por diseno
+# (GAMIFICACION_PRIV_01D_SUPRESION.md §2 y §8).
+GM_SECRET_MARKER = b"GM05-CLAVE-SINTETICA-NO-DEBE-SALIR"
+GM_REGISTRY_MARKER = b"GM05-REGISTRO-SINTETICO-NO-DEBE-SALIR"
+GM_NEIGHBOURS = (
+    "data-critical/gamification.db.reconcile.lock",
+    "data-critical/gamification.db.reconcile.lock.tok-gm05.release",
+    "data-critical/gamification.db.tmp-gm05",
+    "data-critical/gamification.db.bak",
+    "data-critical/gamification_exclusions.log",
+)
+
+
+def _restored_files(env: "Env") -> list:
+    restore_dir = os.path.join(env.root, "restore")
+    return [os.path.join(dp, f) for dp, _d, fs in os.walk(restore_dir) for f in fs]
+
+
+@case("GM05", "gamification.db con WAL vivo: entra la base completa y nada de locks, temporales, clave ni registro")
+def test_gm_perimeter():
+    env = Env("gm05")
+    origen = _build_gamification_db(env.base)
+    for rel in GM_NEIGHBOURS:
+        with open(os.path.join(env.base, rel), "wb") as handle:
+            handle.write(GM_REGISTRY_MARKER if "exclusions" in rel else b"pid 1 token gm05\n")
+    os.makedirs(os.path.join(env.base, "secrets"), exist_ok=True)
+    with open(os.path.join(env.base, "secrets", "gamification_subject_key"), "wb") as handle:
+        handle.write(GM_SECRET_MARKER)
+    os.makedirs(os.path.join(env.base, "gamification-exclusions"), exist_ok=True)
+    with open(os.path.join(env.base, "gamification-exclusions", "registry.log"), "wb") as handle:
+        handle.write(GM_REGISTRY_MARKER)
+    # Escritor vivo: una fila que solo existe en el -wal mientras dura el backup.
+    writer = sqlite3.connect(origen)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("INSERT INTO gm_admin_audit VALUES ('au-wal', 'admin-fx', 'adjustment', 'u-fx', 'mv-fx-3', 1)")
+        writer.commit()
+        assert os.path.getsize(origen + "-wal") > 0, "el fixture debia dejar datos en el -wal"
+        before = fixtures.snapshot_tree(env.base)
+        env.provision_repository()
+        env.run("structured_backup.py", expect=0)
+        assert_sources_untouched(before, fixtures.snapshot_tree(env.base), "GM05")
+    finally:
+        writer.close()
+    manifest = env.manifests()[-1]
+    assert manifest["result"] == "ok", manifest["result"]
+    gm_paths = [s["logical_path"] for s in manifest["stores"] + manifest.get("stores_absent", [])
+                if "gamification" in s["logical_path"] or "exclusion" in s["logical_path"]
+                or "secrets" in s["logical_path"]]
+    assert gm_paths == [GAMIFICATION_LOGICAL_PATH], gm_paths
+    assert len(manifest["stores"]) == 25 + TOPOLOGY_STORE_COUNT, len(manifest["stores"])
+    staged = _restore_staging(env)
+    restaurada = os.path.join(staged, "sqlite", "gamification.db")
+    conn = sqlite3.connect(f"file:{restaurada}?mode=ro", uri=True)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT COUNT(*) FROM gm_admin_audit WHERE row_id='au-wal'").fetchone()[0] == 1, \
+            "la fila del WAL vivo no llego a la copia"
+    finally:
+        conn.close()
+    prohibidos = (".lock", ".release", ".tmp", ".bak", "exclusion", "registry", "subject_key", "secrets")
+    for path in _restored_files(env):
+        name = os.path.basename(path)
+        assert not any(p in name for p in prohibidos), f"archivo fuera de perimetro restaurado: {path}"
+        with open(path, "rb") as handle:
+            data = handle.read()
+        assert GM_SECRET_MARKER not in data and GM_REGISTRY_MARKER not in data, f"contenido prohibido en {path}"
+
+
+@case("GM06", "recuperacion completa de gamification.db: restore aislado, verify ok, y la copia restaurada vuelve a respaldarse identica")
+def test_gm_recovery_roundtrip():
+    env = Env("gm06")
+    origen = _build_gamification_db(env.base)
+    esperado = _gamification_logical_digest(origen)
+    env.provision_repository()
+    env.run("structured_backup.py", expect=0)
+    first = _gamification_entry(env.manifests()[-1])
+    # verify exige RPO de ambos tags (structured y uploads), como en el caso 24.
+    env.run("uploads_backup.py", expect=0)
+    env.run("verify_backup.py", expect=0)
+    staged = _restore_staging(env)
+    restaurada = os.path.join(staged, "sqlite", "gamification.db")
+    assert _gamification_logical_digest(restaurada) == esperado
+    # La copia es autocontenida: si queda un -wal junto a ella, esta vacio.
+    wal = restaurada + "-wal"
+    assert not os.path.exists(wal) or os.path.getsize(wal) == 0, wal
+    # Segundo entorno: la base restaurada ocupa el lugar de la original, como en
+    # una recuperacion real, y el runner la captura de nuevo.
+    env2 = Env("gm06b")
+    destino = os.path.join(env2.base, GAMIFICATION_LOGICAL_PATH)
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    shutil.copyfile(restaurada, destino)
+    env2.provision_repository()
+    env2.run("structured_backup.py", expect=0)
+    second = _gamification_entry(env2.manifests()[-1])
+    env2.run("uploads_backup.py", expect=0)
+    env2.run("verify_backup.py", expect=0)
+    assert second["integrity_result"] == "ok" and second["status"] == "included", second
+    assert first["integrity_result"] == "ok", first
+    staged2 = _restore_staging(env2)
+    assert _gamification_logical_digest(os.path.join(staged2, "sqlite", "gamification.db")) == esperado
+
+
 def main() -> int:
     global SANDBOX_ROOT, WORK_ROOT
 
