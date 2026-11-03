@@ -149,8 +149,8 @@ pm2 start ecosystem.config.cjs   # NOTA: PM2 SOLO para dev local. Producción es
 **Producción (VPS) NO usa PM2.** Producción corre como Docker Compose con
 4 containers (`chibalete_edge`, `chibalete_front`, `chibalete_api_1`,
 `chibalete_api_2`). Ver `deployment_guide.md` para el flujo de deploy
-real (build de imagen frontend / swap de bind mount + restart staggered
-backend). Cualquier instrucción `pm2` en docs históricas
+real: frontend y backend se despliegan **ambos por imagen nueva**, en
+ventanas separadas. Cualquier instrucción `pm2` en docs históricas
 (`deployment_guide.legacy.md`, `deployment_emergency_kit.md`) está
 archivada y NO refleja producción actual.
 
@@ -254,18 +254,39 @@ Single-file Express app (~1,946 lines) with JSON flat-file databases in `/data/`
 - **Topología producción:** Docker Compose en `/opt/chibaleteplus/docker-compose.yml`
   (VPS Hostinger, single-host).
 - **4 containers:** `chibalete_edge` (nginx:alpine, puertos 80/443),
-  `chibalete_front` (imagen `chibalete/front:<tag>`, sin mounts),
-  `chibalete_api_1` y `chibalete_api_2` (imagen `chibalete/api:latest`,
-  con bind mounts a `/var/www/chibalete/data`, `data-critical`,
-  `public/uploads`, `server`).
-- **Frontend deploy** = build nueva imagen Docker + recreate container +
-  reload edge nginx.
-- **Backend deploy** = swap atómico de bind mount `/var/www/chibalete/server` +
-  restart staggered (`api_1` → validar → `api_2`). NO requiere rebuild de
-  imagen api salvo cambio de `package.json`.
+  `chibalete_front` (imagen `chibalete/front:<tag>`, solo monta su
+  `default.conf` y assets estáticos de `/opt/chibaleteplus/front-m1`),
+  `chibalete_api_1` y `chibalete_api_2` (imagen `chibalete/api:<tag>`).
+- **El código del backend va DENTRO de la imagen** (`Dockerfile.api` copia
+  `server/`, `utils/`, `engines/` y `node_modules`). Las APIs solo montan
+  datos: `data`, `data-critical`, `public/uploads`, `identity`, `sessions`,
+  `secrets` (lectura) y `.deploy-info` (lectura). `/var/www/chibalete/server/`
+  existe en el host pero **no está montado**: editarlo o reemplazarlo no
+  cambia nada en producción.
+- **La imagen efectiva** de `front`, `api_1` y `api_2` la declara
+  `/opt/chibaleteplus/docker-compose.override.yml` (no la base). Se verifica
+  con `docker compose config --images`. <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
+- **Backend deploy** = imagen `chibalete/api:<slug>-<sha>` construida fuera
+  del VPS desde un commit con CI verde → `docker load` con checksum →
+  copia del override y tag `rollback-pre-<slug>` de la imagen actual →
+  cambio de la línea `image:` de **una** réplica en el override → drain en
+  el edge, `docker compose up -d --no-deps --force-recreate <réplica>`,
+  verificación de salud y logs en un paso propio, rejoin → la otra réplica
+  en otro paso. Nunca las dos a la vez.
+- **Frontend deploy** = imagen nueva + recreate de `front` + reload del edge,
+  en **su propia ventana**, separada de la del backend.
+- **Rollback** = restaurar la copia del override y recrear las réplicas con
+  la imagen anterior, igual de progresivo. **Nunca se restauran datos** en
+  un rollback de código.
+- **Protegidos:** `data/`, `data-critical/`, `public/uploads/`, `identity/`,
+  `sessions/`, `secrets/` y los respaldos (`structured-backup`/restic en
+  `/opt/chibalete-backup`, `/var/backups/chibalete-backup`). Un deploy no
+  los toca; restaurarlos es una decisión separada con autorización propia.
 - **NO se usa PM2 en producción.** `ecosystem.config.cjs` es solo dev local
   (con fail-fast runtime que aborta si detecta marcadores VPS).
 - **NO se usa nginx system en host.** Nginx vive en el container `chibalete_edge`.
+- `scripts/deploy-backend.sh` implementa el modelo antiguo (swap de
+  `server/` montado) y **no debe usarse**.
 - Ver `deployment_guide.md` (canónico) para flujos paso a paso.
 - Documentos archivados: `deployment_guide.legacy.md` (PM2-first previo),
   `deployment_emergency_kit.md` (instalación inicial PM2-first).

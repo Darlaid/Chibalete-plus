@@ -10,19 +10,29 @@
 
 Chibalete+ corre en producción como un stack **Docker Compose** sobre un
 único VPS Hostinger (`root@72.60.158.97`). No hay clúster, no hay
-Kubernetes, no hay autoscaling, no hay registry privado, no hay CI
+Kubernetes, no hay autoscaling, no hay registry privado, no hay despliegue
 remoto. La operación es **single-host, manual, scripted**.
 
 > 🔴 **Frase fundacional — debe entenderse antes de tocar nada:**
 >
 > Chibalete+ no se actualiza copiando archivos al VPS;
-> se actualiza **reemplazando imágenes Docker (frontend)**
-> y haciendo **swap controlado de bind mounts (backend)**.
+> se actualiza **reemplazando imágenes Docker**, tanto el frontend como
+> el backend, cambiando su referencia en `docker-compose.override.yml`.
 
 Cualquier desviación de este principio (copiar `dist/` a `/var/www/`,
-correr `npm run server` directo en el host, levantar PM2 paralelo,
-etc.) corrompe la separación operativa, produce drift y abre puertas a
-pérdida de datos.
+reemplazar `/var/www/chibalete/server/`, correr `npm run server` directo
+en el host, levantar PM2 paralelo, etc.) corrompe la separación
+operativa, produce drift y abre puertas a pérdida de datos.
+
+> 🔴 **Corrección G4-RELEASE-GATE-01 (2026-11-03).** Versiones anteriores de
+> esta guía describían el backend como «swap atómico de bind mount de
+> `/var/www/chibalete/server/`». Eso dejó de ser cierto: verificado en
+> producción, **las APIs no montan `server/`**; el código va horneado en la
+> imagen `chibalete/api:<tag>`. `/var/www/chibalete/server/` y sus
+> `server.old-*` siguen en el host, pero son restos inertes.
+> `scripts/deploy-backend.sh` implementa el modelo antiguo y **no debe
+> ejecutarse**: haría un swap sin efecto y reiniciaría las réplicas con la
+> misma imagen (deploy fantasma).
 
 Este documento describe **lo que ES**, no lo que sería ideal. Si necesitas
 hacer cambios arquitectónicos, hazlos en un sprint dedicado y actualiza
@@ -49,28 +59,33 @@ este documento simultáneamente.
          │ chibalete_     │  │ chibalete_     │  │ chibalete_     │
          │   front        │  │   api_1        │  │   api_2        │
          │ chibalete/     │  │ chibalete/     │  │ chibalete/     │
-         │   front:<tag>  │  │   api:latest   │  │   api:latest   │
-         │                │  │                │  │                │
-         │ SIN MOUNTS     │  │ Bind mounts ↓  │  │ Bind mounts ↓  │
+         │   front:<tag>  │  │   api:<tag>    │  │   api:<tag>    │
+         │ (código dentro)│  │ (código dentro)│  │ (código dentro)│
+         │ conf + assets  │  │ Datos ↓        │  │ Datos ↓        │
          └────────────────┘  └────────┬───────┘  └────────┬───────┘
                                       │                   │
                                       └─────────┬─────────┘
                                                 │
                                                 ▼
-                                ┌──────────────────────────────────┐
-                                │  /var/www/chibalete/             │
-                                │    data/             → /app/data │
-                                │    data-critical/    → /app/data-critical │
-                                │    public/uploads/   → /app/public/uploads │
-                                │    server/           → /app/server │
-                                └──────────────────────────────────┘
+                     ┌──────────────────────────────────────────────────┐
+                     │  /var/www/chibalete/  (solo DATOS)               │
+                     │    data/            → /app/data                  │
+                     │    data-critical/   → /app/data-critical         │
+                     │    public/uploads/  → /app/public/uploads        │
+                     │    identity/        → /app/identity              │
+                     │    sessions/        → /app/sessions              │
+                     │    secrets/         → /app/secrets        (ro)   │
+                     │    release/<sha>/.deploy-info                    │
+                     │                     → /app/server/.deploy-info (ro) │
+                     └──────────────────────────────────────────────────┘
 ```
 
 **Notas críticas:**
 - `chibalete_edge` es el **único** punto de entrada público (puertos 80/443).
 - `chibalete_front` y los `api_X` solo son accesibles vía la red interna `chibalete_net`.
-- `chibalete_api_1` y `chibalete_api_2` corren la **misma imagen** (`chibalete/api:latest`) y comparten **los mismos bind mounts**. No son réplicas independientes — son **dos workers contra el mismo estado en disco**.
-- Los archivos `data/`, `data-critical/`, `public/uploads/` y `server/` **viven en el host** (`/var/www/chibalete/`), NO en la imagen.
+- `chibalete_api_1` y `chibalete_api_2` corren **la misma imagen** y comparten **los mismos mounts de datos**. No son réplicas independientes: son **dos workers contra el mismo estado en disco**. Su `environment` en el override **no es idéntico** (p. ej. solo `api_1` rota el archivo de eventos): nunca copiar el bloque de una réplica sobre la otra.
+- El **código** (`server/`, `utils/`, `engines/`, `node_modules`) vive **dentro de la imagen** (`Dockerfile.api`). `/var/www/chibalete/server/` no está montado.
+- `.deploy-info` se monta desde una ruta fija del host y hoy apunta a una release antigua (`2945fa8`): **no sirve para saber qué código corre**. La autoridad es la imagen: `docker inspect --format '{{.Config.Image}} {{.Image}}'`.
 
 ---
 
@@ -79,9 +94,9 @@ este documento simultáneamente.
 | Componente | Tipo | Imagen | Mounts | Restart policy |
 |---|---|---|---|---|
 | `chibalete_edge` | service | `nginx:alpine` | `nginx.conf` (lectura) | `unless-stopped` |
-| `chibalete_front` | service | `chibalete/front:<tag>` | ninguno | `unless-stopped` |
-| `chibalete_api_1` | service | `chibalete/api:latest` | 4 bind mounts a `/var/www/chibalete/` | `unless-stopped` |
-| `chibalete_api_2` | service | `chibalete/api:latest` | mismos 4 bind mounts | `unless-stopped` |
+| `chibalete_front` | service | `chibalete/front:<tag>` | `default.conf` y assets estáticos de `/opt/chibaleteplus/front-m1` (lectura) | `unless-stopped` |
+| `chibalete_api_1` | service | `chibalete/api:<tag>` (override, línea `image:` de `api_1`) | 7 bind mounts de datos (§7); **sin `server/`** | `unless-stopped` |
+| `chibalete_api_2` | service | `chibalete/api:<tag>` (override, línea `image:` de `api_2`) | mismos 7 bind mounts | `unless-stopped` |
 
 **Compose canónico — DOS archivos que se cargan juntos:**
 
@@ -143,16 +158,14 @@ Reverse proxy + terminación TLS. Configuración en `/opt/chibaleteplus/nginx/ng
 **Cuándo se toca:** solo `nginx -s reload` tras recrear `chibalete_front` (porque la IP del nuevo container puede haber cambiado y el upstream tiene la vieja cacheada).
 
 ### 4.2 `chibalete_front`
-Bundle estático (Vite build) servido por nginx interno dentro del container. **La imagen es autocontenida**: no depende de archivos del host.
+Bundle estático (Vite build) servido por nginx interno dentro del container. El bundle va en la imagen; del host solo monta su `default.conf` y unos assets estáticos (`/opt/chibaleteplus/front-m1`).
 
 **Implicación:** cambiar el frontend = construir una nueva imagen Docker, etiquetarla, y recrear el container. No se "copia el `dist/`" a ninguna parte del VPS.
 
 ### 4.3 `chibalete_api_1` y `chibalete_api_2`
-Dos workers Express idénticos. Misma imagen `chibalete/api:latest`. Misma versión de Node. Mismas dependencias. Pero el **código real** que ejecutan vive en `/var/www/chibalete/server/` (host) montado como `/app/server` (container).
+Dos workers Express con la misma imagen `chibalete/api:<tag>`. **El código va dentro de la imagen**: `Dockerfile.api` copia `server/`, `utils/`, `engines/` y las dependencias. Del host solo montan datos (§7).
 
-**Implicación:** cambiar el backend = reemplazar archivos en `/var/www/chibalete/server/` y reiniciar los containers. La imagen `chibalete/api:latest` permanece igual.
-
-> ⚠️ Si cambian las dependencias (`package.json` modificado), el modelo bind-mount NO basta: hay que reconstruir la imagen api. Ese flujo NO está cubierto por los scripts de deploy actuales y debe tratarse como un sprint dedicado.
+**Implicación:** cambiar el backend = construir una imagen nueva desde un commit con CI verde, cargarla en el VPS y cambiar la línea `image:` de cada réplica en `docker-compose.override.yml`, una réplica cada vez (§12). Reiniciar un contenedor sin cambiar su imagen **no despliega nada**.
 
 ### 4.4 Lo que NO existe en producción
 - ❌ **PM2** (no gobierna; `ecosystem.config.cjs` es solo para dev local)
@@ -199,38 +212,34 @@ scp front.tar VPS:/tmp/     docker exec chibalete_edge nginx -t
 ```
 Local                              VPS
 ─────                              ───
-git checkout                       ssh root@72.60.158.97
-npm run verify                     # Backup
-                                   cp -a /var/www/chibalete/server  →  backup/$TS/server
-                                   cp -a /var/www/chibalete/data    →  backup/$TS/data
-                                   cp -a /var/www/chibalete/data-critical → backup/$TS/data-critical
-                                   # Pre-validate
-                                   curl /api/admin/membership/validate → ok=true
-tar -czf server-RELEASE.tgz \
-  server/ utils/ types/            # Transferir staging
-                                   tar -xzf server-RELEASE.tgz \
-                                     -C /var/www/chibalete/server.staging/
-                                   # Swap atómico (mismo filesystem)
-                                   mv /var/www/chibalete/server  → server.old-$TS
-                                   mv server.staging/server      → server
-                                   # Restart staggered
-                                   docker stop chibalete_api_1 --time=30
-                                   docker start chibalete_api_1
-                                   wait healthy
-                                   validate api_1
-                                   docker stop chibalete_api_2 --time=30
-                                   docker start chibalete_api_2
-                                   wait healthy
-                                   validate post-deploy
+commit con CI verde                ssh root@72.60.158.97
+git -c core.autocrlf=false \       # Preflight + respaldo
+  archive $SHA | tar -x -C ctx     systemctl status structured-backup → último run ok
+docker build -f Dockerfile.api \   docker tag <imagen actual> chibalete/api:rollback-pre-$SLUG
+  -t chibalete/api:$SLUG-$SHA7     cp docker-compose.override.yml \
+docker save | gzip > api.tar.gz       docker-compose.override.yml.bak-pre-$SLUG-$TS
+sha256sum api.tar.gz               # Cargar
+scp api.tar.gz VPS:/root/chp-$SLUG/   sha256sum -c ; docker load
+                                   # api_1 (paso propio)
+                                   edge-instance.sh drain api_1 ; esperar 65 s
+                                   sed línea image: de api_1 en el override
+                                   docker compose config --images   (verificar merge)  # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
+                                   docker compose up -d --no-deps --force-recreate api_1
+                                   esperar healthy ; leer logs ; rejoin api_1
+                                   # api_2 (OTRO paso, tras leer el gate de api_1)
+                                   mismo ciclo con la línea de api_2
 ```
 
 **Reglas:**
-- ✅ `npm run verify` en local **debe pasar** antes del deploy (212 tests memberships + 96 parser + 9 corpus).
-- ✅ Backup completo (`data/`, `data-critical/`, `server/`, `compose`) es obligatorio en cada deploy.
-- ✅ Swap del directorio `server/` debe ser **atómico** (`mv` en mismo filesystem).
-- ✅ Restart **staggered**: primero `api_1`, validar, después `api_2`. Nunca ambos a la vez.
-- 🔴 Nunca se modifica `server.js` "en caliente" con `docker exec`.
-- 🔴 Nunca se reinicia ambos `api_X` simultáneamente.
+- ✅ La imagen se construye **fuera del VPS** desde un árbol limpio del commit (`git archive`, LF) y se transfiere con **checksum verificado**.
+- ✅ El commit desplegado tiene CI verde completo sobre ese mismo SHA.
+- ✅ Antes de tocar nada: respaldo `structured-backup` reciente y correcto, copia del override y tag `rollback-pre-$SLUG` de la imagen actual.
+- ✅ Cambio de tag **una réplica cada vez**, con drain en el edge, verificación de salud y logs en un paso propio, y rejoin antes de pasar a la otra (§13).
+- ✅ Durante la transición conviven dos versiones contra los mismos datos: el código nuevo debe leer y escribir de forma compatible con el anterior.
+- 🔴 Nunca se modifica código "en caliente" con `docker exec`.
+- 🔴 Nunca se recrean ni reinician ambos `api_X` simultáneamente.
+- 🔴 Nunca se reemplaza `/var/www/chibalete/server/` como forma de desplegar: no está montado.
+- 🔴 Un deploy de backend no cambia flags ni variables de entorno salvo que la orden lo diga expresamente.
 
 ---
 
@@ -240,23 +249,39 @@ tar -czf server-RELEASE.tgz \
 |---|---|---|---|
 | `/var/www/chibalete/data/` | `/app/data` | JSONs principales (`users_db.json`, `groups_db.json`, `progress_db.json`, etc.) | 🔴 NUNCA tocar manualmente. Backup antes de cada deploy backend |
 | `/var/www/chibalete/data-critical/` | `/app/data-critical` | Datos sensibles (auditoría, secrets vault, leo memory) | 🔴 NUNCA tocar. Backup obligatorio |
-| `/var/www/chibalete/public/uploads/` | `/app/public/uploads` | Archivos subidos por administradores (PDF, audio, imágenes) | 🔴 NUNCA borrar. Backup como manifiesto (no por contenido — pesado) |
-| `/var/www/chibalete/server/` | `/app/server` | Código backend ejecutado por los `api_X` | ✅ Solo se reemplaza con swap atómico durante deploy |
+| `/var/www/chibalete/public/uploads/` | `/app/public/uploads` | Archivos subidos por administradores (PDF, audio, imágenes) | 🔴 NUNCA borrar. Respaldo propio (`uploads-backup`) |
+| `/var/www/chibalete/identity/` | `/app/identity` | `identity.db` (SQLite) | 🔴 NUNCA tocar. En `structured-backup` |
+| `/var/www/chibalete/sessions/` | `/app/sessions` | Sesiones firmadas | 🔴 NUNCA tocar |
+| `/var/www/chibalete/secrets/` | `/app/secrets` (solo lectura) | Secretos por archivo | 🔴 NUNCA imprimir ni copiar a logs, argv o evidencia |
+| `/var/www/chibalete/release/<sha>/.deploy-info` | `/app/server/.deploy-info` (solo lectura) | Metadatos de una release antigua | No indica la versión real; ver §2 |
 
-> ⚠️ Backup completo de `data/`, `data-critical/` y `server/` antes de cada
-> deploy backend es **bloqueante**. Sin backup → sin deploy.
+**No montado:** `/var/www/chibalete/server/` (y sus `server.old-*`,
+`server.bak.*`, `server.pre-*`). Son restos del modelo anterior. No se
+borran sin una unidad propia, pero tampoco se usan para desplegar.
 
-> ⚠️ `uploads/` no se backupea por contenido (puede pesar GBs); se guarda
-> un **manifiesto** (lista de filenames con tamaños) para forensics. Si un
-> upload se corrompe en producción, hay que decidir restore manual desde
-> el origen original (CDN, editor que lo subió, etc.).
+> ⚠️ Respaldo correcto y reciente de los stores antes de cada deploy de
+> backend es **bloqueante**. Sin respaldo → sin deploy. El respaldo canónico
+> es `structured-backup` (restic, `/opt/chibalete-backup`, inventario en
+> `ops/backup/CHP-BACKUP-01B/runners/chibalete_backup/stores.py`).
+
+> ⚠️ Un deploy o un rollback de código **no restaura datos**. Restaurar un
+> store es una decisión separada, documentada y autorizada expresamente.
 
 ---
 
 ## 7.1 Backup operacional pre-deploy
 
-> 🔴 **Sin backup → sin deploy.** Esta sección describe el script
-> canónico que materializa esa regla.
+> 🔴 **Sin backup → sin deploy.**
+>
+> ⚠️ **Estado real (2026-11-03):** el respaldo canónico de producción es
+> `structured-backup` (restic off-site, timer cada ~6 h) + `uploads-backup`
+> (diario) + `backup-verify` (semanal), instalados en `/opt/chibalete-backup`
+> desde `ops/backup/CHP-BACKUP-01B/`. El gate de un deploy es un run de
+> `structured-backup` correcto y reciente. `scripts/backup-vps.sh`, descrito
+> abajo, es un respaldo local **auxiliar** cuyo último uso fue en mayo de
+> 2026; su `server.tar.gz` copia una carpeta que ya no está montada y no
+> sirve como punto de rollback de código (el rollback de código es la
+> imagen anterior, §15).
 
 ### 7.1.1 Script canónico: `scripts/backup-vps.sh`
 
@@ -281,8 +306,7 @@ commit + scp deliberado, **no** por edición en el VPS.)
 
 | Situación | ¿Backup obligatorio? |
 |---|---|
-| **Pre-deploy backend** (FASE B1) | ✅ Sí, bloqueante |
-| **Pre-edición manual de `/var/www/chibalete/server/`** (hotfix de emergencia, raro) | ✅ Sí, bloqueante |
+| **Pre-deploy backend** (FASE B1) | ⚠ Opcional: el gate es `structured-backup` correcto |
 | **Pre-importación masiva** (CSV admin, migración manual) | ✅ Sí |
 | **Pre-cambio de compose** (recreate de api o front) | ⚠ Recomendado |
 | **Pre-deploy frontend** | ❌ No requerido (no toca data/) |
@@ -294,7 +318,7 @@ commit + scp deliberado, **no** por edición en el VPS.)
 |---|---|---|
 | `/var/www/chibalete/data/` | `data.tar.gz` | JSONs vivos completos |
 | `/var/www/chibalete/data-critical/` | `data-critical.tar.gz` | Auditoría, vault, leo memory |
-| `/var/www/chibalete/server/` | `server.tar.gz` | Código backend en bind mount |
+| `/var/www/chibalete/server/` | `server.tar.gz` | Carpeta **no montada** (modelo antiguo). No representa el código en ejecución |
 | `/opt/chibaleteplus/docker-compose.yml` | `docker-compose.yml` (copia plana) | Compose **base**. ⚠️ Este script **no** copia `docker-compose.override.yml`, que es el que declara la imagen efectiva. La topología completa la respalda el backup canónico offsite — ver 7.1.4b |
 | `/var/www/chibalete/public/uploads/` | `uploads-manifest.txt` | **Sólo lista** (path+size+mtime), NO contenido |
 
@@ -304,7 +328,7 @@ JSON parseable, schema_version `1.0`).
 ### 7.1.4 Qué NO respalda
 
 - ❌ Contenido binario de `uploads/` (puede pesar GBs)
-- ❌ Imágenes Docker (`chibalete/api:latest`, `chibalete/front:<tag>`).
+- ❌ Imágenes Docker (`chibalete/api:<tag>`, `chibalete/front:<tag>`).
   Las imágenes se conservan por retention de Docker, no por este script
 - ❌ `node_modules` ni dependencias (vienen en la imagen)
 - ❌ Logs de containers (`/var/lib/docker/containers/*/...`)
@@ -382,8 +406,8 @@ Exit codes:
 
 ### 7.1.8 Restore manual
 
-> ⚠️ **Política**: rollback de código (`server/`) es siempre seguro y
-> rápido. Restore de `data/` o `data-critical/` es **última opción** —
+> ⚠️ **Política**: rollback de código (volver a la imagen anterior, §15) es
+> siempre seguro y rápido. Restore de `data/` o `data-critical/` es **última opción** —
 > retrocede operaciones legítimas que ocurrieron post-backup. Requiere
 > decisión humana documentada en `/root/deploys.log`.
 
@@ -419,9 +443,9 @@ docker start chibalete_api_2
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DATA RESTORE from $TS <actor> <razón>" >> /root/deploys.log
 ```
 
-(Mismo patrón aplica a `data-critical.tar.gz` y `server.tar.gz`.
-Para `server.tar.gz` el restart staggered es exactamente el del flujo
-de rollback backend, sección 15.)
+(Mismo patrón aplica a `data-critical.tar.gz`. `server.tar.gz` **no se
+restaura**: la carpeta no está montada; el código se revierte con la
+imagen anterior, sección 15.)
 
 **Restore de la topología Compose desde el backup canónico (recomendado):**
 
@@ -494,8 +518,11 @@ Para cualquiera de estos casos, abrir sprint dedicado.
 | `/var/www/chibalete/data/` | JSONs vivos | Solo `chibalete_api_1` y `chibalete_api_2` con `withFileLock` |
 | `/var/www/chibalete/data-critical/` | Datos sensibles | Idem |
 | `/var/www/chibalete/public/uploads/` | Archivos subidos | `chibalete_api_1`, `chibalete_api_2` (escribe), `chibalete_edge` (lee) |
-| `/var/www/chibalete/server/` | Código backend | Swap controlado por `deploy-backend.sh` |
-| `/root/backups/chibalete/$TS/` | Backups con retention 7 días | `backup-vps.sh` (escribe), operador (lee para restore) |
+| `/var/www/chibalete/identity/`, `sessions/`, `secrets/` | Identidad, sesiones y secretos | Solo los `api_X` (`secrets` en lectura) |
+| `/opt/chibalete-backup/` | Runners de respaldo (`structured`, `uploads`, `verify`) | Unidad de respaldo propia, con copia previa y rollback |
+| `/var/backups/chibalete-backup/` | Área de trabajo y manifiestos del runner | Solo el runner |
+| `/root/chp-<slug>/` | Paquete de cada unidad: tar de imagen, `ROLLBACK.txt`, snapshots previos | Operador |
+| `/root/backups/chibalete/$TS/` | Backups locales auxiliares, retention 7 días | `backup-vps.sh` (escribe), operador (lee para restore) |
 
 ---
 
@@ -505,7 +532,8 @@ Para cualquiera de estos casos, abrir sprint dedicado.
 |---|---|---|
 | `/root/apps-spa/chibaleteplus/` | Source legacy de un experimento previo | Si alguien edita ahí, **no afecta producción**. Confunde auditorías. Marcado para archivar |
 | `/var/www/chibalete/dist/` | Bundle frontend legacy | El frontend **vive en la imagen Docker**, no en este path. Cualquier copia aquí es ruido |
-| `/var/www/chibalete/node_modules/` | Modules legacy (si existe) | El backend usa `node_modules` **dentro de la imagen `chibalete/api:latest`**, no del host |
+| `/var/www/chibalete/server/` y `server.old-*`, `server.bak.*`, `server.pre-*` | Código del modelo antiguo de bind mount | **No está montado.** Editarlo o reemplazarlo no cambia producción |
+| `/var/www/chibalete/node_modules/` | Modules legacy (si existe) | El backend usa `node_modules` **dentro de la imagen `chibalete/api:<tag>`**, no del host |
 | `~/.pm2/` | PM2 local user | PM2 no corre en producción; cualquier proceso aquí es residual |
 | `/etc/nginx/sites-available/`, `/etc/nginx/sites-enabled/` | nginx host system | nginx system **no corre**; el edge es el container `chibalete_edge` |
 | `deployment_package/` (en repo) | Snapshot histórico | Solo referencia. No representa producción actual |
@@ -522,24 +550,26 @@ Para cualquiera de estos casos, abrir sprint dedicado.
 
 | # | Regla |
 |---|---|
-| 1 | El backend = bind mount + restart staggered. **Nunca rebuild de imagen api** salvo cambio de deps |
-| 2 | El frontend = imagen nueva + recreate + reload edge. **Nunca tocar archivos en VPS** |
-| 3 | `data/`, `data-critical/`, `uploads/` son **invariantes** durante el deploy. Solo backup antes |
+| 1 | El backend = imagen nueva + cambio de `image:` en el override + recreate **por réplica**. Nunca reemplazar `server/` en el host |
+| 2 | El frontend = imagen nueva + recreate + reload edge, **en su propia ventana**. Nunca tocar archivos en VPS |
+| 3 | `data/`, `data-critical/`, `uploads/`, `identity/`, `sessions/`, `secrets/` y los respaldos son **invariantes** durante el deploy |
 | 4 | `validate endpoint` pasa **antes y después**. Si falla antes → no deploy. Si falla después → rollback |
-| 5 | Backup del compose **antes** de editarlo. Backup de data **antes** de tocar el código |
-| 6 | Restart staggered: `api_1` → validar → `api_2`. **Nunca paralelo** |
-| 7 | `nginx -s reload` del edge tras recrear `chibalete_front` (no antes) |
+| 5 | Copia del override y tag `rollback-pre-<slug>` **antes** de editar. `structured-backup` correcto **antes** de tocar las APIs |
+| 6 | Réplica a réplica: `api_1` → gate en paso propio → `api_2`. **Nunca paralelo** |
+| 7 | `nginx -s reload` del edge tras recrear `chibalete_front` (no antes); las APIs entran y salen del pool con `edge-instance.sh` |
 | 8 | Toda operación destructiva queda **registrada** en `/root/deploys.log` con TS, actor, RELEASE_TAG |
+| 9 | El rollback restaura **imágenes y override**, nunca datos |
 
 ### 10.2 Política de tags
 - Frontend: `chibalete/front:<SLUG>-<git-sha-corto>`, inmutable. `SLUG` identifica la unidad de trabajo. El tag anterior (`OLD_TAG`) nunca se reescribe: es el punto de rollback.
+- Backend: `chibalete/api:<SLUG>-<git-sha-corto>`, inmutable, igual que el frontend. Antes de cada deploy se etiqueta la imagen en uso como `chibalete/api:rollback-pre-<SLUG>`.
 - El tag efectivo en producción se consulta con `docker compose config --images`, nunca leyendo un archivo compose suelto. <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
-- Backend: el tag de la imagen api permanece `latest`. El SHA del código backend se rastrea por el `git log` del directorio `/var/www/chibalete/server/` (que es un checkout git en el VPS).
+- El SHA del código backend es el del tag de la imagen (y su digest en `docker inspect`). `.deploy-info` y `/var/www/chibalete/server/` no lo indican.
 
 ### 10.3 Política de retention
-- Imágenes Docker: 5 tags más recientes para rollback (cleanup mensual con `docker image prune --filter "until=720h"`)
+- Imágenes Docker: conservar la imagen en uso y las `rollback-pre-*` necesarias para volver atrás (ver `docs/ops/ROLLBACK_IMAGE_RETENTION_01.md`). Nunca `docker system prune` a ciegas.
 - Backups en `/root/backups/chibalete/`: 7 días
-- `server.old-$TS` en `/var/www/chibalete/`: 7 días, luego cleanup manual
+- Snapshots restic de `structured-backup`: sin `forget`/`prune` hasta una unidad que lo habilite
 
 ---
 
@@ -665,135 +695,108 @@ aplicar) y el **hash del bundle** en F8. Ninguna de las dos es opcional.
 
 ## 12. Flujo correcto deploy backend
 
+Modelo real: **imagen nueva por réplica**. Probado en `secdeps-0a606c0`
+(2026-11-01, `docs/ops/SEC_DEPS_PROD_DEPLOY_01_EVIDENCE.md`) y en las
+unidades anteriores por imagen. `SLUG` = nombre corto de la unidad;
+`SHA7` = commit desplegado.
+
 ```
-FASE B0 — LOCAL PRE-FLIGHT
-  [ ] git status limpio
-  [ ] git rev-parse HEAD
-  [ ] npm run verify → 212+96+9 asserts verdes
-  [ ] npm run typecheck:baseline → errores ≤ baseline conocido (5)
-  [ ] git diff HEAD~10..HEAD package-lock.json
-        → si hay cambios, este sprint NO cubre rebuild de imagen api
-  [ ] tar -czf /tmp/server-$RELEASE.tgz server/ utils/ types/
-        (excluir: node_modules, __test__, *.log)
+FASE B0 — LOCAL
+  [ ] Commit publicado con CI verde completo sobre ese MISMO SHA
+  [ ] Contexto limpio y LF: git -c core.autocrlf=false archive $SHA | tar -x -C $CTX
+  [ ] docker build -f Dockerfile.api -t chibalete/api:$SLUG-$SHA7 $CTX
+  [ ] Inspección de la imagen: contiene lo esperado y nada de data/, secretos ni stores
+  [ ] docker save chibalete/api:$SLUG-$SHA7 | gzip > api-$SLUG-$SHA7.tar.gz
+  [ ] sha256sum del tar anotado
 
-FASE B1 — BACKUP REMOTO  (canónico vía scripts/backup-vps.sh — ver §7.1)
-  [ ] ssh: bash /root/scripts/backup-vps.sh
-            → exit 0 obligatorio. Si exit != 0, ABORT deploy.
-  [ ] ssh: TS=$(ls -1 /root/backups/chibalete | grep -E '^[0-9]{4}-' | tail -1)
-            (capturar el TS del backup recién creado para registro)
-  [ ] ssh: cat /root/backups/chibalete/$TS/metadata.json | jq '.status'
-            → debe ser "ok"
-  [ ] ssh: cp /opt/chibaleteplus/docker-compose.yml \
-              /opt/chibaleteplus/docker-compose.yml.bak-$TS
-            (snapshot extra del compose con el mismo TS — el script ya
-             guarda una copia, este .bak vive en /opt para edición rápida)
+FASE B1 — PREFLIGHT REMOTO  (solo lectura)
+  [ ] 4 containers healthy, RestartCount 0
+  [ ] cd /opt/chibaleteplus && docker compose config --images   # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
+        → imagen efectiva de api_1/api_2 = la esperada
+  [ ] grep -n 'image: chibalete/api:' docker-compose.override.yml
+        → exactamente 2 líneas (api_1 y api_2); otra cosa → STOP
+  [ ] sha256sum docker-compose.override.yml anotado
+  [ ] Último structured-backup correcto y reciente (systemctl status / manifiesto ok)
+  [ ] validate de membresías ok=true y counts de referencia
+  [ ] df: espacio suficiente para el tar y la imagen
 
-FASE B2 — PRE-VALIDATE
-  [ ] # El secreto NO va en argv: `ps` lo muestra a cualquier usuario del host.
-      # Se pasa por un archivo de configuración de curl con modo 0600:
-      #   install -m 0600 /dev/null /tmp/curlrc.$$
-      #   printf 'header = "x-admin-secret: %s"\n' "$SECRET" > /tmp/curlrc.$$
-      #   curl --config /tmp/curlrc.$$ https://chibaleteplus.../api/admin/membership/validate
-      #   shred -u /tmp/curlrc.$$
-      curl --config "$CURLRC" \
-            https://chibaleteplus.../api/admin/membership/validate
-  [ ] confirmar ok=true
-  [ ] capturar baseline counts para post-deploy comparison
-  🔴 Si ok=false → ABORT. Limpiar drift histórico antes de cualquier deploy
+FASE B2 — PREPARAR ROLLBACK  (antes de tocar nada)
+  [ ] mkdir /root/chp-$SLUG
+  [ ] docker tag <imagen actual> chibalete/api:rollback-pre-$SLUG
+  [ ] cp docker-compose.override.yml docker-compose.override.yml.bak-pre-$SLUG-$TS
+  [ ] node scripts/security/safeOperationalEvidence.mjs container-summary chibalete_api_1 chibalete_api_2
+        → /root/chp-$SLUG/ (allowlist de campos; nunca el volcado completo del contenedor, que incluye Config.Env)
+  [ ] /root/chp-$SLUG/ROLLBACK.txt con los pasos de §15 y los tags concretos
 
-FASE B3 — TRANSFERIR CÓDIGO
-  [ ] scp /tmp/server-$RELEASE.tgz root@VPS:/tmp/
-  [ ] ssh: rm -rf /var/www/chibalete/server.staging
-  [ ] ssh: mkdir -p /var/www/chibalete/server.staging
-  [ ] ssh: tar -xzf /tmp/server-$RELEASE.tgz \
-              -C /var/www/chibalete/server.staging
-  [ ] ssh: ls /var/www/chibalete/server.staging/server/server.js → debe existir
+FASE B3 — TRANSFERIR Y CARGAR
+  [ ] scp api-$SLUG-$SHA7.tar.gz root@VPS:/root/chp-$SLUG/
+  [ ] sha256sum en el VPS == el anotado en B0; si no, STOP
+  [ ] docker load ; docker image inspect chibalete/api:$SLUG-$SHA7
 
-FASE B4 — SWAP ATÓMICO
-  [ ] ssh: mv /var/www/chibalete/server \
-              /var/www/chibalete/server.old-$TS
-  [ ] ssh: mv /var/www/chibalete/server.staging/server \
-              /var/www/chibalete/server
-  [ ] ssh: ls /var/www/chibalete/server/server.js → confirmar
-  En este punto: api_1 y api_2 SIGUEN sirviendo con código viejo en RAM.
+FASE B4 — api_1
+  [ ] edge-instance.sh drain api_1 ; esperar ≥ 65 s (keepalive del edge)
+  [ ] sed solo en la línea image: de api_1 del override
+  [ ] docker compose config --images → api_1 nueva, api_2 anterior   # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
+  [ ] docker compose up -d --no-deps --force-recreate api_1
+  [ ] esperar healthy (Health.Status) y /api/health dentro del contenedor
 
-FASE B5 — RESTART STAGGERED api_1
-  [ ] ssh: docker stop chibalete_api_1 --time=30
-  [ ] ssh: docker start chibalete_api_1
-  [ ] ssh: loop max 30s:
-            docker exec chibalete_api_1 \
-              wget -qO- http://localhost:3000/api/health → status=ok
-  🔴 Si NO healthy en 30s → FASE B9 ROLLBACK INMEDIATO
+FASE B5 — GATE api_1  (PASO PROPIO: leer antes de seguir)
+  [ ] logs de api_1 desde el recreate: excepciones, [ERROR], lock, escrituras fallidas
+  [ ] RestartCount 0, digest esperado
+  [ ] clasificar cualquier error; si hay duda → §15 sin tocar api_2
+  [ ] edge-instance.sh rejoin api_1
 
-FASE B6 — VALIDAR api_1 AISLADO
-  [ ] ssh: docker exec chibalete_api_1 \
-            curl -sH "x-admin-secret: $SECRET" \
-            http://localhost:3000/api/admin/membership/validate
-  [ ] confirmar ok=true, counts == baseline
+FASE B6 — api_2  (OTRO comando, solo tras leer B5)
+  [ ] drain api_2 ; 65 s ; sed línea de api_2 ; config --images ; recreate ; healthy
+  [ ] gate de api_2 igual que B5 ; rejoin api_2
 
-FASE B7 — RESTART STAGGERED api_2
-  [ ] ssh: docker stop chibalete_api_2 --time=30
-  [ ] ssh: docker start chibalete_api_2
-  [ ] ssh: loop max 30s para healthy
-  Durante este intervalo: api_1 (NUEVO) sirve, api_2 baja.
-  🔴 Si NO healthy → ROLLBACK PARCIAL
+FASE B7 — POST-VALIDATE
+  [ ] mismo digest en ambas réplicas, RestartCount 0, pool con las dos
+  [ ] /api/health vía edge ×N con ambas instancias
+  [ ] validate ok=true, counts == referencia
+  [ ] smokes de la unidad (§19.2) ; 5xx del edge desde el inicio: 0
+  [ ] stores sin cambios inesperados; sin .tmp ni .lock residuales
+  [ ] structured-backup posterior correcto
 
-FASE B8 — POST-VALIDATE
-  [ ] curl validate vía edge → ok=true, counts == baseline
-  [ ] /api/health desde edge → status=ok en ambas instancias
-  [ ] Smoke A/B/C/D (sección 19)
-  [ ] logs últimos 5min: cero ERROR, cero SECURITY, restarts=0
-
-FASE B9 — REGISTRAR
-  [ ] ssh: echo "$TS backend $RELEASE_TAG <actor>" >> /root/deploys.log
+FASE B8 — REGISTRAR
+  [ ] echo "$TS backend chibalete/api:$SLUG-$SHA7 rollback=rollback-pre-$SLUG override=.bak-pre-$SLUG-$TS actor=<actor>" >> /root/deploys.log
 ```
 
-> 🔴 **Nunca `docker compose down`**. Nunca `docker stop chibalete_api_1 chibalete_api_2` simultáneo.
+> 🔴 **Nunca `docker compose down`**. Nunca recrear `api_1` y `api_2` en el mismo comando.
+>
+> 🔴 **Nunca** reemplazar `/var/www/chibalete/server/` ni ejecutar `scripts/deploy-backend.sh`: es el modelo antiguo y hoy produce un deploy fantasma.
+>
+> ⚠️ Un deploy de código **no** cambia flags, variables de entorno, secretos ni datos. Si la release necesita alguno de esos cambios, va en una unidad u orden separada.
 
 ---
 
-## 13. Restart staggered api_1/api_2
+## 13. Transición réplica a réplica api_1/api_2
 
-**Por qué staggered**: durante el restart de un container, el otro debe seguir sirviendo. Cero downtime.
+**Por qué réplica a réplica**: mientras una réplica cambia de imagen, la otra sigue sirviendo. El edge deja de enviarle tráfico antes del recreate (`drain`) y la vuelve a incluir tras su gate (`rejoin`).
 
 ```
-T0 ───── api_1 [VIEJO en RAM] ──── api_2 [VIEJO en RAM]
-            │                          │
-            │ docker stop --time=30   │
-            │ (drena requests)        │
-            ▼                          │
-T1 ───── api_1 [stopping]          api_2 [VIEJO sirve TODO]
-            │                          │
-            │ docker start              │
-            │ Node lee bind mount      │
-            │ código NUEVO              │
-            ▼                          │
-T2 ───── api_1 [NUEVO en RAM]      api_2 [VIEJO en RAM]
-            │                          │
-            │ wait healthy             │
-            │ validate api_1           │
-            │   ok=true                │
-            │                          │
-            │             docker stop ◀┤
-            │             --time=30    │
-            │                          ▼
-T3 ───── api_1 [NUEVO sirve TODO]  api_2 [stopping]
-            │                          │
-            │             docker start │
-            │             Node lee     │
-            │             código NUEVO │
-            │                          ▼
-T4 ───── api_1 [NUEVO en RAM]      api_2 [NUEVO en RAM]
-                                        │
-                          wait healthy  │
-                          validate api_2│
-                            ok=true     ▼
-T5 ───── ✅ deploy completo
+T0 ── api_1 [imagen VIEJA] ─────────── api_2 [imagen VIEJA]
+          │ drain api_1 (65 s)            │ sirve TODO
+          │ override: image api_1 → NUEVA │
+          │ up -d --no-deps --force-recreate api_1
+          ▼                               │
+T1 ── api_1 [imagen NUEVA, fuera del pool]│
+          │ healthy + gate en paso propio │
+          │ rejoin api_1                  │
+          ▼                               │
+T2 ── api_1 [NUEVA] ───────────────────── api_2 [VIEJA]   ← versiones mezcladas
+                                          │ drain api_2 (65 s)
+                                          │ override: image api_2 → NUEVA
+                                          │ recreate ; healthy ; gate ; rejoin
+                                          ▼
+T3 ── api_1 [NUEVA] ───────────────────── api_2 [NUEVA]  ✅
 ```
 
-> ⚠️ **Coexistencia momentánea de versiones (T2)**: `api_1` con código nuevo sirve junto a `api_2` con código viejo. Durante este intervalo, dos instancias operan sobre los mismos JSONs en disco con `withFileLock` cross-process. Para Sprint 022 (sin cambios de schema) esto es **seguro**. Para deploys futuros que cambien el formato de los JSONs, este modelo NO es válido — requiere parar ambas instancias o migración de schema con backward compatibility.
+> ⚠️ **Versiones mezcladas (T2)**: las dos imágenes operan sobre los mismos datos con `withFileLock` entre procesos. En `secdeps-0a606c0` duró ~100 s. Solo es válido si el código nuevo es compatible hacia atrás con los formatos en disco; un cambio de formato incompatible exige su propio plan.
 
-> ⚠️ `--time=30` da hasta 30s de gracia para drenar requests en curso (uploads de archivos grandes, llamadas largas). Si el deploy ocurre durante un upload de 2 GiB en red lenta, el cliente recibe error y debe reintentar.
+> ⚠️ El `environment` de `api_1` y `api_2` en el override no es igual (tareas que corren en una sola réplica). El `sed` cambia **solo** la línea `image:`; nunca copiar bloques entre réplicas.
+
+> ⚠️ `edge-instance.sh` (copia en `/root/chp-edge-drain-01/`, fuente en `ops/edge/`) se niega a vaciar el pool. El efecto del drain tarda hasta 60 s por el keepalive. La sonda correcta es `GET /api/health` (devuelve la instancia y no pasa por el rate limiter); no usar logins fallidos.
 
 ---
 
@@ -858,53 +861,44 @@ PASO RF.7 — Registrar (variables expandidas EN EL VPS)
 
 ## 15. Rollback backend
 
+El rollback de código restaura **imágenes y override**. **Nunca restaura datos.**
+
 ```
 PRE-REQUISITOS
-  ✓ /var/www/chibalete/server.old-$TS existe
-  ✓ /root/backups/chibalete/$TS/ existe
-  ✓ docker images chibalete/api:latest sigue presente
+  ✓ docker image inspect chibalete/api:rollback-pre-$SLUG  → presente
+  ✓ /opt/chibaleteplus/docker-compose.override.yml.bak-pre-$SLUG-$TS presente
+  ✓ /root/chp-$SLUG/ROLLBACK.txt con los tags concretos
 
 PASO RB.1 — Snapshot del estado fallido
-  ssh: mv /var/www/chibalete/server \
-            /var/www/chibalete/server.failed-$TS
+  ssh: cp docker-compose.override.yml docker-compose.override.yml.failed-$SLUG-$TS
 
-PASO RB.2 — Restaurar código previo (swap atómico inverso)
-  ssh: mv /var/www/chibalete/server.old-$TS \
-            /var/www/chibalete/server
-  ssh: ls /var/www/chibalete/server/server.js → confirmar
+PASO RB.2 — Restaurar el override
+  ssh: cp docker-compose.override.yml.bak-pre-$SLUG-$TS docker-compose.override.yml
+  ssh: docker compose config --images   # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
+        → api_1/api_2 = imagen anterior ; front y edge sin cambio
 
-PASO RB.3 — Restart staggered (mismo patrón que deploy)
-  ssh: docker stop chibalete_api_1 --time=30
-  ssh: docker start chibalete_api_1
-  ssh: wait healthy
-  ssh: docker exec chibalete_api_1 node (validate) → ok=true
-
-  ssh: docker stop chibalete_api_2 --time=30
-  ssh: docker start chibalete_api_2
-  ssh: wait healthy
+PASO RB.3 — Réplica a réplica (mismo patrón que §13)
+  edge-instance.sh drain api_1 ; 65 s ; docker compose up -d --no-deps --force-recreate api_1
+  healthy ; gate en paso propio ; rejoin api_1
+  repetir con api_2 en otro paso
+  (si solo api_1 llegó a cambiar, basta revertir api_1)
 
 PASO RB.4 — Validar
-  curl validate (vía edge) → ok=true
-  comparar counts con baseline pre-deploy original
+  /api/health vía edge con ambas instancias ; validate ok=true
+  comparar counts con la referencia pre-deploy
 
-PASO RB.5 — Decidir sobre data/
-  Si counts coinciden con baseline → rollback completo, NO restaurar data
-  Si counts NO coinciden → posible corrupción de data durante el deploy fallido
-    Decisión humana:
-      Opción A: aceptar el estado actual (no restaurar data)
-                — el deploy escribió cambios legítimos en data
-      Opción B: restaurar data desde backup
-                cp -a /root/backups/chibalete/$TS/data /var/www/chibalete/data
-                cp -a /root/backups/chibalete/$TS/data-critical /var/www/chibalete/data-critical
-                Restart staggered de nuevo
-                ⚠️ Esto retrocede operaciones legítimas que ocurrieron post-deploy.
-                Solo se elige si el daño es claramente mayor que la pérdida.
+PASO RB.5 — Datos
+  El rollback de código NO toca data/, data-critical/, uploads/, identity/,
+  sessions/ ni secrets/. No se limpian locks ni se restauran stores.
+  Si los counts no coinciden: STOP y decisión humana documentada. Restaurar
+  un store desde structured-backup es una operación separada con
+  autorización propia: retrocede operaciones legítimas.
 
 PASO RB.6 — Registrar
-  ssh: echo "$TS rollback backend → estado pre-$TS <actor>" >> /root/deploys.log
+  ssh: echo "$TS ROLLBACK backend chibalete/api:$SLUG-$SHA7 -> rollback-pre-$SLUG reason=<motivo> actor=<actor>" >> /root/deploys.log
 ```
 
-> 🔴 **Política**: rollback de código es siempre seguro y rápido (~60s). Rollback de data es **última opción**, requiere decisión humana, retrocede operaciones reales.
+> 🔴 **Política**: rollback de código es rápido (~2 min por réplica, sin rebuild) porque la imagen anterior sigue en el host. Por eso **no se borra** ninguna `rollback-pre-*` en uso. Rollback de datos es **última opción** y no forma parte de este procedimiento.
 
 ---
 
@@ -999,26 +993,21 @@ VPS
 
 ```
 LOCAL
-[ ] git status limpio
-[ ] git pull --rebase origin master
-[ ] npm run verify → 212+96+9 asserts verdes
-[ ] npm run typecheck:baseline → errores ≤ 5 (baseline conocido)
-[ ] git diff HEAD~10 package-lock.json → vacío (si no, sprint distinto)
-[ ] tar generado, excluyendo node_modules, __test__, *.log
-[ ] anunciar: "deploy backend $RELEASE en T-10min"
+[ ] commit publicado, CI verde sobre ese SHA
+[ ] contexto con git archive (LF, sin untracked)
+[ ] imagen chibalete/api:$SLUG-$SHA7 construida e inspeccionada
+[ ] tar + sha256 anotado
+[ ] ventana del backend acordada y SEPARADA de la del frontend
 
 VPS
-[ ] ssh: df -h /var /root → > 20% disponible
-[ ] ssh: docker ps → 4 containers UP, restarts=0
-[ ] curl validate → ok=true (BLOQUEANTE)
-[ ] ssh: bash /root/scripts/backup-vps.sh → exit 0 (ver §7.1)
-[ ] confirmar /root/backups/chibalete/$TS contiene los 7 archivos esperados
-      (data.tar.gz, data-critical.tar.gz, server.tar.gz, docker-compose.yml,
-       uploads-manifest.txt, metadata.json, backup.log)
-[ ] cat $TS/metadata.json | jq '.status' → "ok"
-[ ] sesión SSH abierta con docker logs -f chibalete_api_1
-[ ] navegador conectado a la app, listo para smoke
-[ ] capturar baseline counts del validate pre-deploy
+[ ] df -h /var /root → espacio suficiente para tar + imagen
+[ ] docker ps → 4 containers UP, healthy, restarts=0
+[ ] docker compose config --images → imagen efectiva esperada   # chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno
+[ ] grep -c 'image: chibalete/api:' docker-compose.override.yml → 2
+[ ] último structured-backup correcto y reciente (BLOQUEANTE)
+[ ] curl validate → ok=true (BLOQUEANTE) y counts de referencia
+[ ] tag rollback-pre-$SLUG, .bak-pre del override y ROLLBACK.txt creados
+[ ] edge-instance.sh status → las dos instancias en el pool
 ```
 
 ---
@@ -1083,8 +1072,9 @@ SMOKES (manuales en navegador, dos sesiones)
 | 11 | Cambiar la imagen de `front` editando el compose **base** mientras el override la fija | Es un **deploy fantasma**: termina sin error y recrea el service con la imagen anterior (§11.1). El destino del swap se determina con `docker compose config --images` | <!-- chp-evidence-ratchet: allow --images-no-imprime-config-ni-entorno -->
 | 11 | Editar `/etc/nginx/sites-available/*` esperando que afecte algo | nginx system NO corre. La config real está dentro del container `chibalete_edge` |
 | 12 | Restart simultáneo de `api_1` y `api_2` | Ambos containers down a la vez = backend caído = todos los requests fallan |
-| 13 | `docker rmi chibalete/api:latest` o cualquier imagen activa | Si los containers se reinician después, no encuentran imagen y fallan |
-| 14 | `git pull` directamente en `/var/www/chibalete/server/` | Salta el flujo de deploy: sin verify, sin backup, sin pre-validate, sin staggered restart |
+| 13 | `docker rmi` de la imagen en uso o de una `rollback-pre-*` vigente | Si los containers se recrean, no encuentran imagen; sin la anterior no hay rollback rápido |
+| 14 | Desplegar reemplazando `/var/www/chibalete/server/` (`git pull`, `scripts/deploy-backend.sh`, copia de archivos) | La carpeta no está montada: deploy fantasma. El backend se despliega por imagen (§12) |
+| 18 | Restaurar stores como parte de un rollback de código | El rollback restaura imágenes y override; un restore de datos retrocede operaciones reales y requiere autorización propia |
 | 15 | Ejecutar el `.deploy-front-*.sh` de un sprint pasado contra una versión nueva | Los scripts son versionados con tags concretos. Reusarlos cross-version puede fallar de formas no obvias |
 | 16 | `chmod -R 777 /var/www/chibalete/` | Pérdida total de control de permisos. No resuelve nada que un mount correcto no resuelva |
 | 17 | Modificar `/opt/chibaleteplus/nginx/nginx.conf` sin `nginx -t` previo | Una syntax error en config → reload falla → edge sigue con config vieja silenciosamente, posible 502 si reinicia |
@@ -1097,20 +1087,21 @@ SMOKES (manuales en navegador, dos sesiones)
 
 | Aspecto | Frontend | Backend |
 |---|---|---|
-| **Imagen Docker** | `chibalete/front:<tag>` con tag inmutable por release | `chibalete/api:latest` (estática, no cambia entre deploys) |
-| **Mounts** | **Ninguno** | 4 bind mounts vivos a `/var/www/chibalete/` |
-| **Dónde vive el código** | Dentro de la imagen | En el host (`/var/www/chibalete/server/`) |
-| **Cómo se actualiza** | Build nueva imagen + recreate container | Reemplazar archivos en host + restart staggered |
-| **Cómo se hace rollback** | Cambiar tag en compose al `OLD_TAG` + recreate | Swap atómico de directorio (`server.old-$TS` ↔ `server`) + restart staggered |
-| **Reload de edge** | ✅ Obligatorio (IP cambió) | ❌ No necesario (containers mantienen IP en restart) |
-| **¿Toca data?** | Nunca (sin mounts) | Lee/escribe (con `withFileLock`) — backup obligatorio |
-| **¿Cambia con cada deploy?** | Casi siempre | Solo si `server/`, `utils/` o `types/` cambiaron |
-| **Tiempo típico** | 2-3 min (build + transfer + reload) | 5-10 min (verify + backup + transfer + 2 restarts staggered + smoke) |
+| **Imagen Docker** | `chibalete/front:<slug>-<sha>`, inmutable | `chibalete/api:<slug>-<sha>`, inmutable |
+| **Dónde vive el código** | Dentro de la imagen | Dentro de la imagen |
+| **Mounts** | `default.conf` y assets (lectura) | 7 mounts de **datos** (§7); `server/` no se monta |
+| **Cómo se actualiza** | Cambiar `image:` de `front` en el override + recreate | Cambiar `image:` de cada réplica en el override + recreate, una a una |
+| **Cómo se hace rollback** | Restaurar el override + recreate con `OLD_TAG` | Restaurar el override + recreate con `rollback-pre-<slug>`, una a una |
+| **Edge** | `nginx -s reload` obligatorio tras el recreate | `edge-instance.sh drain` / `rejoin` por réplica |
+| **¿Toca data?** | Nunca | Lee/escribe en ejecución (con `withFileLock`); el deploy no la modifica |
+| **Ventana** | Propia | Propia, separada de la del frontend |
+| **Tiempo típico** | 2-3 min (transfer + recreate + reload) | ~5 min por réplica con gates |
 
 **Regla mnemotécnica:**
 > ✅ Frontend = imagen inmutable
-> ✅ Backend = bind mount vivo
-> 🔴 Mezclar ambos modelos = deploy roto
+> ✅ Backend = imagen inmutable, réplica a réplica
+> ✅ Rollback = imagen anterior + override anterior, nunca datos
+> 🔴 Reemplazar `/var/www/chibalete/server/` = deploy fantasma
 
 ---
 
@@ -1216,20 +1207,20 @@ ssh root@VPS "docker exec chibalete_edge wget -qO- http://chibalete_api_1:3000/a
 2. Si api_X caído: `docker start chibalete_api_X` y revisar logs.
 3. Si todos UP pero edge sigue 502: `docker exec chibalete_edge nginx -s reload`.
 
-### 22.7 "Working tree dirty en `/var/www/chibalete/server/`"
+### 22.7 "Cambié `/var/www/chibalete/server/` y producción no cambia"
 
-**Causa probable**: alguien editó archivos directamente en el VPS sin pasar por el flow de deploy.
+**Causa**: esa carpeta no está montada en las APIs (§2, §7). El código en ejecución es el de la imagen.
 
 **Diagnóstico:**
 ```bash
-ssh root@VPS "cd /var/www/chibalete/server && git status"
+ssh root@VPS "docker inspect -f '{{.Config.Image}} {{.Image}}' chibalete_api_1 chibalete_api_2"
+ssh root@VPS "docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' chibalete_api_1"
 ```
 
 **Solución:**
-1. **NO descartar** los cambios sin entender qué hacen.
-2. Hacer `git diff` y revisar.
-3. Si son legítimos: traerlos a local, commit, deploy normal.
-4. Si son hotfix de emergencia ya validados: backup del directorio, hacer `git checkout .` para limpiar, y considerar el incidente cerrado.
+1. No volver a editar la carpeta del host: no tiene efecto.
+2. Llevar el cambio al repo, commit, CI y deploy por imagen (§12).
+3. La carpeta y sus `server.old-*` no se borran sin una unidad propia.
 
 ---
 
@@ -1246,7 +1237,8 @@ ssh root@VPS "cd /var/www/chibalete/server && git status"
 | **Restart staggered** | Reiniciar `api_1`, validar, después reiniciar `api_2`. Garantiza zero-downtime |
 | **Server truth** | El backend es la única fuente autoritativa. Cualquier cache (frontend, navegador) es derivado y puede estar stale |
 | **Smoke test** | Verificación manual post-deploy desde el navegador, con sesiones reales, validando flujos críticos (login, Aula Viva, validate) |
-| **Swap atómico** | `mv directoryA directoryB` en mismo filesystem es atómico a nivel kernel. Patrón usado en el deploy backend para reemplazar `/var/www/chibalete/server/` sin estado intermedio |
+| **Swap atómico** | `mv directoryA directoryB` en mismo filesystem es atómico a nivel kernel. Lo usa `edge-instance.sh` en `nginx/dynamic`. **Ya no** se usa para desplegar el backend |
+| **Drain / rejoin** | Sacar una réplica del pool del edge antes de recrearla y devolverla tras su gate (`edge-instance.sh`) |
 | **TS** | Timestamp `YYYYMMDD-HHMMSS` usado para nombrar backups, snapshots y entries en `/root/deploys.log` |
 | **`unless-stopped`** | Restart policy de Docker: el container se reinicia automáticamente si crashea, pero NO si fue parado manualmente con `docker stop` |
 | **Validate endpoint** | `GET /api/admin/membership/validate`. Termómetro estructural de integridad de membresías |
@@ -1266,8 +1258,11 @@ ssh root@VPS "cd /var/www/chibalete/server && git status"
 
 ### Archivos relacionados en el repo
 - `nginx.prod.conf` — referencia local del nginx config; el real vive en VPS
-- `Dockerfile.front` (en `deployment_package/`) — base para construir `chibalete/front:<tag>`
-- `Dockerfile.api` (en `deployment_package/`) — base de `chibalete/api:latest`
+- `Dockerfile.front` (raíz) — construye `chibalete/front:<tag>`
+- `Dockerfile.api` (raíz) — construye `chibalete/api:<tag>` con el código dentro
+- `ops/edge/edge-instance.sh` — drain/rejoin por réplica
+- `ops/backup/CHP-BACKUP-01B/` — runners de `structured-backup`, `uploads-backup` y `backup-verify` (desplegados en `/opt/chibalete-backup`)
+- `scripts/deploy-backend.sh` — **obsoleto** (modelo bind mount); no ejecutar
 - `scripts/backup-vps.sh` — backup operacional canónico (§7.1)
 - `.audit-vps.sh` / `.audit-vps-2.sh` — scripts de auditoría read-only
 - `.deploy-front-*.sh` — scripts de deploy frontend versionados por release

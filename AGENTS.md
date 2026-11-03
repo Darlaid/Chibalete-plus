@@ -69,20 +69,26 @@ Produccion corre en VPS mediante Docker Compose en:
 Servicios principales:
 
 - chibalete_edge: nginx en contenedor, puertos 80/443.
-- chibalete_front: frontend como imagen Docker chibalete/front:<tag>, sin mounts.
-- chibalete_api_1: backend.
-- chibalete_api_2: backend.
+- chibalete_front: frontend como imagen Docker chibalete/front:<tag> (solo monta su default.conf y assets estaticos).
+- chibalete_api_1: backend, imagen chibalete/api:<tag>.
+- chibalete_api_2: backend, misma imagen.
 
 La red Docker de produccion es:
 
 - chibalete_net
 
-El backend usa mounts persistentes:
+El codigo del backend va DENTRO de la imagen (Dockerfile.api). El backend solo monta datos:
 
 - /var/www/chibalete/data -> /app/data
 - /var/www/chibalete/data-critical -> /app/data-critical
 - /var/www/chibalete/public/uploads -> /app/public/uploads
-- /var/www/chibalete/server -> /app/server
+- /var/www/chibalete/identity -> /app/identity
+- /var/www/chibalete/sessions -> /app/sessions
+- /var/www/chibalete/secrets -> /app/secrets (solo lectura)
+
+/var/www/chibalete/server NO esta montado: reemplazarlo no despliega nada.
+Deploy y rollback = cambiar la imagen en docker-compose.override.yml, una
+replica cada vez (ver deployment_guide.md §12-§15). El rollback nunca restaura datos.
 
 ## 5. Reglas absolutas de produccion
 

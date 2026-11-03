@@ -1,5 +1,13 @@
 # Chibalete+ — Panic Card (1-page)
 
+> 🔴 **OBSOLETO para el backend (G4-RELEASE-GATE-01, 2026-11-03).** Este documento
+> describe el modelo de bind mount de `/var/www/chibalete/server/`. Ese directorio
+> **ya no está montado**: el código del backend va dentro de la imagen
+> `chibalete/api:<tag>` y se despliega cambiando la imagen de cada réplica en
+> `docker-compose.override.yml`. Procedimiento vigente: `deployment_guide.md`
+> §12 (deploy), §13 (réplica a réplica) y §15 (rollback). Se conserva como
+> referencia histórica; no ejecutar sus pasos de backend.
+
 > Una hoja. Sólo lo que el operador necesita en pantalla durante el deploy.
 > Si necesitas más detalle: `docs/sprint022-runbook.md`. Pero NO durante un incidente.
 
