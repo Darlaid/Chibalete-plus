@@ -73,7 +73,8 @@ Las 44 obras están `disponible` y no tienen régimen de derechos. **43 de ellas
 | `slug` | `selva-tortuga-gigante` |
 | Título | La tortuga que no se rindió |
 | Descripción | Lee «La tortuga gigante», de Horacio Quiroga, y descubre por qué una tortuga cruzó montes, ríos y pantanos para salvar a un hombre. Al final escribirás lo que piensas y tu mediador te dará su opinión. |
-| Público (`audience`) | Lectores de 7 a 11 años, con acompañamiento del mediador. Piloto: Grado 005. |
+| Público (`audience`) | Lectores de 7 a 11 años, con acompañamiento del mediador. |
+| Cohorte (dato interno de planificación; **no se carga en Studio**, el lector no lo ve) | Piloto: Grado 005 (§3) |
 | Duración (`durationLabel`) | 2 sesiones de 40 minutos |
 | Objetivos | 1. Comprender qué pasa en el cuento y en qué orden. 2. Explicar por qué actúa un personaje usando momentos del texto. 3. Escribir con palabras propias una idea apoyada en el cuento. |
 
