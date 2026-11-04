@@ -29,6 +29,8 @@ import { VisorTextoAccesibleOverlay } from '../components/accesible/VisorTextoAc
 // sin tocar TTS, audioRef ni el lifecycle existente. El TTS sigue siendo
 // 100% manejado por VisorTexto (legacy) en esta fase.
 import { useReadingRuntimeBridge } from '../hooks/useReadingRuntimeBridge';
+// G4-PILOT-UX-03B-FIX — un manifiesto con solo `_meta` no tiene audio reproducible.
+import { manifestAudioState, playableChunkCount } from '../utils/ttsManifest.mjs';
 
 // Cache de TTS legacy eliminada — /api/tts usa Cache-Control: 1h desde el servidor.
 // El navegador evita re-generar el mismo texto sin necesidad de cache en memoria.
@@ -697,7 +699,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     // target > 0, never overwrites a non-zero index the user already moved to in this session.
     useEffect(() => {
         if (!manifest || !user?.id || !content?.id) return;
-        const totalChunks = Object.keys(manifest).length;
+        const totalChunks = playableChunkCount(manifest);
         if (totalChunks <= 0) return;
         const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
         // [RS-DEBUG]
@@ -793,8 +795,18 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         }
     };
 
+    // G4-PILOT-UX-03B-FIX: con manifiesto pero sin fragmentos NO hay audio. Antes el
+    // botón tomaba la vía del manifiesto, no encontraba el fragmento 0 y no hacía
+    // nada, sin avisar. Ahora se dice, y no se simula reproducción alguna.
+    const audioState = manifestAudioState(manifest);
+    const audioUnavailable = audioState === 'unavailable' && language === 'es';
+
     const handleTTS = async () => {
         setAudioError(null);
+        if (audioUnavailable) {
+            setAudioError('Audio no disponible para este libro. Puedes seguir leyendo en pantalla.');
+            return;
+        }
 
         // C1: Guard — prevent double-press while a Gemini request is already in-flight.
         if (audioLoading) return;
@@ -821,7 +833,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
         // OPTION A: TURBO (Manifest pre-generado).
         // C1: Only valid for Spanish — the server generates manifests from ES text only.
         // Non-ES languages fall through to the legacy path.
-        if (manifest && Object.keys(manifest).length > 0 && language === 'es') {
+        if (audioState === 'ready' && language === 'es') {
             // JIT seed (2026-04-26 hotfix): si currentAudioIndex es 0 y hay progreso
             // guardado, calcular el indice correcto AL MOMENTO DEL CLICK. Esto es
             // inmune al reset de linea ~205 (content-load effect que re-fire si user
@@ -830,7 +842,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
             let idxToPlay = currentAudioIndex;
             if (idxToPlay === 0 && user?.id && content?.id) {
                 const prog = dataService.getProgresoUsuarioLibro(user.id, content.id);
-                const totalChunks = Object.keys(manifest).length;
+                const totalChunks = playableChunkCount(manifest);
                 const pct = prog?.canonicalProgress?.globalPercentage ?? prog?.porcentaje ?? 0;
                 if (pct > 0 && totalChunks > 0) {
                     idxToPlay = Math.min(Math.floor((pct / 100) * totalChunks), totalChunks - 1);
@@ -978,14 +990,18 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
                     <button
                         onClick={handleTTS}
                         disabled={audioLoading}
-                        className={`p-2 rounded-full transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${isPlaying ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700 text-indigo-600 dark:text-indigo-400'}`}
+                        // Sin audio el botón sigue siendo enfocable (aria-disabled, no disabled):
+                        // así el teclado y el lector de pantalla también reciben la explicación.
+                        aria-disabled={audioUnavailable || undefined}
+                        className={`p-2 rounded-full transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${audioUnavailable ? 'opacity-50 cursor-not-allowed text-gray-600 dark:text-gray-300' : isPlaying ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700 text-indigo-600 dark:text-indigo-400'}`}
                         title={
+                            audioUnavailable ? 'Audio no disponible para este libro' :
                             audioLoading ? 'Generando audio…' :
                             isPlaying    ? 'Pausar lectura' :
                             manifest && language === 'es' ? 'Leer en voz alta (libro completo)' :
                             'Leer en voz alta (vista previa — primeros 300 caracteres)'
                         }
-                        aria-label={audioLoading ? 'Generando audio' : isPlaying ? 'Pausar lectura' : 'Leer en voz alta'}
+                        aria-label={audioUnavailable ? 'Audio no disponible' : audioLoading ? 'Generando audio' : isPlaying ? 'Pausar lectura' : 'Leer en voz alta'}
                         aria-pressed={isPlaying}
                     >
                         {audioLoading ? <Loader2 size={24} className="animate-spin" /> : (isPlaying ? <VolumeX size={24} /> : <Volume2 size={24} />)}

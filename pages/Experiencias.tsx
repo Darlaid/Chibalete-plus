@@ -15,6 +15,8 @@ import { useAccessCheck } from '../hooks/useAccessCheck';
 import { useMyProgressAvailable } from '../hooks/useMyProgressAvailable';
 // CHP-MOOK-CONTEXTUAL-READING-RETURN-01 — el origen del MOOK viaja por la URL.
 import { withMookContext, resolveReturnNode, MOOK_NODE_PARAM } from '../utils/mookReturn.mjs';
+// G4-PILOT-UX-03B-FIX — textos para lectores de 7 a 11 años (módulo puro, probado aparte).
+import { wordCount, lengthMessage, counterText, learnerErrorMessage } from '../utils/mookLearnerText.mjs';
 import { BookOpen, MessageCircle, ListChecks, PenLine, CheckCircle2, Lock, Circle, Clock, Users, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export const NODE_ICON: Record<string, React.ReactNode> = {
@@ -30,7 +32,6 @@ export const MODULE_STATE_LABEL: Record<string, { text: string; cls: string }> =
     NOT_STARTED: { text: 'Por iniciar', cls: 'bg-gray-100 text-gray-600' },
 };
 
-const wordCount = (t: string) => t.trim().split(/\s+/).filter(Boolean).length;
 
 /** Barra de progreso accesible de la Experiencia. */
 export const ProgressBar: React.FC<{ done: number; total: number }> = ({ done, total }) => (
@@ -159,6 +160,66 @@ export const PrivateJournalEntry: React.FC<{ e: any; node: any }> = ({ e, node }
 };
 
 /**
+ * G4-PILOT-UX-03B-FIX — contador legible: cuántas palabras lleva y qué pide la
+ * consigna. Va ligado al campo por `aria-describedby`; no es región viva para
+ * no anunciar cada tecla.
+ */
+const WordCounter: React.FC<{ id: string; words: number; min: number; max: number }> = ({ id, words, min, max }) => (
+    <span id={id} className={`text-sm ${words >= min && words <= max ? 'text-emerald-800 dark:text-emerald-300 font-bold' : 'text-gray-700 dark:text-gray-200'}`}>
+        {counterText(words, min, max)}
+    </span>
+);
+
+/**
+ * G4-PILOT-UX-03B-FIX — reenvío tras «pedir ajustes». El campo empieza con el
+ * texto EXACTO de la entrega vigente (`currentText`, que el servidor proyecta
+ * solo a su dueño) para mejorarlo, no reescribirlo de memoria. Editar aquí no
+ * toca nada: la versión anterior la conserva el servidor (append-only) y solo
+ * cambia con un reenvío VÁLIDO. Sin guardado automático ni almacenamiento local.
+ */
+const ProductionResubmitForm: React.FC<{ e: any; title: string; min: number; max: number; refresh: () => void }> = ({ e, title, min, max, refresh }) => {
+    const [text, setText] = useState<string>(e.currentText ?? '');
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
+    const base = `resubmit-${e.id}`;
+    const words = wordCount(text);
+    const resubmit = async () => {
+        if (busy) return;
+        const why = lengthMessage(words, min, max);
+        if (why) { setMsg(why); return; }
+        setBusy(true); setMsg(null);
+        const r = await dataService.resubmitProduction(e.id, text);
+        setBusy(false);
+        if (!r.ok) { setMsg(learnerErrorMessage(r, { words, min, max })); return; }
+        refresh();
+    };
+    return (
+        <div className="space-y-2 mt-2">
+            <label htmlFor={base} className="block text-sm font-bold text-gray-800 dark:text-gray-100">Mejora tu texto de «{title}»</label>
+            <p id={`${base}-hint`} className="text-sm text-gray-700 dark:text-gray-200">
+                Aquí está lo que enviaste. Cámbialo con lo que te pidió tu mediador y vuelve a enviarlo. Lo que enviaste antes queda guardado aunque lo cambies.
+            </p>
+            <textarea id={base} value={text} onChange={ev => setText(ev.target.value)} rows={8}
+                aria-describedby={`${base}-hint ${base}-count${msg ? ` ${base}-err` : ''}`}
+                className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-base" />
+            {e.currentText && (
+                <details className="text-sm">
+                    <summary className="cursor-pointer font-bold text-indigo-700 dark:text-indigo-300">Ver lo que enviaste antes</summary>
+                    <p className="mt-1 whitespace-pre-line text-gray-700 dark:text-gray-200">{e.currentText}</p>
+                </details>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <WordCounter id={`${base}-count`} words={words} min={min} max={max} />
+                <button type="button" onClick={resubmit} disabled={busy} className="min-h-[44px] px-5 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">
+                    {busy ? 'Enviando…' : 'Reenviar producción'}
+                </button>
+            </div>
+            {msg && <p id={`${base}-err`} className="text-sm text-red-700 dark:text-red-300" role="alert">{msg}</p>}
+        </div>
+    );
+};
+
+/**
  * NodeShell — nodo actual/expandido: contexto, instrucción, contenido, acción.
  * `preview` (STUDIO-01, C11): mismo renderer sin efectos — completar/enviar
  * NO llaman a la API (cero runs, cero evidencia, cero eventos).
@@ -169,6 +230,11 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
     const [msg, setMsg] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const myEvidence = (route.evidence || []).filter((e: any) => e.nodeId === node.id);
+    // G4-PILOT-UX-03B-FIX: con una entrega ya hecha NO se ofrece un formulario
+    // nuevo vacío; se muestran su estado, la devolución y, si hay ajustes, el reenvío.
+    const production = myEvidence.find((e: any) => e.requiresReview);
+    const pMin = node.config?.minPalabras ?? 150;
+    const pMax = node.config?.maxPalabras ?? 300;
 
     // ESTAS-AQUI-01 — bitácora privada: el backend es la autoridad
     // (`config.privado` viaja en la versión congelada); aquí solo se ajusta el
@@ -180,16 +246,23 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
         if (preview) { setMsg('Vista previa — nada de lo que hagas aquí se guarda.'); return; }
         setBusy(true); setMsg(null);
         const r = await dataService.completeExperienceNode(route.runId, node.id);
-        if (!r.ok) setMsg(r.error ?? 'No se pudo completar');
+        if (!r.ok) setMsg(learnerErrorMessage(r));
         setBusy(false); refresh();
     };
     const send = async (payload: { answers?: string[]; text?: string }) => {
         if (preview) { setMsg('Vista previa — nada de lo que hagas aquí se guarda.'); return; }
         setBusy(true); setMsg(null);
         const r = await dataService.submitExperienceEvidence(route.runId, node.id, payload);
-        if (!r.ok) setMsg(r.error ?? 'No se pudo enviar');
+        if (!r.ok) setMsg(learnerErrorMessage(r, payload.text !== undefined ? { words: wordCount(payload.text), min: pMin, max: pMax } : {}));
         else if (privado) setAnswers([]); // guardada: el borrador local deja de estar «sin guardar»
         setBusy(false); refresh();
+    };
+
+    // La regla de extensión se explica ANTES de enviar; el servidor la vuelve a aplicar.
+    const sendProduction = async () => {
+        const why = lengthMessage(wordCount(text), pMin, pMax);
+        if (why) { setMsg(why); return; }
+        await send({ text });
     };
 
     // Guardado de la bitácora accesible desde el aviso de salida, sin recrear
@@ -235,7 +308,7 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                         sería adivinar. En preview no hay recorrido al que volver. */}
                     <Link to={preview ? `/contenido/${node.resource.id}`
                         : withMookContext(`/contenido/${node.resource.id}`, { experienceId: route?.experienceId, nodeId: node.id })}
-                        className="ml-auto px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-bold">Abrir {NODE_TYPE_LABEL[node.type]?.toLowerCase() ?? ''}</Link>
+                        className="ml-auto px-3 py-2 min-h-[44px] inline-flex items-center rounded-lg bg-indigo-600 text-white text-sm font-bold">{node.type === 'PRODUCTION' ? 'Volver a leer' : `Abrir ${NODE_TYPE_LABEL[node.type]?.toLowerCase() ?? ''}`}</Link>
                 </div>
             )}
             {node.resourceRef && !node.resource && (
@@ -313,18 +386,22 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 </div>
             )}
 
-            {!revisiting && node.type === 'PRODUCTION' && (
+            {node.type === 'PRODUCTION' && (
                 <div className="space-y-2 mt-2">
-                    <p className="text-sm text-gray-600 dark:text-gray-300">{node.config?.consigna}</p>
-                    {node.config?.criterioRevision && <p className="text-xs text-gray-500">Criterio de revisión: {node.config.criterioRevision}</p>}
-                    <label htmlFor={`prod-${node.id}`} className="sr-only">Tu producción</label>
-                    <textarea id={`prod-${node.id}`} value={text} onChange={e => setText(e.target.value)} rows={8}
-                        className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" placeholder="Escribe aquí tu texto…" />
-                    <div className="flex items-center justify-between">
-                        <span className={`text-xs ${wordCount(text) >= (node.config?.minPalabras ?? 150) && wordCount(text) <= (node.config?.maxPalabras ?? 300) ? 'text-emerald-700 font-bold' : 'text-gray-600 dark:text-gray-400'}`}>
-                            {wordCount(text)} palabras ({node.config?.minPalabras ?? 150}–{node.config?.maxPalabras ?? 300})
-                        </span>
-                        <button onClick={() => send({ text })} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Enviar producción</button>
+                    <p className="text-base text-gray-700 dark:text-gray-200">{node.config?.consigna}</p>
+                    {node.config?.criterioRevision && (
+                        <p className="text-sm text-gray-700 dark:text-gray-200 rounded-lg bg-indigo-50 dark:bg-indigo-900/30 p-2"><b>Cómo lo revisará tu mediador:</b> {node.config.criterioRevision}</p>
+                    )}
+                </div>
+            )}
+            {!revisiting && node.type === 'PRODUCTION' && !production && (
+                <div className="space-y-2 mt-2">
+                    <label htmlFor={`prod-${node.id}`} className="block text-sm font-bold text-gray-800 dark:text-gray-100">Tu texto para «{node.title}»</label>
+                    <textarea id={`prod-${node.id}`} value={text} onChange={e => setText(e.target.value)} rows={8} aria-describedby={`prod-${node.id}-count`}
+                        className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-base" placeholder="Escribe aquí tu texto…" />
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <WordCounter id={`prod-${node.id}-count`} words={wordCount(text)} min={pMin} max={pMax} />
+                        <button onClick={sendProduction} disabled={busy} className="min-h-[44px] px-5 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">Enviar producción</button>
                     </div>
                 </div>
             )}
@@ -332,7 +409,12 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
             {myEvidence.map((e: any) => (
                 <div key={e.id} className="mt-3 text-sm rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
                     {e.requiresReview
-                        ? <ProductionStatus e={e} compact />
+                        ? (revisiting
+                            ? <ProductionStatus e={e} compact title={node.title} />
+                            : <>
+                                <ProductionStatus e={e} title={node.title} />
+                                {e.canResubmit && !preview && <ProductionResubmitForm e={e} title={node.title} min={pMin} max={pMax} refresh={refresh} />}
+                            </>)
                         : e.privado
                             ? <PrivateJournalEntry e={e} node={node} />
                             : <span className="text-emerald-700">Respuestas enviadas.</span>}
@@ -345,15 +427,15 @@ export const NodeShell: React.FC<{ node: any; moduleTitle: string; experienceTit
                 finalización, que conserva su jerarquía primaria. Estilo
                 secundario, y `disabled` real en los bordes del recorrido. */}
             {nav && (
-                <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700 flex flex-wrap items-center justify-end gap-2">
+                <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700 flex flex-wrap items-center justify-start sm:justify-end gap-2">
                     <button type="button" onClick={nav.onBack} disabled={!nav.canBack}
                         aria-label="Ver el paso anterior"
-                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                        className="inline-flex items-center gap-1 px-3 py-2 min-h-[44px] rounded-xl border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">
                         <ChevronLeft size={16} aria-hidden /> Atrás
                     </button>
                     <button type="button" onClick={nav.onForward} disabled={!nav.canForward}
                         aria-label="Volver al paso siguiente ya alcanzado"
-                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                        className="inline-flex items-center gap-1 px-3 py-2 min-h-[44px] rounded-xl border border-gray-300 dark:border-gray-600 text-sm font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">
                         Adelantar <ChevronRight size={16} aria-hidden />
                     </button>
                 </div>
@@ -374,78 +456,65 @@ export const PRODUCTION_STATE_LABEL: Record<string, string> = {
     REVIEWED: 'Revisada',
 };
 
-const ProductionStatus: React.FC<{ e: any; compact?: boolean }> = ({ e, compact }) => {
+const ProductionStatus: React.FC<{ e: any; compact?: boolean; title?: string }> = ({ e, compact, title }) => {
     const status = e.status ?? e.review?.status;
     const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleDateString() : '');
     return (
         <div className="text-sm space-y-1">
+            {title && <p className="font-bold text-gray-800 dark:text-gray-100">«{title}»</p>}
             {status === 'REVIEWED'
                 ? <span>Revisada el {fmt(e.review?.reviewedAt)} — <b>{e.review?.decision === 'aprobado' ? 'Aprobada' : 'Con comentarios'}</b>{e.review?.feedback ? <>: <span className="italic">“{e.review.feedback}”</span></> : null}</span>
                 : <span className={status === 'REVISION_REQUESTED' ? 'text-orange-700 font-medium' : 'text-amber-700'}>{PRODUCTION_STATE_LABEL[status] ?? status}</span>}
             {!compact && (e.comments ?? []).length > 0 && (
                 <ul className="pl-3 border-l-2 border-gray-200 dark:border-gray-700 space-y-1">
                     {e.comments.map((c: any, i: number) => (
-                        <li key={i} className="text-xs text-gray-600 dark:text-gray-300 italic">“{c.comment}” <span className="not-italic text-gray-400">· mediación, {fmt(c.at)}</span></li>
+                        <li key={i} className="text-xs text-gray-600 dark:text-gray-300 italic">“{c.comment}” <span className="not-italic text-gray-600 dark:text-gray-400">· mediación, {fmt(c.at)}</span></li>
                     ))}
                 </ul>
             )}
             {!compact && (e.versions ?? []).length > 1 && (
-                <p className="text-xs text-gray-400">Historial: {e.versions.map((v: any, i: number) => `versión ${i + 1} (${fmt(v.submittedAt)})`).join(' · ')} — todas se conservan.</p>
+                <p className="text-xs text-gray-600 dark:text-gray-400">Historial: {e.versions.map((v: any, i: number) => `versión ${i + 1} (${fmt(v.submittedAt)})`).join(' · ')} — todas se conservan.</p>
             )}
         </div>
     );
 };
 
-/** Panel «Tu producción» bajo la ruta: estado + reenvío tras ajustes (D4). */
-const MyProductionPanel: React.FC<{ route: any; refresh: () => void }> = ({ route, refresh }) => {
-    const [text, setText] = useState('');
-    const [busy, setBusy] = useState(false);
-    const [msg, setMsg] = useState<string | null>(null);
+/**
+ * Panel «Tus producciones» bajo la ruta: estado de CADA producción con su
+ * nombre, y el reenvío tras ajustes (D4). G4-PILOT-UX-03B-FIX: si la tarjeta
+ * del nodo visible ya muestra esa producción con su formulario
+ * (`inCardNodeId`), aquí solo se resume, para no ofrecer dos campos para la misma
+ * entrega.
+ */
+const MyProductionPanel: React.FC<{ route: any; refresh: () => void; inCardNodeId?: string | null }> = ({ route, refresh, inCardNodeId = null }) => {
     const productions = (route.evidence || []).filter((e: any) => e.requiresReview);
     if (productions.length === 0) return null;
 
-    const resubmit = async (e: any) => {
-        if (busy) return;
-        setBusy(true); setMsg(null);
-        const r = await dataService.resubmitProduction(e.id, text);
-        setBusy(false);
-        if (!r.ok) { setMsg(r.error ?? 'No se pudo reenviar'); return; }
-        setText('');
-        refresh();
-    };
-
     return (
-        <section aria-label="Tu producción" className="mt-8 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5">
-            <h3 className="font-bold text-gray-800 dark:text-gray-100 mb-3">Tu producción</h3>
-            {productions.map((e: any) => {
-                const node = (route.nodes || []).find((n: any) => n.id === e.nodeId);
-                const min = node?.config?.minPalabras ?? 150;
-                const max = node?.config?.maxPalabras ?? 300;
-                return (
-                    <div key={e.id} className="space-y-3">
-                        <ProductionStatus e={e} />
-                        {e.canResubmit && (
-                            <div className="space-y-2">
-                                <label htmlFor={`resubmit-${e.id}`} className="block text-sm font-medium text-gray-700 dark:text-gray-200">Nueva versión (la anterior se conserva en el historial)</label>
-                                <textarea id={`resubmit-${e.id}`} value={text} onChange={ev => setText(ev.target.value)} rows={8}
-                                    placeholder={e.currentText ? 'Puedes partir de tu versión anterior copiándola aquí…' : 'Escribe tu nueva versión…'}
-                                    aria-describedby={msg ? `resubmit-err-${e.id}` : undefined}
-                                    className="w-full p-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 text-sm" />
-                                <div className="flex items-center justify-between">
-                                    <span className={`text-xs ${wordCount(text) >= min && wordCount(text) <= max ? 'text-emerald-700 font-bold' : 'text-gray-600 dark:text-gray-400'}`}>
-                                        {wordCount(text)} palabras ({min}–{max})
-                                    </span>
-                                    <button type="button" onClick={() => resubmit(e)} disabled={busy} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-50">
-                                        {busy ? 'Enviando…' : 'Reenviar producción'}
-                                    </button>
-                                </div>
-                                {msg && <p id={`resubmit-err-${e.id}`} className="text-sm text-red-600" role="alert">{msg}</p>}
+        <section aria-label="Tus producciones" className="mt-8 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5">
+            <h3 className="font-bold text-gray-800 dark:text-gray-100 mb-3">Tus producciones</h3>
+            <div className="space-y-5">
+                {productions.map((e: any) => {
+                    const node = (route.nodes || []).find((n: any) => n.id === e.nodeId);
+                    const title = node?.title ?? 'Producción';
+                    if (e.nodeId === inCardNodeId) {
+                        return (
+                            <div key={e.id} className="space-y-1">
+                                <ProductionStatus e={e} compact title={title} />
+                                <p className="text-xs text-gray-600 dark:text-gray-400">Está abierta arriba, en su paso del recorrido.</p>
                             </div>
-                        )}
-                    </div>
-                );
-            })}
-
+                        );
+                    }
+                    return (
+                        <div key={e.id} className="space-y-3">
+                            <ProductionStatus e={e} title={title} />
+                            {e.canResubmit && (
+                                <ProductionResubmitForm e={e} title={title} min={node?.config?.minPalabras ?? 150} max={node?.config?.maxPalabras ?? 300} refresh={refresh} />
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
         </section>
     );
 };
@@ -581,7 +650,8 @@ const Experiencias: React.FC = () => {
 
     // ── Cierre (Q) ──
     const renderCierre = () => {
-        const production = (route.evidence || []).find((e: any) => e.requiresReview);
+        const productions = (route.evidence || []).filter((e: any) => e.requiresReview);
+        const titleOf = (nodeId: string) => (route.nodes || []).find((n: any) => n.id === nodeId)?.title ?? 'Producción';
         return (
             <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-8 shadow-xl mb-8">
                 <h1 className="text-3xl font-bold">🎉 Experiencia completada</h1>
@@ -590,15 +660,23 @@ const Experiencias: React.FC = () => {
                         <li key={m.id} className="flex items-center gap-2"><CheckCircle2 size={16} aria-hidden /> {m.title} — {MODULE_STATE_LABEL[m.state]?.text}</li>
                     ))}
                 </ul>
-                {production && (
-                    <div className="mt-4 text-emerald-50">
-                        Tu producción: {production.status === 'REVIEWED'
-                            ? <>Revisada — <b>{production.review?.decision === 'aprobado' ? 'Aprobada' : 'Con comentarios'}</b>{production.review?.feedback ? <>: <span className="italic">“{production.review.feedback}”</span></> : null}</>
-                            : production.status === 'REVISION_REQUESTED'
-                                ? 'Tu mediador te pidió ajustes — reenvíala desde «Revisar recorrido».'
-                                : production.status === 'RESUBMITTED'
-                                    ? 'Reenviada — pendiente de revisión.'
-                                    : 'Pendiente de revisión por tu mediador.'}
+                {productions.length > 0 && (
+                    // Recuadro claro: el texto blanco sobre el degradado no llega a 4,5:1.
+                    <div className="mt-4 rounded-xl bg-white text-gray-800 p-4">
+                        <p className="font-bold">{productions.length === 1 ? 'Tu producción:' : 'Tus producciones:'}</p>
+                        <ul className="mt-1 space-y-1">
+                            {productions.map((p: any) => (
+                                <li key={p.id}>
+                                    «{titleOf(p.nodeId)}»: {p.status === 'REVIEWED'
+                                        ? <><b>{p.review?.decision === 'aprobado' ? 'Aprobada' : 'Revisada, con comentarios'}</b>{p.review?.feedback ? <>: <span className="italic">“{p.review.feedback}”</span></> : null}</>
+                                        : p.status === 'REVISION_REQUESTED'
+                                            ? <><b>tu mediador te pidió ajustes.</b> Pulsa «Revisar recorrido» y búscala en «Tus producciones».</>
+                                            : p.status === 'RESUBMITTED'
+                                                ? 'reenviada, esperando revisión.'
+                                                : 'enviada, esperando que tu mediador la revise.'}
+                                </li>
+                            ))}
+                        </ul>
                     </div>
                 )}
                 <div className="flex flex-wrap gap-3 mt-6">
@@ -669,7 +747,7 @@ const Experiencias: React.FC = () => {
                             </section>
                         ))}
                     </div>
-                    <MyProductionPanel route={route} refresh={refresh} />
+                    <MyProductionPanel route={route} refresh={refresh} inCardNodeId={visibleIdx === frontierIdx ? visibleId : null} />
                 </>
             )}
         </div>
@@ -700,7 +778,7 @@ const Experiencias: React.FC = () => {
                         ))}
                     </div>
                     {detail.hasProduction && (
-                        <p className="text-sm text-gray-500">Incluye una producción que revisará tu mediador.</p>
+                        <p className="text-sm text-gray-500">Incluye textos que escribirás y que revisará tu mediador.</p>
                     )}
                     <ul className="space-y-1">
                         {detail.modules.map((m: any, i: number) => (
@@ -716,7 +794,7 @@ const Experiencias: React.FC = () => {
     );
 
     return (
-        <div className="p-4 md:p-8 md:pt-10 max-w-4xl mx-auto">
+        <div className="p-4 pb-40 md:p-8 md:pt-10 md:pb-10 max-w-4xl mx-auto">
             {!experienceId && (
                 <>
                     <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2 tracking-tight">Experiencias</h1>

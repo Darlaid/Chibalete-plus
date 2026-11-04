@@ -5368,23 +5368,23 @@ class DataService {
         } catch { return null; }
     }
 
-    async completeExperienceNode(runId: string, nodeId: string): Promise<{ ok: boolean; error?: string }> {
+    async completeExperienceNode(runId: string, nodeId: string): Promise<{ ok: boolean; error?: string; code?: string }> {
         try {
             const res = await fetch(`${this.apiUrl}/experiences/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/complete`, {
                 method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}',
             });
             const body = await res.json().catch(() => ({}));
-            return res.ok ? { ok: true } : { ok: false, error: body.error };
+            return res.ok ? { ok: true } : { ok: false, error: body.error, code: body.code };
         } catch { return { ok: false, error: 'Sin conexión' }; }
     }
 
-    async submitExperienceEvidence(runId: string, nodeId: string, payload: { answers?: string[]; text?: string }): Promise<{ ok: boolean; error?: string }> {
+    async submitExperienceEvidence(runId: string, nodeId: string, payload: { answers?: string[]; text?: string }): Promise<{ ok: boolean; error?: string; code?: string }> {
         try {
             const res = await fetch(`${this.apiUrl}/experiences/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/evidence`, {
                 method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
             });
             const body = await res.json().catch(() => ({}));
-            return res.ok ? { ok: true } : { ok: false, error: body.error };
+            return res.ok ? { ok: true } : { ok: false, error: body.error, code: body.code };
         } catch { return { ok: false, error: 'Sin conexión' }; }
     }
 
@@ -5452,14 +5452,14 @@ class DataService {
         } catch { return { ok: false, error: 'Sin conexión con el servidor' }; }
     }
 
-    private async reviewPost(path: string, payload: object): Promise<{ ok: boolean; error?: string }> {
+    private async reviewPost(path: string, payload: object): Promise<{ ok: boolean; error?: string; code?: string }> {
         try {
             const res = await fetch(`${this.apiUrl}${path}`, {
                 method: 'POST', credentials: 'include',
                 headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
             });
             const body = await res.json().catch(() => null);
-            return res.ok ? { ok: true } : { ok: false, error: body?.error ?? `Error ${res.status}` };
+            return res.ok ? { ok: true } : { ok: false, error: body?.error ?? `Error ${res.status}`, code: body?.code };
         } catch { return { ok: false, error: 'Sin conexión con el servidor' }; }
     }
 
