@@ -9,6 +9,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { createLoginLimiters } from './lib/loginRateLimits.mjs';
 // P0.4 — validación estructural centralizada (zod). Aditivo.
 import { validate } from './middleware/validate.js';
 import { loginSchema, resetRequestSchema, resetConfirmSchema } from './schemas/auth.schema.js';
@@ -387,13 +388,11 @@ app.use('/api/', (req, res, next) => {
 // --- AUTH HARDENING: Rate limiters específicos por endpoint sensible ---
 // En dev los límites son relajados para no bloquear pruebas manuales.
 // En prod se aplican límites estrictos contra fuerza bruta.
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: IS_PROD ? 10 : 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' },
-});
+// G4-PILOT-LOGIN-01 — el login ya no cuenta los éxitos contra la IP: un aula
+// detrás de una sola IP agotaba el cupo con inicios de sesión legítimos. Tres
+// barreras (volumen por IP, fallos por IP y fallos por cuenta); ver
+// server/lib/loginRateLimits.mjs. `normalizeEmail` se resuelve al usarse.
+const loginLimiters = createLoginLimiters({ rateLimit, ipKeyGenerator, isProd: IS_PROD, normalizeEmail: (e) => normalizeEmail(e) });
 
 const acceptInviteLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -4985,6 +4984,11 @@ const normalizeRoles = (roles) => {
     return filteredRoles.length > 0 ? filteredRoles : ['lector'];
 };
 
+// G4-PILOT-LOGIN-01 — hash de relleno (coste 10, como los reales) para que un email
+// inexistente tarde lo mismo que una contraseña incorrecta. Aleatorio por proceso:
+// no corresponde a ninguna contraseña conocida y nunca se guarda.
+const LOGIN_TIMING_HASH = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 10);
+
 const hashPasswordIfNeeded = async (password) => {
     if (!password) return undefined;
     if (password.startsWith('$2')) return password; // Already hashed by bcrypt
@@ -5599,7 +5603,7 @@ app.get('/api/users', requireAuth, async (req, res) => {
 });
 
 // LOGIN
-app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async (req, res) => {
+app.post('/api/auth/login', loginLimiters.ip, loginLimiters.ipFailures, validate({ body: loginSchema }), loginLimiters.account, async (req, res) => {
     const { email, password } = req.body;
     const normalizedEmail = normalizeEmail(email);
 
@@ -5665,6 +5669,11 @@ app.post('/api/auth/login', loginLimiter, validate({ body: loginSchema }), async
             return res.json({ success: true, user: sanitizeUserForClient(current) });
         }
     }
+
+    // G4-PILOT-LOGIN-01: sin cuenta (o sin id) no se comparaba ninguna contraseña
+    // y la respuesta llegaba antes que la de una contraseña incorrecta: el tiempo
+    // revelaba qué emails existen. Se compara contra un hash de relleno del mismo coste.
+    if (userIndex === -1 || !users[userIndex]?.id) await bcrypt.compare(String(password ?? ''), LOGIN_TIMING_HASH);
 
     // CHP-PRIVACY-LOGGING-01: sin identidad conocida, solo forma redactada.
     log(`Login fallido: ${redactEmail(normalizedEmail)} ip=${req.ip}`, 'ACCESS');
