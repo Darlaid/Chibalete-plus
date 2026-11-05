@@ -10,6 +10,9 @@ import { fileURLToPath } from 'url';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { createLoginLimiters } from './lib/loginRateLimits.mjs';
+import { createApiLimiter, createApiSubjectResolver } from './lib/apiRateLimit.mjs';
+import { readVerificationKeys } from './lib/sessionSigningKey.js';
+import { verifySessionToken } from './lib/sessionToken.js';
 // P0.4 — validación estructural centralizada (zod). Aditivo.
 import { validate } from './middleware/validate.js';
 import { loginSchema, resetRequestSchema, resetConfirmSchema } from './schemas/auth.schema.js';
@@ -21,7 +24,7 @@ import {
     csrfCheck, allowedOriginsFromEnv, bumpCredentialVersion, credentialVersionOf,
     SESSION_COOKIE, DEFAULT_TTL_SEC, parseCookies,
 } from './lib/sessionAuth.js';
-import { cleanupExpiredSessions } from './db/sessionStore.js';
+import { cleanupExpiredSessions, getSessionState } from './db/sessionStore.js';
 import { createEventsWriteAuth, createLegacyAnalyticsDropGuard } from './lib/eventsWriteAuth.js';
 import { createLibraryActorAuth, institutionalContextIdOf, personalContextIdOf } from './lib/libraryScope.js';
 import * as libraryStore from './lib/libraryStore.js';
@@ -358,16 +361,18 @@ app.use((req, res, next) => (
 // P2-B — latencia/errores por ruta (overhead ~0 si METRICS_ENABLED off).
 app.use(metricsMiddleware);
 
-// Key by userId for authenticated requests — prevents shared school NAT IPs from
-// exhausting a single bucket for all students. Falls back to IP for anonymous traffic.
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 1500,
-    keyGenerator: (req) => req.headers['x-user-id'] || ipKeyGenerator(req),
-    skip: (req) => req.path === '/api/health'
-        || requestPathname(req) === UPLOADS_AUTHZ_PATH,
-    standardHeaders: true,
-    legacyHeaders: false,
+// SEC-API-RATELIMIT-01 — limitador general de /api/. Clave = cuenta de una
+// sesión firmada y viva, o IP real para el resto. Nunca x-user-id ni otra
+// cabecera del cliente. Corre ANTES de la autenticación de cada ruta: verifica
+// la cookie por su cuenta y solo elige el cubo. Ver server/lib/apiRateLimit.mjs.
+const limiter = createApiLimiter({
+    rateLimit, ipKeyGenerator, isProd: IS_PROD,
+    resolveSubject: createApiSubjectResolver({
+        enabled: () => sessionIssuanceEnabled(),
+        parseCookies, cookieName: SESSION_COOKIE,
+        readVerificationKeys, verifySessionToken, getSessionState,
+    }),
+    skipPaths: ['/api/health', UPLOADS_AUTHZ_PATH],
 });
 app.use('/api/', limiter);
 
