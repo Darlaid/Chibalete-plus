@@ -322,6 +322,64 @@ await t('dos réplicas: cada una aplica su cupo; el techo efectivo es 2× y sigu
     } finally { srvA.close(); srvB.close(); }
 });
 
+console.log('\n[7] copia corta de las claves (V7-LOGIN-RELEASE-01)');
+function keyedResolver({ ttl = 5000 } = {}) {
+    const st = { reads: 0, keys: [KEY], fail: false, t: 1_000_000 };
+    const sessions = new Map();
+    const resolve = createApiSubjectResolver({
+        enabled: () => true, parseCookies, cookieName: SESSION_COOKIE, verifySessionToken,
+        readVerificationKeys: async () => { st.reads++; if (st.fail) throw new Error('no key'); return st.keys; },
+        getSessionState: (sid) => sessions.get(sid) || null,
+        keysTtlMs: ttl, now: () => st.t,
+    });
+    const issue = (sub, key = KEY) => {
+        const sid = generateSid(); const iat = Math.floor(Date.now() / 1000);
+        sessions.set(sid, { revoked: false, expired: false, credentialVersion: 0 });
+        return { headers: { cookie: `${SESSION_COOKIE}=${signSessionToken({ sub, sid, iat, exp: iat + 3600, cv: 0 }, key)}` } };
+    };
+    return { st, resolve, issue };
+}
+await t('dentro del TTL: 500 peticiones con sesión, UNA lectura de claves', async () => {
+    const { st, resolve, issue } = keyedResolver();
+    const r = issue('cache-u');
+    for (let i = 0; i < 500; i++) assert.equal((await resolve(r)).kind, 'session');
+    assert.equal(st.reads, 1);
+});
+await t('sin cookie no se leen claves', async () => {
+    const { st, resolve } = keyedResolver();
+    for (let i = 0; i < 50; i++) await resolve({ headers: {} });
+    assert.equal(st.reads, 0);
+});
+await t('al vencer el TTL se relee', async () => {
+    const { st, resolve, issue } = keyedResolver();
+    const r = issue('cache-u');
+    await resolve(r); st.t += 4999; await resolve(r); assert.equal(st.reads, 1);
+    st.t += 2; await resolve(r); assert.equal(st.reads, 2);
+});
+await t('un fallo de lectura no se guarda: anónimo y reintento en la siguiente', async () => {
+    const { st, resolve, issue } = keyedResolver();
+    const r = issue('cache-u');
+    st.fail = true;
+    assert.equal((await resolve(r)).kind, 'anonymous');
+    assert.equal((await resolve(r)).kind, 'anonymous');
+    assert.equal(st.reads, 2, 'cada petición reintenta mientras falla');
+    st.fail = false;
+    assert.equal((await resolve(r)).kind, 'session');
+    await resolve(r);
+    assert.equal(st.reads, 3);
+});
+await t('rotación: la clave nueva vale como sesión tras ≤ TTL; antes cuenta como anónimo, nunca como otra cuenta', async () => {
+    const { st, resolve, issue } = keyedResolver();
+    await resolve(issue('pre'));
+    const NEW = 'k-rotated-' + 'z'.repeat(40);
+    st.keys = [NEW, KEY];
+    const fresh = issue('post-rot', NEW);
+    assert.equal((await resolve(fresh)).kind, 'anonymous', 'dentro del TTL aún no conoce la clave nueva');
+    st.t += 5001;
+    const s = await resolve(fresh);
+    assert.equal(s.kind, 'session'); assert.equal(s.userId, 'post-rot');
+});
+
 assert.equal(erlWarnings.length, 0, `express-rate-limit avisó: ${JSON.stringify(erlWarnings.map((a) => String(a[0]?.code || a[0])))}`);
 console.error = origError;
 console.log(`\napiRateLimit: ${passed} pruebas OK`);

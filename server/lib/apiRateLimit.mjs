@@ -56,6 +56,9 @@ export function apiLimits(isProd) {
 
 const SUBJECT = Symbol('chpApiRateSubject');
 
+/** Vida de la copia de las claves de verificación que usa el resolver. */
+export const API_KEYS_TTL_MS = 5000;
+
 /**
  * @param {{
  *   enabled: () => boolean,              // sessionIssuanceEnabled
@@ -67,14 +70,31 @@ const SUBJECT = Symbol('chpApiRateSubject');
  * }} deps
  * @returns {(req) => Promise<{kind:'session', userId:string}|{kind:'anonymous'}>}
  */
-export function createApiSubjectResolver({ enabled, parseCookies, cookieName, readVerificationKeys, verifySessionToken, getSessionState }) {
+export function createApiSubjectResolver({ enabled, parseCookies, cookieName, readVerificationKeys, verifySessionToken, getSessionState, keysTtlMs = API_KEYS_TTL_MS, now = Date.now }) {
     const ANON = Object.freeze({ kind: 'anonymous' });
+    // V7-LOGIN-RELEASE-01 — releer los dos archivos de clave en CADA petición
+    // costaba ~0,4 ms y −17 % de rendimiento con un aula en saturación. Aquí
+    // las claves solo eligen el cubo, así que basta una copia de pocos
+    // segundos: durante una rotación, como mucho `keysTtlMs` de cubo
+    // anónimo/de cuenta equivocado, nunca un acceso (la autenticación de cada
+    // ruta sigue leyendo las claves en fresco). Un fallo de lectura no se
+    // guarda: la petición siguiente vuelve a intentarlo.
+    let cachedKeys = null;
+    let cachedAt = 0;
+    const verificationKeys = async () => {
+        const t = now();
+        if (cachedKeys && t - cachedAt < keysTtlMs) return cachedKeys;
+        const keys = await readVerificationKeys();
+        cachedKeys = keys;
+        cachedAt = t;
+        return keys;
+    };
     return async function resolveApiSubject(req) {
         try {
             if (!enabled()) return ANON;
             const token = parseCookies(req.headers?.cookie)[cookieName];
             if (!token) return ANON;
-            const keys = await readVerificationKeys();
+            const keys = await verificationKeys();
             const v = verifySessionToken(token, keys);
             if (!v?.ok) return ANON;
             const state = getSessionState(v.payload.sid);
