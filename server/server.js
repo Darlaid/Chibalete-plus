@@ -2673,6 +2673,11 @@ app.get('/api/me/progress', requireUserAuth, async (req, res) => {
         const userId = req.user.id;
         const out = await gamificationMook.readMyProgress(userId, {
             ...gamificationRecognition,
+            // V8-INTEGRATION-01: el ledger es compartido y siempre está al día; el
+            // estado de las entregas debe estarlo también. Con la caché de 30 s por
+            // réplica, una revisión hecha en la otra réplica dejaba la obra «en
+            // revisión» junto a su XP ya reconocido.
+            readMook: () => { _jsonCache.delete(MOOK_DB); return readMook(); },
             readUsers: () => readJSON(USERS_DB), isUserActive, isSyntheticUser,
             titleOf: (id) => readJSON(DB_FILE).find(c => c.id === id)?.titulo ?? null,
             workAccessOf: async (workRef) => {
