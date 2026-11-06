@@ -13,6 +13,7 @@ Este documento va en `12a5050`. Los SHA son los publicados (V8-INTEGRATION-02A).
 | `40f40bd` | Historial de reconocimiento en «Mi progreso» | `server/gamification/progress.mjs`, `utils/myProgressView.mjs`, `pages/MiProgreso.tsx` y sus pruebas |
 | `e8acc6c` | Coherencia entre réplicas de «Mi progreso» + prueba integral HTTP | `server/server.js` (5 líneas), `platformIntegration.test.mjs`, `package.json` |
 | `77c6d38` | Prueba de escala de plataforma | `platformScale.test.mjs`, `package.json` |
+| `da7c436` | «Mi progreso» y agregados leen una sola instantánea WAL (defecto encontrado por CI) | `server/gamification/mookSource.mjs` y regresiones en `myProgress` y `platformIntegration` |
 
 ## 2. Estado de cada componente
 
@@ -25,6 +26,7 @@ Este documento va en `12a5050`. Los SHA son los publicados (V8-INTEGRATION-02A).
 | «Mi progreso»: XP, nivel, logros, obras | **Implementado y probado** | `myProgress`, `myProgressHttp`, `MiProgreso` |
 | Historial: qué, cuándo y por qué | **Faltaba → implementado** (`40f40bd`) | `myProgress` [4b]; `MiProgreso`; `platformIntegration` [9] |
 | Coherencia entre réplicas del estado de las entregas en «Mi progreso» | **Defecto → corregido** (`e8acc6c`): caché de 30 s de `mook_db.json` por réplica | `platformIntegration` [1] [2]; control negativo 52/55 sin el arreglo |
+| Lectura de «Mi progreso» en una sola instantánea | **Defecto → corregido** (`da7c436`): consultas de solo lectura fuera de transacción; un reconocimiento confirmado a mitad de la lectura daba XP total sin obra ni historial. Lo detectó la CI (`identity-preflight`) | `myProgress` [4c], determinista: falla sin el arreglo con la respuesta exacta de CI |
 | Niveles Semilla y Brote | **Implementado y probado** (definitivos) | `progress`, `myProgress` [4] |
 | Raíz, Tallo, Rama y Árbol | **Desconectado a propósito:** provisionales, sin aprobar (G4_UX_01 §350) | `progress.mjs` `PROPOSED_LEVELS` |
 | Logros del catálogo inicial | Implementado y probado. El umbral 5 de «lector-reflexivo» es provisional | `progress.mjs:55` |
