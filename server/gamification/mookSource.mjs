@@ -151,11 +151,14 @@ export async function readMyProgress(userId, deps = {}) {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
         db.pragma('query_only = ON');
-        const out = readWorkProgress(db, userId, {
+        // V8-INTEGRATION-02A: una sola transacción de lectura = una instantánea WAL.
+        // Sin ella, un reconocimiento confirmado a mitad de la lectura daba una
+        // respuesta rota (XP total ya sumado, obra «pendiente» e historial vacío).
+        const out = db.transaction(() => readWorkProgress(db, userId, {
             doc, workRefOf: deps.workRefOf, access, sinceMs, env, now, titleOf: deps.titleOf,
             resolveUser: makeResolveUser(deps.readUsers(), deps.isUserActive, deps.isSyntheticUser),
             isWithdrawn: withdrawnReader(deps.readRights),
-        });
+        }))();
         return { enabled: true, ...out };
     } finally {
         db.close();
@@ -197,7 +200,8 @@ export async function readGroupRecognition(studentIds, deps = {}) {
                 }
             }
         }
-        return readGroupRecognitionCounts(db, studentIds, { eligibleWorkRefs, env, now });
+        // Misma instantánea para todo el grupo (V8-INTEGRATION-02A).
+        return db.transaction(() => readGroupRecognitionCounts(db, studentIds, { eligibleWorkRefs, env, now }))();
     } finally {
         db.close();
     }

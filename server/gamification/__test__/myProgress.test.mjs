@@ -222,6 +222,31 @@ try {
         ok('límite del historial', P.HISTORY_LIMIT === 50);
     }
 
+    section('[4c] instantánea única: un reconocimiento a mitad de la lectura (V8-INTEGRATION-02A)');
+    {
+        // Intercalación determinista: la primera consulta de retirada DENTRO de la
+        // lectura ejecuta el barrido real con la conexión escritora (otra réplica).
+        const g = freshDb();
+        const coherent = (r) => r.xp === r.history.reduce((s, e) => s + e.xp, 0) && r.xp === r.works.reduce((s, w) => s + w.xp, 0);
+        let fired = false, during = null;
+        // `isWithdrawn` (lo devuelve readRights) se consulta dentro de readWorkProgress,
+        // entre la búsqueda del sujeto y el total de XP: ahí se confirma el reconocimiento.
+        const racing = () => () => {
+            if (!fired) {
+                fired = true;
+                during = sweep(g.db, doc, g.env);
+            }
+            return false;
+        };
+        const r = await M.readMyProgress('u-pending', { ...depsFor(doc, g.env), readRights: racing });
+        ok('el barrido se ejecutó a mitad de la lectura', fired && during?.recognized >= 1, JSON.stringify(during));
+        ok('la respuesta es coherente (XP = historial = obras)', coherent(r), JSON.stringify({ xp: r.xp, works: r.works, history: r.history }));
+        ok('y refleja el estado previo: 0 XP y pendiente', r.xp === 0 && workOf(r, 'obra-b')?.state === 'pending_recognition');
+        const after = await M.readMyProgress('u-pending', depsFor(doc, g.env));
+        ok('la lectura siguiente ve el reconocimiento completo', after.xp === 30 && workOf(after, 'obra-b')?.state === 'recognized' && after.history.length === 2 && coherent(after));
+        reopen();
+    }
+
     section('[5] catálogo sin actividades elegibles');
     {
         const r = await M.readMyProgress('u-new', depsFor(doc, env, { denied: ['obra-a', 'obra-b', 'obra-c', 'obra-d'] }));
@@ -292,10 +317,12 @@ try {
             await rejectsCode(M.readMyProgress('u-50', depsFor(doc, env)), 'GAMIFICATION_DB_NOT_LIVE'));
         ok('sin escritor vivo: no se crean -wal/-shm ni cambia la base', fs.readdirSync(dbDir).sort().join() === cold && sha(dbFile) === coldHash, fs.readdirSync(dbDir).join());
         reopen();
-        const src = fs.readFileSync(path.join(HERE, '..', 'mookSource.mjs'), 'utf8');
+        const src = fs.readFileSync(path.join(HERE, '..', 'mookSource.mjs'), 'utf8').replace(/\r\n/g, '\n');
         const fn = src.match(/export async function readMyProgress[\s\S]*?\n}\n/)?.[0] ?? '';
         ok('readMyProgress abre readonly + query_only y no migra', /readonly: true, fileMustExist: true/.test(fn) && /query_only = ON/.test(fn)
-            && !/getGamificationDb|recordWorkRecognition|recordFact|scheduleFact|transaction|ensureSubject/.test(fn));
+            && !/getGamificationDb|recordWorkRecognition|recordFact|scheduleFact|ensureSubject|\.immediate\(|\.exclusive\(/.test(fn)
+            // V8-INTEGRATION-02A: la única transacción es la de lectura (instantánea WAL) alrededor de readWorkProgress.
+            && (fn.match(/transaction/g) ?? []).length === 1 && /db\.transaction\(\(\) => readWorkProgress\(/.test(fn));
         const core = fs.readFileSync(path.join(HERE, '..', 'progress.mjs'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
         ok('progress.mjs sin escrituras SQL', !/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s|\.transaction\(|ensureSubject|recordWorkRecognition|recordFact/.test(core));
     }

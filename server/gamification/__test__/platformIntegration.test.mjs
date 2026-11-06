@@ -203,7 +203,14 @@ async function deliver(srv, who, expId, node = 'p') {
     return { runId, evidenceId: ev.body.evidenceId, status: ev.status };
 }
 const review = async (srv, mediator, evidenceId, decision = 'aprobado') => call(srv, 'POST', `/api/experiences/review/${evidenceId}`, await login(srv, mediator), { decision });
-const progress = async (srv, who) => call(srv, 'GET', '/api/me/progress', await login(srv, who));
+/** Coherencia interna de una respuesta: XP total = historial = suma por obra (una sola instantánea). */
+const torn = [];
+const coherent = (b) => !b || b.enabled !== true || (b.xp === (b.history ?? []).reduce((s, e) => s + e.xp, 0) && b.xp === (b.works ?? []).reduce((s, w) => s + w.xp, 0));
+const progress = async (srv, who) => {
+    const r = await call(srv, 'GET', '/api/me/progress', await login(srv, who));
+    if (r.status === 200 && !coherent(r.body)) torn.push(`${who}: ${r.text.slice(0, 300)}`);
+    return r;
+};
 /** Los ganchos reconocen después de responder: espera a que el XP llegue (o venza). */
 async function waitXp(srv, who, xp, ms = 15_000) {
     let last = null;
@@ -317,6 +324,22 @@ try {
         ok('exactamente un hecho por evidencia', facts() === 9, String(facts()));
     }
 
+    section('[7b] lecturas de Mi progreso durante aprobaciones concurrentes');
+    {
+        const readers = ['a9', 'a10', 'a11'];
+        const evs = await Promise.all(readers.map((u, i) => deliver(i % 2 ? r2 : r1, u, X1, 'p1')));
+        let stop = false, reads = 0;
+        const poll = async (srv, who) => { while (!stop) { await progress(srv, who); reads += 1; } };
+        const pollers = readers.flatMap((u) => [poll(r1, u), poll(r2, u)]);
+        await Promise.all(evs.map((e, i) => review(i % 2 ? r1 : r2, 'm-a2', e.evidenceId)));
+        const done = await Promise.all(readers.map((u, i) => waitXp(i % 2 ? r2 : r1, u, 30)));
+        await sleep(500);
+        stop = true;
+        await Promise.all(pollers);
+        ok('las tres aprobaciones llegan a 30 XP', done.every((x) => x.body?.xp === 30));
+        ok(`${reads} lecturas concurrentes, todas coherentes (XP = historial = obras)`, torn.length === 0 && reads > 20, torn.slice(0, 2).join(' || '));
+    }
+
     section('[8] agregado del mediador');
     {
         const g = await call(r1, 'GET', '/api/groups/g-a1/analytics-summary', await login(r1, 'm-a1'));
@@ -377,7 +400,7 @@ try {
         const done = await Promise.all(rs);
         ok('dos reconciliadores terminan', done.every((d) => d.code === 0), JSON.stringify(done.map((d) => d.out.slice(-200))));
         ok('a8 reconocida una sola vez (30 XP)', (await waitXp(r1, 'a8', 30, 5000)).body?.xp === 30);
-        ok('sin duplicados: 10 hechos y XP total = suma de ciclos', facts() === 10 && sumXp() === db.prepare('SELECT SUM(xp) n FROM gm_work_cycles').get().n, String(facts()));
+        ok('sin duplicados: 13 hechos y XP total = suma de ciclos', facts() === 13 && sumXp() === db.prepare('SELECT SUM(xp) n FROM gm_work_cycles').get().n, String(facts()));
         ok('ledger íntegro', L.verifyLedger(db).ok && db.pragma('integrity_check', { simple: true }) === 'ok');
         ok('PM: ningún movimiento', db.prepare('SELECT COUNT(*) c FROM gm_pm_movements').get().c === 0);
     }
@@ -393,6 +416,9 @@ try {
         ok('tras reiniciar, el progreso es el mismo (sesión, XP e historial)', p.body?.xp === 80 && p.body.history.length === 5, p.text.slice(0, 200));
         ok('los logs de las réplicas no contienen ids de lectores junto a XP', ![r2.logs()].some((l) => /a1[^\n]*\bxp\b/i.test(l)));
     }
+
+    section('[coherencia]');
+    ok('ninguna respuesta de Mi progreso rota en toda la prueba', torn.length === 0, torn.slice(0, 2).join(' || '));
 
     section('[aislamiento]');
     const after = realFingerprint();
