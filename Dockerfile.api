@@ -73,7 +73,11 @@ FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb836
 # FALLA: nunca se construye en silencio con la versión vulnerable.
 # `node` no usa estas libs (enlaza OpenSSL 3.0.x estático); solo las utilidades
 # del sistema de la imagen.
-RUN apk add --no-cache dumb-init 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0'
+#
+# SEC-ZLIB-2026-01 — mismo criterio para zlib (CVE-2026-85091, gz_vacate();
+# fix Alpine 1.3.2-r1). Solo `apk`/`libapk` enlazan libz del sistema; `node`
+# lleva su zlib embebido y los addons nativos no enlazan libz.
+RUN apk add --no-cache dumb-init 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' 'zlib>=1.3.2-r1'
 
 WORKDIR /app
 
