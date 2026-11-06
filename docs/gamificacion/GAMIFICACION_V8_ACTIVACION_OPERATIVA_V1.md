@@ -77,7 +77,7 @@ GO exige **todas** las filas en GO, con su evidencia archivada. Una sola fila en
 | O1 | Acta de reglas | `APROBACION-<approvalRef>.md` fusionado, con el SHA-256 del bloque JSON de A7-A12-V3 §1, `ruleVersion`, entrada en vigor y los **topes `caps`** confirmados (ver §6, H1) | Commit del acta |
 | O2 | Release de desbloqueo | Imagen con `mook_review` fuera de `XP_LOCKED_SOURCES`, CI 3/3 verde, Trivy 0 HIGH/CRITICAL y laboratorio con XP activo idéntico al de V8 | Evidencia de la unidad de release |
 | O3 | Clave de sujeto | El archivo existe en las dos réplicas con modo `0400` y su copia de custodia está confirmada | Comprobación de modo y existencia, sin leer el valor; acuse del custodio |
-| O4 | Registro | Volumen propio, distinto de `data/` y `data-critical/`, montado rw en las dos réplicas, con archivo vacío y copia separada configurada | `docker inspect` (montajes), `wc -l` = 0, acuse del custodio |
+| O4 | Registro | Volumen propio, distinto de `data/` y `data-critical/`, montado rw en las dos réplicas, con archivo vacío y copia separada configurada | Montajes con `node scripts/security/safeOperationalEvidence.mjs container-summary <réplica>` (nunca el entorno completo), `wc -l` = 0, acuse del custodio |
 | O5 | Respaldo | Último `structured-backup` correcto con menos de 24 h; ninguno en curso durante la ventana | `journalctl` del servicio |
 | O6 | Producción sana | Cuatro contenedores healthy, 0 5xx en la última hora, disco > 20 GB | Preflight del runbook de despliegue |
 | O7 | Contenido elegible | Solo existen las experiencias con PRODUCTION que se van a publicar, y ninguna se ha publicado antes del corte | Lectura de `mook_db.json` |
