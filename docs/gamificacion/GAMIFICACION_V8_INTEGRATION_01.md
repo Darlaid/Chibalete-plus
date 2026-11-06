@@ -2,15 +2,17 @@
 
 **Fecha:** 2026-11-06. **Veredicto:** `GREEN_LOCAL_V8_INTEGRATION`. **Sin push, sin despliegue y sin activar nada en producción.**
 
-**Base:** rama `chp/epub-mainfile-r1-release`. Producción: API `zlib-6d09d47` ×2, front `uxfix-b18f6f0`, G4 inerte (sin flags, sin clave, sin registro y sin `gamification.db`). La especificación B1 (`67a544e`) se conserva como antecedente local: no se implementa ni se publica como plan vigente.
+**Base:** rama `chp/epub-mainfile-r1-release`. Producción: API `zlib-6d09d47` ×2, front `uxfix-b18f6f0`, G4 inerte (sin flags, sin clave, sin registro y sin `gamification.db`). La especificación B1 (lista de participantes) se descartó y no forma parte de esta rama.
 
 ## 1. Commits
 
+Este documento va en `12a5050`. Los SHA son los publicados (V8-INTEGRATION-02A).
+
 | Commit | Responsabilidad | Archivos |
 |---|---|---|
-| `c37afb8` | Historial de reconocimiento en «Mi progreso» | `server/gamification/progress.mjs`, `utils/myProgressView.mjs`, `pages/MiProgreso.tsx` y sus pruebas |
-| `70b0f24` | Coherencia entre réplicas de «Mi progreso» + prueba integral HTTP | `server/server.js` (5 líneas), `platformIntegration.test.mjs`, `package.json` |
-| `5ddd2b1` | Prueba de escala de plataforma | `platformScale.test.mjs`, `package.json` |
+| `40f40bd` | Historial de reconocimiento en «Mi progreso» | `server/gamification/progress.mjs`, `utils/myProgressView.mjs`, `pages/MiProgreso.tsx` y sus pruebas |
+| `e8acc6c` | Coherencia entre réplicas de «Mi progreso» + prueba integral HTTP | `server/server.js` (5 líneas), `platformIntegration.test.mjs`, `package.json` |
+| `77c6d38` | Prueba de escala de plataforma | `platformScale.test.mjs`, `package.json` |
 
 ## 2. Estado de cada componente
 
@@ -21,8 +23,8 @@
 | Ganchos MOOK (revisión, recorrido) y reconciliadores síncrono y por lotes | **Implementado y probado**; cableado en `server.js:2657`, `:3173` y `:12974` | `mookHooksHttp`, `mookReconcileBatched`, `platformIntegration` [11] |
 | Exclusión con restauración y reaplicación | **Implementado y probado** | `exclusion`, PRIV-C7, `platformIntegration` [6] |
 | «Mi progreso»: XP, nivel, logros, obras | **Implementado y probado** | `myProgress`, `myProgressHttp`, `MiProgreso` |
-| Historial: qué, cuándo y por qué | **Faltaba → implementado** (`c37afb8`) | `myProgress` [4b]; `MiProgreso`; `platformIntegration` [9] |
-| Coherencia entre réplicas del estado de las entregas en «Mi progreso» | **Defecto → corregido** (`70b0f24`): caché de 30 s de `mook_db.json` por réplica | `platformIntegration` [1] [2]; control negativo 52/55 sin el arreglo |
+| Historial: qué, cuándo y por qué | **Faltaba → implementado** (`40f40bd`) | `myProgress` [4b]; `MiProgreso`; `platformIntegration` [9] |
+| Coherencia entre réplicas del estado de las entregas en «Mi progreso» | **Defecto → corregido** (`e8acc6c`): caché de 30 s de `mook_db.json` por réplica | `platformIntegration` [1] [2]; control negativo 52/55 sin el arreglo |
 | Niveles Semilla y Brote | **Implementado y probado** (definitivos) | `progress`, `myProgress` [4] |
 | Raíz, Tallo, Rama y Árbol | **Desconectado a propósito:** provisionales, sin aprobar (G4_UX_01 §350) | `progress.mjs` `PROPOSED_LEVELS` |
 | Logros del catálogo inicial | Implementado y probado. El umbral 5 de «lector-reflexivo» es provisional | `progress.mjs:55` |
