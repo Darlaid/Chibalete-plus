@@ -141,7 +141,7 @@ try {
     section('[7] bloqueos G4');
     const P = await import('../policy.mjs');
     ok('toda fuente sigue sin PM', Object.keys(P.SOURCE_GRADE).every((s) => P.PM_LOCKED_SOURCES.includes(s)));
-    ok('solo ruta y misión admiten XP', Object.keys(P.SOURCE_GRADE).filter((s) => !P.XP_LOCKED_SOURCES.includes(s)).sort().join() === 'mission,mook_experience');
+    ok('por facts solo ruta y misión admiten XP (la revisión, solo por reconocimiento)', Object.keys(P.SOURCE_GRADE).filter((s) => !P.isXpLockedForFacts(s)).sort().join() === 'mission,mook_experience' && P.XP_RECOGNITION_ONLY_SOURCES.join() === 'mook_review');
     ok('ningún PM emitido en toda la suite', count('gm_pm_movements') === 0);
     D.closeGamificationDb({ resetBackoff: true });
     ok('reconciliar sin clave de sujeto falla cerrado', await (async () => {

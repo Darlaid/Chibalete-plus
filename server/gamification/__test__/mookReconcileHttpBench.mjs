@@ -1,7 +1,7 @@
 /**
  * mookReconcileHttpBench.mjs — CHP-GAMIFICACION-G4-PERF-01B. Banco de medición, no es una prueba.
  *
- * `server.js` real, sin arnés (`mook_review` sigue bloqueada como en producción),
+ * `server.js` real, sin arnés (código real; desde V8-ACTIVATE-PREP-01 `mook_review` reconoce),
  * con un store MOOK sintético de N evidencias en disco. Una sonda en este proceso
  * consulta `/api/health` cada 5 ms mientras corre el barrido programado; el
  * barrido termina cuando el servidor registra los hechos recuperados.

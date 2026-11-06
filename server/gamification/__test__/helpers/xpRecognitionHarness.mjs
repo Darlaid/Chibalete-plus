@@ -1,10 +1,10 @@
 /**
  * xpRecognitionHarness.mjs — CHP-GAMIFICACION-G4-05A-4.
  *
- * `mook_review` sigue bloqueada para XP en producción. Para probar la emisión por
- * obra y ciclo sin dejar un atajo, este arnés registra un hook de carga que la
- * libera solo en ESTE proceso de prueba, como pmMechanicsHarness con `mission`.
- * El bloqueo de PM no cambia. Debe importarse antes que `policy.mjs`.
+ * Liberaba `mook_review` de `XP_LOCKED_SOURCES` solo en el proceso de prueba.
+ * Desde V8-ACTIVATE-PREP-01 el código real ya no la bloquea para XP (solo por
+ * reconocimiento, nunca por `facts` ni con PM): el hook no cambia nada y se
+ * conserva para que las suites que lo importan carguen igual.
  */
 import { register } from 'node:module';
 

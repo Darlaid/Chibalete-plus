@@ -3,8 +3,8 @@
  *
  * Recorrido completo de gamificación por HTTP sobre DOS réplicas reales de
  * server.js (stores temporales compartidos, sesiones firmadas en modo enforce,
- * usuarios sintéticos). `mook_review` se libera solo en estos procesos con el
- * arnés de prueba: producción sigue bloqueada.
+ * usuarios sintéticos). Desde V8-ACTIVATE-PREP-01 el arnés ya no cambia nada:
+ * es el código real de `mook_review`.
  *  [1] lector individual (regla de usuario, revisa administración)
  *  [2] lector de colegio: 1.ª y 2.ª aprobación, ajustes y reenvío, duplicados
  *  [3] dos colegios, mediadores de grupos distintos: alcance de revisión

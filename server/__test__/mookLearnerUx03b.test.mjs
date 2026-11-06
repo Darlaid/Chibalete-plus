@@ -146,7 +146,7 @@ t('el backend y las reglas no cambian', () => {
     assert.match(ds, /return res\.ok \? \{ ok: true \} : \{ ok: false, error: body\.error, code: body\.code \};/);
     const store = read('server/lib/experienceStore.js');
     assert.match(store, /throw err\('PRODUCTION_LENGTH'/);
-    assert.match(read('server/gamification/policy.mjs'), /XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/);
+    assert.match(read('server/gamification/policy.mjs'), /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/); // V8-ACTIVATE-PREP-01: sin XP por facts
 });
 
 console.log(`\nmookLearnerUx03b: ${passed} tests OK`);

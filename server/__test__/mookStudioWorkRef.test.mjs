@@ -183,7 +183,7 @@ try {
         ok('flags OFF: sin gamification.db', !fs.existsSync(gam));
         ok('regalías sin cambios', (fs.existsSync(db('royalties.db')) ? sha(db('royalties.db')) : null) === royaltiesAtBoot);
         const policy = fs.readFileSync(path.join(REPO, 'server', 'gamification', 'policy.mjs'), 'utf8');
-        ok('`mook_review` sigue bloqueada', /XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy));
+        ok('`mook_review` sin XP por facts: solo por reconocimiento aprobado', /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policy) && /PM_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy));
     }
 
     section('[5] Studio (estructural)');

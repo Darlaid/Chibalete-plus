@@ -287,7 +287,7 @@ export function workCycleHistory(db, subjectRef, workKey) {
  *
  * Sin escritura, y con la clave libre, si:
  *  - `XP_EARNING_ENABLED` está apagado;
- *  - `mook_review` sigue en `XP_LOCKED_SOURCES`, el bloqueo vigente en producción;
+ *  - `mook_review` está en `XP_LOCKED_SOURCES` (interruptor de código: hoy fuera, V8-ACTIVATE-PREP-01);
  *  - la regla activa no trae `recognition` aprobado y completo;
  *  - no queda XP que emitir para esta evidencia.
  *

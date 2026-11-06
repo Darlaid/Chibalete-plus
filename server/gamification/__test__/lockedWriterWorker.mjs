@@ -1,7 +1,8 @@
 /**
  * lockedWriterWorker.mjs — CHP-GAMIFICACION-G4-XP-EMISSION-01.
- * Proceso SIN arnés, como producción: con flags y regla aprobada, el escritor no
- * debe escribir. Lo lanza xpPilotEmission.test.mjs.
+ * Proceso SIN arnés, como producción. Desde V8-ACTIVATE-PREP-01 el código real
+ * reconoce la revisión cuando hay flags, clave, registro y regla aprobada; repetirlo
+ * no escribe nada. Lo lanza xpPilotEmission.test.mjs.
  */
 import '../../__test__/helpers/testMode.mjs';
 

@@ -2,11 +2,11 @@
  * xpPilotEmission.test.mjs — CHP-GAMIFICACION-G4-XP-EMISSION-01.
  *
  * El modelo aprobado (A7-A12-V3) sobre el escritor real, con bases temporales y
- * usuarios sintéticos. El arnés libera `mook_review` solo en este proceso:
- * producción sigue bloqueada, y [8] lo prueba en un proceso sin arnés.
+ * usuarios sintéticos. Desde V8-ACTIVATE-PREP-01 el arnés no cambia nada: [8]
+ * prueba el código real en un proceso sin arnés.
  *  [1] configuración  [2] primera, segunda y tercera evidencia  [3] doble emisión
  *  [4] dos procesos  [5] reinicio y restauración  [6] derechos  [7] exclusión,
- *  PM y retroactividad  [8] bloqueo de producción
+ *  PM y retroactividad  [8] código real sin arnés
  * Nunca toca data/ ni data-critical/.
  *
  *   node server/gamification/__test__/xpPilotEmission.test.mjs
@@ -157,8 +157,8 @@ try {
         ok('la API directa tampoco', L.recordWorkRecognition(db2, { evidenceId: ev.id, userId: 'lector', actorId: 'mediador', at: Date.parse(ev.review.reviewedAt), workRef: 'obra-a', decision: 'aprobado' }, { env }).inserted === false && sumXp(db2) === 30);
         ok('tres rutas sobre una obra respetan el techo', (() => { for (const s of ['b', 'c']) deliver(doc, route(doc, s)); sweep(db2, doc, env); return sumXp(db2) === 50; })());
         const fx = fresh(null);
-        const conflict = throwsCode(() => L.createRuleSet(fx.db, { ruleVersion: 'gm-x', createdBy: 'migration', now: SINCE, rules: rules({ facts: { 'mook_review/evidence_reviewed': { xp: 5 } } }) }), 'RECOGNITION_RULE_CONFLICT');
-        ok('una regla no puede pagar la revisión por la vía antigua', conflict);
+        const conflict = throwsCode(() => L.createRuleSet(fx.db, { ruleVersion: 'gm-x', createdBy: 'migration', now: SINCE, rules: rules({ facts: { 'mook_review/evidence_reviewed': { xp: 5 } } }) }), 'XP_SOURCE_LOCKED');
+        ok('una regla no puede pagar la revisión por la vía antigua (la rechaza la política)', conflict);
         ok('sin hechos residuales', count(fx.db, 'gm_rule_sets') === 0);
         I.closeIntake({ resetBackoff: true });
         D.closeGamificationDb({ resetBackoff: true });
@@ -256,20 +256,31 @@ try {
         D.closeGamificationDb({ resetBackoff: true });
     }
 
-    section('[8] el bloqueo no se levanta por accidente');
+    section('[8] código real, sin arnés (V8-ACTIVATE-PREP-01)');
     {
-        const { env } = fresh();
+        const { db, env } = fresh();
         D.closeGamificationDb({ resetBackoff: true });
-        const out = await new Promise((resolve) => {
+        const runWorker = () => new Promise((resolve) => {
             const c = spawn(process.execPath, [path.join(HERE, 'lockedWriterWorker.mjs')], { env: { ...process.env, ...env, ROYALTIES_DB: ROY }, stdio: ['ignore', 'pipe', 'pipe'] });
             let o = ''; c.stdout.on('data', (d) => { o += d; }); c.stderr.on('data', (d) => { o += d; });
-            c.on('close', (code) => resolve({ code, o }));
+            c.on('close', (code) => resolve({ code, o, res: JSON.parse(o.trim().split('\n').pop() || '{}') }));
         });
-        const res = JSON.parse(out.o.trim().split('\n').pop() || '{}');
-        ok('sin arnés, con flags y regla aprobada: bloqueado', out.code === 0 && res.reason === 'source_locked' && res.xp === 0, out.o.slice(-300));
-        ok('ninguna escritura', res.facts === 0 && res.cycles === 0 && res.entries === 0, JSON.stringify(res));
+        const first = await runWorker();
+        ok('sin arnés, con flags, clave, registro y regla aprobada: 30 XP', first.code === 0 && first.res.inserted === true && first.res.xp === 30, first.o.slice(-300));
+        ok('un hecho, lectura y reflexión, una entrada de XP', first.res.facts === 1 && first.res.cycles === 2 && first.res.entries === 1, JSON.stringify(first.res));
+        const second = await runWorker();
+        ok('repetir en otro proceso: 0 adicional, sin filas nuevas', second.code === 0 && second.res.inserted === false && second.res.xp === 0 && second.res.facts === 1 && second.res.entries === 1, JSON.stringify(second.res));
+        const db2 = D.getGamificationDb({ env });
+        ok('sin PM', noPm(db2));
+        const P = await import('../policy.mjs');
+        ok('la vía genérica no puede pagar XP por revisión', throwsCode(() => P.validateRules({ schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST }), 'XP_SOURCE_LOCKED'));
+        ok('ni con reglas sin recognition', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-facts', createdBy: 'migration', rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } } }), 'XP_SOURCE_LOCKED'));
+        ok('ni con una regla ya guardada', P.decideEmission({ rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } }, source: 'mook_review', factType: 'evidence_reviewed', eligibility: 'eligible', features: {}, xpEnabled: true, pmEnabled: false, usage: { day: 0, week: 0, daySource: 0 } }).xp === 0);
+        const rf = L.recordFact(db2, { source: 'mook_review', sourceEventId: 'ev-generico', factType: 'evidence_reviewed', userId: 'lector', actorId: 'mediador', occurredAt: Date.now(), eligibility: 'eligible' }, { env });
+        ok('recordFact de una revisión: observado, sin fila ni clave ocupada', rf.decision === 'observed' && rf.persisted === false && count(db2, 'gm_source_facts') === 1);
+        D.closeGamificationDb({ resetBackoff: true });
         const policy = fs.readFileSync(path.join(HERE, '..', 'policy.mjs'), 'utf8');
-        ok('`mook_review` sigue en XP_LOCKED_SOURCES y PM_LOCKED_SOURCES', /XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy) && /PM_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy));
+        ok('`mook_review`: fuera de XP_LOCKED_SOURCES, solo por reconocimiento y sin PM', !/XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy) && /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policy) && /PM_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy));
         const product = [];
         const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name === '__test__' || e.name === 'node_modules') continue; const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.(mjs|js)$/.test(e.name)) product.push(p); } };
         walk(path.join(REPO, 'server'));

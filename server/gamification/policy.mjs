@@ -28,14 +28,25 @@ export const LOCKED_SOURCES = Object.freeze(['reading_completion']);
  * G4-04. Bloqueos por código, por encima de cualquier regla:
  *  - lectura libre y ruta MOOK nunca dan PM: no demuestran comprensión (A1);
  *  - una misión es institucional: nunca da PM personales (D38);
- *  - revisión y validación necesitan cobertura verificable de obra y ciclo, que
+ *  - la validación presencial necesita cobertura verificable de obra y ciclo, que
  *    aún no existe. Sin ella no se puede aplicar la unicidad de PM ni el techo de
- *    XP por obra (A4), así que tampoco dan XP. Se registran como `observed`.
+ *    XP por obra (A4), así que tampoco da XP. Se registra como `observed`.
+ *
+ * V8-ACTIVATE-PREP-01: la revisión MOOK ya tiene esa cobertura (obra y ciclo en
+ * `gm_work_cycles`) y sale de `XP_LOCKED_SOURCES`, pero SOLO por el reconocimiento
+ * aprobado (`ledger.recordWorkRecognition`: `approvalRef`, techo por obra, corte,
+ * acceso explícito, clave y registro). Por la vía genérica de `facts` sigue sin
+ * poder dar XP: pagarla allí esquivaría el techo y el acta, y ocuparía la clave
+ * del hecho que usa el reconocimiento.
  */
 export const PM_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_experience', 'mission', 'mook_review', 'offline_validation']);
-export const XP_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_review', 'offline_validation']);
-/** ¿Esta fuente no puede emitir nada, sean cuales sean las reglas? */
-export const isEmissionLocked = (source) => PM_LOCKED_SOURCES.includes(source) && XP_LOCKED_SOURCES.includes(source);
+export const XP_LOCKED_SOURCES = Object.freeze(['reading_completion', 'offline_validation']);
+/** Fuentes cuyo XP solo puede venir del reconocimiento aprobado, nunca de `facts`. */
+export const XP_RECOGNITION_ONLY_SOURCES = Object.freeze(['mook_review']);
+/** ¿La vía genérica (`facts`, `recordFact`) tiene prohibido dar XP a esta fuente? */
+export const isXpLockedForFacts = (source) => XP_LOCKED_SOURCES.includes(source) || XP_RECOGNITION_ONLY_SOURCES.includes(source);
+/** ¿Esta fuente no puede emitir nada por la vía genérica, sean cuales sean las reglas? */
+export const isEmissionLocked = (source) => PM_LOCKED_SOURCES.includes(source) && isXpLockedForFacts(source);
 
 export const ELIGIBILITY = Object.freeze([
     'eligible', 'observe',
@@ -78,7 +89,7 @@ export function validateRules(rules, { featureAllowlist }) {
             throw bad('READING_EMISSION_LOCKED', `${key}: la lectura terminada sigue en observación`);
         }
         if (PM_LOCKED_SOURCES.includes(source) && (r.pm ?? 0) > 0) throw bad('PM_SOURCE_LOCKED', `${key}: esta fuente no puede emitir PM`);
-        if (XP_LOCKED_SOURCES.includes(source) && (r.xp ?? 0) > 0) throw bad('XP_SOURCE_LOCKED', `${key}: esta fuente no puede emitir XP`);
+        if (isXpLockedForFacts(source) && (r.xp ?? 0) > 0) throw bad('XP_SOURCE_LOCKED', `${key}: esta fuente no puede emitir XP por facts`);
         if (r.emitWhen !== undefined) {
             if (!r.emitWhen || typeof r.emitWhen !== 'object' || Array.isArray(r.emitWhen)) throw bad('INVALID_RULES', `${key}.emitWhen`);
             const allowed = new Set(featureAllowlist[source] || []);
@@ -126,7 +137,7 @@ export function decideEmission({ rules, source, factType, eligibility, features,
         if (!vals.includes(features?.[f])) return none('observed');
     }
     // Los bloqueos valen también para un conjunto de reglas ya guardado.
-    const ruleXp = XP_LOCKED_SOURCES.includes(source) ? 0 : (rule.xp ?? 0);
+    const ruleXp = isXpLockedForFacts(source) ? 0 : (rule.xp ?? 0);
     const rulePm = PM_LOCKED_SOURCES.includes(source) ? 0 : (rule.pm ?? 0);
     if (isEmissionLocked(source)) return none('observed');
     if (!xpEnabled && !pmEnabled) return none('disabled_source');

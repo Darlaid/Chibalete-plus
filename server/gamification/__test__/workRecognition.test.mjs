@@ -323,7 +323,7 @@ try {
         const P = await import('../policy.mjs');
         ok('PM sigue bloqueado aun con el arnés', P.PM_LOCKED_SOURCES.includes('mook_review'));
         const policySrc = fs.readFileSync(path.join(HERE, '..', 'policy.mjs'), 'utf8');
-        ok('en el código real `mook_review` sigue bloqueada para XP', /XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policySrc));
+        ok('en el código real `mook_review` solo da XP por reconocimiento (V8-ACTIVATE-PREP-01)', !/XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policySrc) && /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policySrc));
         ok('ninguna regla puede pagar PM por revisión', throwsCode(() => P.validateRules({ schema: 1, caps: { pmPerDay: 1, pmPerWeek: 1 }, facts: { 'mook_review/evidence_reviewed': { pm: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST }), 'PM_SOURCE_LOCKED'));
         const src = fs.readFileSync(path.join(HERE, '..', 'ledger.mjs'), 'utf8').split('export function recordWorkRecognition')[1].split('/** ¿Ya existe este hecho?')[0];
         ok('el registro no escribe PM', !/gm_pm_movements|insertMovement/.test(src));
@@ -458,7 +458,7 @@ try {
         const look = () => { const c = new Database(gamDb, { readonly: true }); const r = { cycles: c.prepare('SELECT COUNT(*) n FROM gm_work_cycles').get().n, xp: c.prepare('SELECT COUNT(*) n FROM gm_xp_entries').get().n, pm: c.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n }; c.close(); return r; };
         await sleep(1500); // margen para el gancho posterior a la respuesta
         const seen = look();
-        ok('flags ON y parámetros válidos: el bloqueo de código impide escribir', seen.cycles === 0 && seen.xp === 0 && seen.pm === 0, `${JSON.stringify(seen)} ${logs.slice(-400)}`);
+        ok('flags ON y parámetros válidos: el servidor real reconoce una vez, sin PM (V8-ACTIVATE-PREP-01)', seen.cycles === 2 && seen.xp === 1 && seen.pm === 0, `${JSON.stringify(seen)} ${logs.slice(-400)}`);
     }
 
     section('[aislamiento]');

@@ -9,8 +9,8 @@
  *       usuario desactivado 403, inexistente 403
  *   [3] IDOR: ruta, query, cuerpo y cabeceras no confiables nunca cambian el sujeto
  *   [4] aislamiento entre lectores y entre instituciones (acceso real por reglas)
- *   [5] estados y XP 0/30/50 por HTTP; `mook_review` bloqueada (producción): sin
- *       actividades elegibles y aprobada sin XP, pero lo ya reconocido se ve
+ *   [5] estados y XP 0/30/50 por HTTP; el servidor SIN arnés (código real, desde
+ *       V8-ACTIVATE-PREP-01) muestra lo mismo que el del arnés
  *   [6] lecturas repetidas sin escrituras (gamification.db, MOOK, stores)
  *   [7] privacidad del JSON y 503 genérico sin filtración
  *   [8] POSIX: sesión firmada (enforce) válida, ausente, expirada, revocada por
@@ -262,16 +262,16 @@ try {
         ok('acceso real por reglas: elegibles para u-new, no para u-instb', fresh.achievements.next?.id === 'primera-obra' && inst.achievements.next === null);
     }
 
-    section('[5] estados y bloqueo de producción');
+    section('[5] estados; código real sin arnés (V8-ACTIVATE-PREP-01)');
     {
         const p = (await get(on, '/api/me/progress', as('u-pending'))).body;
         ok('aprobada sin barrido: pending_recognition y 0 XP', workOf(p, 'obra-b')?.state === 'pending_recognition' && p.xp === 0);
         const lp = (await get(locked, '/api/me/progress', as('u-pending'))).body;
-        ok('`mook_review` bloqueada: la misma aprobada ⇒ approved_no_xp', workOf(lp, 'obra-b')?.state === 'approved_no_xp' && lp.xp === 0, JSON.stringify(lp));
+        ok('sin arnés: la misma aprobada ⇒ pending_recognition y 0 XP', workOf(lp, 'obra-b')?.state === 'pending_recognition' && lp.xp === 0, JSON.stringify(lp));
         const lf = (await get(locked, '/api/me/progress', as('u-new'))).body;
-        ok('`mook_review` bloqueada: catálogo sin actividades elegibles', lf.availability.works === 0 && lf.availability.activities === 0 && lf.achievements.next === null);
+        ok('sin arnés: 2 obras y 3 actividades elegibles, como con el arnés', lf.availability.works === 2 && lf.availability.activities === 3 && lf.achievements.next?.id === 'primera-obra', JSON.stringify(lf.availability));
         const l30 = (await get(locked, '/api/me/progress', as('u-30'))).body;
-        ok('`mook_review` bloqueada: lo ya reconocido se sigue viendo (30 XP)', l30.xp === 30 && workOf(l30, 'obra-a')?.state === 'recognized');
+        ok('sin arnés: lo ya reconocido se ve igual (30 XP)', l30.xp === 30 && workOf(l30, 'obra-a')?.state === 'recognized');
     }
 
     section('[6] lecturas repetidas sin escrituras');

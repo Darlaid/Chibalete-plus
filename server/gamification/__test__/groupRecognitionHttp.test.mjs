@@ -13,7 +13,7 @@
  *   [4] exclusión: la persona excluida no cuenta y nada lo delata
  *   [5] permisos: mediador propio 200; mediador ajeno, otra institución,
  *       lector y sin sesión ⇒ sin datos
- *   [6] `mook_review` bloqueada (producción): 0 obras elegibles
+ *   [6] código real sin arnés (V8-ACTIVATE-PREP-01): igual que con el arnés
  *   [7] errores de lectura ⇒ ledger `unavailable`, nunca 0; sin escrituras
  *   [8] privacidad: solo conteos (sin ids, nombres, XP ni niveles)
  * Nunca toca data/ ni data-critical/.
@@ -259,10 +259,10 @@ try {
         ok('grupo inexistente ⇒ sin datos', ghost.status >= 400 && !/recognition/.test(ghost.text));
     }
 
-    section('[6] `mook_review` bloqueada (producción)');
+    section('[6] código real sin arnés (V8-ACTIVATE-PREP-01)');
     {
         const r = (await get(locked, 'g-7', 'med-a')).body.recognition;
-        ok('0 obras elegibles; lo ya reconocido se sigue contando', r.catalog.eligibleWorks === 0 && r.ledger.studentsWithRecognizedWork === 2, JSON.stringify(r));
+        ok('sin arnés: 1 obra elegible y los mismos 2 reconocidos', r.catalog.eligibleWorks === 1 && r.ledger.studentsWithRecognizedWork === 2, JSON.stringify(r));
     }
 
     section('[7] errores y solo lectura');
