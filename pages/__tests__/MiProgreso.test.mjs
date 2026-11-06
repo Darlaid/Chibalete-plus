@@ -32,7 +32,9 @@ const ZERO = { ...base, xp: 0, level: { id: 'semilla', index: 0, next: { id: 'br
     achievements: { earned: [], next: { id: 'primera-obra', metric: 'works', missing: 1 } }, works: [] };
 const XP30 = { ...base, xp: 30, level: { id: 'brote', index: 1, next: null },
     achievements: { earned: ['primera-obra'], next: { id: 'mirada-profunda', metric: 'deepWorks', missing: 1 } },
-    works: [{ contentId: 'obra-a', title: 'El principito', experienceId: 'exp-1', state: 'recognized', xp: 30, ceiling: 50, reflections: 1 }] };
+    works: [{ contentId: 'obra-a', title: 'El principito', experienceId: 'exp-1', state: 'recognized', xp: 30, ceiling: 50, reflections: 1 }],
+    history: [{ day: '2026-11-06', contentId: 'obra-a', title: 'El principito', act: 'reading', xp: 10 },
+        { day: '2026-11-06', contentId: 'obra-a', title: 'El principito', act: 'reflection', xp: 20 }] };
 const XP50 = { ...base, xp: 50, level: { id: 'brote', index: 1, next: null }, availability: { works: 1, activities: 1 },
     achievements: { earned: ['primera-obra', 'mirada-profunda'], next: null },
     works: [{ contentId: 'obra-a', title: 'El principito', experienceId: 'exp-1', state: 'complete', xp: 50, ceiling: 50, reflections: 2 }] };
@@ -85,7 +87,7 @@ const entry = path.join(tmp, 'entry.mjs');
 const fwd = (p) => JSON.stringify(p.replace(/\\/g, '/'));
 fs.writeFileSync(entry, `
 export { default as MiProgreso, MiProgresoView, MiProgresoNotice } from ${fwd(path.join(ROOT, 'pages', 'MiProgreso.tsx'))};
-export { buildProgressView } from ${fwd(path.join(ROOT, 'utils', 'myProgressView.mjs'))};
+export { buildProgressView, formatHistoryDay } from ${fwd(path.join(ROOT, 'utils', 'myProgressView.mjs'))};
 export { renderToStaticMarkup } from 'react-dom/server';
 export { createElement } from 'react';
 export { MemoryRouter } from 'react-router-dom';
@@ -109,7 +111,7 @@ const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 try {
     console.log('\n[R] render real');
     const z = view(ZERO);
-    ok('cuatro secciones con encabezado h2 enlazado (aria-labelledby)', count(z, /<section aria-labelledby="mp-/g) === 4 && count(z, /<h2 id="mp-/g) === 4);
+    ok('cinco secciones con encabezado h2 enlazado (aria-labelledby)', count(z, /<section aria-labelledby="mp-/g) === 5 && count(z, /<h2 id="mp-/g) === 5);
     ok('barra de nivel: role=progressbar con min/max/now y aria-valuetext', /role="progressbar" aria-label="Avance hacia Brote" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0" aria-valuetext="Avance a Brote: 0 de 30 XP"/.test(z));
     ok('el valor de la barra también está en texto visible', text(z).includes('Avance a Brote: 0 de 30 XP'));
     ok('requisitos con marca accesible (listo/pendiente)', /Te faltan 30 XP<span class="sr-only"> \(pendiente\)<\/span>/.test(z));
@@ -124,6 +126,17 @@ try {
     ok('logros: solo el obtenido y un «Siguiente posible»', text(t).includes('Primera obra') && count(t, /Siguiente posible/g) === 1 && !text(t).includes('Lector reflexivo'));
     ok('XP acumulado, XP por obra y avance de nivel se distinguen en texto', text(t).includes('Tienes 30 XP en total') && text(t).includes('Esta obra: 30 de 50 XP')
         && text(z).includes('Avance a Brote: 0 de 30 XP') && !/(^| )30 XP( |$)/.test(text(t).replace('Tienes 30 XP en total', '')));
+    ok('historial: lista ordenada, una entrada por acto, con qué, cuándo y por qué', /<ol class="mt-3 space-y-3"><li/.test(t) && count(t, /<time dateTime="2026-11-06">6 de noviembre de 2026<\/time>/g) === 2
+        && text(t).includes('Lectura reconocida: El principito') && text(t).includes('Reflexión aprobada: El principito') && text(t).includes('+10 XP') && text(t).includes('+20 XP')
+        && text(t).includes('tu mediador aprobó tu primera reflexión'));
+    ok('historial vacío: explicación sin cifras', text(z).includes('Aquí verás cada vez que tu mediador apruebe') && !/<time /.test(z));
+    {
+        const bad = M.buildProgressView({ ...XP30, history: [{ day: '06/11/2026', act: 'reading', xp: 10 }, { day: '2026-11-06', act: 'route', xp: 5 },
+            { day: '2026-11-06', act: 'reflection', xp: 0 }, { day: '2026-11-06', act: 'reflection', xp: 20, title: '' }] });
+        ok('historial: descarta días, actos y XP inválidos; título ausente = «Una obra»', bad.history.length === 1 && bad.history[0].title === 'Una obra');
+        ok('historial ausente (servidor anterior): lista vacía, la vista sigue válida', M.buildProgressView(XP50).history.length === 0);
+        ok('el día no se desplaza por zona horaria', M.formatHistoryDay('2026-01-01') === '1 de enero de 2026' && M.formatHistoryDay('2026-13-40') === null);
+    }
     const f = view(XP50);
     ok('50 XP: «¡Obra completa!» 50 de 50, dos logros, sin siguiente', f.includes('¡Obra completa!') && /aria-valuetext="Esta obra: 50 de 50 XP"/.test(f) && text(f).includes('Mirada profunda') && !/Siguiente posible/.test(f));
     const a = view(ALL_STATES);

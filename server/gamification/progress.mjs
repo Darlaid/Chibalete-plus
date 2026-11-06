@@ -69,7 +69,7 @@ const zeroStats = () => ({ xp: 0, works: 0, reflections: 0, deepWorks: 0 });
  */
 function validHistory(db, subjectRef) {
     return db.prepare(`
-        SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp
+        SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp, f.occurred_at AS at
         FROM gm_work_cycles c
         JOIN gm_source_facts f ON f.fact_id = c.fact_id
         WHERE c.subject_ref = ? AND f.decision = 'awarded'
@@ -321,7 +321,37 @@ export function readWorkProgress(db, userId, { doc, workRefOf, resolveUser, isWi
         achievements: { earned: progress.achievements.earned, next: progress.achievements.next },
         availability: { works: new Set(eligible.map((a) => a.workRef)).size, activities: remaining },
         works: list,
+        history: recognitionHistory(valid, [...works.keys(), ...activities.map((a) => a.workRef)], keyOf, titleOf),
     };
+}
+
+/** Máximo de entradas del historial visible (las más recientes). */
+export const HISTORY_LIMIT = 50;
+
+/**
+ * V8-INTEGRATION-01. Historial visible: un acto reconocido por fila, con el día
+ * del hecho (precisión del ledger), la obra y el XP. Las claves de obra se
+ * resuelven solo contra obras que la persona ya ve (sus entregas y su catálogo);
+ * una clave sin obra conocida sale sin `contentId` ni título. Nunca expone
+ * claves, ids de hechos, ciclos ni motivos.
+ */
+function recognitionHistory(valid, workRefs, keyOf, titleOf) {
+    const byKey = new Map();
+    for (const workRef of workRefs) if (!byKey.has(keyOf(workRef))) byKey.set(keyOf(workRef), workRef);
+    const order = { reading: 0, reflection: 1 };
+    const rows = valid
+        .filter((e) => Number.isSafeInteger(e.xp) && e.xp > 0 && Number.isSafeInteger(e.at) && e.act in order)
+        .map((e, i) => ({ e, i }))
+        .sort((a, b) => b.e.at - a.e.at || b.i - a.i)
+        .slice(0, HISTORY_LIMIT);
+    // Dentro de un mismo hecho, la lectura antes que la reflexión.
+    rows.sort((a, b) => b.e.at - a.e.at || (a.e.evidenceId === b.e.evidenceId ? order[a.e.act] - order[b.e.act] : b.i - a.i));
+    return rows.map(({ e }) => {
+        const contentId = byKey.get(e.workRef) ?? null;
+        let title = null;
+        try { title = contentId ? titleOf(contentId) ?? null : null; } catch { title = null; }
+        return { day: new Date(e.at).toISOString().slice(0, 10), contentId, title, act: e.act, xp: e.xp };
+    });
 }
 
 // ── G4-UX-U4: agregados de reconocimiento de un grupo (vista del mediador) ────

@@ -130,6 +130,26 @@ export const MiProgresoView: React.FC<{ view: View }> = ({ view }) => {
                 )}
             </section>
 
+            <section aria-labelledby="mp-historial" className={card}>
+                <h2 id="mp-historial" className="text-lg font-bold text-gray-900 dark:text-white">Mi historial</h2>
+                {view.history.length === 0 ? (
+                    <p className="mt-2 text-gray-700 dark:text-gray-200">Aquí verás cada vez que tu mediador apruebe lo que escribiste y los XP que ganaste.</p>
+                ) : (
+                    <ol className="mt-3 space-y-3">
+                        {view.history.map((h, i) => (
+                            <li key={`${h.day}-${i}`} className="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+                                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                    <h3 className="font-bold text-gray-900 dark:text-white break-words">{h.label}: {h.title}</h3>
+                                    <p className="font-bold text-emerald-800 dark:text-emerald-300">{h.text}</p>
+                                </div>
+                                <p className="mt-1 text-sm text-gray-700 dark:text-gray-200"><time dateTime={h.day}>{h.date}</time></p>
+                                <p className="mt-1 text-gray-800 dark:text-gray-100">{h.why}</p>
+                            </li>
+                        ))}
+                    </ol>
+                )}
+            </section>
+
             <section aria-labelledby="mp-logros" className={card}>
                 <h2 id="mp-logros" className="text-lg font-bold text-gray-900 dark:text-white">Mis logros</h2>
                 {view.earned.length === 0 && <p className="mt-2 text-gray-700 dark:text-gray-200">Tus logros aparecerán aquí cuando los consigas.</p>}

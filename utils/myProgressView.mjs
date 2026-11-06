@@ -36,6 +36,36 @@ export const ACHIEVEMENT_TEXT = Object.freeze({
     'tres-obras': { title: 'Tres obras', body: 'Compartiste lo que pensaste de tres obras distintas.' },
 });
 
+/**
+ * V8-INTEGRATION-01. Historial: qué se reconoció y por qué. Solo los dos actos
+ * que hoy pueden sumar XP; un acto desconocido no se muestra.
+ */
+export const HISTORY_ACT_TEXT = Object.freeze({
+    reading: { label: 'Lectura reconocida', why: 'Leíste la obra y tu mediador aprobó tu primera reflexión sobre ella.' },
+    reflection: { label: 'Reflexión aprobada', why: 'Tu mediador aprobó lo que escribiste sobre la obra.' },
+});
+
+const DAY_RX = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_FORMAT = new Intl.DateTimeFormat('es-CO', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+/** `YYYY-MM-DD` del servidor → «6 de noviembre de 2026». El día no se desplaza por zona horaria. */
+export function formatHistoryDay(day) {
+    if (typeof day !== 'string' || !DAY_RX.test(day)) return null;
+    const d = new Date(`${day}T00:00:00Z`);
+    return Number.isNaN(d.getTime()) ? null : DAY_FORMAT.format(d);
+}
+
+/** Entradas válidas del historial, en el orden del servidor. */
+export function historyEntries(history) {
+    return (Array.isArray(history) ? history : []).flatMap((h) => {
+        const act = h && HISTORY_ACT_TEXT[h.act];
+        const date = h && formatHistoryDay(h.day);
+        if (!act || !date || !Number.isSafeInteger(h.xp) || h.xp <= 0) return [];
+        const title = typeof h.title === 'string' && h.title ? h.title : 'Una obra';
+        return [{ day: h.day, date, title, label: act.label, why: act.why, xp: h.xp, text: `+${h.xp} XP` }];
+    });
+}
+
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 
@@ -104,6 +134,7 @@ export function buildProgressView(data) {
         zero: data.xp === 0 && earned.length === 0,
         canEarn,
         works,
+        history: historyEntries(data.history),
         earned,
         nextAchievement: canEarn ? nextAchievementText(data.achievements?.next) : null,
     };

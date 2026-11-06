@@ -208,6 +208,20 @@ try {
         && R['u-30'].achievements.next.missing === 1, JSON.stringify(R['u-30'].achievements));
     ok('disponibilidad descuenta lo entregado: u-50 tiene E2 libre', R['u-50'].availability.activities === 1 && R['u-50'].availability.works === 2);
 
+    section('[4b] historial de reconocimiento (V8-INTEGRATION-01)');
+    {
+        const today = new Date().toISOString().slice(0, 10);
+        const h30 = R['u-30'].history, h50 = R['u-50'].history;
+        ok('30 XP ⇒ lectura 10 y reflexión 20, en ese orden', h30.length === 2 && h30[0].act === 'reading' && h30[0].xp === 10
+            && h30[1].act === 'reflection' && h30[1].xp === 20, JSON.stringify(h30));
+        ok('50 XP ⇒ tres entradas que suman el XP total', h50.length === 3 && h50.reduce((s, e) => s + e.xp, 0) === R['u-50'].xp, JSON.stringify(h50));
+        ok('cada entrada: día del hecho, obra y título conocidos', h50.every((e) => e.day === today && e.contentId === 'obra-a' && e.title === 'Título obra-a'));
+        ok('la tercera evidencia (sin XP) no aparece', h50.filter((e) => e.act === 'reflection').length === 2);
+        ok('sin reconocimiento: historial vacío', ['u-started', 'u-review', 'u-adjust', 'u-pending', 'u-old', 'u-comments'].every((u) => R[u].history.length === 0));
+        ok('solo claves visibles', [...h30, ...h50].every((e) => Object.keys(e).sort().join() === 'act,contentId,day,title,xp'));
+        ok('límite del historial', P.HISTORY_LIMIT === 50);
+    }
+
     section('[5] catálogo sin actividades elegibles');
     {
         const r = await M.readMyProgress('u-new', depsFor(doc, env, { denied: ['obra-a', 'obra-b', 'obra-c', 'obra-d'] }));
@@ -297,7 +311,8 @@ try {
         const walk = (o) => { if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { keys.add(k); walk(v); } };
         Object.values(R).forEach(walk);
         ok('solo claves del contrato', [...keys].every((k) => /^\d+$/.test(k) || ['enabled', 'xp', 'level', 'id', 'index', 'next', 'xpTarget', 'missing', 'works', 'reflections',
-            'stats', 'deepWorks', 'achievements', 'earned', 'metric', 'availability', 'activities', 'contentId', 'title', 'experienceId', 'state', 'ceiling'].includes(k)),
+            'stats', 'deepWorks', 'achievements', 'earned', 'metric', 'availability', 'activities', 'contentId', 'title', 'experienceId', 'state', 'ceiling',
+            'history', 'day', 'act'].includes(k)),
             [...keys].join());
         ok('estados dentro del contrato', Object.values(R).every((r) => r.works.every((w) => P.WORK_STATES.includes(w.state))));
         const g = { ...env, GAMIFICATION_DB: path.join(tmp, 'no-existe', 'gamification.db') };
