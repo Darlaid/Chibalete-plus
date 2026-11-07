@@ -52,7 +52,7 @@ Sale de este documento cuando Legal complete las marcas. Se entrega por el canal
 > - que el lector tenía acceso a esa obra por su colegio o grupo.
 >
 > **No** se copian al registro de reconocimiento los textos que escribe el lector, sus respuestas, su forma de leer (por ejemplo, si usa ayudas de lectura) ni el tiempo que dedica.
-> Los textos siguen guardados en la experiencia, como ya ocurre hoy, y su tratamiento se rige por [LEGAL: aviso o política general de Chibalete+, hoy inexistente como política integral].
+> Los textos siguen guardados en la experiencia, como ya ocurre hoy, y su tratamiento se rige por [LEGAL: aviso o política general de Chibalete+; no consta en el repositorio y su existencia externa no se ha verificado (V8-GATE-CLOSE-02)].
 >
 > **4. Qué se genera.** Por cada obra se calculan puntos de lectura, con un máximo por obra. A partir de ellos se calculan un nivel y unos logros. Valores fijados por el acta O1 (`DIR-XP-O1-20261107`): 10 puntos por la lectura y 20 por la reflexión en la primera entrega aprobada de una obra (30), 20 más por la segunda y un máximo de 50 por obra. Niveles activos: Semilla y Brote. No hay puntos por tiempo, clics ni por terminar una lectura.
 >
@@ -71,7 +71,7 @@ Sale de este documento cuando Legal complete las marcas. Se entrega por el canal
 > - El registro de reconocimiento no se edita: se conserva para poder explicar cada punto. [LEGAL/DIRECCIÓN: plazo de conservación; hoy no hay ninguno definido ni ejecutado.]
 > - Si se solicita el retiro o la eliminación, se borra la relación entre el código y la cuenta. Las filas quedan sin poder asociarse de nuevo a la persona a partir del registro.
 > - **[PENDIENTE]** Las copias de seguridad de la plataforma no se depuran todavía de forma automática. Una relación borrada puede seguir existiendo en copias anteriores. [LEGAL/DIRECCIÓN: qué plazo se comunica, o el compromiso de ejecutar la retención aprobada antes de activar.]
-> - Eliminar una cuenta no retira por sí solo el reconocimiento: se hace con el procedimiento de retiro. [PENDIENTE: procedimiento operativo, checklist C-7 y C-8.]
+> - Eliminar una cuenta no retira por sí solo el reconocimiento: se hace con el procedimiento de retiro, que gestiona **Administración** (decisión de Dirección, V8-GATE-CLOSE-02; procedimiento PRIV-C7 §5, probado en laboratorio). No hay retiro por autoservicio.
 >
 > **8. Derechos.** [LEGAL: derechos de la niña, el niño y su representante según la normativa colombiana de protección de datos personales, con la redacción, el procedimiento y los plazos de respuesta que Legal determine. También la forma de verificar la representación.]
 >
@@ -81,7 +81,7 @@ Sale de este documento cuando Legal complete las marcas. Se entrega por el canal
 >   - no se generan nuevos reconocimientos;
 >   - los anteriores dejan de mostrarse;
 >   - la lectura, las experiencias, las entregas y su revisión **siguen funcionando igual**.
-> - Retirarse no tiene consecuencias pedagógicas. [PENDIENTE: el retiro lo ejecuta hoy una persona operadora; se requiere el procedimiento C-7.]
+> - Retirarse no tiene consecuencias pedagógicas. La solicitud la gestiona Administración y la ejecuta con el procedimiento de retiro (PRIV-C7 §5). [LEGAL: plazos de respuesta y verificación de la representación.]
 >
 > **10. Canal.** [DIRECCIÓN/LEGAL: canal formal para consultas y solicitudes. El buzón institucional usado en el aviso de Leo, contacto@chibaleteeditores.com, no está validado como canal formal de derechos.]
 
@@ -98,7 +98,7 @@ Informativa. Se entrega con las pautas del piloto (ficha 03A, §4).
 > - No puedes aprobar tu propia entrega: no cuenta.
 > - Tu aprobación queda registrada con un código aleatorio, no con tu nombre.
 > - En Aula Viva verás, para cada estudiante de tus grupos, sus puntos, su nivel, las obras reconocidas y los logros; y del grupo, cuántas personas tienen al menos una obra reconocida (nunca con menos de 5). No verás estudiantes de otros grupos ni rankings. [V8-UNIFIED-XP-01: el mediador del grupo ahora puede consultar el XP, el nivel y los logros de cada estudiante de sus grupos (solo de esos, sin rankings). LEGAL: revisar esta frase; no se publica sin aprobación.]
-> - Si una familia pide que su hija o hijo no participe, o pregunta por los datos, remítela al canal [DIRECCIÓN/LEGAL]. Tu revisión pedagógica continúa igual.
+> - Si una familia pide que su hija o hijo no participe, o pregunta por los datos, remítela a **Administración**, que gestiona las solicitudes de derechos y exclusión. [LEGAL: confirmar el medio formal del canal.] Tu revisión pedagógica continúa igual.
 > - Si un texto contiene información personal o sensible del lector, atiéndelo fuera de la plataforma y no lo uses como criterio de revisión (ficha 03A, §4).
 
 ---

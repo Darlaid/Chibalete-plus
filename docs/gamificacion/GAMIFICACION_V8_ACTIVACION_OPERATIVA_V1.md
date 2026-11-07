@@ -85,7 +85,7 @@ GO exige **todas** las filas en GO, con su evidencia archivada. Una sola fila en
 
 **Estado actual:** J1–J8 en NO-GO (ninguna decisión tomada) y O1–O4 y O8 en NO-GO. O5–O7 se cumplirían hoy.
 
-**Actualización 2026-11-07 ([V8-ACTIVATION-GATE-01](GAMIFICACION_V8_ACTIVATION_GATE_01.md) §5):** O1 y O2 en GREEN (acta [`DIR-XP-O1-20261107`](aprobaciones/APROBACION-DIR-XP-O1-20261107.md) y release desplegada); O5–O7 en GREEN a re-verificar en F0; O3, O4 y O8 en YELLOW; J1–J6 y J8 en RED; J7 en YELLOW.
+**Actualización 2026-11-07 ([V8-ACTIVATION-GATE-01](GAMIFICACION_V8_ACTIVATION_GATE_01.md) §5):** O1 y O2 en GREEN (acta [`DIR-XP-O1-20261107`](aprobaciones/APROBACION-DIR-XP-O1-20261107.md) y release desplegada); O5–O7 en GREEN a re-verificar en F0; O3, O4 y O8 en YELLOW; J1–J6 y J8 en RED; J7 en YELLOW. **Estado vigente:** [cierre operativo V8-GATE-CLOSE-02](GAMIFICACION_V8_GATE_CIERRE_OPERATIVO.md).
 
 ## 3. Secuencia de activación
 

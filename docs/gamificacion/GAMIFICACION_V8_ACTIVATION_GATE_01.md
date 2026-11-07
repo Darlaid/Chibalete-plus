@@ -1,5 +1,7 @@
 # V8-ACTIVATION-GATE-01 — Reglas XP formalizadas y gate de activación
 
+> **Matriz sustituida** por [V8 — Cierre operativo del gate](GAMIFICACION_V8_GATE_CIERRE_OPERATIVO.md) (V8-GATE-CLOSE-02). Este documento se conserva como registro.
+
 **Fecha:** 2026-11-07. **Veredicto:** `YELLOW`. El acta de reglas (O1) está registrada y validada contra el código; la activación (F2–F8) **sigue bloqueada** por el gate jurídico, que no puede cerrarse en ingeniería.
 
 **Este documento no activa nada, no aprueba PRIV-6, no elige una base jurídica ni concluye sobre el cumplimiento normativo.** Contrasta lo que existe en el repositorio y en producción con lo que exige el [procedimiento de activación](GAMIFICACION_V8_ACTIVACION_OPERATIVA_V1.md) (J1–J8, O1–O8). Las decisiones pendientes ya están formuladas en [V7](GAMIFICACION_V7_DECISIONES_ACTIVACION_PILOTO_V1.md) (D1–D9, L1–L5, N1); aquí no se reformulan.
