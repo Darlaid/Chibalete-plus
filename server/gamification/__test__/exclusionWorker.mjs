@@ -3,7 +3,6 @@
  * Réplica sintética: `ingest` registra hechos de un usuario en bucle; `exclude`
  * lo excluye en mitad de la ingesta. Base y registro llegan por entorno.
  */
-import './helpers/pmMechanicsHarness.mjs';
 import fs from 'node:fs';
 
 const D = await import('../db.mjs');
@@ -11,7 +10,7 @@ const L = await import('../ledger.mjs');
 const E = await import('../erasure.mjs');
 
 const [role, barrier, stop] = process.argv.slice(2);
-const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: process.env.GAMIFICATION_DB };
+const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: process.env.GAMIFICATION_DB };
 const USER = process.env.CHP_EXCLUDED_USER;
 const out = { role, inserted: 0, refused: 0, errors: [] };
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);

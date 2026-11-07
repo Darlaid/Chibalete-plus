@@ -45,7 +45,7 @@ const iso = (minutesAfterSince) => new Date(SINCE + minutesAfterSince * 60_000).
 // fecha de ejecución. Se comparte con los workers para que cada réplica vea el mismo.
 const CLOCK = SINCE + 120 * 60_000;
 Date.now = () => CLOCK;
-const RULES = { schema: 1, caps: { pmPerDay: 1000, pmPerWeek: 5000 }, facts: {
+const RULES = { schema: 1, facts: {
     'mook_review/evidence_reviewed': {},
     'mook_experience/experience_completed': { xp: 20 },
 } };
@@ -69,7 +69,7 @@ function freshEnv() {
     D.closeGamificationDb({ resetBackoff: true });
     I.closeIntake({ resetBackoff: true });
     const p = path.join(tmp, `db${++dbN}`, 'gamification.db');
-    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: p, GAMIFICATION_MOOK_SINCE: SINCE_ISO };
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: p, GAMIFICATION_MOOK_SINCE: SINCE_ISO };
     const db = D.getGamificationDb({ env });
     // Vigentes justo antes del corte: `occurredAt` debe alcanzar la regla (D48 prospectivo).
     L.createRuleSet(db, { ruleVersion: 'gm-mook-v1', rules: RULES, createdBy: 'migration', now: SINCE - 1000 });
@@ -88,7 +88,7 @@ try {
     let { env, db } = freshEnv();
     const e1 = ev('evid-1', 'u-lector', 'u-mediador', 'aprobado', iso(10));
     const o1 = await hook(M.onMookEvidenceReviewed, e1, env);
-    ok('el gancho decide observed, sin persistir', o1?.ok && !o1.result.persisted && o1.result.decision === 'observed' && o1.result.xp === 0 && o1.result.pm === 0, JSON.stringify(o1));
+    ok('el gancho decide observed, sin persistir', o1?.ok && !o1.result.persisted && o1.result.decision === 'observed' && o1.result.xp === 0 && !('pm' in o1.result), JSON.stringify(o1));
     await hook(M.onMookEvidenceReviewed, e1, env);
     await hook(M.onMookEvidenceReviewed, e1, env);
     const r1 = reconcileDoc(env, { evidence: [e1], runs: [] });
@@ -97,7 +97,7 @@ try {
     section('[2] autorrevisión ⇒ sin recompensa');
     const e2 = ev('evid-2', 'u-mediador', 'u-mediador', 'aprobado', iso(11));
     const o2 = await hook(M.onMookEvidenceReviewed, e2, env);
-    ok('revisor = autor ⇒ rejected_self_review, 0 XP, 0 PM', o2?.ok && o2.result.decision === 'rejected_self_review' && o2.result.xp === 0 && o2.result.pm === 0);
+    ok('revisor = autor ⇒ rejected_self_review, 0 XP, sin PM', o2?.ok && o2.result.decision === 'rejected_self_review' && o2.result.xp === 0 && !('pm' in o2.result));
     ok('sin fila ni sujeto', facts(db).length === 0 && db.prepare('SELECT COUNT(*) n FROM gm_subjects').get().n === 0);
 
     section('[3] con_comentarios (y cualquier decisión no aprobada) ⇒ nada');
@@ -114,7 +114,7 @@ try {
     section('[4] experiencia completada ⇒ idempotente');
     const ru = run('run-1', 'u-lector', iso(20));
     const o4 = await hook(M.onMookRunUpdated, ru, env);
-    ok('el gancho registra experience_completed (20 XP, 0 PM)', o4?.ok && o4.result.decision === 'awarded' && o4.result.xp === 20 && o4.result.pm === 0);
+    ok('el gancho registra experience_completed (20 XP, sin PM)', o4?.ok && o4.result.decision === 'awarded' && o4.result.xp === 20 && !('pm' in o4.result) && !('movementId' in o4.result));
     ok('source_event_id es un HMAC: sin usuario ni versión en claro', facts(db).some((f) => f.source === 'mook_experience' && /^[0-9a-f]{64}$/.test(f.source_event_id)));
     await hook(M.onMookRunUpdated, ru, env);
     const rerun = run('run-2', 'u-lector', iso(90)); // abandonó y repitió la ruta de la misma versión
@@ -122,7 +122,7 @@ try {
     reconcileDoc(env, { evidence: [], runs: [ru, rerun] });
     ok('gancho ×2 + repetir la ruta + reconciliación ⇒ 1 hecho de experiencia', facts(db).filter((f) => f.source === 'mook_experience').length === 1);
     ok('un run activo no produce nada', (await hook(M.onMookRunUpdated, run('run-3', 'u-lector2', null, 'active'), env)) === null);
-    ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
+    ok('ninguna fila de PM (PM retirado)', db.prepare('SELECT (SELECT COUNT(*) FROM gm_pm_movements) + (SELECT COUNT(*) FROM gm_pm_balances) n').get().n === 0);
 
     section('[5] dos réplicas reconciliando a la vez');
     ({ env, db } = freshEnv());
@@ -146,7 +146,7 @@ try {
     db = D.getGamificationDb({ env });
     ok('10 hechos en la base, ninguno duplicado', facts(db).length === 10 && new Set(facts(db).map((f) => `${f.source}:${f.source_event_id}`)).size === 10);
     ok('el lock del reconciliador no quedó huérfano', !fs.existsSync(`${env.GAMIFICATION_DB}.reconcile.lock`));
-    ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
+    ok('ninguna fila de PM (PM retirado)', db.prepare('SELECT (SELECT COUNT(*) FROM gm_pm_movements) + (SELECT COUNT(*) FROM gm_pm_balances) n').get().n === 0);
 
     section('[6] evento perdido entre la escritura MOOK y el gancho ⇒ se recupera');
     ({ env, db } = freshEnv());
@@ -180,9 +180,9 @@ try {
     const oi = await hook(M.onMookEvidenceReviewed, ev('evid-ina', 'u-inactivo', 'u-mediador', 'aprobado', iso(50)), env);
     const os_ = await hook(M.onMookEvidenceReviewed, ev('evid-syn', 'u-sintetico', 'u-mediador', 'aprobado', iso(50)), env);
     const og = await hook(M.onMookEvidenceReviewed, ev('evid-ghost', 'u-fantasma', 'u-mediador', 'aprobado', iso(50)), env);
-    ok('inactivo ⇒ rejected_inactive_account, sin emisión', oi?.result?.decision === 'rejected_inactive_account' && oi.result.pm === 0);
-    ok('sintético ⇒ rejected_excluded_user, sin emisión', os_?.result?.decision === 'rejected_excluded_user' && os_.result.pm === 0);
-    ok('inexistente ⇒ rejected_not_eligible, sin emisión', og?.result?.decision === 'rejected_not_eligible' && og.result.pm === 0);
+    ok('inactivo ⇒ rejected_inactive_account, sin emisión', oi?.result?.decision === 'rejected_inactive_account' && oi.result.xp === 0);
+    ok('sintético ⇒ rejected_excluded_user, sin emisión', os_?.result?.decision === 'rejected_excluded_user' && os_.result.xp === 0);
+    ok('inexistente ⇒ rejected_not_eligible, sin emisión', og?.result?.decision === 'rejected_not_eligible' && og.result.xp === 0);
     const lockFile = `${env.GAMIFICATION_DB}.reconcile.lock`;
     fs.writeFileSync(lockFile, '999999');
     fs.utimesSync(lockFile, new Date(CLOCK), new Date(CLOCK));
@@ -202,7 +202,7 @@ try {
     const logs = [];
     ok('startMookReconciler con flag OFF ⇒ null (sin temporizadores)', M.startMookReconciler({}, { env: OFF, log: (m) => logs.push(m) }) === null);
     ok('ningún archivo ni directorio creado con flag OFF', !fs.existsSync(OFFP) && !fs.existsSync(path.dirname(OFFP)));
-    const NOCUT = { GAMIFICATION_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: OFFP };
+    const NOCUT = { GAMIFICATION_ENABLED: '1', GAMIFICATION_DB: OFFP };
     ok('flag ON sin GAMIFICATION_MOOK_SINCE: el gancho no programa nada', (await hook(M.onMookEvidenceReviewed, e1, NOCUT)) === null);
     ok('…la reconciliación se salta (no_activation_cutoff)', reconcileDoc(NOCUT, { evidence: [e1], runs: [] }).skipped === 'no_activation_cutoff');
     ok('…y no se programa ningún temporizador, con aviso explícito', M.startMookReconciler({}, { env: NOCUT, log: (m) => logs.push(m) }) === null && logs.some((l) => /GAMIFICATION_MOOK_SINCE/.test(l)));

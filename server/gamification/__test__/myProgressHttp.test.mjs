@@ -64,8 +64,8 @@ const M = await import('../mookSource.mjs');
 const { signSessionToken } = await import('../../lib/sessionToken.js');
 
 const SINCE = Date.now() - 60_000;
-const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
+const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
 const WORDS = 'una dos tres cuatro cinco seis';
 const PW = 'fixture-pass';
 const HASH = bcrypt.hashSync(PW, 4);
@@ -119,7 +119,7 @@ const pendingEv = deliverApproved('u-pending', E2, 'p', 'obra-b');
 fs.writeFileSync(P.mook, JSON.stringify(doc, null, 2));
 
 // Ledger: reglas y barrido real (sin la evidencia de u-pending).
-const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: P.gamDb,
+const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: P.gamDb,
     GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
 Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_REGISTRY: P.reg });
 // Este proceso hace de réplica escritora: su conexión queda ABIERTA (como
@@ -127,7 +127,7 @@ Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_RE
 {
     const db = D.getGamificationDb({ env: ENV });
     L.createRuleSet(db, { ruleVersion: 'gm-u2-http', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
-        rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: PILOT } });
+        rules: { schema: 1, facts: {}, recognition: PILOT } });
     const res = M.recognizeMookWorks(db, { ...doc, evidence: doc.evidence.filter((e) => e.id !== pendingEv.id) }, {
         workRefOf: Store.productionWorkRef, readRights: () => () => false, sinceMs: SINCE, env: ENV,
         resolveUser: M.makeResolveUser(USERS.map((u) => ({ ...u, accountStatus: 'active' })), () => true, () => false) });
@@ -165,7 +165,7 @@ function spawnApi(port, { flags = ENV, harness = true, mode = 'off' } = {}) {
             EVENTS_SQLITE_PATH: path.join(tmp, 'sqlite', `events-${port}.db`), ARCHIVE_SQLITE_PATH: path.join(tmp, 'sqlite', `archive-${port}.db`),
             INSIGHTS_SQLITE_PATH: path.join(tmp, 'sqlite', `insights-${port}.db`), PROGRESS_SQLITE_PATH: path.join(tmp, 'sqlite', `progress-${port}.db`),
             ROYALTIES_DB: process.env.ROYALTIES_DB,
-            GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_MOOK_SINCE: '',
+            GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', GAMIFICATION_MOOK_SINCE: '',
             ...flags, GAMIFICATION_RECONCILE_INITIAL_DELAY_MS: '3600000', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
             OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
         },

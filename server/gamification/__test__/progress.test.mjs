@@ -54,8 +54,8 @@ const realBefore = realFiles.map(sha);
 const realGam = fs.existsSync(path.join(REPO, 'data-critical', 'gamification.db'));
 
 /** A7-A12-V3 §1. `approvalRef` sintético: el real lo emite Dirección. */
-const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
+const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
 const SINCE = Date.now() - 60_000;
 let n = 0;
 function fresh() {
@@ -63,13 +63,13 @@ function fresh() {
     const dir = path.join(tmp, `g${n}`);
     fs.mkdirSync(path.join(dir, 'db'), { recursive: true }); fs.mkdirSync(path.join(dir, 'reg'));
     const reg = path.join(dir, 'reg', 'r.jsonl'); fs.writeFileSync(reg, '');
-    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
         GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
     process.env.GAMIFICATION_DB = env.GAMIFICATION_DB; process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
     D.closeGamificationDb({ resetBackoff: true });
     const db = D.getGamificationDb({ env });
     L.createRuleSet(db, { ruleVersion: 'gm-u1-v1', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
-        rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: PILOT } });
+        rules: { schema: 1, facts: {}, recognition: PILOT } });
     return { db, env };
 }
 let ev = 0;

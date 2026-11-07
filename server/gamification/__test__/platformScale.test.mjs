@@ -46,8 +46,8 @@ const realFiles = ['data/mook_db.json', 'data/content.json'].map((f) => path.joi
 const realBefore = realFiles.map(sha);
 
 const SINCE = Date.now() - 3_600_000;
-const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
+const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
 const WORDS = 'una dos tres cuatro cinco seis siete ocho';
 const SCHOOLS = 3, GROUPS = 4, READERS = 25;
 
@@ -97,13 +97,13 @@ function lab(name) {
     const dir = path.join(tmp, name);
     fs.mkdirSync(path.join(dir, 'db'), { recursive: true }); fs.mkdirSync(path.join(dir, 'reg'));
     const reg = path.join(dir, 'reg', 'r.jsonl'); fs.writeFileSync(reg, '');
-    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
         GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
     Object.assign(process.env, { GAMIFICATION_DB: env.GAMIFICATION_DB, GAMIFICATION_EXCLUSION_REGISTRY: reg });
     D.closeGamificationDb({ resetBackoff: true });
     const db = D.getGamificationDb({ env });
     L.createRuleSet(db, { ruleVersion: 'gm-v8-scale', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
-        rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: PILOT } });
+        rules: { schema: 1, facts: {}, recognition: PILOT } });
     for (const id of excluded) E.excludeUser(db, { userId: id, env });
     return { db, env };
 }
@@ -136,7 +136,7 @@ try {
         const ms2 = Math.round(performance.now() - t2);
         console.log(`  · segundo barrido sin novedades: ${ms2} ms`);
         ok('repetir no cambia nada', JSON.stringify(totals(db)) === JSON.stringify(single));
-        ok('ledger íntegro, sin PM', L.verifyLedger(db).ok && db.prepare('SELECT COUNT(*) c FROM gm_pm_movements').get().c === 0);
+        ok('ledger íntegro, sin PM (retirado)', db.prepare('SELECT COUNT(*) c FROM gm_pm_movements').get().c === 0);
 
         section('[3] agregados por grupo y exclusiones');
         const counts = groups.map((g) => P.readGroupRecognitionCounts(db, g.members, { eligibleWorkRefs: ['obra-1', 'obra-2'], env }));

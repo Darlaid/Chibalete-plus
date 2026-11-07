@@ -95,7 +95,7 @@ async function boot(e, port, mode = 'restricted') {
     const db = (n) => path.join(sqlite, n);
     const child = spawn(process.execPath, [path.join(REPO, 'server', 'server.js')], {
         env: { ...process.env, NODE_ENV: 'test', SESSION_AUTH_MODE: 'off', ACCESS_FALLBACK_MODE: mode, PORT: String(port), USERS_DB: path.join(dir, 'users.json'), CHP_DATA_DIR: data,
-            UPLOADS_ROOT: path.join(dir, 'uploads'), ACCESS_DB: path.join(data, 'access_db.json'), GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '',
+            UPLOADS_ROOT: path.join(dir, 'uploads'), ACCESS_DB: path.join(data, 'access_db.json'), GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '',
             GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db'), GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
             EVENTS_SQLITE_PATH: db('events.db'), ARCHIVE_SQLITE_PATH: db('events.archive.db'), INSIGHTS_SQLITE_PATH: db('insights.db'), PROGRESS_SQLITE_PATH: db('progress.db'),
             OFFLINE_ASSIGNMENT_DB_PATH: db('offline.db'), ROYALTIES_DB: db('royalties.db'), IDENTITY_DB: db('identity.db'), SESSIONS_DB: db('sessions.db'),

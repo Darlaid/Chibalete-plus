@@ -41,10 +41,10 @@
 
 | # | Contrato | Comportamiento real | Referencia |
 |---|---|---|---|
-| 1 | Flags | `GAMIFICATION_ENABLED` gobierna todo. `XP_EARNING_ENABLED` depende de él (`1`/`true`). `PM_EARNING_ENABLED` es independiente y debe seguir sin definir. Se leen de `process.env`, así que **cambiar una flag exige recrear el contenedor** | `db.mjs:36-55` |
+| 1 | Flags | `GAMIFICATION_ENABLED` gobierna todo. `XP_EARNING_ENABLED` depende de él (`1`/`true`). `PM_EARNING_ENABLED` está **retirado** (V8-UNIFIED-XP-01): no tiene efecto, no se define. Se leen de `process.env`, así que **cambiar una flag exige recrear el contenedor** | `db.mjs:36-55` |
 | 1b | Visibilidad de «Mi progreso» | Sin `GAMIFICATION_ENABLED` → 404. Con él pero sin XP → `{enabled:false}`. Con los dos → contrato completo. Si la base aún no existe o falla → 503. El front muestra el enlace (Perfil propio y Experiencias) **solo** si la respuesta es `ok`: con XP activo, **todos los lectores ven el enlace en su perfil**, tengan XP o no | `mookSource.mjs:130-150`; `server.js:2670-2694`; `hooks/useMyProgressAvailable.ts:15-27`; `pages/Perfil.tsx:324` |
 | 2 | `mook_review` | Bloqueado por una constante de código. Ninguna regla ni flag lo levanta: `validateRules` rechaza XP de una fuente bloqueada (`XP_SOURCE_LOCKED`). Cinco tests fijan el bloqueo y tendrán que actualizarse en la release de desbloqueo | `policy.mjs:36,81`; `server/gamification/__test__/`: `workRecognition.test.mjs:326`, `xpPilotEmission.test.mjs:272`, `subjectReconcile.test.mjs:144`; `server/__test__/`: `mookLearnerUx03b.test.mjs:149`, `mookStudioWorkRef.test.mjs:186` |
-| 3 | Reglas 30/20/50 | `createRuleSet` es append-only, prospectivo (`effectiveFrom ≥ now`, `RETROACTIVE_RULES`) e idempotente por `ruleVersion` + SHA-256. `recognition` exige `approvalRef`, XP de lectura y reflexión > 0, techo > 0 y PM = 0. **Además** valida `schema: 1`, `facts` y `caps` (`pmPerDay`, `pmPerWeek`, obligatorios). Sin reglas vigentes, el reconocimiento falla con `NO_ACTIVE_RULES` | `ledger.mjs:105-110,160-186,236-237`; `recognition.mjs:205-215`; `policy.mjs:92-97` |
+| 3 | Reglas 30/20/50 | `createRuleSet` es append-only, prospectivo (`effectiveFrom ≥ now`, `RETROACTIVE_RULES`) e idempotente por `ruleVersion` + SHA-256. `recognition` exige `approvalRef`, XP de lectura y reflexión > 0 y techo > 0. **Además** valida `schema: 1` y `facts`. V8-UNIFIED-XP-01: `caps`, `pm`, `amounts.pm` y `reread.pmFactors` están retirados y un conjunto nuevo que los traiga se rechaza con `PM_RETIRED`. Sin reglas vigentes, el reconocimiento falla con `NO_ACTIVE_RULES` | `ledger.mjs:105-110,160-186,236-237`; `recognition.mjs:205-215`; `policy.mjs:92-97` |
 | 3b | Mecanismo de instalación | **No hay script ni endpoint.** La única vía es la función de librería `createRuleSet` ejecutada dentro del contenedor (como en los tests). No se crea un script nuevo: el comando va en el paso F4 | `xpPilotEmission.test.mjs:50,81` (forma usada en pruebas) |
 | 4 | Clave de sujeto | Archivo fijo `/app/secrets/gamification_subject_key`, mínimo 32 caracteres. `readSecretFile` exige modo `0400`, mismo uid/gid que el proceso y sin enlaces simbólicos. Se carga **una vez**, al arrancar el reconciliador (solo con `GAMIFICATION_ENABLED`): debe existir **antes** del recreate que encienda la flag. No hay rotación: rotarla invalida los tombstones | `subjectKey.mjs:15-34`; `lib/secretFile.js:28,111-132`; `mookSource.mjs:463-469` |
 | 5 | Registro de exclusiones | Ruta en `GAMIFICATION_EXCLUSION_REGISTRY`, sin valor por defecto, en un directorio **distinto** del de la base (`EXCLUSION_REGISTRY_NOT_INDEPENDENT`). Archivo ausente, alterado o desalineado con `gm_erasures` ⇒ ninguna ingesta. Un archivo vacío es válido. **No está en el inventario de respaldos, a propósito**: necesita copia separada (P2) | `exclusions.mjs:9-60`; PRIV-C7 §5.1 |
@@ -74,7 +74,7 @@ GO exige **todas** las filas en GO, con su evidencia archivada. Una sola fila en
 
 | # | Criterio | GO si… | Evidencia |
 |---|---|---|---|
-| O1 | Acta de reglas | `APROBACION-<approvalRef>.md` fusionado, con el SHA-256 del bloque JSON de A7-A12-V3 §1, `ruleVersion`, entrada en vigor y los **topes `caps`** confirmados (ver §6, H1) | Commit del acta |
+| O1 | Acta de reglas | `APROBACION-<approvalRef>.md` fusionado, con el SHA-256 del bloque JSON de A7-A12-V3 §1 **en su forma solo XP** (sin `amounts.pm` ni `reread.pmFactors`; los valores de XP no cambian), `ruleVersion` y entrada en vigor (ver §6, H1) | Commit del acta |
 | O2 | Release de desbloqueo | Imagen con `mook_review` fuera de `XP_LOCKED_SOURCES`, CI 3/3 verde, Trivy 0 HIGH/CRITICAL y laboratorio con XP activo idéntico al de V8 | Evidencia de la unidad de release |
 | O3 | Clave de sujeto | El archivo existe en las dos réplicas con modo `0400` y su copia de custodia está confirmada | Comprobación de modo y existencia, sin leer el valor; acuse del custodio |
 | O4 | Registro | Volumen propio, distinto de `data/` y `data-critical/`, montado rw en las dos réplicas, con archivo vacío y copia separada configurada | Montajes con `node scripts/security/safeOperationalEvidence.mjs container-summary <réplica>` (nunca el entorno completo), `wc -l` = 0, acuse del custodio |
@@ -155,7 +155,7 @@ Durante el rolling, una réplica responde 404 y la otra `{enabled:false}`. No ha
 ### F4 — Instalar las reglas aprobadas (S)
 
 1. Ejecutar **dentro de `api_1`**, con un proceso puntual de node, `createRuleSet(getGamificationDb(), { ruleVersion, createdBy, effectiveFrom, rules })` con los valores literales del acta (O1):
-   - `rules = { schema: 1, facts: {}, caps: { pmPerDay: <acta>, pmPerWeek: <acta> }, recognition: <bloque A7-A12-V3 §1 con approvalRef del acta> }`.
+   - `rules = { schema: 1, facts: {}, recognition: <bloque A7-A12-V3 §1 con approvalRef del acta, sin amounts.pm ni reread.pmFactors> }`. Sin `caps` (V8-UNIFIED-XP-01).
    - `effectiveFrom` ≥ ahora y ≤ la publicación de F6.
 2. **Evidencia:**
    - `getActiveRuleSet` devuelve el `ruleVersion` del acta.
@@ -239,7 +239,7 @@ Nunca se restauran datos en un rollback de código. Restaurar `gamification.db` 
 
 | # | Hallazgo | Consecuencia |
 |---|---|---|
-| H1 | El acta A7-A12-V3 fija `recognition`, pero no los `caps` (`pmPerDay`, `pmPerWeek`), que son **obligatorios** en `createRuleSet`. Las pruebas usan `0/0`, coherente con «PM = 0», pero eso es una inferencia | El acta (O1) debe fijarlos de forma explícita. No se rellenan en ingeniería |
+| H1 | **Cerrado por V8-UNIFIED-XP-01.** Los `caps` eran topes de PM y ya no existen. El bloque de A7-A12-V3 §1 trae `amounts.pm` y `reread.pmFactors` a 0, que `createRuleSet` ahora rechaza (`PM_RETIRED`) | El acta (O1) fija el bloque en su forma solo XP: mismos valores 10/20/50, sin esas dos claves. No se edita en ingeniería |
 | H2 | No existe ningún mecanismo de instalación de reglas aparte de la función de librería | F4 se ejecuta con un proceso puntual dentro del contenedor. No hace falta crear un script |
 | H3 | La clave se lee una sola vez al arrancar el reconciliador | Debe existir antes del recreate de F3. Añadirla después exige otro recreate |
 | H4 | El registro ausente bloquea toda ingesta, y un archivo vacío es válido | El archivo vacío debe crearse antes de F3 |
@@ -255,7 +255,7 @@ Nunca se restauran datos en un rollback de código. Restaurar `gamification.db` 
 3. **Dirección:**
    - J4 (D3, D9, L5, custodios de P2, P3 y P4).
    - J7 (riesgo T3) y J8 (orden de activación).
-   - El acta de reglas O1: `approvalRef`, `ruleVersion`, entrada en vigor y `caps`.
+   - El acta de reglas O1: `approvalRef`, `ruleVersion`, entrada en vigor y el bloque solo XP.
    - El valor de T0.
    - La decisión sobre el corte si alguna vez se reanuda tras una suspensión.
 4. **Pedagogía:** criterio de `minPalabras` y revisión disponible en las cohortes (A7-A12-V3 §4.7).

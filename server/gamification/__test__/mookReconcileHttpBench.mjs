@@ -51,7 +51,7 @@ fs.writeFileSync(path.join(dir, 'users.json'), JSON.stringify(users.map((u) => (
 Pub.getRoyaltiesDb(); Pub.closeRoyaltiesDb();
 const db = D.getGamificationDb({ env: { GAMIFICATION_ENABLED: '1', GAMIFICATION_DB: gamDb, GAMIFICATION_EXCLUSION_REGISTRY: reg } });
 L.createRuleSet(db, { ruleVersion: 'gm-http-v1', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
-    rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_experience/experience_completed': { xp: 5 } } } });
+    rules: { schema: 1, facts: { 'mook_experience/experience_completed': { xp: 5 } } } });
 D.closeGamificationDb({ resetBackoff: true });
 
 const port = await freePort();
@@ -63,7 +63,7 @@ const nodeOptions = (process.env.NODE_OPTIONS ?? '').split(' ').filter((x, i, a)
 const child = spawn(process.execPath, [path.join(ROOT, 'server', 'server.js')], {
     cwd: ROOT,
     env: { ...process.env, NODE_OPTIONS: `${nodeOptions} --import ${keyHelper}`.trim(), NODE_ENV: 'test', SESSION_AUTH_MODE: 'off', ACCESS_FALLBACK_MODE: 'restricted', PORT: String(port), USERS_DB: path.join(dir, 'users.json'), CHP_DATA_DIR: data,
-        UPLOADS_ROOT: path.join(dir, 'uploads'), ACCESS_DB: path.join(data, 'access_db.json'), GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '',
+        UPLOADS_ROOT: path.join(dir, 'uploads'), ACCESS_DB: path.join(data, 'access_db.json'), GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1',
         GAMIFICATION_DB: gamDb, GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString(), GAMIFICATION_RECONCILE_INITIAL_DELAY_MS: String(DELAY),
         EXPERIENCE_EVENTS_BACKBONE_ENABLED: '', EVENTS_SQLITE_PATH: db_('events.db'), ARCHIVE_SQLITE_PATH: db_('events.archive.db'), INSIGHTS_SQLITE_PATH: db_('insights.db'),
         PROGRESS_SQLITE_PATH: db_('progress.db'), OFFLINE_ASSIGNMENT_DB_PATH: db_('offline.db'), ROYALTIES_DB: roy, IDENTITY_DB: db_('identity.db'), SESSIONS_DB: db_('sessions.db'),

@@ -7,7 +7,7 @@
  *
  *   loading · catálogo · filtros dinámicos · colección nueva · sin tabs vacías ·
  *   COP sin decimales · oferta · agotado · stale · error · CTA · canje simulado
- *   retirado (G0, CHP-GAMIFICACION-G0-01).
+ *   retirado (G0) y Puntos de Magia retirados (V8-UNIFIED-XP-01).
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -34,10 +34,9 @@ fs.writeFileSync(mockDs, `
 export const dataService = {
     getStoreCatalog: () => new Promise(() => {}),
     getProductos: () => { globalThis.__getProductosCalled = true; return []; },
-    redeemCoupon: () => { globalThis.__redeemCouponCalled = true; return { success: true, message: '' }; },
 };`);
 const mockAuth = path.join(tmp, 'AuthContext.mock.mjs');
-fs.writeFileSync(mockAuth, `export const useAuth = () => ({ user: { id: 'u-1', puntos: 1200 } });`);
+fs.writeFileSync(mockAuth, `export const useAuth = () => ({ user: { id: 'u-1' } });`);
 const entry = path.join(tmp, 'entry.mjs');
 const fwd = (p) => JSON.stringify(p.replace(/\\/g, '/'));
 fs.writeFileSync(entry, `
@@ -121,17 +120,14 @@ try {
     // NO exista y que haya un aviso veraz. El catálogo se verifica igual que antes.
     console.log('\n[P] página completa y canje simulado retirado (G0)');
     globalThis.__getProductosCalled = false;
-    globalThis.__redeemCouponCalled = false;
     const page = M.renderToStaticMarkup(M.createElement(M.Tienda));
     ok('la Tienda arranca en carga (catálogo del servidor)', /Cargando catálogo/.test(page));
     ok('ya no lee dataService.getProductos() (localStorage)', globalThis.__getProductosCalled === false);
     ok('G0: sin botones de canje ni bonos', !/Solicitar Canje/.test(page) && !/Bono \d+% OFF/.test(page) && !/\d+(<!-- -->)? pts/.test(page));
     ok('G0: sin bono del 25 %', !/25%/.test(page));
     ok('G0: sin saldo de puntos simulado', !/Tus Puntos/.test(page));
-    ok('G0: aviso veraz de recompensas no habilitadas',
-        page.includes('Las recompensas con Puntos de Magia estarán disponibles cuando el sistema esté habilitado.'));
+    ok('V8-UNIFIED-XP-01: sin Puntos de Magia ni bloque de recompensas', !/Puntos de Magia|recompensas/i.test(page));
     ok('G0: no promete códigos ni cupones', !/te enviará el código|código de descuento único|cupón/i.test(page));
-    ok('G0: render no invoca redeemCoupon', globalThis.__redeemCouponCalled === false);
     const src = fs.readFileSync(path.join(ROOT, 'pages', 'Tienda.tsx'), 'utf8');
     ok('G0: el código de la página no llama a redeemCoupon', !/redeemCoupon/.test(src));
     ok('G0: Contactar Ventas sigue presente', /Contactar Ventas/.test(page));

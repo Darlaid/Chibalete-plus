@@ -14,7 +14,6 @@
  *   node server/gamification/__test__/subjectModel.test.mjs
  */
 import '../../__test__/helpers/testMode.mjs';
-import './helpers/pmMechanicsHarness.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,7 +37,7 @@ const S = await import('../subjects.mjs');
 const K = await import('../subjectKey.mjs');
 const { runMigrations } = await import('../../db/migrate.js');
 
-const ON = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: DB };
+const ON = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: DB };
 const USER = 'usuario-sintetico-marcador-1';
 const USER2 = 'usuario-sintetico-marcador-2';
 const ACTOR = 'mediador-sintetico-marcador';
@@ -50,13 +49,11 @@ const dump = (db, t) => JSON.stringify(db.prepare(`SELECT * FROM ${t}`).all().ma
 
 try {
     const db = D.getGamificationDb({ env: ON });
-    L.createRuleSet(db, { ruleVersion: 'gm-s-v1', createdBy: 'migration', now: T0 - 1000, rules: { schema: 1, caps: { pmPerDay: 500, pmPerWeek: 1000 },
-        facts: { 'mission/mission_completed': { xp: 3, pm: 7 }, 'mook_experience/experience_completed': { xp: 2 } } } });
+    L.createRuleSet(db, { ruleVersion: 'gm-s-v1', createdBy: 'migration', now: T0 - 1000, rules: { schema: 1,
+        facts: { 'mission/mission_completed': { xp: 3 }, 'mook_experience/experience_completed': { xp: 2 } } } });
     const f1 = L.recordFact(db, fact(), { env: ON });
     const f2 = L.recordFact(db, fact({ userId: USER2 }), { env: ON });
     L.recordFact(db, { source: 'mook_experience', sourceEventId: `${USER}:xv-1`, factType: 'experience_completed', userId: USER, occurredAt: T0, eligibility: 'eligible', now: T0 }, { env: ON });
-    const ad = L.appendAdjustment(db, { userId: USER, amount: 4, reasonCode: 'support', actorId: ACTOR, idempotencyKey: 'a1', ruleVersion: 'gm-s-v1', now: T0 });
-    L.appendCompensation(db, { userId: USER, amount: -1, reasonCode: 'correction', actorId: ACTOR, relatedMovementId: f1.movementId, idempotencyKey: 'c1', ruleVersion: 'gm-s-v1', now: T0 });
 
     section('[1] sin identidad canónica fuera de gm_subjects');
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'gm_%'").all().map((r) => r.name);
@@ -77,10 +74,9 @@ try {
     const facts = db.prepare('SELECT * FROM gm_source_facts').all();
     ok('source_event_id son HMAC', facts.every((f) => /^[0-9a-f]{64}$/.test(f.source_event_id)));
     ok('el id de ruta `usuario:versión` no queda en claro', !dump(db, 'gm_source_facts').includes('xv-1'));
-    ok('las claves de ajuste no contienen la identidad', db.prepare("SELECT idempotency_key k FROM gm_pm_movements WHERE kind='adjustment'").all().every((r) => !r.k.includes(ACTOR)));
     ok('ids aleatorios: fact_id no es un ULID', facts.every((f) => /^[0-9a-f-]{36}$/.test(f.fact_id)));
     ok('fechas de hechos: solo día de Bogotá', facts.every((f) => BOGOTA_DAY(f.occurred_at) && BOGOTA_DAY(f.recorded_at)));
-    ok('fechas de movimientos: solo día', db.prepare('SELECT created_at c FROM gm_pm_movements').all().every((r) => BOGOTA_DAY(r.c)));
+    ok('PM retirado (V8-UNIFIED-XP-01): ningún movimiento ni saldo escrito', db.prepare('SELECT (SELECT COUNT(*) FROM gm_pm_movements) + (SELECT COUNT(*) FROM gm_pm_balances) n').get().n === 0);
     ok('fechas de XP y auditoría: solo día', db.prepare('SELECT created_at c FROM gm_xp_entries UNION ALL SELECT created_at FROM gm_admin_audit').all().every((r) => BOGOTA_DAY(r.c)));
     ok('fecha del sujeto: YYYY-MM-DD', db.prepare('SELECT created_on d FROM gm_subjects').all().every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.d)));
     ok('sin features en hechos de misión y ruta', facts.every((f) => f.features_json === '{}'));
@@ -94,20 +90,18 @@ try {
     ok('obra: distinta entre sujetos y determinista', S.deriveWorkKey(a, 'c-1') !== S.deriveWorkKey(b, 'c-1') && S.deriveWorkKey(a, 'c-1') === S.deriveWorkKey(a, 'c-1'));
     ok('obra y fuente no comparten espacio', S.deriveWorkKey(a, 'c-1') !== S.deriveSourceKey(a, 'c-1', '', ''));
     const replay = L.recordFact(db, fact(), { env: ON });
-    ok('reintento: mismo hecho, sin emitir', !replay.inserted && replay.factId === f1.factId && replay.pm === f1.pm);
+    ok('reintento: mismo hecho, sin emitir', !replay.inserted && replay.factId === f1.factId && replay.xp === f1.xp && L.getXp(db, USER) === 3 + 2);
     ok('los dos usuarios tienen hechos propios', f1.factId !== f2.factId && L.getXp(db, USER2) === 3);
     ok('la reconciliación localiza el hecho', L.hasFact(db, fact()) && !L.hasFact(db, fact({ sourceEventId: 'otra' })) && !L.hasFact(db, fact({ userId: 'nadie' })));
 
     section('[4] sin clave de servidor');
     const keep = K.getSubjectKey();
-    const before = dump(db, 'gm_source_facts') + dump(db, 'gm_pm_movements') + dump(db, 'gm_subjects');
+    const before = dump(db, 'gm_source_facts') + dump(db, 'gm_xp_entries') + dump(db, 'gm_subjects');
     K.clearSubjectKey();
     ok('recordFact falla', throwsCode(() => L.recordFact(db, fact({ sourceEventId: 'sin-clave', userId: 'nuevo' }), { env: ON }), 'SUBJECT_KEY_UNAVAILABLE'));
-    ok('appendAdjustment falla', throwsCode(() => L.appendAdjustment(db, { userId: USER, amount: 1, reasonCode: 'x', actorId: ACTOR, idempotencyKey: 'z', ruleVersion: 'gm-s-v1' }), 'SUBJECT_KEY_UNAVAILABLE'));
-    ok('appendCompensation falla', throwsCode(() => L.appendCompensation(db, { userId: USER, amount: -1, reasonCode: 'x', actorId: ACTOR, relatedMovementId: f1.movementId, idempotencyKey: 'z', ruleVersion: 'gm-s-v1' }), 'SUBJECT_KEY_UNAVAILABLE'));
     ok('derivar una clave falla', throwsCode(() => S.deriveSourceKey(a, 'mission', 't', 'x'), 'SUBJECT_KEY_UNAVAILABLE'));
     ok('crear un sujeto falla', throwsCode(() => S.ensureSubject(db, 'nuevo', { roleClass: 'reader', day: '2026-11-03' }), 'SUBJECT_KEY_UNAVAILABLE'));
-    ok('ninguna escritura', dump(db, 'gm_source_facts') + dump(db, 'gm_pm_movements') + dump(db, 'gm_subjects') === before);
+    ok('ninguna escritura', dump(db, 'gm_source_facts') + dump(db, 'gm_xp_entries') + dump(db, 'gm_subjects') === before);
     let loadCode = null;
     await K.loadSubjectKey({ read: async () => { throw Object.assign(new Error('x'), { code: 'FILE_MISSING' }); } }).catch((e) => { loadCode = e.code; });
     ok('si el archivo falla, la clave sigue ausente', loadCode === 'FILE_MISSING' && !K.hasSubjectKey());
@@ -144,7 +138,7 @@ try {
     ok('disabled_source: sin fila', dis.decision === 'disabled_source' && !dis.persisted);
     ok('ningún sujeto ni hecho nuevo', db.prepare('SELECT COUNT(*) n FROM gm_subjects').get().n === n0 && db.prepare('SELECT COUNT(*) n FROM gm_source_facts').get().n === fN);
     const old = L.recordFact(db, fact({ userId: 'u-old', sourceEventId: 'e7', occurredAt: T0 - 86_400_000 }), { env: ON });
-    ok('D48: un hecho anterior a la regla vigente no emite al reevaluarse', old.xp === 0 && old.pm === 0 && !old.persisted);
+    ok('D48: un hecho anterior a la regla vigente no emite al reevaluarse', old.xp === 0 && !old.persisted);
 
     section('[6] migración 0002');
     ok('secure_delete activo', db.pragma('secure_delete', { simple: true }) === 1);

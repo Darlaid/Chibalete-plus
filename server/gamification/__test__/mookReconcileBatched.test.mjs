@@ -62,7 +62,7 @@ const deps = (env, over = {}) => ({ readMook: () => doc, readUsers: () => users,
 let n = 0;
 const fresh = () => freshLedger(D, L, path.join(tmp, `l${++n}`), SINCE);
 const digest = (env, only = users) => { const db = new Database(env.GAMIFICATION_DB, { readonly: true }); try { return ledgerDigest(L, S, db, only, { withTotals: only === users }); } finally { db.close(); } };
-const verify = (env) => { const db = new Database(env.GAMIFICATION_DB, { readonly: true }); try { return L.verifyLedger(db).ok; } finally { db.close(); } };
+const verify = (env) => { const db = new Database(env.GAMIFICATION_DB, { readonly: true }); try { return db.prepare('SELECT (SELECT COUNT(*) FROM gm_pm_movements) + (SELECT COUNT(*) FROM gm_pm_balances) n').get().n === 0 && db.prepare("SELECT COUNT(*) n FROM gm_source_facts f WHERE (SELECT COUNT(*) FROM gm_xp_entries a WHERE a.fact_id = f.fact_id AND a.kind = 'award') <> 1").get().n === 0; } finally { db.close(); } };
 const strip = ({ slices, ...r }) => r; // eslint-disable-line no-unused-vars
 const lockOf = (env) => `${env.GAMIFICATION_DB}.reconcile.lock`;
 const spawnW = (role, signal, env) => {

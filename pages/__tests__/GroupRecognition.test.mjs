@@ -68,7 +68,8 @@ try {
     ok('el texto completo acompaña al número (el número es decorativo)', text(h).includes('2 entregas esperan tu revisión') && /aria-hidden="true">2<\/p>/.test(h));
     ok('botón «Ir a Producciones» real (≥ 44 px, foco visible) solo si hay pendientes', /<button type="button"[^>]*min-h-\[44px\][^>]*focus-visible:ring-4[^>]*>\s*Ir a Producciones/.test(h)
         && !/Ir a Producciones/.test(render({ ...OK, pedagogy: { pendingReview: 0 } }, { onReview: () => {} })));
-    ok('aviso explícito: sin XP, niveles ni datos individuales', text(h).includes('No se muestran XP, niveles ni datos de cada estudiante'));
+    ok('aviso explícito: datos del grupo en conjunto, sin XP, niveles ni comparaciones', text(h).includes('Datos del grupo en conjunto, sin XP, niveles ni comparaciones entre estudiantes.'));
+    ok('el bloque agregado no muestra XP ni niveles individuales', !/\d+\s*XP|Semilla|Brote/.test(text(h)));
     const s = render(SUP);
     ok('suprimido: «Datos insuficientes», sin número de reconocidos', text(s).includes('Datos insuficientes') && !/aria-hidden="true">\d+<\/p>\s*<p[^>]*>Datos/.test(s));
     ok('iconos decorativos ocultos', (h.match(/<span aria-hidden="true"/g) ?? []).length === 3);

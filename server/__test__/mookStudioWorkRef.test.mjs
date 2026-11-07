@@ -122,7 +122,7 @@ try {
         const port = await freePort();
         child = spawn(process.execPath, [path.join(REPO, 'server', 'server.js')], {
             env: { ...process.env, NODE_ENV: 'test', SESSION_AUTH_MODE: 'off', ACCESS_FALLBACK_MODE: 'restricted', PORT: String(port), USERS_DB: path.join(dir, 'users.json'), CHP_DATA_DIR: data, UPLOADS_ROOT: path.join(dir, 'uploads'),
-                ACCESS_DB: path.join(data, 'access_db.json'), GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_DB: gam, GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
+                ACCESS_DB: path.join(data, 'access_db.json'), GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', GAMIFICATION_DB: gam, GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
                 EVENTS_SQLITE_PATH: db('events.db'), ARCHIVE_SQLITE_PATH: db('events.archive.db'), INSIGHTS_SQLITE_PATH: db('insights.db'), PROGRESS_SQLITE_PATH: db('progress.db'), OFFLINE_ASSIGNMENT_DB_PATH: db('offline.db'),
                 ROYALTIES_DB: db('royalties.db'), IDENTITY_DB: db('identity.db'), SESSIONS_DB: db('sessions.db'), GROUPS_DB: path.join(data, 'groups_db.json'), SCHOOLS_DB: path.join(data, 'schools_db.json'), LEO_EVIDENCE_DB: path.join(data, 'leo_evidence_db.json') },
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -183,7 +183,7 @@ try {
         ok('flags OFF: sin gamification.db', !fs.existsSync(gam));
         ok('regalías sin cambios', (fs.existsSync(db('royalties.db')) ? sha(db('royalties.db')) : null) === royaltiesAtBoot);
         const policy = fs.readFileSync(path.join(REPO, 'server', 'gamification', 'policy.mjs'), 'utf8');
-        ok('`mook_review` sin XP por facts: solo por reconocimiento aprobado', /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policy) && /PM_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy));
+        ok('`mook_review` sin XP por facts: solo por reconocimiento aprobado', /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policy) && !/PM_LOCKED_SOURCES/.test(policy));
     }
 
     section('[5] Studio (estructural)');

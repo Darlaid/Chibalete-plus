@@ -63,8 +63,8 @@ const E = await import('../erasure.mjs');
 (await import('../../royalties/publishersStore.mjs')).getRoyaltiesDb();
 
 const SINCE = Date.now() - 60_000;
-const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
+const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
 
 // ── Usuarios, grupos y dos instituciones ─────────────────────────────────────
 const ORG_A = 'org-a', ORG_B = 'org-b';
@@ -131,12 +131,12 @@ Store.requestChanges(doc, deliver('5s2').id, { reviewerId: 'med-a', comment: 'aj
 ['4s1', '4s2'].forEach((u) => approve(deliver(u)));
 fs.writeFileSync(P.mook, JSON.stringify(doc, null, 2));
 
-const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: P.gamDb,
+const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: P.gamDb,
     GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
 Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_REGISTRY: P.reg });
 let writer = D.getGamificationDb({ env: ENV }); // réplica escritora viva durante toda la prueba
 L.createRuleSet(writer, { ruleVersion: 'gm-u4-http', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
-    rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: PILOT } });
+    rules: { schema: 1, facts: {}, recognition: PILOT } });
 const seeded = M.recognizeMookWorks(writer, { ...doc, evidence: doc.evidence.filter((e) => e.id !== pendingEv.id) }, {
     workRefOf: Store.productionWorkRef, readRights: () => () => false, sinceMs: SINCE, env: ENV,
     resolveUser: M.makeResolveUser(USERS, () => true, () => false) });
@@ -159,7 +159,7 @@ function spawnApi(port, { flags = ENV, harness = true } = {}) {
             EVENTS_SQLITE_PATH: path.join(tmp, 'sqlite', `events-${port}.db`), ARCHIVE_SQLITE_PATH: path.join(tmp, 'sqlite', `archive-${port}.db`),
             INSIGHTS_SQLITE_PATH: path.join(tmp, 'sqlite', `insights-${port}.db`), PROGRESS_SQLITE_PATH: path.join(tmp, 'sqlite', `progress-${port}.db`),
             ROYALTIES_DB: process.env.ROYALTIES_DB,
-            GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_MOOK_SINCE: '',
+            GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', GAMIFICATION_MOOK_SINCE: '',
             ...flags, GAMIFICATION_RECONCILE_INITIAL_DELAY_MS: '3600000', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
             OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
         },

@@ -59,8 +59,8 @@ export function buildSweepDoc(Store, { n, experiences = 20, users = 200, reviewe
 export const isUserActive = (u) => !u.accountStatus || u.accountStatus === 'active';
 export const isSyntheticUser = (u) => !!u._loadtest_marker;
 
-export const TEST_RECOGNITION = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 3, reflection: 4, validated: 4, route: 1 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 20, reread: { windowDays: 30, xpFactors: [0.5], pmFactors: [0] } };
+export const TEST_RECOGNITION = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 3, reflection: 4, validated: 4, route: 1 } },
+    xpCeilingPerWorkCycle: 20, reread: { windowDays: 30, xpFactors: [0.5] } };
 
 /**
  * Base y registro temporales, con reglas vigentes antes del corte.
@@ -72,7 +72,7 @@ export function freshLedger(D, L, dir, sinceMs, rules = 'recognition') {
     fs.mkdirSync(path.join(dir, 'reg'), { recursive: true });
     const reg = path.join(dir, 'reg', 'r.jsonl');
     fs.writeFileSync(reg, '');
-    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
         GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(sinceMs).toISOString() };
     process.env.GAMIFICATION_DB = env.GAMIFICATION_DB;
     process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
@@ -80,8 +80,8 @@ export function freshLedger(D, L, dir, sinceMs, rules = 'recognition') {
     const db = D.getGamificationDb({ env });
     L.createRuleSet(db, { ruleVersion: 'gm-perf-v1', createdBy: 'migration', now: sinceMs - 5000, effectiveFrom: sinceMs - 5000,
         rules: rules === 'facts'
-            ? { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_experience/experience_completed': { xp: 5 } } }
-            : { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: TEST_RECOGNITION } });
+            ? { schema: 1, facts: { 'mook_experience/experience_completed': { xp: 5 } } }
+            : { schema: 1, facts: {}, recognition: TEST_RECOGNITION } });
     D.closeGamificationDb({ resetBackoff: true });
     return env;
 }

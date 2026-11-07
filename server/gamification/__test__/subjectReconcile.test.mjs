@@ -29,7 +29,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_gam_recon_'));
 const DB = path.join(tmp, 'gam', 'gamification.db');
 process.env.GAMIFICATION_DB = DB;
-const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: DB, GAMIFICATION_MOOK_SINCE: '2026-11-01T00:00:00.000Z' };
+const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: DB, GAMIFICATION_MOOK_SINCE: '2026-11-01T00:00:00.000Z' };
 
 const D = await import('../db.mjs');
 const L = await import('../ledger.mjs');
@@ -56,7 +56,7 @@ const hook = (fn, arg) => new Promise((resolve) => { let done = false; fn(arg, {
 
 try {
     const db0 = D.getGamificationDb({ env: ENV });
-    L.createRuleSet(db0, { ruleVersion: 'gm-r-v1', createdBy: 'migration', now: Date.UTC(2026, 0, 1), rules: { schema: 1, caps: { pmPerDay: 100, pmPerWeek: 300 },
+    L.createRuleSet(db0, { ruleVersion: 'gm-r-v1', createdBy: 'migration', now: Date.UTC(2026, 0, 1), rules: { schema: 1,
         facts: { 'mook_review/evidence_reviewed': {}, 'mook_experience/experience_completed': { xp: 5 } } } });
 
     section('[1] identificadores de fuente');
@@ -105,7 +105,7 @@ try {
     ok('el barrido recupera los hechos perdidos', sweep(lost).recorded === 2);
     ok('una recompensa por hecho', L.getXp(D.getGamificationDb({ env: ENV }), LECTOR) === x0 + 5);
     ok('repetir no duplica la recompensa', sweep(lost).recorded === 0 && L.getXp(D.getGamificationDb({ env: ENV }), LECTOR) === x0 + 5);
-    ok('el ledger cuadra', L.verifyLedger(D.getGamificationDb({ env: ENV })).ok);
+    ok('ninguna fila de PM (PM retirado)', D.getGamificationDb({ env: ENV }).prepare('SELECT (SELECT COUNT(*) FROM gm_pm_movements) + (SELECT COUNT(*) FROM gm_pm_balances) n').get().n === 0);
 
     section('[5] minimización');
     const db = D.getGamificationDb({ env: ENV });
@@ -140,9 +140,9 @@ try {
 
     section('[7] bloqueos G4');
     const P = await import('../policy.mjs');
-    ok('toda fuente sigue sin PM', Object.keys(P.SOURCE_GRADE).every((s) => P.PM_LOCKED_SOURCES.includes(s)));
+    ok('PM retirado: la política no tiene bloqueos ni reglas de PM', !('PM_LOCKED_SOURCES' in P) && P.RETIRED_PM_FACT_KEYS.join() === 'pm' && P.RETIRED_PM_RULE_KEYS.join() === 'caps');
     ok('por facts solo ruta y misión admiten XP (la revisión, solo por reconocimiento)', Object.keys(P.SOURCE_GRADE).filter((s) => !P.isXpLockedForFacts(s)).sort().join() === 'mission,mook_experience' && P.XP_RECOGNITION_ONLY_SOURCES.join() === 'mook_review');
-    ok('ningún PM emitido en toda la suite', count('gm_pm_movements') === 0);
+    ok('ningún PM emitido en toda la suite', count('gm_pm_movements') === 0 && count('gm_pm_balances') === 0);
     D.closeGamificationDb({ resetBackoff: true });
     ok('reconciliar sin clave de sujeto falla cerrado', await (async () => {
         const K = await import('../subjectKey.mjs');

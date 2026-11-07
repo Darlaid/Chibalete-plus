@@ -39,9 +39,9 @@ const E = await import('../erasure.mjs');
 const I = await import('../intake.mjs');
 
 /** A7-A12-V3 §1 con un `approvalRef` sintético: el real lo emite Dirección. */
-const APPROVED = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
-const RULES = { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: APPROVED };
+const APPROVED = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
+const RULES = { schema: 1, facts: {}, recognition: APPROVED };
 
 const SINCE = Date.now() - 60_000;
 const WORDS = 'una dos tres cuatro cinco seis siete ocho';
@@ -71,7 +71,7 @@ function fresh({ rules = RULES, registry = true, envOver = {} } = {}) {
     fs.mkdirSync(path.join(dir, 'db'), { recursive: true }); fs.mkdirSync(path.join(dir, 'reg'));
     const reg = path.join(dir, 'reg', 'r.jsonl');
     if (registry) fs.writeFileSync(reg, '');
-    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'),
         GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString(), ...envOver };
     process.env.GAMIFICATION_DB = env.GAMIFICATION_DB;
     process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
@@ -97,7 +97,7 @@ const realGam = fs.existsSync(path.join(REPO, 'data-critical', 'gamification.db'
 try {
     section('[0] política real, sin arnés');
     ok('`mook_review` fuera de XP_LOCKED_SOURCES', !P.XP_LOCKED_SOURCES.includes('mook_review'));
-    ok('pero solo por reconocimiento y nunca con PM', P.XP_RECOGNITION_ONLY_SOURCES.includes('mook_review') && P.PM_LOCKED_SOURCES.includes('mook_review') && P.isXpLockedForFacts('mook_review'));
+    ok('pero solo por reconocimiento y nunca con PM', P.XP_RECOGNITION_ONLY_SOURCES.includes('mook_review') && !('PM_LOCKED_SOURCES' in P) && P.isXpLockedForFacts('mook_review'));
     ok('lectura libre y validación presencial siguen bloqueadas', P.XP_LOCKED_SOURCES.includes('reading_completion') && P.XP_LOCKED_SOURCES.includes('offline_validation'));
     ok('ninguna fuente nueva', Object.keys(P.SOURCE_GRADE).sort().join() === 'mission,mook_experience,mook_review,offline_validation,reading_completion');
 
@@ -155,7 +155,7 @@ try {
             ok('sin reglas: no_active_rules, sin filas', r.notRecorded.no_active_rules === 1 && count(db, 'gm_source_facts') === 0, JSON.stringify(r));
         }
         {
-            const { db, env } = fresh({ rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {} } });
+            const { db, env } = fresh({ rules: { schema: 1, facts: {} } });
             const r = sweep(db, doc, env);
             ok('reglas sin recognition: recognition_not_configured', r.notRecorded.recognition_not_configured === 1 && count(db, 'gm_source_facts') === 0, JSON.stringify(r));
         }
@@ -163,7 +163,7 @@ try {
             const { db } = fresh({ rules: null });
             const noRef = { ...APPROVED }; delete noRef.approvalRef;
             ok('recognition sin approvalRef: rechazada al crear', codeOf(() => L.createRuleSet(db, { ruleVersion: 'gm-sin-ref', createdBy: 'migration', rules: { ...RULES, recognition: noRef } })) === 'INVALID_RULES');
-            ok('recognition con PM: rechazada', codeOf(() => L.createRuleSet(db, { ruleVersion: 'gm-pm', createdBy: 'migration', rules: { ...RULES, recognition: { ...APPROVED, amounts: { ...APPROVED.amounts, pm: { reviewed: 1, validated: 0 } } } } })) === 'INVALID_RULES');
+            ok('recognition con PM: rechazada (PM_RETIRED)', codeOf(() => L.createRuleSet(db, { ruleVersion: 'gm-pm', createdBy: 'migration', rules: { ...RULES, recognition: { ...APPROVED, amounts: { ...APPROVED.amounts, pm: { reviewed: 0, validated: 0 } } } } })) === 'PM_RETIRED');
             ok('reglas retroactivas: rechazadas', codeOf(() => L.createRuleSet(db, { ruleVersion: 'gm-retro', createdBy: 'migration', effectiveFrom: Date.now() - 86_400_000, rules: RULES })) === 'RETROACTIVE_RULES');
             ok('ninguna regla quedó guardada', count(db, 'gm_rule_sets') === 0);
         }
@@ -216,7 +216,7 @@ try {
         const res = await new Promise((resolve) => M.onMookEvidenceReviewed(ev, { resolveUser: everyone, env,
             recognition: { readMook: () => doc, workRefOf: Store.productionWorkRef, readRights: open, onDone: resolve } }));
         ok('gancho sobre lo ya reconocido: 0', res.ok && res.result.already === 1 && sumXp(db) === 50, JSON.stringify(res));
-        ok('el ledger cuadra, sin PM', L.verifyLedger(db).ok && count(db, 'gm_source_facts') === 2 && noPm(db));
+        ok('el ledger cuadra, sin PM', count(db, 'gm_source_facts') === 2 && noPm(db));
     }
 
     section('[7] obra sin acceso o retirada: 0 XP');
@@ -258,17 +258,17 @@ try {
         const { db, env } = fresh({ envOver: { PM_EARNING_ENABLED: '1' } });
         const doc = Store.emptyMookStore(); deliver(doc, route(doc, 'pm')); deliver(doc, route(doc, 'pm2'));
         sweep(db, doc, env);
-        ok('con PM_EARNING_ENABLED: XP sí, PM no', sumXp(db) === 50 && noPm(db));
+        ok('con PM_EARNING_ENABLED (retirado, sin efecto): XP sí, PM no', sumXp(db) === 50 && noPm(db));
     }
 
     section('[10] la vía genérica no paga la revisión');
     {
         const { db, env } = fresh();
-        ok('validateRules: XP por facts → XP_SOURCE_LOCKED', codeOf(() => P.validateRules({ schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST })) === 'XP_SOURCE_LOCKED');
-        ok('createRuleSet sin recognition: rechazada', codeOf(() => L.createRuleSet(db, { ruleVersion: 'gm-facts', createdBy: 'migration', rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } } })) === 'XP_SOURCE_LOCKED');
+        ok('validateRules: XP por facts → XP_SOURCE_LOCKED', codeOf(() => P.validateRules({ schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST })) === 'XP_SOURCE_LOCKED');
+        ok('createRuleSet sin recognition: rechazada', codeOf(() => L.createRuleSet(db, { ruleVersion: 'gm-facts', createdBy: 'migration', rules: { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } } })) === 'XP_SOURCE_LOCKED');
         const rf = L.recordFact(db, { source: 'mook_review', sourceEventId: 'ev-gen', factType: 'evidence_reviewed', userId: 'lector', actorId: 'mediador', occurredAt: Date.now(), eligibility: 'eligible' }, { env });
         ok('recordFact: observado, sin fila', rf.decision === 'observed' && rf.persisted === false && count(db, 'gm_source_facts') === 0);
-        ok('PM por facts sigue prohibido', codeOf(() => P.validateRules({ schema: 1, caps: { pmPerDay: 1, pmPerWeek: 1 }, facts: { 'mook_review/evidence_reviewed': { pm: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST })) === 'PM_SOURCE_LOCKED');
+        ok('PM por facts sigue prohibido', codeOf(() => P.validateRules({ schema: 1, facts: { 'mook_review/evidence_reviewed': { pm: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST })) === 'PM_RETIRED');
     }
 
     section('[aislamiento]');

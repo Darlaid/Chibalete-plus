@@ -143,10 +143,10 @@ try {
     ok('append-only: sin UPDATE', (() => { try { c.prepare("UPDATE gm_work_cycles SET xp = 1").run(); return false; } catch (e) { return e.message.includes('append-only'); } })());
     ok('append-only: sin DELETE', (() => { try { c.prepare('DELETE FROM gm_work_cycles').run(); return false; } catch (e) { return e.message.includes('append-only'); } })());
     const decision = Rec.decideRecognition({ evidence: { source: 'mook_review', userId: 'u', actorId: 'm', evidenceId: 'e3', at: 1, workRef: 'w7', decision: 'aprobado' },
-        subject: { exists: true, active: true, synthetic: false }, history: [], flags: { xpEarning: true, pmEarning: true },
-        config: { amounts: { xp: { reading: 1, reflection: 1, validated: 1, route: 1 }, pm: { reviewed: 1, validated: 1 } }, xpCeilingPerWorkCycle: 9, reread: { windowDays: 1, xpFactors: [], pmFactors: [] } } });
+        subject: { exists: true, active: true, synthetic: false }, history: [], flags: { xpEarning: true },
+        config: { amounts: { xp: { reading: 1, reflection: 1, validated: 1, route: 1 } }, xpCeilingPerWorkCycle: 9, reread: { windowDays: 1, xpFactors: [] } } });
     fact(c, 'e3');
-    const fit = c.transaction(() => decision.entries.forEach((en) => row(c, 'e3', en.workRef, en.cycle, en.act, en.xp, en.pm)));
+    const fit = c.transaction(() => decision.entries.forEach((en) => row(c, 'e3', en.workRef, en.cycle, en.act, en.xp, 0)));
     fit();
     ok('las entradas reales de decideRecognition caben', decision.entries.map((x) => x.act).join() === 'reading,reflection' && c.prepare("SELECT COUNT(*) n FROM gm_work_cycles WHERE fact_id = 'e3'").get().n === 2);
     ok('solo actos del conjunto cerrado', decision.entries.every((x) => Rec.WORK_CYCLE_ACTS.includes(x.act)));
@@ -165,7 +165,7 @@ try {
     ok('restaurada: no reaplica nada', versions(rdb).length === 3 && versions(rdb).includes(V3));
     ok('filas idénticas', JSON.stringify(rdb.prepare('SELECT * FROM gm_work_cycles ORDER BY rowid').all()) === before);
     ok('esquema idéntico', pk(rdb) === 'fact_id,work_key,act' && objects(rdb, 'index') === 'ux_gm_cycle_pm,ux_gm_cycle_reading');
-    ok('integridad y ledger', rdb.pragma('integrity_check', { simple: true }) === 'ok' && L.verifyLedger(rdb).ok);
+    ok('integridad y sin PM', rdb.pragma('integrity_check', { simple: true }) === 'ok' && rdb.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 0 && rdb.prepare('SELECT COUNT(*) n FROM gm_pm_balances').get().n === 0);
     ok('las unicidades siguen activas tras restaurar', throwsCode(() => row(rdb, 'e1', 'w1', 1, 'reflection'), 'SQLITE_CONSTRAINT_PRIMARYKEY')
         && throwsCode(() => row(rdb, 'e2', 'w1', 1, 'reflection', 0, 1), 'SQLITE_CONSTRAINT_UNIQUE'));
     D.closeGamificationDb({ resetBackoff: true });

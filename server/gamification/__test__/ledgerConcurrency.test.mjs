@@ -4,8 +4,8 @@
  * Varios PROCESOS sobre la misma gamification.db temporal, como api_1 y api_2
  * sobre el bind mount:
  *  [1] arranque simultáneo (4) sobre una base inexistente: 1 migración;
- *  [2] escrituras concurrentes: sin duplicados ni movimientos perdidos;
- *  [3] topes bajo concurrencia: dos réplicas no exceden el tope diario;
+ *  [2] escrituras concurrentes: sin duplicados ni asientos de XP perdidos;
+ *  [3] mismo usuario desde dos réplicas: XP acumulativo exacto, sin topes ni PM;
  *  [4] reconciliación simultánea desde la misma fuente: sin duplicados;
  *  [5] interrupción abrupta a mitad de la reconciliación: el siguiente
  *      barrido recupera lo que faltaba, sin duplicar;
@@ -16,7 +16,6 @@
  *   node server/gamification/__test__/ledgerConcurrency.test.mjs
  */
 import '../../__test__/helpers/testMode.mjs';
-import './helpers/pmMechanicsHarness.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,7 +32,12 @@ const REAL_DB = path.join(REPO, 'data-critical', 'gamification.db');
 const realBefore = fs.existsSync(REAL_DB);
 const WORKER = path.join(HERE, 'concurrencyWorker.mjs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_gam_conc_'));
-const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
+const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1' };
+// V8-UNIFIED-XP-01: ninguna escritura del motor toca las tablas de PM (retirados).
+const pmRows = (db) => ['gm_pm_movements', 'gm_pm_balances', 'gm_redemptions'].reduce((n, t) => n + db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n, 0);
+// getXp de cada sujeto = Σ de sus asientos award.
+const xpConsistent = (db) => db.prepare('SELECT user_id FROM gm_subjects').all().every(({ user_id: u }) =>
+    L.getXp(db, u) === db.prepare("SELECT COALESCE(SUM(xp),0) n FROM gm_xp_entries WHERE kind='award' AND subject_ref=(SELECT subject_ref FROM gm_subjects WHERE user_id=?)").get(u).n);
 
 let barrierN = 0;
 function runReplicas(dbPath, roles, extraEnv = {}) {
@@ -61,8 +65,8 @@ const openFresh = (dbPath, rules) => {
     L.createRuleSet(db, { ruleVersion: 'gm-conc-v1', rules, createdBy: 'migration', now: Date.UTC(2026, 0, 1) });
     D.closeGamificationDb();
 };
-const BIG = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: {
-    'mission/mission_completed': { xp: 3, pm: 7 },
+const BIG = { schema: 1, facts: {
+    'mission/mission_completed': { xp: 3 },
     'mook_review/evidence_reviewed': {},
     'mook_experience/experience_completed': { xp: 2 },
 } };
@@ -105,28 +109,26 @@ try {
     let n = (sql) => db.prepare(sql).get().n;
     ok('300 hechos en la base, ninguno duplicado', n('SELECT COUNT(*) n FROM gm_source_facts') === 300
         && n('SELECT COUNT(*) n FROM (SELECT source, source_event_id, fact_type FROM gm_source_facts GROUP BY 1,2,3 HAVING COUNT(*) > 1)') === 0);
-    ok('300 movimientos earn y 300 asientos XP (uno por hecho, ninguno perdido)', n("SELECT COUNT(*) n FROM gm_pm_movements WHERE kind='earn'") === 300 && n('SELECT COUNT(*) n FROM gm_xp_entries') === 300);
-    ok('ajustes en la base = ajustes reportados por las réplicas', n("SELECT COUNT(*) n FROM gm_pm_movements WHERE kind='adjustment'") === a.adjustments + b.adjustments, `${a.adjustments}+${b.adjustments}`);
-    ok('snapshot = Σ ledger tras la carrera', L.verifyLedger(db).ok);
-    const sum = n('SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements');
-    ok(`Σ saldos = Σ movimientos = 300×7 − 3×ajustes (${sum})`, n('SELECT COALESCE(SUM(available),0) n FROM gm_pm_balances') === sum && sum === 300 * 7 - 3 * (a.adjustments + b.adjustments));
-    ok('ningún saldo negativo (los ajustes no pueden dejarlo así)', n('SELECT COUNT(*) n FROM gm_pm_balances WHERE available < 0') === 0);
-    ok('seq estrictamente creciente sin huecos de movimientos', n('SELECT COUNT(*) n FROM gm_pm_movements') === n('SELECT MAX(seq) - MIN(seq) + 1 n FROM gm_pm_movements'));
+    ok('300 asientos XP: exactamente uno por hecho, ninguno perdido', n('SELECT COUNT(*) n FROM gm_xp_entries') === 300
+        && n('SELECT COUNT(*) n FROM gm_source_facts f WHERE (SELECT COUNT(*) FROM gm_xp_entries x WHERE x.fact_id = f.fact_id) <> 1') === 0);
+    const xpSum = n('SELECT COALESCE(SUM(xp),0) n FROM gm_xp_entries');
+    ok(`Σ XP = 300×3 = XP reportado por las réplicas (${xpSum})`, xpSum === 900 && a.xp + b.xp === 900, `${a.xp}+${b.xp}`);
+    ok('getXp = Σ asientos para cada sujeto tras la carrera', xpConsistent(db));
+    ok('ninguna fila de PM escrita por las réplicas', pmRows(db) === 0);
 
-    section('[3] topes bajo concurrencia: 2 réplicas × 50 hechos del mismo usuario');
+    section('[3] XP acumulativo bajo concurrencia: 2 réplicas × 50 hechos del mismo usuario');
     const DB3 = path.join(tmp, 'caps', 'gamification.db');
-    openFresh(DB3, { schema: 1, caps: { pmPerDay: 100, pmPerWeek: 300 }, facts: { 'mission/mission_completed': { xp: 1, pm: 10 } } });
+    openFresh(DB3, { schema: 1, facts: { 'mission/mission_completed': { xp: 1 } } });
     const [c1, c2] = await runReplicas(DB3, ['caps-1', 'caps-2']);
     ok('ambas terminan sin error', c1.errors.length === 0 && c2.errors.length === 0, JSON.stringify([c1.errors, c2.errors]));
     process.env.GAMIFICATION_DB = DB3;
     db = D.getGamificationDb();
     n = (sql) => db.prepare(sql).get().n;
-    const earned = n("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE subject_ref=(SELECT subject_ref FROM gm_subjects WHERE user_id='u-hot') AND kind='earn'");
-    ok(`PM emitidos al usuario = tope diario exacto (${earned} = 100), no más`, earned === 100 && c1.pm + c2.pm === 100, `${c1.pm}+${c2.pm}`);
-    ok('100 hechos registrados: 10 awarded y 90 capped entre ambas', n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 10 && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='capped'") === 90);
-    ok('el XP sí se emitió para los 100 (los topes son de PM)', n('SELECT COUNT(*) n FROM gm_xp_entries') === 100);
+    ok(`XP del usuario = 100 × 1 exacto (${L.getXp(db, 'u-hot')}), sin perder ni duplicar`, L.getXp(db, 'u-hot') === 100 && c1.xp + c2.xp === 100, `${c1.xp}+${c2.xp}`);
+    ok('100 hechos registrados, todos «awarded» (ya no existe «capped»)', n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 100 && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision<>'awarded'") === 0);
+    ok('100 asientos de XP y ninguna fila de PM', n('SELECT COUNT(*) n FROM gm_xp_entries') === 100 && pmRows(db) === 0);
     ok('un solo sujeto por usuario entre las dos réplicas', n('SELECT COUNT(*) n FROM gm_subjects') === n('SELECT COUNT(DISTINCT user_id) n FROM gm_subjects') && n("SELECT COUNT(*) n FROM gm_subjects WHERE user_id='u-hot'") === 1);
-    ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
+    ok('getXp = Σ asientos', xpConsistent(db));
 
     section('[4] reconciliación simultánea de la misma fuente (2 procesos)');
     const DB4 = path.join(tmp, 'recon', 'gamification.db');
@@ -141,7 +143,7 @@ try {
     ok('20 hechos, ninguno duplicado', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_ROUTES);
     const dec = Object.fromEntries(db.prepare('SELECT decision, COUNT(*) n FROM gm_source_facts GROUP BY decision').all().map((r) => [r.decision, r.n]));
     ok('solo persisten las 20 rutas awarded: ni observadas ni rechazos', Object.keys(dec).join() === 'awarded' && dec.awarded === 20, JSON.stringify(dec));
-    ok('snapshot = Σ ledger', L.verifyLedger(db).ok);
+    ok('getXp = Σ asientos y sin filas de PM', xpConsistent(db) && pmRows(db) === 0);
 
     section('[5] interrupción abrupta a mitad de la reconciliación');
     const DB5 = path.join(tmp, 'crash', 'gamification.db');
@@ -152,13 +154,13 @@ try {
     db = D.getGamificationDb();
     n = (sql) => db.prepare(sql).get().n;
     ok('quedaron registradas exactamente las 10 rutas previas a la caída (tras 50 revisiones sin fila)', n('SELECT COUNT(*) n FROM gm_source_facts') === 10);
-    ok('la base sigue íntegra y consistente tras la caída', db.pragma('integrity_check', { simple: true }) === 'ok' && L.verifyLedger(db).ok);
+    ok('la base sigue íntegra y consistente tras la caída', db.pragma('integrity_check', { simple: true }) === 'ok' && xpConsistent(db));
     const doc = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
     const cands = [...R.mookReviewCandidates(doc), ...R.mookExperienceCandidates(doc)];
     const resolveUser = (id) => ({ exists: true, active: true, synthetic: id.startsWith('synthetic-') });
     const rec = R.reconcile(db, cands, { resolveUser, env: EARN });
     ok('el siguiente barrido recupera las 10 restantes y salta las 10 ya registradas', rec.recorded === 10 && rec.alreadyRecorded === 10);
-    ok('resultado final idéntico al de una reconciliación sin caída', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_ROUTES && L.verifyLedger(db).ok
+    ok('resultado final idéntico al de una reconciliación sin caída', n('SELECT COUNT(*) n FROM gm_source_facts') === EXPECTED_ROUTES && xpConsistent(db) && pmRows(db) === 0
         && n("SELECT COUNT(*) n FROM gm_source_facts WHERE decision='awarded'") === 20);
     const again = R.reconcile(db, cands, { resolveUser, env: EARN });
     ok('un tercer barrido no registra nada (idempotente)', again.recorded === 0 && again.alreadyRecorded === EXPECTED_ROUTES);

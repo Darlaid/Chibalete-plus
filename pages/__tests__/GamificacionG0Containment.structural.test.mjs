@@ -1,12 +1,13 @@
 /**
  * GamificacionG0Containment.structural.test.mjs — CHP-GAMIFICACION-G0-01.
  *
- * Contención de la gamificación simulada (sin nuevo sistema):
- *   [L] Leo: el Chatbot no concede puntos por tokens.
- *   [D] dataService: sumar/gastar/canjear/aprobar puntos es inerte.
- *   [T] Trivia: fuera de la navegación; la ruta no genera preguntas, ni puntos, ni premios.
- *   [A] Admin: sin aprobaciones simuladas ni «cupón generado»; historial intacto.
- *   [B] Biblioteca: sin etiqueta «N pts»; secciones y unlockCost intactos.
+ * Contención de la gamificación simulada. V8-UNIFIED-XP-01 la RETIRA: lo que G0
+ * dejó inerte ya no existe (XP es la única escala, servidor):
+ *   [L] Leo: el Chatbot no concede puntos por tokens (el filtro de tokens sigue).
+ *   [D] dataService: sin métodos de Puntos de Magia (sumar/gastar/canjear/aprobar).
+ *   [T] Trivia: página, ruta, permiso y generador retirados.
+ *   [A] Admin: AdminRecompensas retirada (ruta, permiso y Navbar); Tienda sin PM.
+ *   [B] Biblioteca: sin etiqueta «N pts»; las secciones siguen.
  *   [I] Visor inmersivo: el corte por tiempo no dice «¡Lectura Completada!» ni
  *       emite finalización; el fin real de la obra sigue igual.
  *   [M] MOOK / progreso canónico: el diff de G0 no los toca.
@@ -40,12 +41,11 @@ function methodBody(src, name) {
 
 const chatbot = read('components/Chatbot.tsx');
 const ds = read('services/dataService.ts');
-// Sin comentarios `//`: el comentario de cabecera documenta lo retirado por nombre.
-const trivia = read('pages/Trivia.tsx').replace(/^\s*\/\/.*$/gm, '');
+const exists = (p) => fs.existsSync(path.join(ROOT, p));
+const noComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const navbar = read('components/Navbar.tsx');
 const app = read('App.tsx');
 const perms = read('config/routePermissions.ts');
-const admin = read('pages/AdminRecompensas.tsx');
 const home = read('pages/Home.tsx');
 const tienda = read('pages/Tienda.tsx');
 const biblio = read('pages/Biblioteca.tsx');
@@ -58,39 +58,31 @@ ok('Chatbot borra el token con el util compartido', /stripAwardPointsTokens\(tex
 ok('parseActions ya no expone points', !/points:\s*number/.test(chatbot));
 ok('SAVE_VOCAB e INTERACTION_TYPE siguen procesándose', /\[SAVE_VOCAB:/.test(chatbot) && /\[INTERACTION_TYPE:/.test(chatbot));
 
-console.log('\n[D] dataService inerte para puntos y canjes');
-const bodies = Object.fromEntries(['addPuntos', 'canjearRecompensa', 'addPoints', 'redeemCoupon', 'processRewardRequest']
-    .map(n => [n, methodBody(ds, n)]));
-for (const [n, b] of Object.entries(bodies)) {
-    ok(`${n}: localizable`, b !== null);
-    ok(`${n}: no modifica puntos`, b !== null && !/\.puntos\s*[-+]?=/.test(b));
-    ok(`${n}: no persiste estado`, b !== null && !/saveState\(/.test(b));
-    ok(`${n}: no crea ni muta solicitudes`, b !== null && !/journalEntries|status\s*=/.test(b));
+console.log('\n[D] dataService sin Puntos de Magia (V8-UNIFIED-XP-01)');
+for (const n of ['addPuntos', 'canjearRecompensa', 'addPoints', 'redeemCoupon', 'processRewardRequest', 'getRewardRequests']) {
+    ok(`${n}: retirado`, methodBody(ds, n) === null && !new RegExp(`\\b${n}\\(`).test(noComments(ds)));
 }
-ok('canjearRecompensa devuelve false', /return false;/.test(bodies.canjearRecompensa || ''));
-ok('redeemCoupon devuelve success:false con aviso veraz',
-   /success:\s*false/.test(bodies.redeemCoupon || '') && /estarán disponibles cuando el sistema esté habilitado/.test(bodies.redeemCoupon || ''));
+ok('ningún texto de «Puntos de Magia» en dataService', !/Puntos de Magia/.test(noComments(ds)));
+ok('sin reward_request ni .puntos', !/reward_request|\.puntos\b/.test(noComments(ds)));
 ok('addPoints ya no escribe nombre_usuario en consola', !/console\.log\([^)]*\[Points\]/.test(ds));
-ok('getRewardRequests (historial) se conserva', /getRewardRequests\(filter/.test(ds));
 
 console.log('\n[T] Trivia');
 ok('Navbar sin enlaces a /trivia', !/['"]\/trivia['"]/.test(navbar));
 ok('Navbar sin etiqueta Trívia', !/Tr[ií]via/.test(navbar));
-ok('la ruta /trivia sigue protegida (sin 404 ni ruta abierta)',
-   /path="\/trivia"[\s\S]{0,200}?ProtectedRoute access=\{getRouteAccess\('\/trivia'\)\}/.test(app) && /path: '\/trivia'/.test(perms));
-ok('Trivia no genera preguntas', !/generarPreguntaTrivia/.test(trivia));
-ok('Trivia no usa dataService (ni suma ni gasta)', !/dataService/.test(trivia));
-ok('Trivia no muestra premios simulados', !/MOCK_REWARDS|picsum|Canjear|PTS|recompensa/i.test(trivia));
-ok('Trivia muestra aviso veraz', /Trivia no disponible/.test(trivia) && /to="\/biblioteca"/.test(trivia));
+ok('pages/Trivia.tsx retirada', !exists('pages/Trivia.tsx'));
+ok('sin ruta ni permiso /trivia', !/\/trivia/.test(app) && !/'\/trivia'/.test(perms) && !/pages\/Trivia/.test(app));
+ok('sin generador de trivia ni tipo TriviaQuestion', !/generarPreguntaTrivia|TriviaQuestion/.test(read('services/geminiService.ts'))
+   && !/TriviaQuestion/.test(read('types/index.ts')));
 
-console.log('\n[A] Administración de recompensas');
-ok('sin botones Aprobar/Rechazar', !/>\s*Aprobar\b|>\s*Rechazar\b|<CheckCircle[^>]*\/> Aprobar/.test(admin));
-ok('no invoca processRewardRequest', !/processRewardRequest/.test(admin));
-ok('ningún mensaje afirma «cupón generado»', !/cup[oó]n generado/i.test(admin) && !/cup[oó]n generado/i.test(ds));
-ok('aviso de canje no habilitado', /no está habilitado/.test(admin));
-ok('historial sigue visible (pestañas y tabla)', /getRewardRequests\(filter\)/.test(admin) && /<table/.test(admin));
+console.log('\n[A] Administración de recompensas y Tienda');
+ok('pages/AdminRecompensas.tsx retirada', !exists('pages/AdminRecompensas.tsx'));
+ok('sin ruta, permiso ni enlace /admin/recompensas', !/\/admin\/recompensas|AdminRecompensas/.test(app)
+   && !/\/admin\/recompensas/.test(perms) && !/\/admin\/recompensas|'Recompensas'/.test(navbar));
+ok('ningún mensaje afirma «cupón generado»', !/cup[oó]n generado/i.test(ds));
 ok('Home ya no avisa «esperando aprobación de cupones»', !/aprobaci[oó]n de cupones/.test(home));
 ok('Tienda sin redeemCoupon ni «te enviará el código»', !/redeemCoupon|te enviará el código/.test(tienda));
+ok('Tienda sin Puntos de Magia ni bloque de recompensas', !/Puntos de Magia|<Gift\b/.test(noComments(tienda)));
+ok('/tienda ya no se describe como canje de puntos', !/[Cc]anje de puntos/.test(perms) && /path: '\/tienda'/.test(perms));
 ok('Tienda conserva el catálogo y la CTA externa', /<CatalogSection state=\{catalogState\}/.test(tienda) && /getStoreCatalog\(\)/.test(tienda));
 
 console.log('\n[B] Biblioteca');

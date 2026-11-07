@@ -5,7 +5,8 @@
  * función REAL del runner de backups (`capture_sqlite`, Online Backup API +
  * integrity_check, ops/backup/CHP-BACKUP-01B). Comprueba que la copia:
  *  - se toma con la base abierta en WAL y una escritura sin checkpoint;
- *  - conserva el historial completo (hash de cada tabla) y el snapshot;
+ *  - conserva el historial completo (hash de cada tabla), el XP por persona y
+ *    las filas HISTÓRICAS de PM (retirados en V8-UNIFIED-XP-01: no se borran);
  *  - restaurada, sigue rechazando UPDATE/DELETE (los triggers viajan) y
  *    mantiene la idempotencia (re-procesar los mismos hechos no duplica).
  * No modifica stores.py: la incorporación real al runner es su propia unidad.
@@ -14,7 +15,6 @@
  *   node server/gamification/__test__/ledgerBackupRestore.test.mjs
  */
 import '../../__test__/helpers/testMode.mjs';
-import './helpers/pmMechanicsHarness.mjs';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -54,20 +54,23 @@ const TABLES = ['gm_rule_sets', 'gm_subjects', 'gm_source_facts', 'gm_xp_entries
 const tableHash = (db, t) => crypto.createHash('sha256').update(JSON.stringify(db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all())).digest('hex');
 const fact = (i, user) => ({ source: 'mission', sourceEventId: `bk-${i}`, factType: 'mission_completed', userId: user,
     actorId: 'u-med', occurredAt: Date.now(), eligibility: 'eligible' });
-const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
-const RULES = { schema: 1, caps: { pmPerDay: 10000, pmPerWeek: 10000 }, facts: { 'mission/mission_completed': { xp: 5, pm: 11 } } };
+const EARN = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1' };
+const RULES = { schema: 1, facts: { 'mission/mission_completed': { xp: 5 } } };
 
 try {
     section('[1] base viva con historial, en WAL y sin checkpoint');
     const db = D.getGamificationDb();
     L.createRuleSet(db, { ruleVersion: RV, rules: RULES, createdBy: 'migration' });
     for (let i = 0; i < 40; i++) L.recordFact(db, fact(i, `u-${i % 4}`), { env: EARN });
-    const mv = db.prepare("SELECT m.movement_id, s.user_id FROM gm_pm_movements m JOIN gm_subjects s ON s.subject_ref = m.subject_ref ORDER BY m.seq LIMIT 1").get();
-    L.appendAdjustment(db, { userId: 'u-1', amount: 4, reasonCode: 'support', actorId: 'admin-1', idempotencyKey: 'a1', ruleVersion: RV });
-    L.appendCompensation(db, { userId: mv.user_id, amount: -11, reasonCode: 'correction', actorId: 'admin-1', relatedMovementId: mv.movement_id, idempotencyKey: 'c1', ruleVersion: RV });
+    // Fila HISTÓRICA de PM (anterior a V8-UNIFIED-XP-01), insertada en SQL: el motor ya no escribe PM.
+    db.prepare(`INSERT INTO gm_pm_movements (movement_id,subject_ref,kind,amount,source,idempotency_key,fact_id,redemption_id,related_movement_id,reason_code,actor_ref,rule_version,period_day,period_week,created_at)
+        VALUES ('mv-hist','u-hist','adjustment',4,'admin','hist-1',NULL,NULL,NULL,'support','admin-1','${RV}','2026-10-29','2026-W44',1)`).run();
+    db.prepare("INSERT INTO gm_pm_balances VALUES ('u-hist', 4, 0, 0, 1, 1)").run();
     ok('el WAL tiene páginas sin volcar al archivo principal', fs.existsSync(`${SRC}-wal`) && fs.statSync(`${SRC}-wal`).size > 0);
     const hashesBefore = Object.fromEntries(TABLES.map((t) => [t, tableHash(db, t)]));
-    const balancesBefore = JSON.stringify(db.prepare('SELECT * FROM gm_pm_balances ORDER BY subject_ref').all());
+    const xpOf = (d) => JSON.stringify(['u-0', 'u-1', 'u-2', 'u-3'].map((u) => L.getXp(d, u)));
+    const xpBefore = xpOf(db);
+    ok('XP acumulado antes de la captura = 10 hechos × 5 por persona', xpBefore === JSON.stringify([50, 50, 50, 50]), xpBefore);
 
     section('[2] captura con la función real del runner (con la base abierta)');
     const py = [
@@ -97,11 +100,13 @@ try {
     const diff = TABLES.filter((t) => tableHash(rdb, t) !== hashesBefore[t]);
     ok('historial idéntico en las 11 tablas (hash por tabla)', diff.length === 0, diff.join(','));
     ok('el hecho escrito DESPUÉS de la captura no está (punto de restauración exacto)', !rdb.prepare("SELECT 1 FROM gm_source_facts WHERE source_event_id='bk-999'").get());
-    ok('snapshot idéntico y = Σ ledger', JSON.stringify(rdb.prepare('SELECT * FROM gm_pm_balances ORDER BY subject_ref').all()) === balancesBefore && L.verifyLedger(rdb).ok);
-    ok('los triggers append-only viajan con la copia', (() => { try { rdb.prepare('DELETE FROM gm_pm_movements').run(); return false; } catch (e) { return /append-only/.test(e.message); } })());
+    ok('XP por persona idéntico tras restaurar', xpOf(rdb) === xpBefore);
+    ok('las filas históricas de PM viajan intactas con la copia', rdb.prepare("SELECT COUNT(*) n FROM gm_pm_movements WHERE movement_id='mv-hist'").get().n === 1);
+    ok('los triggers append-only viajan con la copia', ['gm_xp_entries', 'gm_pm_movements'].every((t) => { try { rdb.prepare(`DELETE FROM ${t}`).run(); return false; } catch (e) { return /append-only/.test(e.message); } }));
     const replays = Array.from({ length: 40 }, (_, i) => L.recordFact(rdb, fact(i, `u-${i % 4}`), { env: EARN }));
     ok('re-procesar los 40 hechos tras restaurar no duplica (idempotencia I1)', replays.every((x) => !x.inserted) && rdb.prepare('SELECT COUNT(*) n FROM gm_source_facts').get().n === 40);
-    ok('los hechos perdidos tras el punto de restauración se recuperan al re-procesarlos', L.recordFact(rdb, fact(999, 'u-live'), { env: EARN }).inserted && L.verifyLedger(rdb).ok);
+    ok('los hechos perdidos tras el punto de restauración se recuperan al re-procesarlos', L.recordFact(rdb, fact(999, 'u-live'), { env: EARN }).inserted && L.getXp(rdb, 'u-live') === 5 && xpOf(rdb) === xpBefore);
+    ok('ninguna fila de PM nueva tras restaurar y re-procesar', rdb.prepare('SELECT COUNT(*) n FROM gm_pm_movements').get().n === 1);
     D.closeGamificationDb();
 } catch (e) {
     console.error('  ✗ excepción inesperada', e);

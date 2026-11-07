@@ -5,11 +5,11 @@
  * son ilustrativas: no son tarifas.
  *  [1] clasificación por fuente y modalidad
  *  [2] equivalencia entre modalidades
- *  [3] lectura plausible: nunca PM (A1, A2)
+ *  [3] lectura plausible: solo XP; PM retirado (V8-UNIFIED-XP-01)
  *  [4] comprensión verificada: elegibilidad controlada y sin duplicados
  *  [5] obra y ciclo: techo, dos actividades, orden de llegada, lectura y MOOK
  *  [6] relecturas
- *  [7] flags independientes (A4)
+ *  [7] flag de XP (A4); el de PM ya no existe
  *  [8] tiempo, velocidad, clics, bloques e IA excluidos (A3)
  *  [9] niveles (A8)
  * [10] logros
@@ -43,11 +43,11 @@ const { SOURCE_GRADE, LOCKED_SOURCES } = await import('../policy.mjs');
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 10, 3, 17);
 const CONFIG = Object.freeze({
-    amounts: { xp: { reading: 10, reflection: 6, validated: 5, route: 3 }, pm: { reviewed: 8, validated: 7 } },
+    amounts: { xp: { reading: 10, reflection: 6, validated: 5, route: 3 } },
     xpCeilingPerWorkCycle: 20,
-    reread: { windowDays: 30, xpFactors: [0.5, 0], pmFactors: [] },
+    reread: { windowDays: 30, xpFactors: [0.5, 0] },
 });
-const ON = Object.freeze({ xpEarning: true, pmEarning: true });
+const ON = Object.freeze({ xpEarning: true });
 const SUBJECT = Object.freeze({ exists: true, active: true, synthetic: false });
 const MODALITIES = Object.keys(MODE_INSTRUMENTATION);
 const OBSERVABLE = MODALITIES.filter((m) => MODE_INSTRUMENTATION[m]);
@@ -67,11 +67,13 @@ function run(list, extra = {}) {
         history = R.applyRecognition(history, d);
         return d;
     });
-    return { history, decisions, xp: history.reduce((s, e) => s + e.xp, 0), pm: history.reduce((s, e) => s + e.pm, 0) };
+    return { history, decisions, xp: history.reduce((s, e) => s + e.xp, 0) };
 }
+const noPm = (d) => d && !('pm' in d) && (d.entries ?? []).every((e) => !('pm' in e));
+
 /** Decisión sin ids ni hora, para comparar reconocimientos. */
-const shape = (d) => ({ outcome: d.outcome, xp: d.xp, pm: d.pm, cycle: d.cycle, grade: d.grade, layer: d.layer, reasons: d.reasons,
-    entries: d.entries.map((e) => ({ act: e.act, via: e.via, xp: e.xp, pm: e.pm, cycle: e.cycle })) });
+const shape = (d) => ({ outcome: d.outcome, xp: d.xp, cycle: d.cycle, grade: d.grade, layer: d.layer, reasons: d.reasons,
+    entries: d.entries.map((e) => ({ act: e.act, via: e.via, xp: e.xp, cycle: e.cycle })) });
 
 section('[1] clasificación');
 {
@@ -111,43 +113,48 @@ section('[2] equivalencia entre modalidades');
     ok('veredicto plausible sin instrumentación no se acepta', d.xp === 0 && d.reasons.includes('modality_without_traversal_evidence'));
 }
 
-section('[3] lectura plausible: nunca PM');
+section('[3] lectura plausible: solo XP (PM retirado)');
 {
     for (const m of OBSERVABLE) {
         const d = decide(reading({ modality: m }));
-        ok(`${m}: XP sí, PM no`, d.xp > 0 && d.pm === 0 && d.reasons.includes('reading_alone_never_pm'));
+        ok(`${m}: XP sí, ningún campo de PM`, d.xp > 0 && noPm(d) && !d.reasons.some((x) => /pm/i.test(x)));
     }
-    ok('tampoco con importes de PM enormes', decide(reading(), [], { config: { ...CONFIG, amounts: { ...CONFIG.amounts, pm: { reviewed: 10_000, validated: 10_000 } } } }).pm === 0);
+    const legacy = { ...CONFIG, amounts: { ...CONFIG.amounts, pm: { reviewed: 0, validated: 0 } }, reread: { ...CONFIG.reread, pmFactors: [0] } };
+    ok('configuración HISTÓRICA con pm en cero: se tolera y da el mismo resultado', R.validateRecognitionConfig(legacy).ok && same(shape(decide(reading({ evidenceId: 'lg' }), [], { config: legacy })), shape(decide(reading({ evidenceId: 'lg' })))));
+    const legacyPositive = { ...CONFIG, amounts: { ...CONFIG.amounts, pm: { reviewed: 9999, validated: 9999 } } };
+    ok('configuración con pm distinto de cero: inválida (amounts.pm.retired), nada', R.validateRecognitionConfig(legacyPositive).errors.includes('amounts.pm.retired') && decide(review(), [], { config: legacyPositive }).xp === 0);
+    ok('pmFactors distintos de cero: inválidos', R.validateRecognitionConfig({ ...CONFIG, reread: { ...CONFIG.reread, pmFactors: [0.5] } }).errors.includes('reread.pmFactors.retired'));
+    ok('hasRetiredPm detecta cualquier campo de PM', R.hasRetiredPm(legacy) && R.hasRetiredPm({ ...CONFIG, reread: { ...CONFIG.reread, pmFactors: [] } }) && !R.hasRetiredPm(CONFIG));
     const r = run([1, 2, 3].map((i) => reading({ workRef: `w-${i}` })));
-    ok('muchas lecturas plausibles: 0 PM', r.pm === 0 && r.xp === 3 * CONFIG.amounts.xp.reading);
+    ok('muchas lecturas plausibles: XP acumulado, sin PM', r.history.every((e) => !('pm' in e)) && r.xp === 3 * CONFIG.amounts.xp.reading);
     ok('una lectura no suma a reflexiones', R.summarizeRecognition(r.history).reflections === 0);
     for (const v of ['implausible', 'insufficient_data']) {
         const d = decide(reading({ verdict: v }));
-        ok(`${v}: sin XP, sin PM, vía abierta`, d.xp === 0 && d.pm === 0 && d.alternativeRouteOpen && d.entries.length === 0);
+        ok(`${v}: sin XP, vía abierta`, d.xp === 0 && noPm(d) && d.alternativeRouteOpen && d.entries.length === 0);
     }
 }
 
 section('[4] comprensión verificada');
 {
     const d = decide(review());
-    ok('aprobado: XP de lectura + reflexión, y PM', d.xp === CONFIG.amounts.xp.reading + CONFIG.amounts.xp.reflection && d.pm === CONFIG.amounts.pm.reviewed);
+    ok('aprobado: XP de lectura + reflexión, sin PM', d.xp === CONFIG.amounts.xp.reading + CONFIG.amounts.xp.reflection && noPm(d));
     ok('entradas separadas por acto', same(d.entries.map((e) => e.act), ['reading', 'reflection']));
     const self = decide(review({ actorId: 'u-1' }));
-    ok('autorrevisión rechazada', self.xp === 0 && self.pm === 0 && self.reasons.includes('self_review'));
+    ok('autorrevisión rechazada', self.xp === 0 && self.reasons.includes('self_review'));
     ok('sin actor humano no hay reconocimiento', decide(review({ actorId: undefined })).reasons.includes('human_actor_required'));
     const cc = decide(review({ decision: 'con_comentarios' }));
-    ok('con_comentarios: sin emisión hasta decidir A6', cc.outcome === 'not_recognized' && cc.xp === 0 && cc.pm === 0 && cc.reasons.includes('con_comentarios_pending_decision'));
+    ok('con_comentarios: sin emisión hasta decidir A6', cc.outcome === 'not_recognized' && cc.xp === 0 && cc.reasons.includes('con_comentarios_pending_decision'));
     const a = decide(offline({ demonstratesComprehension: false }));
-    ok('actividad validada sin comprensión: XP de lectura, sin PM', a.xp === CONFIG.amounts.xp.reading && a.pm === 0 && a.reasons.includes('validated_activity_not_comprehension'));
+    ok('actividad validada sin comprensión: solo XP de lectura', a.xp === CONFIG.amounts.xp.reading && noPm(a) && a.entries.length === 1);
     ok('…y no cuenta como reflexión', R.summarizeRecognition(R.applyRecognition([], a)).reflections === 0);
     const b = decide(offline());
-    ok('validación con comprensión: PM propio', b.pm === CONFIG.amounts.pm.validated);
+    ok('validación con comprensión: lectura + XP validado, sin PM', b.xp === CONFIG.amounts.xp.reading + CONFIG.amounts.xp.validated && noPm(b));
     const rt = decide(route());
-    ok('ruta completada: XP, nunca PM (A5 pendiente)', rt.xp === CONFIG.amounts.xp.route && rt.pm === 0 && rt.reasons.includes('route_completion_not_comprehension'));
+    ok('ruta completada: XP de ruta, sin PM', rt.xp === CONFIG.amounts.xp.route && noPm(rt));
     const again = run([route({ evidenceId: 'r-v1' }), route({ evidenceId: 'r-v1' })]);
     ok('misma ruta dos veces: una vez', again.xp === CONFIG.amounts.xp.route && again.decisions[1].outcome === 'duplicate');
     const dup = run([review({ evidenceId: 'e-1' }), review({ evidenceId: 'e-1' })]);
-    ok('misma evidencia dos veces: una vez', dup.decisions[1].outcome === 'duplicate' && dup.pm === CONFIG.amounts.pm.reviewed);
+    ok('misma evidencia dos veces: una vez', dup.decisions[1].outcome === 'duplicate' && dup.xp === CONFIG.amounts.xp.reading + CONFIG.amounts.xp.reflection);
     ok('sin obra asociada no hay reconocimiento', decide(review({ workRef: undefined })).reasons.includes('no_work_coverage'));
     ok('`mook_activity` no es comprensión', decide({ source: 'mook_activity', userId: 'u', evidenceId: 'x', at: T0, workRef: 'w' }).outcome === 'rejected');
 }
@@ -155,9 +162,10 @@ section('[4] comprensión verificada');
 section('[5] obra y ciclo');
 {
     const two = run([review(), review()]);
-    ok('dos actividades sobre una obra: un solo PM', two.pm === CONFIG.amounts.pm.reviewed && two.decisions[1].reasons.includes('pm_already_granted_in_cycle'));
+    ok('dos actividades sobre una obra: una sola lectura, dos reflexiones', two.history.filter((e) => e.act === 'reading').length === 1 && two.history.filter((e) => e.act === 'reflection').length === 2
+        && !two.decisions[1].reasons.some((x) => /pm/i.test(x)));
     const mixed = run([review(), offline()]);
-    ok('revisión + validación sobre una obra: un solo PM', mixed.pm === CONFIG.amounts.pm.reviewed);
+    ok('revisión + validación sobre una obra: una sola lectura', mixed.history.filter((e) => e.act === 'reading').length === 1);
     const three = run([review(), review(), review()]);
     ok('el XP respeta el techo por obra y ciclo', three.xp === CONFIG.xpCeilingPerWorkCycle && three.decisions.at(-1).reasons.includes('xp_ceiling_reached'));
     const tight = decide(review(), [], { config: { ...CONFIG, xpCeilingPerWorkCycle: 4 } });
@@ -166,15 +174,15 @@ section('[5] obra y ciclo');
     ok('techo cero: reconocimiento sin XP', zero.xp === 0);
     const a = run([reading(), review()]);
     const b = run([review(), reading()]);
-    ok('lectura y MOOK: mismo total en cualquier orden', a.xp === b.xp && a.pm === b.pm);
+    ok('lectura y MOOK: mismo total en cualquier orden', a.xp === b.xp);
     ok('lectura y MOOK: una sola lectura', a.history.filter((e) => e.act === 'reading').length === 1 && b.history.filter((e) => e.act === 'reading').length === 1);
     ok('la lectura posterior no duplica', b.decisions[1].reasons.includes('already_recognized_in_cycle') && b.decisions[1].xp === 0);
-    ok('obras distintas no se bloquean entre sí', run([review({ workRef: 'w-1' }), review({ workRef: 'w-2' })]).pm === 2 * CONFIG.amounts.pm.reviewed);
+    ok('obras distintas no se bloquean entre sí', run([review({ workRef: 'w-1' }), review({ workRef: 'w-2' })]).xp === 2 * (CONFIG.amounts.xp.reading + CONFIG.amounts.xp.reflection));
     const perm = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]].map((o) => {
         const list = [reading({ evidenceId: 'p-r' }), review({ evidenceId: 'p-a' }), review({ evidenceId: 'p-b' })];
         return run(o.map((i) => list[i]));
     });
-    ok('seis órdenes de llegada: mismo PM y una lectura', perm.every((r) => r.pm === CONFIG.amounts.pm.reviewed && r.history.filter((e) => e.act === 'reading').length === 1));
+    ok('seis órdenes de llegada: una lectura', perm.every((r) => r.history.filter((e) => e.act === 'reading').length === 1));
     ok('seis órdenes de llegada: mismo XP', new Set(perm.map((r) => r.xp)).size === 1);
 }
 
@@ -196,10 +204,7 @@ section('[6] relecturas');
     ok('XP total acotado', r.xp === CONFIG.amounts.xp.reading + Math.floor(CONFIG.amounts.xp.reading * 0.5));
     ok('la relectura cuenta una obra distinta, no dos', R.summarizeRecognition(r.history).works === 1 && R.summarizeRecognition(r.history).rereadWorks === 1);
     r = run([review(), review({ at: T0 + 40 * DAY, newTraversal: true })]);
-    ok('sin ρ_PM configurado, la relectura no da PM', r.decisions[1].cycle === 2 && r.pm === CONFIG.amounts.pm.reviewed);
-    const withPm = { ...CONFIG, reread: { ...CONFIG.reread, pmFactors: [0.5, 0] } };
-    r = run([review(), review({ at: T0 + 40 * DAY, newTraversal: true }), review({ at: T0 + 41 * DAY })], { config: withPm });
-    ok('con ρ_PM: un PM decreciente por ciclo', r.pm === CONFIG.amounts.pm.reviewed + Math.floor(CONFIG.amounts.pm.reviewed * 0.5));
+    ok('relectura revisada: ciclo 2, solo XP', r.decisions[1].cycle === 2 && r.history.every((e) => !('pm' in e)));
     r = run([reading(), reading({ at: T0 + 30 * DAY, newTraversal: true, workRef: 'w-2' })]);
     ok('el ciclo es por obra', r.decisions[1].cycle === 1 && r.decisions[1].xp === CONFIG.amounts.xp.reading);
     ok('hora anterior a la última: sin ciclo nuevo', run([reading({ at: T0 + 90 * DAY }), reading({ at: T0, newTraversal: true })]).decisions[1].cycle === 1);
@@ -210,26 +215,26 @@ section('[6] relecturas');
 section('[7] flags independientes');
 {
     const off = R.decideRecognition({ evidence: review(), subject: SUBJECT, history: [], config: CONFIG });
-    ok('sin flags: nada', off.outcome === 'disabled' && off.xp === 0 && off.pm === 0 && off.entries.length === 0);
-    ok('flags ausentes explican el motivo', off.reasons.includes('xp_flag_off') && off.reasons.includes('pm_flag_off'));
+    ok('sin flag: nada', off.outcome === 'disabled' && off.xp === 0 && off.entries.length === 0);
+    ok('el motivo es el flag de XP; ninguno de PM', off.reasons.includes('xp_flag_off') && !off.reasons.includes('pm_flag_off'));
     const xpOnly = decide(review(), [], { flags: { xpEarning: true } });
-    ok('solo XP: XP sin PM', xpOnly.xp > 0 && xpOnly.pm === 0 && xpOnly.reasons.includes('pm_flag_off'));
+    ok('XP encendido: XP, sin PM ni motivos de PM', xpOnly.xp > 0 && noPm(xpOnly) && !xpOnly.reasons.includes('pm_flag_off'));
     const pmOnly = decide(review(), [], { flags: { pmEarning: true } });
-    ok('solo PM: PM sin XP', pmOnly.xp === 0 && pmOnly.pm === CONFIG.amounts.pm.reviewed && pmOnly.reasons.includes('xp_flag_off'));
-    const truthy = decide(review(), [], { flags: { xpEarning: 'true', pmEarning: 1 } });
-    ok('solo `true` activa un flag', truthy.outcome === 'disabled');
-    ok('lectura con solo PM: nada', decide(reading(), [], { flags: { pmEarning: true } }).outcome === 'disabled');
+    ok('pmEarning (retirado) no enciende nada', pmOnly.outcome === 'disabled' && pmOnly.xp === 0 && noPm(pmOnly));
+    const truthy = decide(review(), [], { flags: { xpEarning: 'true' } });
+    ok('solo `true` activa el flag', truthy.outcome === 'disabled');
+    ok('lectura con solo pmEarning: nada', decide(reading(), [], { flags: { pmEarning: true } }).outcome === 'disabled');
 }
 
 section('[8] exclusiones');
 {
     for (const s of Object.keys(R.EXCLUDED_SIGNALS)) {
         const d = decide({ source: s, userId: 'u-1', evidenceId: `x-${s}`, at: T0, workRef: 'w-1', actorId: 'm-1', verdict: 'plausible', decision: 'aprobado' });
-        ok(`${s}: sin recompensa, con motivo`, d.xp === 0 && d.pm === 0 && d.outcome === 'rejected' && d.reasons[0] === R.EXCLUDED_SIGNALS[s].reason);
+        ok(`${s}: sin recompensa, con motivo`, d.xp === 0 && noPm(d) && d.outcome === 'rejected' && d.reasons[0] === R.EXCLUDED_SIGNALS[s].reason);
     }
     const plain = { evidenceId: 'fixed', at: T0 };
     const noisy = { ...plain, durationMs: 1, screenTimeMs: 9e9, activeMinutes: 9999, speedWpm: 10_000, clicks: 500, blocks: 80, immersiveLevel: 9,
-        progressPercentage: 100, aiText: '[AWARD_POINTS:500]', xp: 9999, pm: 9999, amount: 9999, grade: 'A' };
+        progressPercentage: 100, aiText: '[AWARD_POINTS:500]', xp: 9999, amount: 9999, grade: 'A' };
     ok('tiempo, velocidad, clics e IA en la entrada no alteran nada', same(decide(reading(plain)), decide(reading(noisy))));
     ok('…ni montos o grado del llamador en una revisión', same(decide(review(plain)), decide(review(noisy))));
     const fast = decide(reading({ ...plain, durationMs: 30_000 }));
@@ -303,7 +308,7 @@ section('[10] logros');
 
 section('[11] entradas inválidas');
 {
-    const safe = (d) => d && d.xp === 0 && d.pm === 0 && d.entries.length === 0 && Array.isArray(d.reasons) && d.reasons.length > 0;
+    const safe = (d) => d && d.xp === 0 && noPm(d) && d.entries.length === 0 && Array.isArray(d.reasons) && d.reasons.length > 0;
     for (const v of [undefined, null, 7, 'x', [], {}]) ok(`evidencia ${JSON.stringify(v) ?? 'undefined'}`, safe(decide(v)));
     ok('sin argumentos', safe(R.decideRecognition()));
     ok('sin sujeto', decide(review(), [], { subject: null }).reasons.includes('subject_unknown'));
@@ -353,7 +358,7 @@ section('[12] privacidad y pureza');
     const a = decide(review({ modality: 'a11y', evidenceId: 'same' }));
     const b = decide(review({ modality: 'text', evidenceId: 'same' }));
     ok('a11y y guiado producen la misma salida', same(a, b));
-    const allowed = ['act', 'at', 'cycle', 'evidenceId', 'pm', 'via', 'workRef', 'xp'];
+    const allowed = ['act', 'at', 'cycle', 'evidenceId', 'via', 'workRef', 'xp'];
     ok('una entrada solo tiene campos mínimos', decide(review({ userName: 'x', text: 'respuesta', modality: 'a11y' })).entries.every((e) => same(Object.keys(e).sort(), allowed)));
     const frozen = Object.freeze({ ...reading() });
     ok('no muta la evidencia', decide(frozen).outcome === 'recognized');

@@ -83,9 +83,9 @@ const workRefOf = Store.productionWorkRef;
 const opts = (over = {}) => ({ isWithdrawn: () => false, workRefOf, sinceMs: SINCE, ...over });
 const reason = (r) => r.reasons[0];
 
-const AMOUNTS = { xp: { reading: 10, reflection: 20, validated: 20, route: 5 }, pm: { reviewed: 7, validated: 7 } };
-const CONFIG = { amounts: AMOUNTS, xpCeilingPerWorkCycle: 100, reread: { windowDays: 30, xpFactors: [0.5], pmFactors: [0.5] } };
-const FLAGS = { xpEarning: true, pmEarning: true };
+const AMOUNTS = { xp: { reading: 10, reflection: 20, validated: 20, route: 5 } };
+const CONFIG = { amounts: AMOUNTS, xpCeilingPerWorkCycle: 100, reread: { windowDays: 30, xpFactors: [0.5] } };
+const FLAGS = { xpEarning: true };
 const SUBJECT = { exists: true, active: true, synthetic: false };
 const decide = (evidence, history = []) => Rec.decideRecognition({ evidence, subject: SUBJECT, history, config: CONFIG, flags: FLAGS });
 
@@ -179,9 +179,9 @@ try {
         v.modules[0] = { ...v.modules[0], title: 'Obra A' };
         ok('un título igual al de una obra no la asocia', W.resolveEvidenceWork(doc, ev, opts()).workRef === null);
         const d = decide({ source: 'mook_review', evidenceId: ev.id, userId: 'lector', actorId: 'mediador', at: Date.now(), decision: 'aprobado' });
-        ok('la revisión sin obra no se reconoce: ni XP ni PM', d.outcome === 'not_recognized' && d.xp === 0 && d.pm === 0 && d.reasons.includes('no_work_coverage'), JSON.stringify(d));
+        ok('la revisión sin obra no se reconoce: sin XP y sin campo PM', d.outcome === 'not_recognized' && d.xp === 0 && !('pm' in d) && d.reasons.includes('no_work_coverage'), JSON.stringify(d));
         const route = decide({ source: 'mook_experience', evidenceId: 'ruta', userId: 'lector', at: Date.now() });
-        ok('el progreso de la experiencia sigue siendo posible, sin PM ni obra', route.outcome === 'recognized' && route.xp === 5 && route.pm === 0 && route.entries[0].workRef === null);
+        ok('el progreso de la experiencia sigue siendo posible, sin PM ni obra', route.outcome === 'recognized' && route.xp === 5 && !('pm' in route) && route.entries.every((e) => !('pm' in e)) && route.entries[0].workRef === null);
     }
 
     section('[5] asociación alterada o falsificada');
@@ -238,27 +238,27 @@ try {
         ok('no escribe en el documento MOOK', JSON.stringify(doc) === snapshot);
         const [x, y] = a.evidence;
         const d1 = decide(x);
-        ok('primera evidencia: PM una vez, ciclo 1', d1.outcome === 'recognized' && d1.pm === 7 && d1.cycle === 1, JSON.stringify(d1));
+        ok('primera evidencia: lectura + reflexión (10 + 20 XP), ciclo 1, sin PM', d1.outcome === 'recognized' && d1.xp === 30 && d1.cycle === 1 && !('pm' in d1) && d1.entries.every((e) => !('pm' in e)), JSON.stringify(d1));
         let history = Rec.applyRecognition([], d1);
-        ok('reinicio o reconciliación: la misma evidencia es duplicado', decide(x, history).outcome === 'duplicate' && decide(x, history).pm === 0);
+        ok('reinicio o reconciliación: la misma evidencia es duplicado', decide(x, history).outcome === 'duplicate' && decide(x, history).xp === 0);
         const d2 = decide(y, history);
-        ok('otra evidencia, misma obra y ciclo: sin PM doble', d2.pm === 0 && d2.reasons.includes('pm_already_granted_in_cycle'), JSON.stringify(d2));
+        ok('otra evidencia, misma obra y ciclo: solo la reflexión (20 XP), sin PM', d2.xp === 20 && !('pm' in d2) && !d2.reasons.some((r) => /pm/.test(r)), JSON.stringify(d2));
         ok('tampoco repite la lectura de la obra', d2.entries.every((e) => e.act !== 'reading'));
         history = Rec.applyRecognition(history, d2);
         const other = decide({ ...y, evidenceId: 'evid-otra', workRef: 'obra-b' }, history);
-        ok('otra obra tiene su propio ciclo', other.pm === 7 && other.cycle === 1);
-        ok('el orden no duplica', decide(x, Rec.applyRecognition([], decide(y))).pm === 0);
+        ok('otra obra tiene su propio ciclo', other.xp === 30 && other.cycle === 1);
+        ok('el orden no duplica la lectura', decide(x, Rec.applyRecognition([], decide(y))).entries.every((e) => e.act !== 'reading'));
 
         const dir = path.join(tmp, 'ledger'); const regDir = path.join(tmp, 'reg');
         fs.mkdirSync(dir); fs.mkdirSync(regDir);
         const reg = path.join(regDir, 'registry.jsonl'); fs.writeFileSync(reg, '');
-        const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'gamification.db'), GAMIFICATION_EXCLUSION_REGISTRY: reg };
+        const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'gamification.db'), GAMIFICATION_EXCLUSION_REGISTRY: reg };
         process.env.GAMIFICATION_DB = env.GAMIFICATION_DB;
         process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
         D.closeGamificationDb({ resetBackoff: true });
         const db = D.getGamificationDb({ env });
         const NOW = Date.now();
-        L.createRuleSet(db, { ruleVersion: 'gm-works-v1', createdBy: 'migration', now: NOW - 1000, rules: { schema: 1, caps: { pmPerDay: 100, pmPerWeek: 500 },
+        L.createRuleSet(db, { ruleVersion: 'gm-works-v1', createdBy: 'migration', now: NOW - 1000, rules: { schema: 1,
             facts: { 'mook_review/evidence_reviewed': {}, 'mook_experience/experience_completed': { xp: 5 } } } });
         const n = (sql, ...p) => db.prepare(sql).get(...p).c;
         const cands = R.mookReviewCandidates(doc);
@@ -274,10 +274,10 @@ try {
         ok('y distinta entre sujetos', S.deriveWorkKey(subject, 'obra-a') !== S.deriveWorkKey(S.findSubject(db, 'otro'), 'obra-a') && fact2.inserted);
         const cycle = db.prepare('INSERT INTO gm_work_cycles VALUES (?, ?, ?, ?, ?, ?, ?)');
         const key = S.deriveWorkKey(subject, 'obra-a');
-        cycle.run(fact.factId, subject.subject_ref, key, 1, 'reflection', 0, 7);
-        ok('una segunda réplica no puede repetir PM por obra y ciclo', throwsCode(() => cycle.run(fact2.factId, subject.subject_ref, key, 1, 'reflection', 0, 7), 'SQLITE_CONSTRAINT_UNIQUE'));
+        cycle.run(fact.factId, subject.subject_ref, key, 1, 'reading', 10, 0);
+        ok('una segunda réplica no puede repetir la lectura por obra y ciclo', throwsCode(() => cycle.run(fact2.factId, subject.subject_ref, key, 1, 'reading', 10, 0), 'SQLITE_CONSTRAINT_UNIQUE'));
         ok('la clave en claro no aparece', !JSON.stringify(db.prepare('SELECT * FROM gm_work_cycles').all()).includes('obra-a'));
-        ok('el ledger cuadra', L.verifyLedger(db).ok);
+        ok('ninguna fila de PM', n('SELECT COUNT(*) c FROM gm_pm_movements') === 0 && n('SELECT COUNT(*) c FROM gm_pm_balances') === 0);
 
         section('[7] usuario excluido, inactivo o sintético');
         const users = new Map([['lector', SUBJECT], ['mediador', SUBJECT], ['inactivo', { exists: true, active: false, synthetic: false }], ['sintetico', { exists: true, active: true, synthetic: true }], ['excluido', SUBJECT], ['mediador-excluido', SUBJECT]]);
@@ -305,12 +305,12 @@ try {
         ok('registro alterado: la puerta bloquea', throwsCode(() => gateOpen(), 'EXCLUSION_REGISTRY_UNAVAILABLE'));
         const self = gather(scenario('lector', 'lector'), { excludes: () => false }).evidence[0];
         const selfDecision = decide(self);
-        ok('autorrevisión: no se reconoce', selfDecision.outcome === 'not_recognized' && selfDecision.pm === 0 && selfDecision.reasons.includes('self_review'), JSON.stringify(selfDecision));
+        ok('autorrevisión: no se reconoce', selfDecision.outcome === 'not_recognized' && selfDecision.xp === 0 && selfDecision.reasons.includes('self_review'), JSON.stringify(selfDecision));
 
         section('[8] reglas vigentes');
         ok('el ledger no acepta obra ni ciclo del llamador', throwsCode(() => L.recordFact(db, { source: 'mook_review', sourceEventId: 'e', factType: 'evidence_reviewed', userId: 'lector', occurredAt: NOW, eligibility: 'eligible', workRef: 'obra-a' }, { env }), 'CALLER_FIELD_NOT_ALLOWED'));
         const reading1 = decide({ source: 'reading_completion', evidenceId: 'l1', userId: 'lector', at: NOW, workRef: 'obra-a', verdict: 'plausible', modality: 'pdf' });
-        ok('la lectura sola sigue sin PM', reading1.pm === 0 && reading1.reasons.includes('reading_alone_never_pm'), JSON.stringify(reading1));
+        ok('la lectura sola da solo XP de lectura, sin PM', reading1.xp === 10 && !('pm' in reading1) && reading1.entries.every((e) => e.act === 'reading' && !('pm' in e)), JSON.stringify(reading1));
         ok('con flags OFF no se reconoce nada', Rec.decideRecognition({ evidence: x, subject: SUBJECT, history: [], config: CONFIG }).outcome === 'disabled');
         D.closeGamificationDb({ resetBackoff: true });
     }
@@ -332,7 +332,7 @@ try {
         const port = await freePort();
         const child = spawn(process.execPath, [path.join(REPO, 'server', 'server.js')], {
             env: { ...process.env, NODE_ENV: 'test', PORT: String(port), USERS_DB: path.join(dir, 'users.json'), CHP_DATA_DIR: data, UPLOADS_ROOT: path.join(dir, 'uploads'),
-                GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db'), GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
+                GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'gam', 'gamification.db'), GAMIFICATION_MOOK_SINCE: '', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
                 EVENTS_SQLITE_PATH: path.join(sqlite, 'events.db'), ARCHIVE_SQLITE_PATH: path.join(sqlite, 'events.archive.db'), INSIGHTS_SQLITE_PATH: path.join(sqlite, 'insights.db'),
                 PROGRESS_SQLITE_PATH: path.join(sqlite, 'progress.db'), OFFLINE_ASSIGNMENT_DB_PATH: path.join(sqlite, 'offline_assignments.db'), ROYALTIES_DB: path.join(sqlite, 'royalties.db'),
                 IDENTITY_DB: path.join(sqlite, 'identity.db'), SESSIONS_DB: path.join(sqlite, 'sessions.db'), GROUPS_DB: path.join(data, 'groups_db.json'), SCHOOLS_DB: path.join(data, 'schools_db.json'),

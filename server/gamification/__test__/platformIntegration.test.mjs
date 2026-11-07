@@ -69,8 +69,8 @@ const L = await import('../ledger.mjs');
 const E = await import('../erasure.mjs');
 
 const SINCE = Date.now() - 60_000;
-const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
+const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
 const WORDS = 'una dos tres cuatro cinco seis siete';
 const PW = 'fixture-pass';
 const HASH = bcrypt.hashSync(PW, 4);
@@ -122,13 +122,13 @@ const mkExp = (slug, w, prods) => {
 const X1 = mkExp('x1', 'obra-1', ['p1', 'p2']), X2 = mkExp('x2', 'obra-2', ['p']), X3 = mkExp('x3', 'obra-3', ['p']), X0 = mkExp('x0', 'obra-1', []);
 fs.writeFileSync(P.mook, JSON.stringify(doc, null, 2));
 
-const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: P.gamDb,
+const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: P.gamDb,
     GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
 Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_REGISTRY: P.reg });
 // Este proceso es una réplica escritora más (conexión abierta: -wal/-shm existen).
 const db = D.getGamificationDb({ env: ENV });
 L.createRuleSet(db, { ruleVersion: 'gm-v8-int', createdBy: 'migration', now: SINCE - 5000, effectiveFrom: SINCE - 5000,
-    rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: PILOT } });
+    rules: { schema: 1, facts: {}, recognition: PILOT } });
 {
     const Pub = await import('../../royalties/publishersStore.mjs');
     Pub.getRoyaltiesDb();
@@ -154,7 +154,7 @@ function spawnApi(port, { flags = ENV } = {}) {
             EVENTS_SQLITE_PATH: path.join(tmp, 'sqlite', `events-${port}.db`), ARCHIVE_SQLITE_PATH: path.join(tmp, 'sqlite', `archive-${port}.db`),
             INSIGHTS_SQLITE_PATH: path.join(tmp, 'sqlite', `insights-${port}.db`), PROGRESS_SQLITE_PATH: path.join(tmp, 'sqlite', `progress-${port}.db`),
             ROYALTIES_DB: process.env.ROYALTIES_DB,
-            GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', PM_EARNING_ENABLED: '', GAMIFICATION_MOOK_SINCE: '',
+            GAMIFICATION_ENABLED: '', XP_EARNING_ENABLED: '', GAMIFICATION_MOOK_SINCE: '',
             ...flags, GAMIFICATION_RECONCILE_INITIAL_DELAY_MS: '3600000', EXPERIENCE_EVENTS_BACKBONE_ENABLED: '',
             OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
         },
@@ -401,8 +401,8 @@ try {
         ok('dos reconciliadores terminan', done.every((d) => d.code === 0), JSON.stringify(done.map((d) => d.out.slice(-200))));
         ok('a8 reconocida una sola vez (30 XP)', (await waitXp(r1, 'a8', 30, 5000)).body?.xp === 30);
         ok('sin duplicados: 13 hechos y XP total = suma de ciclos', facts() === 13 && sumXp() === db.prepare('SELECT SUM(xp) n FROM gm_work_cycles').get().n, String(facts()));
-        ok('ledger íntegro', L.verifyLedger(db).ok && db.pragma('integrity_check', { simple: true }) === 'ok');
-        ok('PM: ningún movimiento', db.prepare('SELECT COUNT(*) c FROM gm_pm_movements').get().c === 0);
+        ok('ledger íntegro', db.pragma('integrity_check', { simple: true }) === 'ok');
+        ok('PM retirado: ningún movimiento ni saldo', db.prepare('SELECT COUNT(*) c FROM gm_pm_movements').get().c === 0 && db.prepare('SELECT COUNT(*) c FROM gm_pm_balances').get().c === 0);
     }
 
     section('[12] reinicio de una réplica');

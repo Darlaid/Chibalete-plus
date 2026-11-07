@@ -45,9 +45,9 @@ const E = await import('../erasure.mjs');
 const S = await import('../subjects.mjs');
 
 /** A7-A12-V3 §1. `approvalRef` sintético: el real lo emite Dirección. */
-const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 }, pm: { reviewed: 0, validated: 0 } },
-    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [], pmFactors: [] } };
-const rules = (extra = {}) => ({ schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: {}, recognition: PILOT, ...extra });
+const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, reflection: 20, validated: 0, route: 0 } },
+    xpCeilingPerWorkCycle: 50, reread: { windowDays: 30, xpFactors: [] } };
+const rules = (extra = {}) => ({ schema: 1, facts: {}, recognition: PILOT, ...extra });
 
 const SINCE = Date.now() - 60_000;
 const WORDS = 'una dos tres cuatro cinco seis siete ocho';
@@ -73,7 +73,7 @@ function fresh(ruleSet = rules()) {
     const dir = path.join(tmp, `g${n}`);
     fs.mkdirSync(path.join(dir, 'db'), { recursive: true }); fs.mkdirSync(path.join(dir, 'reg'));
     const reg = path.join(dir, 'reg', 'r.jsonl'); fs.writeFileSync(reg, '');
-    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'), GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
+    const env = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: path.join(dir, 'db', 'gamification.db'), GAMIFICATION_EXCLUSION_REGISTRY: reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
     process.env.GAMIFICATION_DB = env.GAMIFICATION_DB;
     process.env.GAMIFICATION_EXCLUSION_REGISTRY = reg;
     D.closeGamificationDb({ resetBackoff: true });
@@ -104,7 +104,7 @@ try {
         ok('una regla de ruta en cero se admite', count(db, 'gm_rule_sets') === 1);
         const conflict = (facts) => throwsCode(() => L.createRuleSet(db, { ruleVersion: 'gm-mal', createdBy: 'migration', now: SINCE, rules: rules({ facts }) }), 'RECOGNITION_RULE_CONFLICT');
         ok('rechazada: XP por ruta junto a recognition', conflict({ 'mook_experience/experience_completed': { xp: 5 } }));
-        ok('sin recognition, las reglas previas no cambian', L.createRuleSet(db, { ruleVersion: 'gm-prev', createdBy: 'migration', now: SINCE, rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_experience/experience_completed': { xp: 5 } } } }).created);
+        ok('sin recognition, las reglas previas no cambian', L.createRuleSet(db, { ruleVersion: 'gm-prev', createdBy: 'migration', now: SINCE, rules: { schema: 1, facts: { 'mook_experience/experience_completed': { xp: 5 } } } }).created);
     }
 
     section('[2] primera, segunda y tercera evidencia');
@@ -133,7 +133,7 @@ try {
         ok('otra obra vuelve a dar 30', sweep(db, doc, env).recognized === 1 && sumXp(db) === 80);
         const again = sweep(db, doc, env);
         ok('repetir el barrido no cambia nada', again.recognized === 0 && again.already === 3 && sumXp(db) === 80 && count(db, 'gm_source_facts') === 3, JSON.stringify(again));
-        ok('el ledger cuadra, sin PM', L.verifyLedger(db).ok && noPm(db) && cuadra(db));
+        ok('el ledger cuadra, sin PM', noPm(db) && cuadra(db));
         ok('otro lector sobre la misma obra tiene su propio ciclo', (() => { const r = route(doc, 'f'); deliver(doc, r, 'otro'); sweep(db, doc, env); return sumXp(db) === 110; })());
         ok('primera evidencia intacta', e1.review.decision === 'aprobado');
     }
@@ -206,7 +206,7 @@ try {
         const rdb = D.getGamificationDb({ env: envR });
         const again = sweep(rdb, doc, envR);
         ok('restaurada: no repite y mantiene el techo', again.recognized === 0 && sumXp(rdb) === 50 && count(rdb, 'gm_source_facts') === 2, JSON.stringify(again));
-        ok('restaurada: íntegra', rdb.pragma('integrity_check', { simple: true }) === 'ok' && L.verifyLedger(rdb).ok && cuadra(rdb));
+        ok('restaurada: íntegra', rdb.pragma('integrity_check', { simple: true }) === 'ok' && noPm(rdb) && cuadra(rdb));
         D.closeGamificationDb({ resetBackoff: true });
     }
 
@@ -236,7 +236,7 @@ try {
         const { db, env } = fresh();
         const doc = Store.emptyMookStore();
         deliver(doc, route(doc, 'a'));
-        const onPm = { ...env, PM_EARNING_ENABLED: '1' };
+        const onPm = { ...env };
         sweep(db, doc, onPm);
         ok('PM encendido: sigue sin PM', sumXp(db) === 30 && noPm(db));
         deliver(doc, route(doc, 'b'), 'excluido');
@@ -273,14 +273,14 @@ try {
         const db2 = D.getGamificationDb({ env });
         ok('sin PM', noPm(db2));
         const P = await import('../policy.mjs');
-        ok('la vía genérica no puede pagar XP por revisión', throwsCode(() => P.validateRules({ schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST }), 'XP_SOURCE_LOCKED'));
-        ok('ni con reglas sin recognition', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-facts', createdBy: 'migration', rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } } }), 'XP_SOURCE_LOCKED'));
-        ok('ni con una regla ya guardada', P.decideEmission({ rules: { schema: 1, caps: { pmPerDay: 0, pmPerWeek: 0 }, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } }, source: 'mook_review', factType: 'evidence_reviewed', eligibility: 'eligible', features: {}, xpEnabled: true, pmEnabled: false, usage: { day: 0, week: 0, daySource: 0 } }).xp === 0);
+        ok('la vía genérica no puede pagar XP por revisión', throwsCode(() => P.validateRules({ schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 1 } } }, { featureAllowlist: L.FEATURE_ALLOWLIST }), 'XP_SOURCE_LOCKED'));
+        ok('ni con reglas sin recognition', throwsCode(() => L.createRuleSet(db2, { ruleVersion: 'gm-facts', createdBy: 'migration', rules: { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } } }), 'XP_SOURCE_LOCKED'));
+        ok('ni con una regla ya guardada', P.decideEmission({ rules: { schema: 1, facts: { 'mook_review/evidence_reviewed': { xp: 50 } } }, source: 'mook_review', factType: 'evidence_reviewed', eligibility: 'eligible', features: {}, xpEnabled: true, pmEnabled: false, usage: { day: 0, week: 0, daySource: 0 } }).xp === 0);
         const rf = L.recordFact(db2, { source: 'mook_review', sourceEventId: 'ev-generico', factType: 'evidence_reviewed', userId: 'lector', actorId: 'mediador', occurredAt: Date.now(), eligibility: 'eligible' }, { env });
         ok('recordFact de una revisión: observado, sin fila ni clave ocupada', rf.decision === 'observed' && rf.persisted === false && count(db2, 'gm_source_facts') === 1);
         D.closeGamificationDb({ resetBackoff: true });
         const policy = fs.readFileSync(path.join(HERE, '..', 'policy.mjs'), 'utf8');
-        ok('`mook_review`: fuera de XP_LOCKED_SOURCES, solo por reconocimiento y sin PM', !/XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy) && /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policy) && /PM_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy));
+        ok('`mook_review`: fuera de XP_LOCKED_SOURCES, solo por reconocimiento y sin PM', !/XP_LOCKED_SOURCES = Object\.freeze\(\[[^\]]*'mook_review'/.test(policy) && /XP_RECOGNITION_ONLY_SOURCES = Object\.freeze\(\['mook_review'\]\)/.test(policy) && !/PM_LOCKED_SOURCES/.test(policy) && /RETIRED_PM_FACT_KEYS/.test(policy));
         const product = [];
         const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name === '__test__' || e.name === 'node_modules') continue; const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.(mjs|js)$/.test(e.name)) product.push(p); } };
         walk(path.join(REPO, 'server'));

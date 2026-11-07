@@ -2,7 +2,7 @@
  * emissionLocks.test.mjs — CHP-GAMIFICACION-G4-04.
  *
  * Alineación reducida de G3 con G4, sobre bases temporales y usuarios sintéticos:
- *  [1] flags de XP y PM independientes y apagados por defecto
+ *  [1] flag de XP apagado por defecto; el de PM ya no existe (V8-UNIFIED-XP-01)
  *  [2] flags OFF: sin base y sin emisión
  *  [3] reglas que intentan emitir desde una fuente bloqueada
  *  [4] emisiones prohibidas a través de recordFact
@@ -46,10 +46,9 @@ const R = await import('../recognition.mjs');
 
 const BASE = { GAMIFICATION_ENABLED: '1', GAMIFICATION_DB: DB_PATH };
 const XP = { ...BASE, XP_EARNING_ENABLED: '1' };
-const PM = { ...BASE, PM_EARNING_ENABLED: '1' };
+const PM = { ...BASE, PM_EARNING_ENABLED: '1' }; // flag retirado: no enciende nada
 const BOTH = { ...BASE, XP_EARNING_ENABLED: '1', PM_EARNING_ENABLED: '1' };
-const CAPS = { pmPerDay: 100, pmPerWeek: 300 };
-const RULES = { schema: 1, caps: CAPS, facts: {
+const RULES = { schema: 1, facts: {
     'mook_experience/experience_completed': { xp: 20 },
     'mook_review/evidence_reviewed': {},
     'offline_validation/offline_activity_validated': {},
@@ -68,13 +67,12 @@ const fact = (source, over = {}) => ({ source, sourceEventId: nextId(), userId: 
 const movements = (db) => db.prepare('SELECT COUNT(*) c FROM gm_pm_movements').get().c;
 
 try {
-    section('[1] flags independientes');
+    section('[1] flags: solo XP');
     ok('XP apagado por defecto', D.isXpEarningEnabled({ GAMIFICATION_ENABLED: '1' }) === false);
-    ok('PM apagado por defecto', D.isEarningEnabled({ GAMIFICATION_ENABLED: '1' }) === false);
+    ok('el flag de PM ya no existe en db.mjs', !('isEarningEnabled' in D));
     ok('XP sin el padre ⇒ OFF', D.isXpEarningEnabled({ XP_EARNING_ENABLED: '1' }) === false);
-    ok('PM sin el padre ⇒ OFF', D.isEarningEnabled({ PM_EARNING_ENABLED: '1' }) === false);
-    ok('encender XP no enciende PM', D.isXpEarningEnabled(XP) === true && D.isEarningEnabled(XP) === false);
-    ok('encender PM no enciende XP', D.isEarningEnabled(PM) === true && D.isXpEarningEnabled(PM) === false);
+    ok('XP encendido', D.isXpEarningEnabled(XP) === true);
+    ok('PM_EARNING_ENABLED (retirado) no enciende XP', D.isXpEarningEnabled(PM) === false);
     ok('un valor desconocido no enciende', D.isXpEarningEnabled({ ...BASE, XP_EARNING_ENABLED: 'yes' }) === false);
 
     section('[2] flags OFF');
@@ -83,18 +81,17 @@ try {
     L.createRuleSet(db, { ruleVersion: 'gm-locks-v1', rules: RULES, createdBy: 'migration', now: T0 - 1000 });
     const offR = L.recordFact(db, fact('mook_experience'), { env: BASE });
     const offM = L.recordFact(db, fact('mook_experience', { source: 'mission', factType: 'mission_completed' }), { env: BASE });
-    ok('ambos flags OFF: disabled_source y nada emitido', offR.decision === 'disabled_source' && offM.decision === 'disabled_source' && offR.xp + offR.pm + offM.xp + offM.pm === 0);
+    ok('ambos flags OFF: disabled_source y nada emitido', offR.decision === 'disabled_source' && offM.decision === 'disabled_source' && offR.xp + offM.xp === 0);
     ok('ninguna fila de XP ni movimiento', db.prepare('SELECT COUNT(*) c FROM gm_xp_entries').get().c === 0 && movements(db) === 0);
 
     section('[3] reglas rechazadas');
-    const rule = (key, r) => () => L.createRuleSet(db, { ruleVersion: 'gm-bad', rules: { schema: 1, caps: CAPS, facts: { [key]: r } }, createdBy: 'migration', now: T0 });
-    ok('lectura con PM ⇒ READING_EMISSION_LOCKED', throwsCode(rule('reading_completion/reading_completed', { pm: 1 }), 'READING_EMISSION_LOCKED'));
+    const rule = (key, r) => () => L.createRuleSet(db, { ruleVersion: 'gm-bad', rules: { schema: 1, facts: { [key]: r } }, createdBy: 'migration', now: T0 });
     ok('lectura con XP ⇒ READING_EMISSION_LOCKED', throwsCode(rule('reading_completion/reading_completed', { xp: 1 }), 'READING_EMISSION_LOCKED'));
-    ok('ruta MOOK con PM ⇒ PM_SOURCE_LOCKED', throwsCode(rule('mook_experience/experience_completed', { pm: 1 }), 'PM_SOURCE_LOCKED'));
-    ok('revisión con PM ⇒ PM_SOURCE_LOCKED', throwsCode(rule('mook_review/evidence_reviewed', { pm: 1 }), 'PM_SOURCE_LOCKED'));
-    ok('validación con PM ⇒ PM_SOURCE_LOCKED', throwsCode(rule('offline_validation/offline_activity_validated', { pm: 1 }), 'PM_SOURCE_LOCKED'));
+    for (const key of ['reading_completion/reading_completed', 'mook_experience/experience_completed', 'mook_review/evidence_reviewed',
+        'offline_validation/offline_activity_validated', 'mission/mission_completed']) {
+        ok(`${key.split('/')[0]} con PM ⇒ PM_RETIRED`, throwsCode(rule(key, { pm: 1 }), 'PM_RETIRED'));
+    }
     ok('revisión con XP ⇒ XP_SOURCE_LOCKED', throwsCode(rule('mook_review/evidence_reviewed', { xp: 1 }), 'XP_SOURCE_LOCKED'));
-    ok('misión con PM ⇒ PM_SOURCE_LOCKED', throwsCode(rule('mission/mission_completed', { pm: 1 }), 'PM_SOURCE_LOCKED'));
     ok('validación con XP ⇒ XP_SOURCE_LOCKED', throwsCode(rule('offline_validation/offline_activity_validated', { xp: 1 }), 'XP_SOURCE_LOCKED'));
     ok('ninguna regla inválida quedó guardada', db.prepare("SELECT COUNT(*) c FROM gm_rule_sets WHERE rule_version='gm-bad'").get().c === 0);
 
@@ -102,43 +99,43 @@ try {
     const before = movements(db);
     for (const s of ['reading_completion', 'mook_review', 'offline_validation']) {
         const r = L.recordFact(db, fact(s), { env: BOTH });
-        ok(`${s} con ambos flags: observed, 0 XP, 0 PM`, r.decision === 'observed', r.decision);
-        ok(`${s}: nada emitido`, r.xp === 0 && r.pm === 0 && r.movementId === null);
+        ok(`${s} con flags encendidos: observed, 0 XP`, r.decision === 'observed', r.decision);
+        ok(`${s}: nada emitido, sin campos de PM`, r.xp === 0 && !('pm' in r) && !('movementId' in r));
     }
     const rt = L.recordFact(db, fact('mook_experience'), { env: BOTH });
-    ok('ruta MOOK con ambos flags: XP sí, PM no', rt.decision === 'awarded' && rt.xp === 20 && rt.pm === 0 && rt.movementId === null);
+    ok('ruta MOOK con flags encendidos: solo XP', rt.decision === 'awarded' && rt.xp === 20 && !('pm' in rt));
     ok('sin movimientos de PM por ninguna de esas fuentes', movements(db) === before);
 
-    section('[4b] XP sin PM y PM sin XP');
+    section('[4b] solo XP; el flag de PM retirado no emite nada');
     const x = L.recordFact(db, fact('mook_experience', { userId: 'u-xp' }), { env: XP });
-    ok('XP sin habilitar PM', x.xp === 20 && x.pm === 0 && L.getXp(db, 'u-xp') === 20 && L.getBalance(db, 'u-xp').available === 0);
+    ok('XP con su flag', x.xp === 20 && L.getXp(db, 'u-xp') === 20);
     const px = L.recordFact(db, fact('mook_experience', { userId: 'u-px' }), { env: PM });
-    ok('ruta con solo PM: disabled_source, nada', px.decision === 'disabled_source' && px.xp === 0 && px.pm === 0);
+    ok('ruta con solo PM_EARNING_ENABLED: disabled_source, nada', px.decision === 'disabled_source' && px.xp === 0 && !px.persisted);
     const mx = L.recordFact(db, fact('mook_experience', { userId: 'u-mx', source: 'mission', factType: 'mission_completed' }), { env: XP });
-    ok('misión con solo XP: XP sin movimiento', mx.xp === 3 && mx.pm === 0 && mx.movementId === null);
+    ok('misión con XP: XP sin movimiento', mx.xp === 3 && !('movementId' in mx));
     const mp = L.recordFact(db, fact('mook_experience', { userId: 'u-mp', source: 'mission', factType: 'mission_completed' }), { env: BOTH });
-    ok('misión con ambos flags: PM imposible', mp.pm === 0 && mp.movementId === null && L.getBalance(db, 'u-mp').available === 0 && L.verifyLedger(db).ok);
+    ok('misión con ambos flags: solo XP, PM imposible', mp.xp === 3 && !('pm' in mp) && movements(db) === 0);
 
     section('[5] regla guardada antes del bloqueo');
     // Un conjunto ya persistido no pasa por validateRules: se simula escribiéndolo directo.
-    const stale = JSON.stringify({ schema: 1, caps: CAPS, facts: {
-        'reading_completion/reading_completed': { xp: 50, pm: 50 },
-        'mook_experience/experience_completed': { xp: 20, pm: 50 },
-        'mook_review/evidence_reviewed': { xp: 50, pm: 50 },
-        'offline_validation/offline_activity_validated': { xp: 50, pm: 50 },
-        'mission/mission_completed': { xp: 3, pm: 50 },
-    } });
+    const stale = JSON.stringify({ schema: 1, facts: {
+        'reading_completion/reading_completed': { xp: 50 },
+        'mook_experience/experience_completed': { xp: 20 },
+        'mook_review/evidence_reviewed': { xp: 50 },
+        'offline_validation/offline_activity_validated': { xp: 50 },
+        'mission/mission_completed': { xp: 3, pm: 9 },
+    }, caps: { pmPerDay: 100, pmPerWeek: 100 } });
     db.prepare('INSERT INTO gm_rule_sets VALUES (?, ?, ?, ?, ?, ?)').run('gm-stale', T0, 'migration', stale, crypto.createHash('sha256').update(stale).digest('hex'), T0);
     const stNow = T0 + 10_000_000;
     const st = (s) => L.recordFact(db, fact(s, { userId: 'u-stale', now: stNow + ++n }), { env: BOTH });
     const results = ['reading_completion', 'mook_review', 'offline_validation'].map(st);
     const results2 = st('mook_experience');
     ok('la versión guardada es la vigente', L.getActiveRuleSet(db, stNow).ruleVersion === 'gm-stale');
-    ok('lectura, revisión y validación: observed y nada', results.every((r) => r.decision === 'observed' && r.xp === 0 && r.pm === 0), JSON.stringify(results));
-    ok('ruta: el XP de la regla, PM forzado a 0', results2.xp === 20 && results2.pm === 0);
+    ok('lectura, revisión y validación: observed y nada', results.every((r) => r.decision === 'observed' && r.xp === 0), JSON.stringify(results));
+    ok('ruta: el XP de la regla', results2.xp === 20 && !('pm' in results2));
     const stMission = L.recordFact(db, fact('mook_experience', { userId: 'u-stale', source: 'mission', factType: 'mission_completed', now: stNow + ++n }), { env: BOTH });
-    ok('misión con regla antigua: PM forzado a 0', stMission.pm === 0 && stMission.movementId === null);
-    ok('0 PM para ese usuario', L.getBalance(db, 'u-stale').available === 0 && L.verifyLedger(db).ok);
+    ok('misión con regla antigua con pm/caps: solo XP, el pm se ignora', stMission.xp === 3 && stMission.decision === 'awarded' && !('pm' in stMission));
+    ok('ninguna fila de PM', movements(db) === 0 && db.prepare('SELECT COUNT(*) c FROM gm_pm_balances').get().c === 0);
 
     section('[6] el llamador no decide');
     for (const k of ['workRef', 'cycle', 'demonstratesComprehension', 'coverageVerified', 'pm', 'xp', 'grade', 'decision']) {
@@ -159,20 +156,21 @@ try {
     section('[8] coherencia con el núcleo');
     const elig = (e) => R.assessEligibility(e, { exists: true, active: true, synthetic: false });
     const common = { userId: 'u', evidenceId: 'e', at: T0, workRef: 'w', actorId: 'm' };
-    ok('lo que el núcleo excluye de PM también lo bloquea G3', !elig({ ...common, source: 'reading_completion', verdict: 'plausible', modality: 'text' }).pm.eligible && P.PM_LOCKED_SOURCES.includes('reading_completion')
-        && !elig({ ...common, source: 'mook_experience' }).pm.eligible && P.PM_LOCKED_SOURCES.includes('mook_experience'));
-    ok('revisión y validación: elegibles en el núcleo, bloqueadas en G3 hasta tener cobertura', elig({ ...common, source: 'mook_review', decision: 'aprobado' }).pm.eligible && P.PM_LOCKED_SOURCES.includes('mook_review')
-        && elig({ ...common, source: 'offline_validation', demonstratesComprehension: true }).pm.eligible && P.PM_LOCKED_SOURCES.includes('offline_validation'));
-    ok('ninguna fuente puede emitir PM hoy', Object.keys(P.SOURCE_GRADE).every((s) => P.PM_LOCKED_SOURCES.includes(s)));
+    const sources = ['reading_completion', 'mook_experience', 'mook_review', 'offline_validation'];
+    const els = sources.map((s) => elig({ ...common, source: s, verdict: 'plausible', modality: 'text', decision: 'aprobado', demonstratesComprehension: true }));
+    ok('el núcleo ya no evalúa elegibilidad de PM', els.every((e) => !('pm' in e) && 'xp' in e));
+    ok('policy ya no tiene bloqueos de PM', !('PM_LOCKED_SOURCES' in P));
+    ok('isEmissionLocked = bloqueo de XP por facts', Object.keys(P.SOURCE_GRADE).every((s) => P.isEmissionLocked(s) === P.isXpLockedForFacts(s)));
     const prod = fs.readdirSync(path.join(HERE, '..')).filter((f) => f.endsWith('.mjs')).map((f) => fs.readFileSync(path.join(HERE, '..', f), 'utf8'));
-    ok('el arnés de pruebas no se importa desde producción', prod.every((s) => !/pmMechanics/.test(s)));
+    ok('el arnés de PM ya no existe ni se importa desde producción', prod.every((s) => !/pmMechanics/.test(s))
+        && !fs.existsSync(path.join(HERE, 'helpers', 'pmMechanicsHarness.mjs')) && !fs.existsSync(path.join(HERE, 'helpers', 'pmMechanicsHooks.mjs')));
 
     section('[9] aislamiento económico');
     const mods = fs.readdirSync(path.join(HERE, '..')).filter((f) => f.endsWith('.mjs'));
     const imports = mods.flatMap((f) => [...fs.readFileSync(path.join(HERE, '..', f), 'utf8').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]));
     ok('sin imports de regalías, derechos ni acceso', !imports.some((i) => /royalt|rights|access|woo/i.test(i)), imports.join());
     ok('solo las migraciones 0001, 0002 y 0003', fs.readdirSync(path.join(HERE, '..', 'migrations')).length === 3);
-    ok('ledger íntegro al final', L.verifyLedger(db).ok);
+    ok('al final, ninguna fila de PM', movements(db) === 0);
     D.closeGamificationDb({ resetBackoff: true });
     ok('stores reales de gamificación y regalías sin cambios', JSON.stringify(fingerprint()) === JSON.stringify(realBefore));
 } catch (e) {
