@@ -19,6 +19,7 @@ import { ProduccionesTab } from '../components/review/ProduccionesTab';
 import { GroupRecognitionBlock } from '../components/aula-viva/GroupRecognitionBlock';
 import type { GroupDiagnosis } from '../utils/groupDiagnosis';
 import { StudentStatusPanel } from '../components/aula-viva/StudentStatusPanel';
+import { StudentProgressBlock } from '../components/aula-viva/StudentProgressBlock';
 import type { StudentStatus } from '../utils/studentStatus';
 import ClubFormModal from '../components/ClubFormModal';
 
@@ -1711,6 +1712,15 @@ const AulaViva: React.FC = () => {
                                         error={studentStatusError}
                                         onClose={() => setSelectedStudent(null)}
                                     />
+                                </div>
+                            )}
+                            {/* V8-UNIFIED-XP-01: progreso individual (XP, nivel, logros). Solo si el
+                                grupo trae el bloque de reconocimiento (XP encendido); el servidor
+                                decide el alcance y, si no corresponde, no se pinta nada. */}
+                            {selectedStudent && selectedGroup && groupAnalytics.status === 'ready'
+                                && (groupAnalytics.summary as { recognition?: unknown }).recognition != null && (
+                                <div className="mb-6">
+                                    <StudentProgressBlock groupId={selectedGroup} studentId={selectedStudent.id} />
                                 </div>
                             )}
 

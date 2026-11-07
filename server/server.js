@@ -287,7 +287,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
-import { buildGroupAnalyticsSummary, createGroupAnalyticsCache } from './analytics/groupAnalyticsSummary.mjs';
+import { buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -9125,6 +9125,56 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
     } catch (e) {
         log(`GET /api/groups/${req.params.id}/analytics-summary error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'group_analytics_unavailable' });
+    }
+});
+
+/**
+ * V8-UNIFIED-XP-01 — progreso individual de una persona del grupo, para SU mediador.
+ * Solo lectura. Orden de puertas (cada una corta sin tocar las siguientes):
+ *  1. sesión (`requireAuth`);
+ *  2. sin GAMIFICATION_ENABLED + XP_EARNING_ENABLED ⇒ 404: la consulta no existe;
+ *  3. el llamador debe MEDIAR el grupo según el CIS (`via: mediator_of_group`).
+ *     Ni el secreto de máquina, ni el administrador de plataforma, ni un lector
+ *     pasan: el alcance es «mis grupos», nada más ⇒ 403 tipificado (503 si la
+ *     identidad no está disponible);
+ *  4. la persona debe estar en la cohorte lectora de ESE grupo (la misma que usan
+ *     los agregados) ⇒ si no, 404 idéntico al de una persona inexistente: no se
+ *     puede sondear quién existe ni quién está en otro grupo.
+ * Solo XP, nivel y reconocimientos (`readStudentRecognition`): ni nombre, ni
+ * claves, ni exclusiones, ni historial, ni rankings. Fallo ⇒ 503 genérico, nunca
+ * 0 XP. El limitador general de /api/ (por cuenta) acota el volumen de consultas.
+ */
+app.get('/api/groups/:groupId/students/:studentId/progress', requireAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const notFound = () => res.status(404).json({ error: 'Not Found' });
+    try {
+        if (!gamificationMook.isStudentProgressReadable()) return notFound();
+        const groupId = String(req.params.groupId ?? '');
+        const studentId = String(req.params.studentId ?? '');
+        const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+        let d;
+        try {
+            d = evaluateScopeAccess(callerId, 'group', groupId);
+        } catch (e) {
+            log(`[AUTHZ] student progress scope failed: ${e.message}`, 'ERROR');
+            return res.status(503).json({ error: 'identity_unavailable' });
+        }
+        if (d.decision === 'unavailable') return res.status(503).json({ error: 'identity_unavailable' });
+        if (d.decision === 'unauthenticated') return res.status(401).json({ error: 'identity_not_established' });
+        if (d.decision !== 'allow' || d.via !== 'mediator_of_group') {
+            return res.status(403).json({ error: 'scope_access_denied' });
+        }
+        const groups = readJSON(GROUPS_DB) || [];
+        const group = groups.find(g => g?.id === groupId);
+        if (!group) return notFound();
+        const cohort = resolveGroupLectorCohort(group, readJSON(USERS_DB) || [], groups);
+        if (!studentId || studentId === callerId || !cohort.includes(studentId)) return notFound();
+        const out = await gamificationMook.readStudentProgress(studentId);
+        if (out?.status === 404) return notFound();
+        return res.json(out);
+    } catch (e) {
+        log(`[gamification] progreso individual no disponible: ${e?.code || 'ERROR'}`, 'WARN');
+        return res.status(503).json({ error: 'No pudimos cargar el progreso.', code: 'PROGRESS_UNAVAILABLE' });
     }
 });
 

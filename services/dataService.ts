@@ -3231,6 +3231,18 @@ class DataService {
         return lectorOnlyStudents(members, group);
     }
 
+    // V8-UNIFIED-XP-01: progreso individual de una persona del grupo, para SU mediador.
+    // El servidor decide el alcance; 404/403 ⇒ la vista no se muestra.
+    async getStudentProgress(groupId: string, studentId: string): Promise<{ status: number; body: any }> {
+        try {
+            const res = await fetch(`${this.apiUrl}/groups/${encodeURIComponent(groupId)}/students/${encodeURIComponent(studentId)}/progress`,
+                { credentials: 'include', cache: 'no-store' });
+            let body: any = null;
+            try { body = await res.json(); } catch { body = null; }
+            return { status: res.status, body };
+        } catch { return { status: 0, body: null }; }
+    }
+
     /**
      * CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B) — resumen REAL del grupo
      * (GET /api/groups/:id/analytics-summary): KPIs y detalle por lector en

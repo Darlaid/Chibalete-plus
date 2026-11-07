@@ -4,7 +4,8 @@
  * «Reconocimiento en el grupo» en Aula Viva: tres conteos del servidor
  * (GET /api/groups/:id/analytics-summary → `recognition`). Indicador pedagógico
  * (entregas por revisar) separado del reconocimiento del ledger y del catálogo.
- * Sin nombres, XP, niveles, rankings ni comparaciones. Sin el campo
+ * Sin nombres, XP, niveles, rankings ni comparaciones (el progreso de cada
+ * persona vive aparte, en `StudentProgressBlock`, V8-UNIFIED-XP-01). Sin el campo
  * (gamificación o XP apagados) no se pinta nada. Nada se guarda en el navegador.
  */
 import React from 'react';
@@ -34,7 +35,7 @@ export const GroupRecognitionBlock: React.FC<{ state: GroupAnalyticsState; onRev
     return (
         <section aria-labelledby="av-reconocimiento" className="mb-8">
             <h2 id="av-reconocimiento" className="text-lg font-bold text-gray-900 dark:text-white mb-1">Reconocimiento en el grupo</h2>
-            <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">Datos del grupo en conjunto. No se muestran XP, niveles ni datos de cada estudiante.</p>
+            <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">Datos del grupo en conjunto, sin XP, niveles ni comparaciones entre estudiantes.</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-6">
                 <Item icon={<Inbox size={20} />} title="Por revisar" value={view.pending.value} text={view.pending.text}>
                     {(view.pending.value ?? 0) > 0 && onReview && (

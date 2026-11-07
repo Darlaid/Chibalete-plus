@@ -383,3 +383,26 @@ export function readGroupRecognitionCounts(db, studentIds, { eligibleWorkRefs = 
     const recognized = ids.filter((id) => readProgressStats(db, id, gate).works >= 1).length;
     return { studentsWithRecognizedWork: recognized, suppressed: false, eligibleWorks };
 }
+
+// ── V8-UNIFIED-XP-01: progreso individual para el mediador ───────────────────
+//
+// Vista MÍNIMA de una persona de su grupo: XP acumulado, nivel y reconocimientos
+// pedagógicos (obras reconocidas y logros obtenidos). Nada más: ni historial, ni
+// obras concretas, ni reflexiones, ni comparación con otras personas. Una persona
+// excluida, o sin sujeto, sale idéntica a alguien sin actividad (cero, Semilla,
+// sin logros): la respuesta nunca revela una exclusión.
+//
+// El llamador garantiza que `userId` pertenece a un grupo que la persona de la
+// sesión media (lo resuelve el servidor, nunca el cliente).
+
+/**
+ * @param {import('better-sqlite3').Database} db  conexión de solo lectura
+ * @param {string} userId
+ * @param {{ gate?, env? }} [opts]
+ * @returns {{ xp: number, level: { id: string|null }, recognizedWorks: number, achievements: string[] }}
+ * @throws errores del registro de exclusiones: el llamador responde «no disponible», nunca 0 XP
+ */
+export function readStudentRecognition(db, userId, { gate = null, env = process.env } = {}) {
+    const p = readProgress(db, userId, { gate: gate ?? exclusionGate(db, env), env });
+    return { xp: p.xp, level: { id: p.level.id }, recognizedWorks: p.works, achievements: [...p.achievements.earned] };
+}

@@ -26,7 +26,7 @@ import { exclusionGate } from './exclusions.mjs';
 import { scheduleFact, scheduleOnHookDb } from './intake.mjs';
 import { recordWorkRecognition } from './ledger.mjs';
 import { attributedEvidence } from './mookWorks.mjs';
-import { catalogActivities, readGroupRecognitionCounts, readWorkProgress, recognitionActive, workAccessCounts } from './progress.mjs';
+import { catalogActivities, readGroupRecognitionCounts, readStudentRecognition, readWorkProgress, recognitionActive, workAccessCounts } from './progress.mjs';
 import { candidateEligibility, drainSteps, mookReviewCandidates, mookExperienceCandidates, reconcileSteps } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
 
@@ -202,6 +202,34 @@ export async function readGroupRecognition(studentIds, deps = {}) {
         }
         // Misma instantánea para todo el grupo (V8-INTEGRATION-02A).
         return db.transaction(() => readGroupRecognitionCounts(db, studentIds, { eligibleWorkRefs, env, now }))();
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * V8-UNIFIED-XP-01. Progreso individual de UNA persona para su mediador. Solo lectura.
+ *  - sin `GAMIFICATION_ENABLED` o sin `XP_EARNING_ENABLED` ⇒ `{ status: 404 }` (la consulta no existe);
+ *  - si no, `{ xp, level: { id }, recognizedWorks, achievements }` (`readStudentRecognition`).
+ * Misma apertura que `readMyProgress`: readonly + query_only, una instantánea WAL y
+ * solo con escritor vivo; si falta, lanza `GAMIFICATION_DB_NOT_LIVE` sin crear nada.
+ * La autorización (mediador del grupo y persona del grupo) la resuelve el servidor
+ * ANTES de llamar aquí; este módulo no la conoce ni la amplía.
+ * @param {string} userId
+ * @param {{ env? }} [deps]
+ */
+/** ¿Existe hoy la consulta individual? Con XP apagado, no: el servidor responde 404 antes de autorizar. */
+export const isStudentProgressReadable = (env = process.env) => isGamificationEnabled(env) && isXpEarningEnabled(env);
+
+export async function readStudentProgress(userId, deps = {}) {
+    const { env = process.env } = deps;
+    if (!isGamificationEnabled(env) || !isXpEarningEnabled(env)) return { status: 404 };
+    const dbPath = resolveGamificationDbPath(env);
+    if (!fs.existsSync(`${dbPath}-wal`) || !fs.existsSync(`${dbPath}-shm`)) throw new GamificationError('GAMIFICATION_DB_NOT_LIVE');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+        db.pragma('query_only = ON');
+        return db.transaction(() => readStudentRecognition(db, userId, { env }))();
     } finally {
         db.close();
     }
