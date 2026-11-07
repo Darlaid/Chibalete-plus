@@ -83,7 +83,7 @@ Cada fase empieza solo con la anterior en GREEN y con su orden. Detalle de coman
 - [ ] L-A…L-G cerradas con documento versionado en `docs/gamificacion/aprobaciones/` y orden J8 (L-H).
 - [ ] Constancia de entrega de avisos (L-C) con fecha anterior al T0 que fije Dirección.
 - [ ] Preflight: cuatro contenedores healthy, 0 5xx en 1 h, disco > 20 GB, `structured-backup` correcto < 24 h, O7 (una experiencia en borrador, 0 recorridos).
-- [ ] `o8-check.mjs` en ambas réplicas: `mode: inerte`, `OK`.
+- [ ] `o8-check.mjs` en ambas réplicas: `mode: inerte`, `OK`. **Forma comprobada en producción (V8-O8-PRODUCTION-READY, 2026-11-07):** desde una copia del repositorio en el commit publicado, `ssh root@<VPS> "docker exec -i chibalete_api_N node --input-type=module -" < ops/gamification/o8-check.mjs`, una réplica por vez (N = 1 y 2). El archivo **no está en la imagen** (`.dockerignore` excluye `ops/`) y no hace falta: se ejecuta por stdin con los módulos y `node_modules` que la imagen ya trae. Para F4 y siguientes se añaden `-e O8_EXPECT_RULE_VERSION=a7a12-v3-xp-o1 -e O8_EXPECT_RULES_SHA=95613ec318be14c820deece4cde62055e69549d66053490b11f91434afd89878` al `docker exec`.
 - [ ] Rollback preparado (tags `rollback-pre-<unidad>`, copia del override).
 
 **F2 — custodia (Dirección)**
@@ -138,7 +138,7 @@ Reutiliza lo que ya existe: estado de los contenedores y `/api/health/ready`, lo
 
 **Evidencia de laboratorio** (`ops/gamification/__tests__/o8Check.test.mjs`, dentro de la imagen `unifiedxp-13b8045`, datos sintéticos): **24 ✓, 0 ✗**. Cubre inerte sin crear archivos; base viva con hechos reales (30/20/techo/30, reintento 0) ⇒ OK; D41 OK y WARN por umbral; regla distinta del acta ⇒ FAIL; PM, fuente ajena, hecho sin asiento, actos por encima de su importe, techo superado, desajuste ciclo/asiento y hecho anterior al corte ⇒ FAIL con su contador; exclusión sin línea en el registro ⇒ `EXCLUSION_REGISTRY_STALE`; registro en el directorio de la base ⇒ FAIL; clave ausente o con modo 0644 ⇒ FAIL; base sin escritor vivo ⇒ WARN sin crear `-wal`/`-shm`; la salida no contiene ids, claves ni rutas.
 
-**Producción:** el comprobador no se ejecutó contra producción en esta unidad (la lectura fue bloqueada por la política de permisos de la sesión). El estado inerte está comprobado por el gate de V8-UNIFIED-XP-02 y la huella `fp.sh` de esta unidad. La primera ejecución productiva corresponde a F0.
+**Producción (V8-O8-PRODUCTION-READY, 2026-11-07):** ejecutado por stdin en `api_1` y `api_2` (imagen `unifiedxp-13b8045`): `{"summary":"OK","mode":"inerte"}` en las dos, sin clave, sin registro y sin base; huellas de stores idénticas antes y después. **Laboratorio de dos réplicas con la misma forma de ejecución:** inerte, OK en ambas y 24 archivos protegidos sin cambios; con XP, escritor vivo, registro y reglas, OK en ambas con los mismos recuentos (7 hechos, 7 asientos), clave cargable, registro alineado y 32 archivos (registro incluido) sin cambios; ninguna salida contiene secretos ni ids.
 
 ## 7. Siguiente
 
