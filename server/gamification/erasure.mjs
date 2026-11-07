@@ -5,23 +5,24 @@
  * llamadores de producto: nada ejecuta una supresión real todavía.
  *
  * Orden: primero el registro (durable y fuera de la base), después una
- * transacción `IMMEDIATE` que anota el tombstone, extingue el saldo y borra el
- * vínculo. Si el proceso cae entre ambos, la puerta bloquea la ingesta hasta
+ * transacción `IMMEDIATE` que anota el tombstone y borra el vínculo. Si el proceso cae entre ambos, la puerta bloquea la ingesta hasta
  * reaplicar. El ledger conserva sus filas: sin sal ni vínculo, sus claves no se
  * pueden recalcular.
+ *
+ * V8-UNIFIED-XP-01: sin Puntos de Magia ya no hay saldo que extinguir. Las filas
+ * de PM anteriores (si existieran) se conservan intactas, igual que el XP: tras
+ * desvincular, nada las une a la persona.
  */
 import crypto from 'node:crypto';
 import { GamificationError } from './db.mjs';
 import { appendRegistry, readRegistry, tombstoneOf } from './exclusions.mjs';
-import { extinguishSubject, periodsFor } from './ledger.mjs';
+import { periodsFor } from './ledger.mjs';
 import { deleteSubject, findSubject, listSubjectsByTombstone } from './subjects.mjs';
 
 const REF_RX = /^[A-Za-z0-9._:-]{1,128}$/;
 
-function detachSubject(db, subjectRef, now) {
-    const extinguished = extinguishSubject(db, subjectRef, { now });
+function detachSubject(db, subjectRef) {
     deleteSubject(db, subjectRef);
-    return extinguished;
 }
 
 const recordErasure = (db, { id, tombstone, day, requestRef }) => db.prepare(
@@ -48,7 +49,8 @@ export function excludeUser(db, { userId, requestRef = null, env = process.env, 
     const result = db.transaction(() => {
         const inserted = recordErasure(db, { id, tombstone, day, requestRef }).changes === 1;
         const subject = findSubject(db, userId);
-        return { inserted, unlinked: !!subject, extinguished: subject ? detachSubject(db, subject.subject_ref, now) : 0 };
+        if (subject) detachSubject(db, subject.subject_ref);
+        return { inserted, unlinked: !!subject };
     }).immediate();
     return { erasureId: id, day, ...result, checkpointed: checkpoint(db) };
 }
@@ -64,7 +66,7 @@ export function replayExclusions(db, { env = process.env, now = Date.now() } = {
         let applied = 0;
         for (const tombstone of registry) applied += recordErasure(db, { id: crypto.randomUUID(), tombstone, day, requestRef: null }).changes;
         const subjects = listSubjectsByTombstone(db, tombstoneOf).filter((s) => registry.has(s.tombstone));
-        for (const s of subjects) detachSubject(db, s.subject_ref, now);
+        for (const s of subjects) detachSubject(db, s.subject_ref);
         return { applied, unlinked: subjects.length };
     }).immediate();
     return { ...result, checkpointed: result.applied + result.unlinked === 0 ? true : checkpoint(db) };

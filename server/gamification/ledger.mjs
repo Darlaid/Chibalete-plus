@@ -7,34 +7,35 @@
  * Reglas que este módulo hace cumplir (además de los CHECK/UNIQUE/triggers):
  *  - toda escritura va en `BEGIN IMMEDIATE` (serializa las dos réplicas);
  *  - un hecho `(source, source_event_id, fact_type)` se registra una sola vez;
- *    su emisión (XP/PM) ocurre en la MISMA transacción, así que un reintento
+ *    su emisión de XP ocurre en la MISMA transacción, así que un reintento
  *    no emite dos veces;
- *  - el snapshot `gm_pm_balances` solo cambia junto con su movimiento;
  *  - el llamador NUNCA fija montos, grado ni decisión: los decide
- *    `policy.mjs` con las reglas vigentes y los topes, en la misma transacción;
+ *    `policy.mjs` con las reglas vigentes, en la misma transacción;
  *  - solo se emite desde evidencia de grado A/B; la lectura terminada sigue en
  *    observación (READING_EMISSION_LOCKED) hasta que G4 apruebe su validador;
- *  - XP y PM tienen flags independientes y bloqueos por fuente (`policy.mjs`);
+ *  - V8-UNIFIED-XP-01: XP es la ÚNICA escala. Los Puntos de Magia (PM) están
+ *    retirados: este módulo no escribe ni expone movimientos, saldos, canjes ni
+ *    ajustes. Sus tablas siguen en el esquema solo por compatibilidad: no se
+ *    borran ni migran filas antiguas, y ninguna ruta de código las escribe;
  *  - PRIV-01B: el ledger no guarda identidad. La API recibe `userId` y lo resuelve
  *    con `subjects.mjs`; solo se escriben `subject_ref` y claves HMAC, ids sin
  *    tiempo y fechas con precisión de día. Un hecho que no emite no deja fila;
  *  - la clave de sujeto es obligatoria: sin ella no se registra nada;
  *  - PRIV-01D: sin registro de exclusiones válido no se escribe nada, y una
  *    persona excluida no vuelve a tener sujeto;
- *  - reservas y canjes NO se exponen en G3-01 (solo existen sus tablas);
- *  - ningún ajuste fija un saldo: siempre es un movimiento con motivo y actor.
  *
  * No importa nada de server/royalties/ ni escribe otro store (P6).
  */
 import crypto from 'node:crypto';
-import { GamificationError, isEarningEnabled, isXpEarningEnabled } from './db.mjs';
+import { GamificationError, isXpEarningEnabled } from './db.mjs';
 import { ELIGIBILITY, SOURCE_GRADE, XP_LOCKED_SOURCES, decideEmission, isEmissionLocked, validateRules } from './policy.mjs';
-import { WORK_CYCLE_ACTS, decideRecognition, validateApprovedRecognition } from './recognition.mjs';
+import { WORK_CYCLE_ACTS, decideRecognition, hasRetiredPm, validateApprovedRecognition } from './recognition.mjs';
 import { exclusionGate } from './exclusions.mjs';
 import { deriveSourceKey, deriveWorkKey, ensureSubject, findSubject, isExcluded } from './subjects.mjs';
 import { getSubjectKey } from './subjectKey.mjs';
 
 export const FACT_SOURCES = Object.freeze(Object.keys(SOURCE_GRADE));
+/** Decisiones que puede contener `gm_source_facts`. `capped` solo en filas anteriores a V8-UNIFIED-XP-01 (topes de PM). */
 export const FACT_DECISIONS = Object.freeze([
     'awarded', 'capped', 'observed', 'disabled_source',
     'rejected_self_review', 'rejected_excluded_user', 'rejected_inactive_account',
@@ -51,12 +52,6 @@ export const FEATURE_ALLOWLIST = Object.freeze({
     mission: [],
 });
 
-/**
- * Cota técnica por movimiento: protege contra montos absurdos por error de
- * programación. NO es una tarifa doctrinal; los topes reales (D13/D14/D46)
- * vivirán en `gm_rule_sets` y se aplican en una unidad posterior.
- */
-export const MAX_AMOUNT_PER_MOVEMENT = 10_000;
 const MAX_ID = 128;
 const MAX_FEATURE_STRING = 64;
 const ID_RX = /^[A-Za-z0-9._:@-]+$/;
@@ -69,7 +64,7 @@ const randomId = () => crypto.randomUUID();
 /** Inicio del día en Bogotá: la única precisión temporal que se persiste. */
 const dayStart = (ms) => Math.floor((ms - BOGOTA_OFFSET_MS) / 86_400_000) * 86_400_000 + BOGOTA_OFFSET_MS;
 
-/** Periodos de topes en America/Bogota: `YYYY-MM-DD` y semana ISO `YYYY-Www`. */
+/** Periodos en America/Bogota (fecha de día que se persiste): `YYYY-MM-DD` y semana ISO `YYYY-Www`. */
 export function periodsFor(ms) {
     const d = new Date(ms - BOGOTA_OFFSET_MS);
     const day = d.toISOString().slice(0, 10);
@@ -95,13 +90,6 @@ function validateFeatures(source, features) {
     return JSON.stringify(features);
 }
 
-function requireRuleVersion(db, ruleVersion) {
-    if (!isId(ruleVersion)) throw bad('INVALID_RULE_VERSION');
-    if (!db.prepare('SELECT 1 FROM gm_rule_sets WHERE rule_version = ?').get(ruleVersion)) {
-        throw bad('UNKNOWN_RULE_VERSION', ruleVersion);
-    }
-}
-
 /** Conjunto de reglas vigente en `now` (D48: el más reciente ya en vigor). */
 export function getActiveRuleSet(db, now = Date.now()) {
     const row = db.prepare(`SELECT rule_version, rules_json, effective_from FROM gm_rule_sets WHERE effective_from <= ?
@@ -109,63 +97,25 @@ export function getActiveRuleSet(db, now = Date.now()) {
     return row ? { ruleVersion: row.rule_version, rules: JSON.parse(row.rules_json), effectiveFrom: row.effective_from } : null;
 }
 
-/** PM `earn` ya emitidos al sujeto en el día y semana (Bogotá) de `now`. */
-function earnedUsage(db, subjectRef, source, now) {
-    if (!subjectRef) return { day: 0, week: 0, daySource: 0 };
-    const p = periodsFor(now);
-    const sum = (sql, ...a) => db.prepare(sql).get(...a).n;
-    return {
-        day: sum("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE subject_ref=? AND kind='earn' AND period_day=?", subjectRef, p.day),
-        week: sum("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE subject_ref=? AND kind='earn' AND period_week=?", subjectRef, p.week),
-        daySource: sum("SELECT COALESCE(SUM(amount),0) n FROM gm_pm_movements WHERE subject_ref=? AND kind='earn' AND source=? AND period_day=?", subjectRef, source, p.day),
-    };
-}
-
-function checkAmount(n, { allowNegative }) {
-    if (!isInt(n) || n === 0) throw bad('INVALID_AMOUNT', 'monto entero distinto de 0');
-    if (!allowNegative && n < 0) throw bad('INVALID_AMOUNT', 'monto positivo requerido');
-    if (Math.abs(n) > MAX_AMOUNT_PER_MOVEMENT) throw bad('AMOUNT_OUT_OF_BOUNDS');
-}
-
-/** Inserta un movimiento y aplica su delta al snapshot. Llamar SOLO dentro de una transacción. */
-function insertMovement(db, m) {
-    const p = periodsFor(m.createdAt);
-    const createdAt = dayStart(m.createdAt);
-    const movementId = randomId();
-    const info = db.prepare(`
-        INSERT INTO gm_pm_movements (movement_id, subject_ref, kind, amount, source, idempotency_key, fact_id,
-            redemption_id, related_movement_id, reason_code, actor_ref, rule_version, period_day, period_week, created_at)
-        VALUES (@movementId, @subjectRef, @kind, @amount, @source, @idempotencyKey, @factId,
-            NULL, @relatedMovementId, @reasonCode, @actorRef, @ruleVersion, @day, @week, @createdAt)
-    `).run({ movementId, factId: null, relatedMovementId: null, ...m, createdAt, day: p.day, week: p.week });
-    const seq = Number(info.lastInsertRowid);
-    db.prepare(`
-        INSERT INTO gm_pm_balances (subject_ref, available, reserved, lifetime_earned, last_seq, updated_at)
-        VALUES (@subjectRef, @amount, 0, @earned, @seq, @createdAt)
-        ON CONFLICT(subject_ref) DO UPDATE SET
-            available = available + excluded.available,
-            lifetime_earned = lifetime_earned + excluded.lifetime_earned,
-            last_seq = excluded.last_seq,
-            updated_at = excluded.updated_at
-    `).run({ subjectRef: m.subjectRef, amount: m.amount, earned: m.kind === 'earn' ? m.amount : 0, seq, createdAt });
-    return movementId;
-}
-
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 /**
  * Registra un conjunto de reglas (append-only, prospectivo D48), validado por
- * la política: sin topes no hay reglas. Idempotente si el contenido coincide.
+ * la política. Solo XP: una regla con PM se rechaza (`PM_RETIRED`). Idempotente
+ * si el contenido coincide.
  */
 export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom, now = Date.now() }) {
     if (!isId(ruleVersion)) throw bad('INVALID_RULE_VERSION');
     if (!isId(createdBy)) throw bad('INVALID_ACTOR');
     validateRules(rules, { featureAllowlist: FEATURE_ALLOWLIST });
+    if (rules.recognition !== undefined && hasRetiredPm(rules.recognition)) {
+        throw bad('PM_RETIRED', 'recognition: los Puntos de Magia están retirados (amounts.pm, reread.pmFactors)');
+    }
     if (rules.recognition !== undefined && !validateApprovedRecognition(rules.recognition).ok) {
         throw bad('INVALID_RULES', `recognition: ${validateApprovedRecognition(rules.recognition).errors.join(',')}`);
     }
     // Revisión y ruta comparten clave con `recordFact`: pagarlas por `facts` esquivaría el techo por obra.
-    if (rules.recognition !== undefined && Object.entries(rules.facts ?? {}).some(([k, r]) => /^mook_(review|experience)\//.test(k) && ((r.xp ?? 0) > 0 || (r.pm ?? 0) > 0))) {
+    if (rules.recognition !== undefined && Object.entries(rules.facts ?? {}).some(([k, r]) => /^mook_(review|experience)\//.test(k) && (r.xp ?? 0) > 0)) {
         throw bad('RECOGNITION_RULE_CONFLICT', 'con recognition, MOOK no paga por facts');
     }
     const rulesJson = JSON.stringify(rules);
@@ -185,14 +135,13 @@ export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom
 
 /**
  * Registra un hecho de evidencia. El llamador aporta SOLO el hecho y su
- * elegibilidad; el grado (por fuente), la decisión y los montos los fija la
- * política con las reglas VIGENTES y los topes del usuario, dentro de la misma
- * transacción `IMMEDIATE` (dos réplicas no pueden exceder un tope). Un
- * reintento del mismo hecho devuelve el registro original sin emitir.
+ * elegibilidad; el grado (por fuente), la decisión y el XP los fija la
+ * política con las reglas VIGENTES, dentro de la misma transacción `IMMEDIATE`.
+ * Un reintento del mismo hecho devuelve el registro original sin emitir.
  *
  * @param {object} fact  source, sourceEventId, factType, userId, actorId?, occurredAt, eligibility, features?, now?
- * @param {{ env?: object }} [opts]  `XP_EARNING_ENABLED` y `PM_EARNING_ENABLED` se leen aquí, por llamada
- * @returns {{ inserted: boolean, factId: string, decision: string, xp: number, pm: number, xpEntryId: string|null, movementId: string|null }}
+ * @param {{ env?: object }} [opts]  `XP_EARNING_ENABLED` se lee aquí, por llamada
+ * @returns {{ inserted: boolean, persisted: boolean, factId: string|null, decision: string, xp: number, xpEntryId: string|null }}
  */
 export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
     const unknown = Object.keys(fact || {}).filter((k) => !FACT_FIELDS.has(k));
@@ -207,16 +156,15 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
     // La autoconcesión nunca emite, aunque el llamador la declare elegible.
     const effectiveEligibility = eligibility === 'eligible' && actorId !== null && actorId === userId ? 'rejected_self_review' : eligibility;
     const xpEnabled = isXpEarningEnabled(env);
-    const pmEnabled = isEarningEnabled(env);
 
     // PRIV-01C: lo que no puede emitir no toma el lock de escritura. Un barrido
     // reevalúa estos hechos cada vez, porque no dejan fila.
-    const noRow = (decision) => ({ inserted: false, persisted: false, factId: null, decision, xp: 0, pm: 0, xpEntryId: null, movementId: null });
+    const noRow = (decision) => ({ inserted: false, persisted: false, factId: null, decision, xp: 0, xpEntryId: null });
     if (effectiveEligibility !== 'eligible') return noRow(effectiveEligibility === 'observe' ? 'observed' : effectiveEligibility);
     if (isEmissionLocked(source)) return noRow('observed');
 
     getSubjectKey(); // sin clave no se evalúa nada: nunca se escribe una fila que no se pueda deduplicar
-    if (!xpEnabled && !pmEnabled) return noRow('disabled_source');
+    if (!xpEnabled) return noRow('disabled_source');
     const open = gate ?? exclusionGate(db, env);
     if (open.excludes(userId) || (actorId !== null && open.excludes(actorId))) return noRow('rejected_excluded_user');
 
@@ -229,9 +177,8 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
             .get(source, deriveSourceKey(subject, source, factType, sourceEventId), factType);
         if (existing) {
             const xpRow = db.prepare("SELECT entry_id, xp FROM gm_xp_entries WHERE fact_id = ? AND kind = 'award'").get(existing.fact_id);
-            const mvRow = db.prepare('SELECT movement_id, amount FROM gm_pm_movements WHERE idempotency_key = ?').get(`fact:${existing.fact_id}`);
-            return { inserted: false, persisted: true, factId: existing.fact_id, decision: existing.decision, xp: xpRow?.xp ?? 0, pm: mvRow?.amount ?? 0,
-                xpEntryId: xpRow?.entry_id ?? null, movementId: mvRow?.movement_id ?? null };
+            return { inserted: false, persisted: true, factId: existing.fact_id, decision: existing.decision, xp: xpRow?.xp ?? 0,
+                xpEntryId: xpRow?.entry_id ?? null };
         }
         const active = getActiveRuleSet(db, now);
         if (!active) throw bad('NO_ACTIVE_RULES', 'no hay reglas vigentes');
@@ -239,8 +186,8 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
         // posterior no puede premiarlo con efecto retroactivo.
         const prospective = occurredAt >= active.effectiveFrom;
         const d = decideEmission({ rules: active.rules, source, factType, eligibility: prospective ? 'eligible' : 'observe',
-            features: features || {}, xpEnabled, pmEnabled, usage: earnedUsage(db, subject?.subject_ref, source, now) });
-        if (d.xp === 0 && d.pm === 0) return noRow(d.decision);
+            features: features || {}, xpEnabled });
+        if (d.xp === 0) return noRow(d.decision);
         const day = periodsFor(now).day;
         subject ??= ensureSubject(db, userId, { roleClass: 'reader', day });
         const subjectRef = subject.subject_ref;
@@ -253,17 +200,9 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(factId, source, deriveSourceKey(subject, source, factType, sourceEventId), factType, subjectRef, actorRef, dayStart(occurredAt), at,
             d.grade, d.decision, active.ruleVersion, featuresJson);
-        let xpEntryId = null;
-        let movementId = null;
-        if (d.xp > 0) {
-            xpEntryId = randomId();
-            db.prepare("INSERT INTO gm_xp_entries VALUES (?, ?, 'award', ?, ?, NULL, ?, ?)").run(xpEntryId, subjectRef, d.xp, factId, active.ruleVersion, at);
-        }
-        if (d.pm > 0) {
-            movementId = insertMovement(db, { subjectRef, kind: 'earn', amount: d.pm, source, idempotencyKey: `fact:${factId}`,
-                factId, reasonCode: `${source}.${factType}`.slice(0, MAX_ID), actorRef: 'system', ruleVersion: active.ruleVersion, createdAt: now });
-        }
-        return { inserted: true, persisted: true, factId, decision: d.decision, xp: d.xp, pm: d.pm, xpEntryId, movementId };
+        const xpEntryId = randomId();
+        db.prepare("INSERT INTO gm_xp_entries VALUES (?, ?, 'award', ?, ?, NULL, ?, ?)").run(xpEntryId, subjectRef, d.xp, factId, active.ruleVersion, at);
+        return { inserted: true, persisted: true, factId, decision: d.decision, xp: d.xp, xpEntryId };
     }).immediate();
 }
 
@@ -276,7 +215,7 @@ export const REVIEW_FACT = 'evidence_reviewed';
  * con la misma entrada que el escritor.
  */
 export function workCycleHistory(db, subjectRef, workKey) {
-    return db.prepare(`SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp, c.pm, f.occurred_at AS at
+    return db.prepare(`SELECT c.fact_id AS evidenceId, c.work_key AS workRef, c.cycle, c.act, c.xp, f.occurred_at AS at
             FROM gm_work_cycles c JOIN gm_source_facts f USING (fact_id) WHERE c.subject_ref = ? AND c.work_key = ?`).all(subjectRef, workKey);
 }
 
@@ -291,7 +230,7 @@ export function workCycleHistory(db, subjectRef, workKey) {
  *  - la regla activa no trae `recognition` aprobado y completo;
  *  - no queda XP que emitir para esta evidencia.
  *
- * Nunca emite PM. Actos, ciclo e importes los decide `decideRecognition` con la
+ * Solo XP (la columna heredada `gm_work_cycles.pm` se escribe siempre a 0). Actos, ciclo e importes los decide `decideRecognition` con la
  * regla vigente; el llamador solo aporta la evidencia.
  * @param {{ evidenceId, userId, actorId, at, workRef, decision }} evidence
  * @returns {{ inserted: boolean, factId: string|null, acts: string[], xp: number, reason: string|null }}
@@ -324,10 +263,10 @@ export function recordWorkRecognition(db, evidence, { env = process.env, gate = 
         const d = decideRecognition({
             evidence: { source: REVIEW_SOURCE, userId, actorId, evidenceId, at, workRef: workKey, decision },
             subject: { exists: true, active: true, synthetic: false },
-            history, config: active.rules.recognition, flags: { xpEarning: true, pmEarning: false },
+            history, config: active.rules.recognition, flags: { xpEarning: true },
         });
         if (d.outcome !== 'recognized') return none(d.reasons[0] ?? d.outcome);
-        if (d.entries.some((e) => e.pm !== 0 || !WORK_CYCLE_ACTS.includes(e.act))) throw bad('INVALID_RECOGNITION');
+        if (d.entries.some((e) => !WORK_CYCLE_ACTS.includes(e.act))) throw bad('INVALID_RECOGNITION');
         const xp = d.entries.reduce((sum, e) => sum + e.xp, 0);
         if (xp <= 0) return none('no_xp_to_emit');
         const day = periodsFor(now).day;
@@ -354,108 +293,7 @@ export function hasFact(db, { source, sourceEventId, factType, userId }) {
         .get(source, deriveSourceKey(subject, source, factType, sourceEventId), factType);
 }
 
-/** Lee el movimiento previo con la misma clave; si difiere del pedido, conflicto. */
-function replayOrConflict(db, idempotencyKey, expect) {
-    const prev = db.prepare('SELECT * FROM gm_pm_movements WHERE idempotency_key = ?').get(idempotencyKey);
-    if (!prev) return null;
-    const same = Object.entries(expect).every(([k, v]) => prev[k] === v);
-    if (!same) throw bad('IDEMPOTENCY_CONFLICT', 'misma clave con otro contenido');
-    return { inserted: false, movementId: prev.movement_id };
-}
-
-/**
- * Ajuste administrativo (D30): un movimiento con motivo y actor humano.
- * Nunca deja el saldo disponible por debajo de 0.
- */
-export function appendAdjustment(db, { userId, amount, reasonCode, actorId, idempotencyKey, relatedMovementId = null,
-    ruleVersion, now = Date.now() }) {
-    if (!isId(userId) || !isId(reasonCode) || !isId(idempotencyKey)) throw bad('INVALID_ADJUSTMENT');
-    if (!isId(actorId) || actorId === 'system') throw bad('INVALID_ACTOR', 'un ajuste exige un actor humano');
-    checkAmount(amount, { allowNegative: true });
-    getSubjectKey();
-    exclusionGate(db);
-    return db.transaction(() => {
-        requireRuleVersion(db, ruleVersion);
-        const day = periodsFor(now).day;
-        const subjectRef = ensureSubject(db, userId, { roleClass: 'reader', day }).subject_ref;
-        const actorRef = ensureSubject(db, actorId, { roleClass: 'actor', day }).subject_ref;
-        const key = `adj:${actorRef}:${idempotencyKey}`;
-        const replay = replayOrConflict(db, key, { subject_ref: subjectRef, kind: 'adjustment', amount, reason_code: reasonCode });
-        if (replay) return replay;
-        if (relatedMovementId !== null) {
-            const rel = db.prepare('SELECT subject_ref FROM gm_pm_movements WHERE movement_id = ?').get(relatedMovementId);
-            if (!rel || rel.subject_ref !== subjectRef) throw bad('INVALID_RELATED_MOVEMENT');
-        }
-        const bal = db.prepare('SELECT available FROM gm_pm_balances WHERE subject_ref = ?').get(subjectRef);
-        if ((bal?.available ?? 0) + amount < 0) throw bad('INSUFFICIENT_BALANCE', 'un ajuste no puede dejar el saldo negativo');
-        const movementId = insertMovement(db, { subjectRef, kind: 'adjustment', amount, source: 'admin', idempotencyKey: key,
-            relatedMovementId, reasonCode, actorRef, ruleVersion, createdAt: now });
-        db.prepare("INSERT INTO gm_admin_audit VALUES (?, ?, 'adjustment', ?, ?, ?)").run(randomId(), actorRef, subjectRef, movementId, dayStart(now));
-        return { inserted: true, movementId };
-    }).immediate();
-}
-
-/**
- * Compensación (D30): corrige un movimiento previo del mismo usuario. Es el
- * único tipo que puede dejar `available` < 0 (Contratos V1 §5.4).
- */
-export function appendCompensation(db, { userId, amount, reasonCode, actorId, relatedMovementId, idempotencyKey,
-    ruleVersion, now = Date.now() }) {
-    if (!isId(userId) || !isId(reasonCode) || !isId(idempotencyKey) || !isId(relatedMovementId)) throw bad('INVALID_COMPENSATION');
-    if (!isId(actorId)) throw bad('INVALID_ACTOR');
-    checkAmount(amount, { allowNegative: true });
-    getSubjectKey();
-    exclusionGate(db);
-    const key = `comp:${relatedMovementId}:${idempotencyKey}`;
-    return db.transaction(() => {
-        requireRuleVersion(db, ruleVersion);
-        const subject = findSubject(db, userId);
-        if (!subject) throw bad('INVALID_RELATED_MOVEMENT');
-        const subjectRef = subject.subject_ref;
-        const replay = replayOrConflict(db, key, { subject_ref: subjectRef, kind: 'compensation', amount, reason_code: reasonCode });
-        if (replay) return replay;
-        const rel = db.prepare('SELECT subject_ref FROM gm_pm_movements WHERE movement_id = ?').get(relatedMovementId);
-        if (!rel || rel.subject_ref !== subjectRef) throw bad('INVALID_RELATED_MOVEMENT');
-        const actorRef = ensureSubject(db, actorId, { roleClass: 'actor', day: periodsFor(now).day }).subject_ref;
-        const movementId = insertMovement(db, { subjectRef, kind: 'compensation', amount, source: 'admin', idempotencyKey: key,
-            relatedMovementId, reasonCode, actorRef, ruleVersion, createdAt: now });
-        return { inserted: true, movementId };
-    }).immediate();
-}
-
-/**
- * Extingue el saldo de un sujeto con una compensación auditada, antes de
- * desvincularlo. Llamar SOLO dentro de una transacción. Idempotente: con saldo 0
- * no escribe nada. Un canje abierto impide la exclusión.
- * @returns importe extinguido
- */
-export function extinguishSubject(db, subjectRef, { now = Date.now() } = {}) {
-    if (db.prepare("SELECT 1 FROM gm_redemptions WHERE subject_ref = ? AND state IN ('RESERVED','DELIVERED')").get(subjectRef)) throw bad('OPEN_REDEMPTIONS');
-    const bal = db.prepare('SELECT available FROM gm_pm_balances WHERE subject_ref = ?').get(subjectRef);
-    if (!bal || bal.available === 0) return 0;
-    const last = db.prepare('SELECT movement_id, rule_version FROM gm_pm_movements WHERE subject_ref = ? ORDER BY seq DESC LIMIT 1').get(subjectRef);
-    insertMovement(db, { subjectRef, kind: 'compensation', amount: -bal.available, source: 'admin', idempotencyKey: `erasure:${subjectRef}`,
-        relatedMovementId: last.movement_id, reasonCode: 'subject_erasure', actorRef: 'system', ruleVersion: last.rule_version, createdAt: now });
-    return bal.available;
-}
-
 // ── Consultas ───────────────────────────────────────────────────────────────
-
-export function getBalance(db, userId) {
-    const ref = findSubject(db, userId)?.subject_ref;
-    const row = ref && db.prepare('SELECT available, reserved, lifetime_earned, last_seq FROM gm_pm_balances WHERE subject_ref = ?').get(ref);
-    return row
-        ? { available: row.available, reserved: row.reserved, lifetimeEarned: row.lifetime_earned, lastSeq: row.last_seq }
-        : { available: 0, reserved: 0, lifetimeEarned: 0, lastSeq: 0 };
-}
-
-export function listMovements(db, userId, { afterSeq = 0, limit = 50 } = {}) {
-    const n = Math.min(Math.max(1, limit | 0), 200);
-    return db.prepare(`
-        SELECT seq, movement_id AS movementId, kind, amount, source, reason_code AS reasonCode, created_at AS createdAt
-        FROM gm_pm_movements WHERE subject_ref = ? AND seq > ? ORDER BY seq LIMIT ?
-    `).all(findSubject(db, userId)?.subject_ref ?? '', afterSeq, n);
-}
 
 /** XP total: asientos `award` no anulados (P1: el XP nunca se gasta). */
 export function getXp(db, userId) {
@@ -464,47 +302,4 @@ export function getXp(db, userId) {
         WHERE a.subject_ref = ? AND a.kind = 'award'
           AND NOT EXISTS (SELECT 1 FROM gm_xp_entries v WHERE v.kind = 'void' AND v.voids_entry_id = a.entry_id)
     `).get(findSubject(db, userId)?.subject_ref ?? '').xp;
-}
-
-const COMPUTED_SQL = `
-    SELECT m.subject_ref,
-           SUM(m.amount) AS available,
-           COALESCE(SUM(CASE WHEN m.kind = 'earn' THEN m.amount END), 0) AS lifetime_earned,
-           COALESCE((SELECT SUM(-r.amount) FROM gm_pm_movements r JOIN gm_redemptions d ON d.redemption_id = r.redemption_id
-                     WHERE r.subject_ref = m.subject_ref AND r.kind = 'reserve' AND d.state IN ('RESERVED','DELIVERED')), 0) AS reserved,
-           MAX(m.seq) AS last_seq
-    FROM gm_pm_movements m GROUP BY m.subject_ref`;
-
-/**
- * Verifica (solo lectura) que el snapshot coincide con el ledger para todos
- * los usuarios, y que no hay snapshots sin movimientos.
- */
-export function verifyLedger(db) {
-    const computed = new Map(db.prepare(COMPUTED_SQL).all().map((r) => [r.subject_ref, r]));
-    const snapshots = db.prepare('SELECT * FROM gm_pm_balances').all();
-    const divergences = [];
-    for (const s of snapshots) {
-        const c = computed.get(s.subject_ref);
-        if (!c || c.available !== s.available || c.reserved !== s.reserved || c.lifetime_earned !== s.lifetime_earned || c.last_seq !== s.last_seq) {
-            divergences.push({ subjectRef: s.subject_ref, snapshot: s, computed: c ?? null });
-        }
-        computed.delete(s.subject_ref);
-    }
-    for (const [subjectRef, c] of computed) divergences.push({ subjectRef, snapshot: null, computed: c });
-    return { ok: divergences.length === 0, users: snapshots.length, divergences };
-}
-
-/** Reconstruye todos los snapshots desde el ledger (recuperación, ADR §7). */
-export function rebuildBalances(db, { now = Date.now() } = {}) {
-    return db.transaction(() => {
-        const rows = db.prepare(COMPUTED_SQL).all();
-        const up = db.prepare(`
-            INSERT INTO gm_pm_balances (subject_ref, available, reserved, lifetime_earned, last_seq, updated_at)
-            VALUES (@subject_ref, @available, @reserved, @lifetime_earned, @last_seq, @now)
-            ON CONFLICT(subject_ref) DO UPDATE SET available = excluded.available, reserved = excluded.reserved,
-                lifetime_earned = excluded.lifetime_earned, last_seq = excluded.last_seq, updated_at = excluded.updated_at
-        `);
-        for (const r of rows) up.run({ ...r, now: dayStart(now) });
-        return { users: rows.length };
-    }).immediate();
 }

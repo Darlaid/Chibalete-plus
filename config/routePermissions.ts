@@ -141,14 +141,9 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     description: 'Contenido multimedia (audio, video)',
   },
   {
-    path: '/trivia',
-    access: 'authenticated',
-    description: 'Minijuego de trivia de lectura',
-  },
-  {
     path: '/tienda',
     access: 'authenticated',
-    description: 'Canje de puntos por recompensas',
+    description: 'Catálogo de libros de Chibalete Editores (WooCommerce)',
   },
   {
     path: '/bitacora',
@@ -273,11 +268,6 @@ export const ROUTE_PERMISSIONS: RoutePermission[] = [
     path: '/admin/productos',
     access: 'admin',
     description: 'Gestión de productos de la tienda',
-  },
-  {
-    path: '/admin/recompensas',
-    access: 'admin',
-    description: 'Configuración de recompensas y canje',
   },
   {
     path: '/admin/editoriales',

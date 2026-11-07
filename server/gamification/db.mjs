@@ -39,16 +39,10 @@ export function isGamificationEnabled(env = process.env) {
 }
 
 /**
- * `PM_EARNING_ENABLED`: hijo de `GAMIFICATION_ENABLED` (padre OFF ⇒ OFF).
- * Solo gobierna PM. El XP tiene su propio flag (G4-04).
+ * `XP_EARNING_ENABLED`: hijo de `GAMIFICATION_ENABLED` (padre OFF ⇒ OFF). Es el
+ * único flag de emisión: V8-UNIFIED-XP-01 retiró `PM_EARNING_ENABLED` junto con
+ * los Puntos de Magia; si alguien lo define, no tiene ningún efecto.
  */
-export function isEarningEnabled(env = process.env) {
-    if (!isGamificationEnabled(env)) return false;
-    const v = String(env.PM_EARNING_ENABLED ?? '').trim().toLowerCase();
-    return v === '1' || v === 'true';
-}
-
-/** `XP_EARNING_ENABLED`: hijo de `GAMIFICATION_ENABLED`, independiente de `PM_EARNING_ENABLED` (A4). */
 export function isXpEarningEnabled(env = process.env) {
     if (!isGamificationEnabled(env)) return false;
     const v = String(env.XP_EARNING_ENABLED ?? '').trim().toLowerCase();

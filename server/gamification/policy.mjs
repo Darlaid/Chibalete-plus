@@ -2,15 +2,19 @@
  * policy.mjs — CHP-GAMIFICACION-G3-02.
  *
  * Política de emisión del lado del servidor. Módulo PURO (sin disco): valida
- * conjuntos de reglas y decide, para un hecho ya elegible, qué XP y PM le
- * corresponden según las reglas vigentes y el consumo de topes del usuario.
+ * conjuntos de reglas y decide, para un hecho ya elegible, qué XP le corresponde
+ * según las reglas vigentes.
  *
- * Nadie más fija montos: `ledger.recordFact` no acepta xp/pm/grado/decisión del
- * llamador; los toma de aquí dentro de la misma transacción `IMMEDIATE`, así
- * que dos réplicas no pueden exceder un tope.
+ * Nadie más fija montos: `ledger.recordFact` no acepta xp/grado/decisión del
+ * llamador; los toma de aquí dentro de la misma transacción `IMMEDIATE`.
  *
- * Las cifras viven en `gm_rule_sets` (CONFIGURABLE). Ninguna está aprobada como
- * tarifa: los valores de las pruebas son ilustrativos.
+ * V8-UNIFIED-XP-01: XP es la ÚNICA escala. Los Puntos de Magia (PM), sus topes
+ * (`caps`) y su flag quedan retirados: una regla NUEVA con `pm` o `caps` se
+ * rechaza (`PM_RETIRED`). Un conjunto ya guardado que los traiga (anterior a esta
+ * unidad) se sigue leyendo y esos campos se ignoran: nunca emiten.
+ *
+ * Las cifras viven en `gm_rule_sets` (CONFIGURABLE). Los valores de las pruebas
+ * son ilustrativos.
  */
 import { GamificationError } from './db.mjs';
 
@@ -25,12 +29,10 @@ export const SOURCE_GRADE = Object.freeze({
 /** Fuentes que no emiten en ningún caso todavía (READING_EMISSION_LOCKED). */
 export const LOCKED_SOURCES = Object.freeze(['reading_completion']);
 /**
- * G4-04. Bloqueos por código, por encima de cualquier regla:
- *  - lectura libre y ruta MOOK nunca dan PM: no demuestran comprensión (A1);
- *  - una misión es institucional: nunca da PM personales (D38);
- *  - la validación presencial necesita cobertura verificable de obra y ciclo, que
- *    aún no existe. Sin ella no se puede aplicar la unicidad de PM ni el techo de
- *    XP por obra (A4), así que tampoco da XP. Se registra como `observed`.
+ * G4-04. Bloqueos de XP por código, por encima de cualquier regla: la validación
+ * presencial necesita cobertura verificable de obra y ciclo, que aún no existe.
+ * Sin ella no se puede aplicar el techo de XP por obra (A4), así que no da XP.
+ * Se registra como `observed`.
  *
  * V8-ACTIVATE-PREP-01: la revisión MOOK ya tiene esa cobertura (obra y ciclo en
  * `gm_work_cycles`) y sale de `XP_LOCKED_SOURCES`, pero SOLO por el reconocimiento
@@ -39,14 +41,17 @@ export const LOCKED_SOURCES = Object.freeze(['reading_completion']);
  * poder dar XP: pagarla allí esquivaría el techo y el acta, y ocuparía la clave
  * del hecho que usa el reconocimiento.
  */
-export const PM_LOCKED_SOURCES = Object.freeze(['reading_completion', 'mook_experience', 'mission', 'mook_review', 'offline_validation']);
 export const XP_LOCKED_SOURCES = Object.freeze(['reading_completion', 'offline_validation']);
 /** Fuentes cuyo XP solo puede venir del reconocimiento aprobado, nunca de `facts`. */
 export const XP_RECOGNITION_ONLY_SOURCES = Object.freeze(['mook_review']);
 /** ¿La vía genérica (`facts`, `recordFact`) tiene prohibido dar XP a esta fuente? */
 export const isXpLockedForFacts = (source) => XP_LOCKED_SOURCES.includes(source) || XP_RECOGNITION_ONLY_SOURCES.includes(source);
-/** ¿Esta fuente no puede emitir nada por la vía genérica, sean cuales sean las reglas? */
-export const isEmissionLocked = (source) => PM_LOCKED_SOURCES.includes(source) && isXpLockedForFacts(source);
+/** ¿Esta fuente no puede emitir nada por la vía genérica, sean cuales sean las reglas? (Solo hay XP.) */
+export const isEmissionLocked = (source) => isXpLockedForFacts(source);
+
+/** V8-UNIFIED-XP-01: claves de PM retiradas. Una regla NUEVA que las use se rechaza. */
+export const RETIRED_PM_RULE_KEYS = Object.freeze(['caps']);
+export const RETIRED_PM_FACT_KEYS = Object.freeze(['pm']);
 
 export const ELIGIBILITY = Object.freeze([
     'eligible', 'observe',
@@ -60,20 +65,23 @@ const bad = (code, message) => new GamificationError(code, message);
 const isAmount = (n) => Number.isSafeInteger(n) && n >= 0 && n <= MAX_RULE_AMOUNT;
 
 /**
- * Valida un conjunto de reglas. Estructura:
+ * Valida un conjunto de reglas NUEVO. Estructura:
  * {
  *   schema: 1,
- *   facts: { "<source>/<factType>": { xp, pm, emitWhen?: { <feature>: [valores] } } },
- *   caps:  { pmPerDay, pmPerWeek, pmPerDayBySource?: { <source>: n } }
+ *   facts: { "<source>/<factType>": { xp, emitWhen?: { <feature>: [valores] } } },
+ *   recognition?: { ... }   // lo valida `ledger.createRuleSet`
  * }
- * Los topes son OBLIGATORIOS: no existe la emisión sin techo (D13).
+ * Solo hay XP: `pm` y `caps` están retirados (PM_RETIRED). El techo del XP es el
+ * techo por obra y ciclo del reconocimiento.
  * Una regla que intente emitir desde una fuente bloqueada se rechaza.
  */
 export function validateRules(rules, { featureAllowlist }) {
     if (!rules || typeof rules !== 'object' || Array.isArray(rules)) throw bad('INVALID_RULES', 'objeto requerido');
     if (rules.schema !== 1) throw bad('INVALID_RULES', 'schema debe ser 1');
+    const retired = Object.keys(rules).filter((k) => RETIRED_PM_RULE_KEYS.includes(k));
+    if (retired.length) throw bad('PM_RETIRED', `los Puntos de Magia están retirados: ${retired.join(',')}`);
     // `recognition` (G4-05A-4) lo valida `ledger.createRuleSet`, junto al núcleo que lo usa.
-    const extra = Object.keys(rules).filter((k) => !['schema', 'facts', 'caps', 'recognition'].includes(k));
+    const extra = Object.keys(rules).filter((k) => !['schema', 'facts', 'recognition'].includes(k));
     if (extra.length) throw bad('INVALID_RULES', `claves desconocidas: ${extra.join(',')}`);
     const facts = rules.facts ?? {};
     if (typeof facts !== 'object' || Array.isArray(facts)) throw bad('INVALID_RULES', 'facts');
@@ -82,13 +90,13 @@ export function validateRules(rules, { featureAllowlist }) {
         if (!m || !(m[1] in SOURCE_GRADE)) throw bad('INVALID_RULES', `regla de fuente desconocida: ${key}`);
         const source = m[1];
         if (!r || typeof r !== 'object') throw bad('INVALID_RULES', key);
-        const rk = Object.keys(r).filter((k) => !['xp', 'pm', 'emitWhen'].includes(k));
+        if (Object.keys(r).some((k) => RETIRED_PM_FACT_KEYS.includes(k))) throw bad('PM_RETIRED', `${key}: los Puntos de Magia están retirados`);
+        const rk = Object.keys(r).filter((k) => !['xp', 'emitWhen'].includes(k));
         if (rk.length) throw bad('INVALID_RULES', `${key}: claves desconocidas ${rk.join(',')} (el grado no es configurable)`);
-        if (!isAmount(r.xp ?? 0) || !isAmount(r.pm ?? 0)) throw bad('INVALID_RULES', `${key}: xp/pm enteros entre 0 y ${MAX_RULE_AMOUNT}`);
-        if (LOCKED_SOURCES.includes(source) && ((r.xp ?? 0) > 0 || (r.pm ?? 0) > 0)) {
+        if (!isAmount(r.xp ?? 0)) throw bad('INVALID_RULES', `${key}: xp entero entre 0 y ${MAX_RULE_AMOUNT}`);
+        if (LOCKED_SOURCES.includes(source) && (r.xp ?? 0) > 0) {
             throw bad('READING_EMISSION_LOCKED', `${key}: la lectura terminada sigue en observación`);
         }
-        if (PM_LOCKED_SOURCES.includes(source) && (r.pm ?? 0) > 0) throw bad('PM_SOURCE_LOCKED', `${key}: esta fuente no puede emitir PM`);
         if (isXpLockedForFacts(source) && (r.xp ?? 0) > 0) throw bad('XP_SOURCE_LOCKED', `${key}: esta fuente no puede emitir XP por facts`);
         if (r.emitWhen !== undefined) {
             if (!r.emitWhen || typeof r.emitWhen !== 'object' || Array.isArray(r.emitWhen)) throw bad('INVALID_RULES', `${key}.emitWhen`);
@@ -101,34 +109,24 @@ export function validateRules(rules, { featureAllowlist }) {
             }
         }
     }
-    const caps = rules.caps;
-    if (!caps || typeof caps !== 'object') throw bad('INVALID_RULES', 'caps obligatorio (sin emisión sin techo)');
-    const ck = Object.keys(caps).filter((k) => !['pmPerDay', 'pmPerWeek', 'pmPerDayBySource'].includes(k));
-    if (ck.length) throw bad('INVALID_RULES', `caps: claves desconocidas ${ck.join(',')}`);
-    if (!isAmount(caps.pmPerDay) || !isAmount(caps.pmPerWeek)) throw bad('INVALID_RULES', 'caps.pmPerDay y caps.pmPerWeek obligatorios');
-    if (caps.pmPerDay > caps.pmPerWeek) throw bad('INVALID_RULES', 'pmPerDay no puede superar pmPerWeek');
-    for (const [s, n] of Object.entries(caps.pmPerDayBySource ?? {})) {
-        if (!(s in SOURCE_GRADE) || !isAmount(n)) throw bad('INVALID_RULES', `caps.pmPerDayBySource.${s}`);
-    }
     return rules;
 }
 
 /**
- * Decide la emisión de un hecho. Pura.
+ * Decide la emisión de XP de un hecho. Pura.
+ * Un conjunto guardado antes de V8-UNIFIED-XP-01 puede traer `pm`/`caps`: se ignoran.
  * @param {object} p
- * @param {object} p.rules          conjunto vigente (ya validado)
+ * @param {object} p.rules          conjunto vigente
  * @param {string} p.source
  * @param {string} p.factType
  * @param {string} p.eligibility    uno de ELIGIBILITY
  * @param {object} p.features
  * @param {boolean} p.xpEnabled
- * @param {boolean} p.pmEnabled
- * @param {{ day: number, week: number, daySource: number }} p.usage  PM `earn` ya emitidos
- * @returns {{ grade, decision, xp, pm }}
+ * @returns {{ grade, decision, xp }}
  */
-export function decideEmission({ rules, source, factType, eligibility, features, xpEnabled, pmEnabled, usage }) {
+export function decideEmission({ rules, source, factType, eligibility, features, xpEnabled }) {
     const grade = SOURCE_GRADE[source];
-    const none = (decision) => ({ grade, decision, xp: 0, pm: 0 });
+    const none = (decision) => ({ grade, decision, xp: 0 });
     if (eligibility !== 'eligible') return none(eligibility === 'observe' ? 'observed' : eligibility);
     if (LOCKED_SOURCES.includes(source)) return none('observed');
     const rule = rules.facts?.[`${source}/${factType}`];
@@ -137,20 +135,8 @@ export function decideEmission({ rules, source, factType, eligibility, features,
         if (!vals.includes(features?.[f])) return none('observed');
     }
     // Los bloqueos valen también para un conjunto de reglas ya guardado.
-    const ruleXp = isXpLockedForFacts(source) ? 0 : (rule.xp ?? 0);
-    const rulePm = PM_LOCKED_SOURCES.includes(source) ? 0 : (rule.pm ?? 0);
     if (isEmissionLocked(source)) return none('observed');
-    if (!xpEnabled && !pmEnabled) return none('disabled_source');
-    const xp = xpEnabled ? ruleXp : 0;
-    const want = pmEnabled ? rulePm : 0;
-    if (xp === 0 && want === 0 && ruleXp + rulePm > 0) return none('disabled_source');
-    const caps = rules.caps;
-    const bySource = caps.pmPerDayBySource?.[source];
-    const room = Math.max(0, Math.min(
-        caps.pmPerDay - usage.day,
-        caps.pmPerWeek - usage.week,
-        bySource === undefined ? Infinity : bySource - usage.daySource,
-    ));
-    const pm = Math.min(want, room);
-    return { grade, decision: pm < want ? 'capped' : 'awarded', xp, pm };
+    if (!xpEnabled) return none('disabled_source');
+    const xp = isAmount(rule.xp) ? rule.xp : 0;
+    return { grade, decision: 'awarded', xp };
 }

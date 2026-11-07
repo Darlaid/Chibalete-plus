@@ -14,7 +14,6 @@ const AdminProductos: React.FC = () => {
         isbn: '',
         descripcion: '',
         precio: '',
-        precio_descuento_puntos: '',
         categoria: 'libro_impreso',
         imagen_url: ''
     });
@@ -61,7 +60,6 @@ const AdminProductos: React.FC = () => {
             isbn: formData.isbn,
             descripcion: formData.descripcion,
             precio: parseFloat(formData.precio),
-            precio_descuento_puntos: formData.precio_descuento_puntos ? parseInt(formData.precio_descuento_puntos) : undefined,
             categoria: formData.categoria as any,
             imagen_url: formData.imagen_url || 'https://via.placeholder.com/300x400?text=Sin+Imagen',
             url_compra: '#' // Placeholder internal link
@@ -159,19 +157,6 @@ const AdminProductos: React.FC = () => {
                                     min="0"
                                     required
                                 />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-bold mb-2 flex items-center text-purple-600 dark:text-purple-400"><Tag size={16} className="mr-2" /> Precio en Puntos (Descuento)</label>
-                                <input
-                                    type="number"
-                                    name="precio_descuento_puntos"
-                                    value={formData.precio_descuento_puntos}
-                                    onChange={handleChange}
-                                    className="w-full p-3 rounded-lg border border-purple-200 dark:border-gray-600 bg-purple-50 dark:bg-gray-700 focus:ring-2 focus:ring-purple-500 font-mono text-lg text-purple-700 dark:text-purple-300"
-                                    placeholder="Ej. 500 Puntos"
-                                    min="0"
-                                />
-                                <p className="text-xs text-purple-400 mt-1">Opcional. Permite canje parcial o total.</p>
                             </div>
                         </div>
 

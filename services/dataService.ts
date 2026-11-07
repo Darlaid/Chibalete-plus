@@ -1957,17 +1957,6 @@ class DataService {
         }
     }
 
-    // CHP-GAMIFICACION-G0-01: los Puntos de Magia no tienen libro de movimientos en el
-    // servidor; mientras no exista, el cliente no suma ni gasta puntos. Firmas
-    // conservadas (retiro en G4B).
-    addPuntos(_userId: string, _puntos: number) {
-        return;
-    }
-
-    canjearRecompensa(_userId: string, _cost: number): boolean {
-        return false;
-    }
-
     updateImmersiveLevel(userId: string, level: 1 | 2 | 3 | 4 | 5) {
         const user = this.getUsuarioById(userId);
         if (user) {
@@ -3024,17 +3013,6 @@ class DataService {
         this.saveState('products', this.products);
     }
 
-    // Rewards Management
-    getRewardRequests(filter: 'submitted' | 'approved' | 'rejected'): JournalEntry[] {
-        return this.journalEntries.filter(e => e.type === 'reward_request' && e.status === filter);
-    }
-
-    // CHP-GAMIFICACION-G0-01: aprobar/rechazar era simulado (nunca emitía cupones ni
-    // devolvía puntos). No-op: las solicitudes históricas quedan intactas, solo lectura.
-    processRewardRequest(_id: string, _action: 'approve' | 'reject') {
-        return;
-    }
-
     getGlobalStats() {
         // Mock stats calculation
         const totalBooksRead = this.users.reduce((acc, u) => acc + u.libros_leidos, 0);
@@ -3445,16 +3423,9 @@ class DataService {
         }
     }
 
-    // --- GAMIFICATION & POINTS ---
-    // CHP-GAMIFICACION-G0-01: sin otorgamiento ni canje en el cliente (ver addPuntos).
-    // Ya no escribe nombre_usuario en la consola ni crea solicitudes reward_request.
-    addPoints(userId: string, _amount: number, _reason: string): number {
-        return this.getUsuarioById(userId)?.puntos || 0;
-    }
-
-    redeemCoupon(_userId: string, _cost: number, _description: string): { success: boolean; message: string; remainingPoints?: number } {
-        return { success: false, message: 'Las recompensas con Puntos de Magia estarán disponibles cuando el sistema esté habilitado.' };
-    }
+    // V8-UNIFIED-XP-01: los Puntos de Magia (addPuntos, canjearRecompensa, addPoints,
+    // redeemCoupon, getRewardRequests, processRewardRequest) están retirados. La única
+    // escala es el XP del servidor (`getMyProgress`).
 
     // --- UTILS FOR TEACHER VIEW ---
     // --- SEÑALES PEDAGÓGICAS BÁSICAS (base para Leo) ---

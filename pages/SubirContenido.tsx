@@ -588,7 +588,7 @@ const SubirContenido: React.FC = () => {
 
     // Section Modal State
     const [isSectionModalOpen, setIsSectionModalOpen] = useState(false);
-    const [newSectionData, setNewSectionData] = useState<Partial<Section>>({ titulo: '', unlockCost: 1500, isPublic: true });
+    const [newSectionData, setNewSectionData] = useState<Partial<Section>>({ titulo: '', isPublic: true });
 
     const handleCreateSection = async () => {
         if (!newSectionData.titulo) return alert("El título es obligatorio");
@@ -598,7 +598,6 @@ const SubirContenido: React.FC = () => {
                 titulo: newSectionData.titulo!,
                 descripcion: newSectionData.descripcion || '',
                 icono: 'BookOpen',
-                unlockCost: newSectionData.unlockCost || 0,
                 isPublic: newSectionData.isPublic || false,
                 isHidden: false,
                 order: availableSections.length
@@ -606,7 +605,7 @@ const SubirContenido: React.FC = () => {
             setAvailableSections(prev => [...prev, created]);
             setMainContent(prev => ({ ...prev, sectionIds: [...prev.sectionIds, created.id] })); // Auto-select
             setIsSectionModalOpen(false);
-            setNewSectionData({ titulo: '', unlockCost: 1500, isPublic: true }); // Reset
+            setNewSectionData({ titulo: '', isPublic: true }); // Reset
         } catch (e) {
             alert("Error al crear sección");
         }
@@ -3408,23 +3407,6 @@ const SubirContenido: React.FC = () => {
                             </div>
 
                             <div className="flex items-center gap-4">
-                                <div className="flex-1">
-                                    <label className="block text-sm font-medium mb-1">
-                                        Costo (Puntos)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        value={newSectionData.unlockCost}
-                                        onChange={e =>
-                                            setNewSectionData(prev => ({
-                                                ...prev,
-                                                unlockCost: parseInt(e.target.value) || 0
-                                            }))
-                                        }
-                                        className="w-full p-2 border border-gray-300 rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                                    />
-                                </div>
-
                                 <div className="flex items-center pt-6">
                                     <label className="flex items-center cursor-pointer">
                                         <input

@@ -245,7 +245,7 @@ export function readWorkProgress(db, userId, { doc, workRefOf, resolveUser, isWi
         const h = historyOf(workRef);
         const d = decideRecognition({
             evidence: { source: REVIEW_SOURCE, userId, actorId: PROJECTION_ACTOR, evidenceId, at, workRef: keyOf(workRef), decision: 'aprobado' },
-            subject: { exists: true, active: true, synthetic: false }, history: h, config: rule.config, flags: { xpEarning: true, pmEarning: false },
+            subject: { exists: true, active: true, synthetic: false }, history: h, config: rule.config, flags: { xpEarning: true },
         });
         if (d.outcome !== 'recognized' || !(d.xp > 0)) return false;
         h.push(...d.entries.map((e) => ({ ...e, projected: true })));

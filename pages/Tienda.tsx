@@ -12,7 +12,7 @@ import {
     type StoreCatalog,
     type StoreProduct,
 } from '../utils/storeCatalog.mjs';
-import { Tag, Gift, ShoppingBag, ShoppingCart, ExternalLink } from 'lucide-react';
+import { ShoppingBag, ShoppingCart, ExternalLink } from 'lucide-react';
 
 // ── Catálogo WooCommerce (CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01) ─────────────
 // WooCommerce es la fuente de verdad y el checkout es suyo: la tarjeta solo
@@ -191,14 +191,6 @@ const Tienda: React.FC = () => {
                 </div>
 
             </header>
-
-            {/* REWARDS — G0: canje simulado retirado (nunca emitía cupones); sin saldo ni botones. */}
-            <div className="mb-12 flex items-start gap-3 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 p-4 text-purple-800 dark:text-purple-200">
-                <Gift className="shrink-0 mt-0.5" size={22} aria-hidden="true" />
-                <p className="text-sm">
-                    Las recompensas con Puntos de Magia estarán disponibles cuando el sistema esté habilitado.
-                </p>
-            </div>
 
             <h2 className="text-2xl font-bold mb-6 text-gray-800 dark:text-white">Libros de Chibalete Editores</h2>
             <CatalogSection state={catalogState} />

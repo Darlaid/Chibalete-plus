@@ -72,7 +72,6 @@ const Perfil = React.lazy(() => import('./pages/Perfil'));
 
 const Soporte = React.lazy(() => import('./pages/Soporte'));
 const Tienda = React.lazy(() => import('./pages/Tienda'));
-const Trivia = React.lazy(() => import('./pages/Trivia'));
 const SubirContenido = React.lazy(() => import('./pages/SubirContenido'));
 const AdminUsuarios = React.lazy(() => import('./pages/AdminUsuarios'));
 const AdminDashboard = React.lazy(() => import('./pages/AdminDashboard'));
@@ -91,7 +90,6 @@ const Bitacora = React.lazy(() => import('./pages/Bitacora'));
 // G4-UX-U3: progreso privado del lector (sin :id; el sujeto es la sesión).
 const MiProgreso = React.lazy(() => import('./pages/MiProgreso'));
 const AdminProductos = React.lazy(() => import('./pages/AdminProductos'));
-const AdminRecompensas = React.lazy(() => import('./pages/AdminRecompensas'));
 const AdminEditoriales = React.lazy(() => import('./pages/AdminEditoriales'));
 const AdminDerechos = React.lazy(() => import('./pages/AdminDerechos'));
 const AdminExperiencias = React.lazy(() => import('./pages/AdminExperiencias'));
@@ -373,9 +371,6 @@ const AppContent: React.FC = () => {
                 <Route path="/multimedia" element={
                     <ProtectedRoute access={getRouteAccess('/multimedia')}><Layout><Multimedia /></Layout></ProtectedRoute>
                 } />
-                <Route path="/trivia" element={
-                    <ProtectedRoute access={getRouteAccess('/trivia')}><Layout><Trivia /></Layout></ProtectedRoute>
-                } />
                 <Route path="/tienda" element={
                     <ProtectedRoute access={getRouteAccess('/tienda')}><Layout><Tienda /></Layout></ProtectedRoute>
                 } />
@@ -491,9 +486,6 @@ const AppContent: React.FC = () => {
                 } />
                 <Route path="/admin/productos" element={
                     <ProtectedRoute access={getRouteAccess('/admin/productos')}><Layout><AdminProductos /></Layout></ProtectedRoute>
-                } />
-                <Route path="/admin/recompensas" element={
-                    <ProtectedRoute access={getRouteAccess('/admin/recompensas')}><Layout><AdminRecompensas /></Layout></ProtectedRoute>
                 } />
                 <Route path="/admin/editoriales" element={
                     <ProtectedRoute access={getRouteAccess('/admin/editoriales')}><Layout><AdminEditoriales /></Layout></ProtectedRoute>

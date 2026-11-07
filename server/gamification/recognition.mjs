@@ -2,8 +2,8 @@
  * recognition.mjs — CHP-GAMIFICACION-G4-03.
  *
  * Núcleo PURO del reconocimiento lector: clasifica evidencia, decide
- * elegibilidad para XP y PM con motivos explícitos, limita lo reconocible por
- * obra y ciclo, deriva el nivel y evalúa logros. Contrato:
+ * elegibilidad para XP con motivos explícitos, limita lo reconocible por obra y
+ * ciclo, deriva el nivel y evalúa logros. Contrato:
  * docs/gamificacion/GAMIFICACION_G4_RECONOCIMIENTO_LECTOR_V1.md.
  *
  * Sin disco, sin reloj, sin azar, sin entorno y sin persistencia: el historial
@@ -12,14 +12,18 @@
  * nada del producto llama a este módulo todavía.
  *
  * Decisiones aprobadas que implementa:
- *  - A1: la finalización de lectura por sí sola nunca genera PM.
  *  - A2: el recorrido es grado B y no demuestra comprensión.
  *  - A3: ni tiempo ni velocidad participan en ninguna decisión.
  *  - A4: XP con flag propio y techo por obra y ciclo.
  *  - A8: nivel = XP + obras distintas + reflexiones; primeros niveles sin reflexión.
  *
- * Lo que sigue sin aprobar queda SIN emisión comercial: `mook_experience` no da
- * PM y `con_comentarios` no se reconoce (A5 y A6 pendientes).
+ * V8-UNIFIED-XP-01: XP es la ÚNICA escala. Los Puntos de Magia (PM) están
+ * retirados: no hay elegibilidad, importes, factores ni flag de PM. Una
+ * configuración guardada antes de esta unidad puede traer `amounts.pm` y
+ * `reread.pmFactors` en cero: se toleran al leer y se ignoran; una nueva que
+ * los traiga la rechaza `ledger.createRuleSet` (`hasRetiredPm`).
+ *
+ * `con_comentarios` no se reconoce (A5 y A6 pendientes).
  *
  * Privacidad: la modalidad solo se lee aquí de forma transitoria. Ninguna
  * entrada resultante la contiene: `a11y` no debe ser un rasgo duradero.
@@ -144,79 +148,88 @@ function structuralBlocks(evidence, cls) {
 }
 
 /**
- * Elegibilidad para XP y PM, sin historial ni montos. `eligible` no significa
- * «se concede»: lo limitan después el ciclo, el techo, los flags y los topes.
+ * Elegibilidad para XP, sin historial ni montos. `eligible` no significa
+ * «se concede»: lo limitan después el ciclo, el techo y el flag.
  */
 export function assessEligibility(evidence, subject) {
     const cls = classifyEvidence(evidence);
     const no = (reason) => ({ eligible: false, reasons: [reason] });
-    const both = (reasons) => ({ classification: cls, xp: { eligible: false, reasons }, pm: { eligible: false, reasons }, alternativeRouteOpen: false });
-    if (!cls.known) return both([cls.reason]);
+    const none = (reasons) => ({ classification: cls, xp: { eligible: false, reasons }, alternativeRouteOpen: false });
+    if (!cls.known) return none([cls.reason]);
     const blocked = [subjectBlock(subject), ...structuralBlocks(evidence, cls)].filter(Boolean);
-    if (blocked.length) return both(blocked);
+    if (blocked.length) return none(blocked);
 
     const yes = { eligible: true, reasons: [] };
     if (cls.source === 'reading_completion') {
-        const pm = no('reading_alone_never_pm'); // A1
         const { verdict } = evidence;
         if (verdict === 'plausible') {
-            if (!cls.traversalObservable) return { classification: cls, xp: no('modality_without_traversal_evidence'), pm, alternativeRouteOpen: true };
-            return { classification: cls, xp: yes, pm, alternativeRouteOpen: true };
+            if (!cls.traversalObservable) return { classification: cls, xp: no('modality_without_traversal_evidence'), alternativeRouteOpen: true };
+            return { classification: cls, xp: yes, alternativeRouteOpen: true };
         }
-        return { classification: cls, xp: no(VERDICT_REASON[verdict] ?? 'invalid_verdict'), pm, alternativeRouteOpen: true };
+        return { classification: cls, xp: no(VERDICT_REASON[verdict] ?? 'invalid_verdict'), alternativeRouteOpen: true };
     }
-    if (cls.source === 'mook_experience') {
-        return { classification: cls, xp: yes, pm: no('route_completion_not_comprehension'), alternativeRouteOpen: false };
+    if (cls.source === 'mook_review' && evidence.decision !== 'aprobado') {
+        return none([evidence.decision === 'con_comentarios' ? 'con_comentarios_pending_decision' : 'invalid_decision']);
     }
-    if (cls.source === 'mook_review') {
-        if (evidence.decision === 'aprobado') return { classification: cls, xp: yes, pm: yes, alternativeRouteOpen: false };
-        return both([evidence.decision === 'con_comentarios' ? 'con_comentarios_pending_decision' : 'invalid_decision']);
-    }
-    if (cls.demonstratesComprehension) return { classification: cls, xp: yes, pm: yes, alternativeRouteOpen: false };
-    return { classification: cls, xp: yes, pm: no('validated_activity_not_comprehension'), alternativeRouteOpen: false };
+    return { classification: cls, xp: yes, alternativeRouteOpen: false };
+}
+
+/**
+/**
+ * ¿La configuración trae campos de PM? Una NUEVA que los traiga se rechaza
+ * (`PM_RETIRED` en `ledger.createRuleSet`); una guardada antes se tolera si
+ * están en cero (`validateRecognitionConfig`).
+ */
+export const hasRetiredPm = (config) => config?.amounts?.pm !== undefined || config?.reread?.pmFactors !== undefined;
+
+/** PM heredado de una configuración guardada: solo se tolera todo a cero. */
+function legacyPmErrors(config) {
+    const errors = [];
+    const pm = config?.amounts?.pm;
+    if (pm !== undefined && (!pm || typeof pm !== 'object' || Array.isArray(pm) || Object.values(pm).some((v) => v !== 0))) errors.push('amounts.pm.retired');
+    const f = config?.reread?.pmFactors;
+    if (f !== undefined && (!Array.isArray(f) || f.some((v) => v !== 0))) errors.push('reread.pmFactors.retired');
+    return errors;
 }
 
 /**
  * Valida la configuración de reconocimiento. Forma:
  * {
- *   amounts: { xp: { reading, reflection, validated, route }, pm: { reviewed, validated } },
+ *   amounts: { xp: { reading, reflection, validated, route } },
  *   xpCeilingPerWorkCycle,
- *   reread: { windowDays, xpFactors: [ρ₂, ρ₃…], pmFactors: [ρ_PM₂…] }
+ *   reread: { windowDays, xpFactors: [ρ₂, ρ₃…] }
  * }
  * El techo y el espaciado son obligatorios: no existe XP sin techo por obra.
+ * `amounts.pm`/`reread.pmFactors` heredados solo se toleran en cero.
  */
 export function validateRecognitionConfig(config) {
     const errors = [];
     const xp = config?.amounts?.xp;
-    const pm = config?.amounts?.pm;
     for (const k of ['reading', 'reflection', 'validated', 'route']) if (!isAmount(xp?.[k])) errors.push(`amounts.xp.${k}`);
-    for (const k of ['reviewed', 'validated']) if (!isAmount(pm?.[k])) errors.push(`amounts.pm.${k}`);
     if (!isAmount(config?.xpCeilingPerWorkCycle)) errors.push('xpCeilingPerWorkCycle');
     const reread = config?.reread;
     if (!Number.isSafeInteger(reread?.windowDays) || reread.windowDays < 1) errors.push('reread.windowDays');
     if (!isFactorList(reread?.xpFactors)) errors.push('reread.xpFactors');
-    if (!isFactorList(reread?.pmFactors)) errors.push('reread.pmFactors');
+    errors.push(...legacyPmErrors(config));
     return { ok: errors.length === 0, errors };
 }
 
 /**
  * G4-05A-4. Configuración que puede activar emisión: la de `validateRecognitionConfig`
- * más una referencia al acta de aprobación, XP real por lectura y reflexión, techo
- * positivo y PM en cero, porque esta ruta no emite PM. Sin valores por defecto.
+ * más una referencia al acta de aprobación, XP real por lectura y reflexión y techo
+ * positivo. Sin valores por defecto.
  */
 export function validateApprovedRecognition(config) {
     const { errors } = validateRecognitionConfig(config);
     if (!isId(config?.approvalRef)) errors.push('approvalRef');
     for (const k of ['reading', 'reflection']) if (!(config?.amounts?.xp?.[k] > 0)) errors.push(`amounts.xp.${k}.zero`);
     if (!(config?.xpCeilingPerWorkCycle > 0)) errors.push('xpCeilingPerWorkCycle.zero');
-    for (const k of ['reviewed', 'validated']) if (config?.amounts?.pm?.[k] !== 0) errors.push(`amounts.pm.${k}.must_be_zero`);
-    if ((config?.reread?.pmFactors ?? []).some((f) => f !== 0)) errors.push('reread.pmFactors.must_be_zero');
     return { ok: errors.length === 0, errors };
 }
 
 function outcomeOf(outcome, cls, reasons, extra = {}) {
     return { outcome, source: cls?.source ?? null, layer: cls?.layer ?? LAYERS.EXCLUDED, grade: cls?.grade ?? null, cycle: null,
-        xp: 0, pm: 0, entries: [], reasons, alternativeRouteOpen: false, ruleVersion: RECOGNITION_RULE_VERSION, ...extra };
+        xp: 0, entries: [], reasons, alternativeRouteOpen: false, ruleVersion: RECOGNITION_RULE_VERSION, ...extra };
 }
 
 /** Ciclo al que pertenece la evidencia. Solo una relectura espaciada abre uno nuevo. */
@@ -242,39 +255,36 @@ function resolveCycle(workEntries, evidence, reread) {
  * @param {{ exists, active, synthetic }} input.subject
  * @param {object[]} input.history entradas previas de ESE usuario
  * @param {object} input.config    ver validateRecognitionConfig
- * @param {{ xpEarning?: boolean, pmEarning?: boolean }} [input.flags]  OFF si faltan
+ * @param {{ xpEarning?: boolean }} [input.flags]  OFF si falta
  */
 export function decideRecognition({ evidence, subject, history, config, flags } = {}) {
     try {
-        const { classification: cls, xp: xpE, pm: pmE, alternativeRouteOpen } = assessEligibility(evidence, subject);
+        const { classification: cls, xp: xpE, alternativeRouteOpen } = assessEligibility(evidence, subject);
         const base = { alternativeRouteOpen };
-        const reasons = [...new Set([...xpE.reasons, ...pmE.reasons])];
+        const reasons = [...new Set(xpE.reasons)];
         const check = validateRecognitionConfig(config);
         if (!check.ok) return outcomeOf('rejected', cls, ['invalid_config'], { ...base, configErrors: check.errors });
         if (!Array.isArray(history) || !history.every((e) => e && isId(e.evidenceId))) return outcomeOf('rejected', cls, ['invalid_history'], base);
-        if (!xpE.eligible && !pmE.eligible) return outcomeOf(cls.known ? 'not_recognized' : 'rejected', cls, reasons, base);
+        if (!xpE.eligible) return outcomeOf(cls.known ? 'not_recognized' : 'rejected', cls, reasons, base);
         if (history.some((e) => e.evidenceId === evidence.evidenceId)) return outcomeOf('duplicate', cls, ['evidence_already_recognized'], base);
 
         const xpOn = flags?.xpEarning === true;
-        const pmOn = flags?.pmEarning === true;
-        const flagNotes = [...(xpE.eligible && !xpOn ? ['xp_flag_off'] : []), ...(pmE.eligible && !pmOn ? ['pm_flag_off'] : [])];
-        if ((!xpE.eligible || !xpOn) && (!pmE.eligible || !pmOn)) return outcomeOf('disabled', cls, [...reasons, ...flagNotes], base);
+        if (!xpOn) return outcomeOf('disabled', cls, [...reasons, 'xp_flag_off'], base);
 
         const { amounts } = config;
-        const entry = (act, cycle, workRef, via, xp, pm) => ({ act, via, evidenceId: evidence.evidenceId, workRef, cycle, xp, pm, at: evidence.at });
+        const entry = (act, cycle, workRef, via, xp) => ({ act, via, evidenceId: evidence.evidenceId, workRef, cycle, xp, at: evidence.at });
 
         if (cls.source === 'mook_experience') {
-            return outcomeOf('recognized', cls, [...reasons, ...flagNotes], { ...base, xp: amounts.xp.route,
-                entries: [entry('route', null, null, 'route', amounts.xp.route, 0)] });
+            return outcomeOf('recognized', cls, [...reasons], { ...base, xp: amounts.xp.route,
+                entries: [entry('route', null, null, 'route', amounts.xp.route)] });
         }
 
         const workEntries = history.filter((e) => e.workRef === evidence.workRef && Number.isSafeInteger(e.cycle));
         const { cycle, notes } = resolveCycle(workEntries, evidence, config.reread);
         const inCycle = workEntries.filter((e) => e.cycle === cycle);
         const xpFactor = cycle === 1 ? 1 : config.reread.xpFactors[cycle - 2];
-        const pmFactor = cycle === 1 ? 1 : (config.reread.pmFactors[cycle - 2] ?? 0);
         let room = Math.max(0, config.xpCeilingPerWorkCycle - inCycle.reduce((s, e) => s + (e.xp || 0), 0));
-        const notesOut = [...reasons, ...flagNotes, ...notes];
+        const notesOut = [...reasons, ...notes];
         const entries = [];
         const take = (want) => {
             const got = Math.min(Math.floor(want * xpFactor), room);
@@ -284,27 +294,22 @@ export function decideRecognition({ evidence, subject, history, config, flags } 
         };
         const via = cls.source === 'reading_completion' ? 'traversal' : cls.source === 'mook_review' ? 'review' : 'offline';
 
-        if (xpOn && xpE.eligible && !inCycle.some((e) => e.act === 'reading')) {
+        if (!inCycle.some((e) => e.act === 'reading')) {
             const xp = take(amounts.xp.reading);
             if (cycle > 1 && xp === 0) notesOut.push('reread_xp_exhausted');
-            entries.push(entry('reading', cycle, evidence.workRef, via, xp, 0));
+            entries.push(entry('reading', cycle, evidence.workRef, via, xp));
         } else if (cls.source === 'reading_completion' || !cls.demonstratesComprehension) {
             notesOut.push('already_recognized_in_cycle');
         }
 
         if (cls.demonstratesComprehension) {
-            const xp = xpOn ? take(cls.source === 'mook_review' ? amounts.xp.reflection : amounts.xp.validated) : 0;
-            let pm = 0;
-            if (pmOn) {
-                if (inCycle.some((e) => (e.pm || 0) > 0)) notesOut.push('pm_already_granted_in_cycle');
-                else pm = Math.floor((cls.source === 'mook_review' ? amounts.pm.reviewed : amounts.pm.validated) * pmFactor);
-            }
-            entries.push(entry('reflection', cycle, evidence.workRef, via, xp, pm));
+            const xp = take(cls.source === 'mook_review' ? amounts.xp.reflection : amounts.xp.validated);
+            entries.push(entry('reflection', cycle, evidence.workRef, via, xp));
         }
 
         if (entries.length === 0) return outcomeOf('not_recognized', cls, notesOut, { ...base, cycle });
         return outcomeOf('recognized', cls, notesOut, { ...base, cycle, entries,
-            xp: entries.reduce((s, e) => s + e.xp, 0), pm: entries.reduce((s, e) => s + e.pm, 0) });
+            xp: entries.reduce((s, e) => s + e.xp, 0) });
     } catch {
         return outcomeOf('rejected', null, ['recognition_error']);
     }

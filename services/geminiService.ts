@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import type { QuizQuestion, Content, ChatMessage, TriviaQuestion, AlbumRegion, VisualContext, LeoReaderProfile, PedagogicalStage } from "../types";
+import type { QuizQuestion, Content, ChatMessage, AlbumRegion, VisualContext, LeoReaderProfile, PedagogicalStage } from "../types";
 import { dataService } from "./dataService";
 import { derivePedagogicalStage } from "../utils/leoStage";
 
@@ -231,62 +231,6 @@ export const generarPreguntasQuiz = async (textoPagina: string, modelName?: stri
     return [];
   }
 };
-
-/**
- * Generates a random Trivia Question about the app's content.
- */
-export const generarPreguntaTrivia = async (): Promise<TriviaQuestion | null> => {
-  try {
-    // Trivia is random, so we don't cache it to ensure variety
-    const contenidos = dataService.getContenidos(['lector']).map(c => `Título: ${c.titulo}, Autor: ${c.autor}, Tipo: ${c.etiquetas.join(', ')}`).join('\n');
-    if (dataService.getContenidos(['lector']).length === 0) return null;
-    const randomContent = dataService.getContenidos(['lector'])[Math.floor(Math.random() * dataService.getContenidos(['lector']).length)];
-
-    if (!ai) {
-      return {
-        question: "¿Cuál es el autor de " + randomContent.titulo + "?",
-        options: [randomContent.autor, "Cervantes", "García Márquez", "J.K. Rowling"],
-        correctAnswer: randomContent.autor,
-        sourceTitle: randomContent.titulo
-      };
-    }
-
-    const response = await ai.models.generateContent({
-      model: GEMINI_FLASH_LATEST,
-      contents: `Genera una pregunta de trivia desafiante pero educativa sobre el siguiente contenido de la biblioteca:
-            Título: ${randomContent.titulo}
-            Autor: ${randomContent.autor}
-            Tipo: ${randomContent.tipo}
-            Descripción: ${randomContent.descripcion_corta}
-            ${randomContent.biografia_autor ? `Biografía Autor: ${randomContent.biografia_autor}` : ''}
-            
-            La pregunta puede ser sobre la trama (inferida), el autor, el género o el tema.
-            Debe tener 4 opciones de respuesta.`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            question: { type: Type.STRING },
-            options: { type: Type.ARRAY, items: { type: Type.STRING } },
-            correctAnswer: { type: Type.STRING },
-            sourceTitle: { type: Type.STRING, description: "Titulo del libro o fuente de la pregunta" }
-          },
-          required: ["question", "options", "correctAnswer", "sourceTitle"]
-        }
-      }
-    });
-
-    const jsonText = response.text;
-    if (jsonText) {
-      return JSON.parse(jsonText) as TriviaQuestion;
-    }
-    return null;
-  } catch (error) {
-    logAiError('generarPreguntaTrivia', error);
-    return null;
-  }
-}
 
 /**
  * Generates TTS Audio from text using Gemini 2.5 Flash TTS

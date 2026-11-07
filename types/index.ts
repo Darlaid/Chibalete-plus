@@ -35,7 +35,6 @@ export interface User {
     instagram: boolean;
     linkedin: boolean;
   };
-  puntos?: number; // Gamification points for Trivia
   immersive_level?: 1 | 2 | 3 | 4 | 5; // Level for Immersive Reading
   recent_history?: string[]; // IDs of content recently visited
   diagnostico_completado?: boolean; // If user has taken the initial level test
@@ -43,13 +42,6 @@ export interface User {
   racha_dias?: number;
   daily_shared_words?: number; // Track daily quota for quote sharing
   last_share_date?: string; // ISO Date to reset quota
-  rewardsHistory?: {
-    id: string;
-    date: string;
-    code: string;
-    productName: string;
-    cost: number;
-  }[];
 }
 
 // ── Album Book Structures ─────────────────────────────────────────────────────
@@ -384,7 +376,7 @@ export interface Section {
   titulo: string;
   descripcion: string;
   icono: string; // lucide icon name
-  unlockCost: number; // Default 1000
+  unlockCost?: number; // LEGADO (Puntos de Magia, retirados en V8-UNIFIED-XP-01): se conserva en datos antiguos, no se usa
   isPublic: boolean; // Override to make it free/visible
   minLevel?: number;
   isHidden: boolean; // Admin hide
@@ -817,7 +809,6 @@ export interface Product {
   isbn?: string;  // Added for books
   descripcion: string;
   precio: number;
-  precio_descuento_puntos?: number; // Price in trivia points
   categoria: 'libro_impreso' | 'ropa' | 'accesorios' | 'papeleria' | 'memorabilia';
   imagen_url: string;
   url_compra: string; // URL to external e-commerce or internal checkout
@@ -840,21 +831,6 @@ export interface QuizQuestion {
   question: string;
   options: string[];
   correctAnswer: string;
-}
-
-export interface TriviaQuestion {
-  question: string;
-  options: string[];
-  correctAnswer: string;
-  sourceTitle: string; // Context (e.g., "About: El Viaje de Arion")
-}
-
-export interface Reward {
-  id: string;
-  name: string;
-  type: 'wallpaper_mobile' | 'wallpaper_desktop' | 'bookmark';
-  cost: number;
-  imageUrl: string;
 }
 
 export interface ChatMessage {
@@ -1501,7 +1477,7 @@ export interface JournalEntry {
   date: string;
   tags?: string[];
   // Smart Linking
-  type: 'personal' | 'task_draft' | 'review_draft' | 'story_draft' | 'reward_request';
+  type: 'personal' | 'task_draft' | 'review_draft' | 'story_draft';
   sourceId?: string; // ID of the Assignment or Book
   sourceTitle?: string; // Title of the Assignment or Book
   status: 'draft' | 'submitted' | 'published' | 'approved' | 'rejected';
