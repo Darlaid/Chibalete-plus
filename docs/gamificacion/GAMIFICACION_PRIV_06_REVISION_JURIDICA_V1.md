@@ -32,7 +32,7 @@
 | 3 | Seudonimización del lector | Sujeto **aleatorio** (`subject_ref`), no derivado de `user_id`. La única tabla con `user_id` es `gm_subjects`, que es borrable. La clave de la obra (`work_key`) y la de idempotencia son HMAC por sujeto con una clave de servidor. El mediador entra igual (`actor_ref`). Es **seudonimización, no anonimización** | Implementado; **la clave no existe en producción** | `0002_subject_model.sql`; `subjects.mjs`; `subjectKey.mjs` (`/app/secrets/gamification_subject_key`, sin valor por defecto) |
 | 4 | Qué conserva el ledger | Tablas `gm_` append-only con triggers que impiden `UPDATE`/`DELETE`. Solo `gm_subjects` es mutable. Nada caduca | Implementado | `0001_ledger.sql`, `0003_work_cycle_acts.sql` |
 | 5a | Qué ve el lector | `GET /api/me/progress`: el sujeto es **siempre la sesión**. Muestra XP total, nivel (`semilla`/`brote`), logros, y por obra: título, estado, XP y techo. Sin rankings ni rachas. Sin flags responde 404 | Implementado (404 hoy) | `server.js:2670`; `progress.mjs` `readWorkProgress`; `pages/MiProgreso.tsx:11` |
-| 5b | Qué ve el mediador | Las entregas para revisar, **como hoy** (texto incluido). En Aula Viva solo `studentsWithRecognizedWork`, suprimido con **menos de 5** (`GROUP_MIN_SIZE`). Sin nombres, XP, niveles ni exclusiones. Aviso «No es una calificación» al revisar | Implementado | `progress.mjs:333-355`; `server.js` `groupRecognitionBlock`; `GroupRecognitionBlock.tsx:7`; `ProduccionesTab.tsx:317` |
+| 5b | Qué ve el mediador | Las entregas para revisar, **como hoy** (texto incluido). En Aula Viva, `studentsWithRecognizedWork`, suprimido con **menos de 5** (`GROUP_MIN_SIZE`). **Desde V8-UNIFIED-XP-01** además, por cada estudiante de los grupos que media, XP, nivel, obras reconocidas y logros (`GET /api/groups/:groupId/students/:studentId/progress`: solo `via: mediator_of_group`, 404 idéntico fuera de la cohorte, sin exclusiones visibles). Sin rankings. Aviso «No es una calificación» al revisar | Implementado | `progress.mjs:333-355`; `server.js` `groupRecognitionBlock`; `GroupRecognitionBlock.tsx:7`; `ProduccionesTab.tsx:317` |
 | 5c | Qué ve la administración | **No hay pantalla** de XP por persona. El acceso al ledger es técnico (servidor) | Implementado (ausencia) | Sin rutas `gamification` aparte de las dos anteriores en `server.js` |
 | 6 | Exclusiones | `excludeUser` genera un tombstone HMAC sin id y lo escribe primero en el **registro independiente**, fuera de copias. Después, en una transacción, anota `gm_erasures`, extingue el saldo de PM y borra la fila de `gm_subjects`. La puerta `exclusionGate` bloquea toda ingesta si el registro falta, está alterado o desalineado. Una persona excluida no recibe hechos nuevos, ni como lectora ni como revisora (`rejected_excluded_user`, sin fila), y su vista muestra cero | Implementado; **sin llamador de producto ni procedimiento**; registro **sin configurar** (`GAMIFICATION_EXCLUSION_REGISTRY`) | `erasure.mjs`; `exclusions.mjs`; `ledger.mjs` (bloque `recordFact`); `progress.mjs:89` |
 | 7a | Revocación del acceso a la obra | El acceso se congela en la primera entrega (`workAccess`). Solo cuenta un acceso explícito (`SCOPE_TITLE`, `SCOPE_COLLECTION`, `GROUP_CATALOG`, `GROUP_ALL`). Lo ya reconocido no se revierte; una obra **retirada legalmente** deja de reconocerse | Implementado | `progress.mjs:185` `workAccessCounts`; `mookSource.mjs` `readRights` |
@@ -47,7 +47,7 @@
 - No califica.
 - No genera canjes: PM está bloqueado por código en `mook_review`, `mook_experience`, `mission`, `reading_completion` y `offline_validation` (`policy.mjs` `PM_LOCKED_SOURCES`).
 - No persiste ritmo, tiempo ni modo de lectura: `reading_completion` está bloqueada y su `verdict` solo existiría si se desbloquea.
-- No expone datos individuales al mediador.
+- No expone datos individuales a mediadores de otros grupos ni colegios. **Desde V8-UNIFIED-XP-01, sí al mediador de sus propios grupos** (XP, nivel, obras reconocidas y logros), por decisión de Dirección. Requiere revisión de Legal (R12, aviso §5).
 
 ## 2. Controles ya implementados
 
@@ -57,7 +57,7 @@
 4. **Exclusión que sobrevive a una restauración:** el registro está fuera de las copias y se reaplica antes de la ingesta.
 5. **Sin retroactividad:** nada anterior a `GAMIFICATION_MOOK_SINCE` cuenta.
 6. **Revisión humana obligatoria:** solo «aprobado» suma; la autorrevisión se rechaza; se excluyen las cuentas inactivas y sintéticas.
-7. **Agregados con umbral:** el mediador ve recuentos con un mínimo de 5 y sin rankings.
+7. **Agregados con umbral:** el mediador ve recuentos con un mínimo de 5 y sin rankings. **Individual acotado (V8-UNIFIED-XP-01):** solo de sus propios estudiantes, sin comparaciones.
 8. **Retirada legal de obras:** bloquea el reconocimiento.
 
 ## 3. Lo que el aviso no puede prometer hoy
@@ -85,7 +85,7 @@ Clase: **OBL** = obligatorio antes de activar XP · **OK** = satisfecho · **DIF
 | R9 | Canal y momento de entrega del aviso | Sin superficie en la app | §2 del aviso | Decisión (§5, D7). Si va dentro de la app, requiere una unidad de frontend propia | Dirección | **OBL** (entrega) / DIF (en la app) |
 | R10 | Seudonimización del sujeto | Indirección aleatoria y HMAC | §1, 3 | Crear la clave (fuera de PRIV-6) | — | **OK** (diseño) |
 | R11 | Minimización de los hechos | `features` vacío, día, sin modo | §1, 2 | — | — | **OK** |
-| R12 | Visibilidad del mediador agregada (k ≥ 5) | Implementada | §1, 5b | — | — | **OK** |
+| R12 | Visibilidad del mediador: agregada (k ≥ 5) e individual de sus propios estudiantes (V8-UNIFIED-XP-01) | Implementada | §1, 5b | Validar la consulta individual y su redacción en el aviso | Legal | **REVISAR** |
 | R13 | XP no califica ni condiciona; revisión humana | Implementado | §1, 5b; §2 | Decirlo en el aviso (ya está) | — | **OK** |
 | R14 | Exclusión resistente a una restauración | Implementada | §1, 6 y 8 | Configurar el registro (C-6) | Ops | **OK** (diseño) |
 | R15 | Acceso del titular a su información | Vista propia en la app; sin exportación formal | §1, 5a | Exportación bajo solicitud por operador, si Legal la exige | Ops | **DIF** |
@@ -148,7 +148,7 @@ No se añaden controles nuevos por precaución. R5 y R6 usan funciones existente
 | Fechas solo con el día | `dayStart(occurredAt)` | ✅ |
 | El texto sigue en la experiencia | `submitEvidence` guarda `payload.text` en MOOK | ✅ |
 | Solo el lector ve sus puntos | `/me/progress` usa siempre la sesión | ✅ |
-| El mediador ve recuentos con un mínimo de 5, sin nombres ni puntos | `readGroupRecognitionCounts`, `GROUP_MIN_SIZE = 5` | ✅ |
+| El mediador ve recuentos con un mínimo de 5, sin nombres ni puntos | `readGroupRecognitionCounts`, `GROUP_MIN_SIZE = 5` | ⚠️ ya no es toda la verdad: desde V8-UNIFIED-XP-01 ve además XP, nivel y logros de sus propios estudiantes (`readStudentRecognition`). El aviso se actualizó; falta Legal |
 | Sin rankings ni comparaciones | `MiProgreso.tsx`, `GroupRecognitionBlock.tsx` | ✅ |
 | Sin pantalla administrativa de puntos | Sin rutas | ✅ |
 | Código aleatorio en lugar del identificador | `ensureSubject`: `randomBytes` | ✅ (con clave instalada) |

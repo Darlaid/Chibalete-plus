@@ -22,7 +22,7 @@ Lenguaje sencillo. Debe mostrarse **antes** de empezar una experiencia que dé p
 >
 > Para darte los puntos, Chibalete+ guarda que tu mediador aprobó tu trabajo, la fecha y el libro. No guarda otra vez lo que escribiste: tu texto se queda en la experiencia, como siempre.
 >
-> Tus puntos solo los ves tú. Tu mediador no ve tus puntos ni tu nivel: solo cuántas personas de tu grupo han ganado puntos, y nunca si el grupo tiene menos de 5 personas.
+> Ves tus puntos y tu nivel. Tu mediador también puede verlos, porque te acompaña en tu lectura; nadie más de tu grupo los ve y no hay rankings ni comparaciones. [V8-UNIFIED-XP-01: el mediador del grupo ahora puede consultar el XP, el nivel y los logros de cada estudiante de sus grupos (solo de esos, sin rankings). LEGAL: revisar esta frase; no se publica sin aprobación.]
 >
 > Si tú o tu familia no quieren participar, pueden decirlo cuando quieran. Seguirás leyendo y escribiendo igual. Solo dejarás de ganar puntos y ya no verás los que tenías.
 >
@@ -54,11 +54,11 @@ Sale de este documento cuando Legal complete las marcas. Se entrega por el canal
 > **No** se copian al registro de reconocimiento los textos que escribe el lector, sus respuestas, su forma de leer (por ejemplo, si usa ayudas de lectura) ni el tiempo que dedica.
 > Los textos siguen guardados en la experiencia, como ya ocurre hoy, y su tratamiento se rige por [LEGAL: aviso o política general de Chibalete+, hoy inexistente como política integral].
 >
-> **4. Qué se genera.** Por cada obra se calculan puntos de lectura, con un máximo por obra. A partir de ellos se calculan un nivel y unos logros. [PENDIENTE: valores definitivos según las reglas aprobadas (A7-A12-V3); en este piloto, 10 puntos por la lectura, 20 por la reflexión y un máximo de 50 por obra.]
+> **4. Qué se genera.** Por cada obra se calculan puntos de lectura, con un máximo por obra. A partir de ellos se calculan un nivel y unos logros. Valores fijados por el acta O1 (`DIR-XP-O1-20261107`): 10 puntos por la lectura y 20 por la reflexión en la primera entrega aprobada de una obra (30), 20 más por la segunda y un máximo de 50 por obra. Niveles activos: Semilla y Brote. No hay puntos por tiempo, clics ni por terminar una lectura.
 >
 > **5. Quién puede ver la información.**
 > - **La niña o el niño** ve sus propios puntos, su nivel y sus logros.
-> - **El mediador** ve las entregas que revisa, como ya ocurre hoy. Del reconocimiento solo ve cuántas personas de su grupo tienen al menos una obra reconocida. No ve nombres, puntos ni niveles, y no ve nada si el grupo tiene menos de 5 personas. No hay rankings ni comparaciones.
+> - **El mediador** ve las entregas que revisa, como ya ocurre hoy. Del reconocimiento ve, por cada estudiante de **sus** grupos, sus puntos acumulados, su nivel, cuántas obras tiene reconocidas y sus logros; y del grupo, cuántas personas tienen al menos una obra reconocida (nunca con menos de 5). No ve estudiantes de otros grupos ni colegios. No hay rankings ni comparaciones. [V8-UNIFIED-XP-01: el mediador del grupo ahora puede consultar el XP, el nivel y los logros de cada estudiante de sus grupos (solo de esos, sin rankings). LEGAL: revisar esta frase; no se publica sin aprobación.]
 > - **Personal técnico autorizado** de Chibalete+ puede acceder a los registros cuando opera la plataforma. No existe una pantalla administrativa de puntos por persona. [LEGAL: confirmar la redacción y los encargados técnicos (alojamiento).]
 >
 > **6. Seudonimización y sus límites.**
@@ -97,7 +97,7 @@ Informativa. Se entrega con las pautas del piloto (ficha 03A, §4).
 > - **No es una calificación.** No uses los puntos para evaluar.
 > - No puedes aprobar tu propia entrega: no cuenta.
 > - Tu aprobación queda registrada con un código aleatorio, no con tu nombre.
-> - En Aula Viva solo verás cuántas personas de tu grupo tienen al menos una obra reconocida, y nunca con menos de 5. No verás puntos individuales.
+> - En Aula Viva verás, para cada estudiante de tus grupos, sus puntos, su nivel, las obras reconocidas y los logros; y del grupo, cuántas personas tienen al menos una obra reconocida (nunca con menos de 5). No verás estudiantes de otros grupos ni rankings. [V8-UNIFIED-XP-01: el mediador del grupo ahora puede consultar el XP, el nivel y los logros de cada estudiante de sus grupos (solo de esos, sin rankings). LEGAL: revisar esta frase; no se publica sin aprobación.]
 > - Si una familia pide que su hija o hijo no participe, o pregunta por los datos, remítela al canal [DIRECCIÓN/LEGAL]. Tu revisión pedagógica continúa igual.
 > - Si un texto contiene información personal o sensible del lector, atiéndelo fuera de la plataforma y no lo uses como criterio de revisión (ficha 03A, §4).
 
