@@ -227,6 +227,26 @@ export function buildGroupAnalyticsSummary({
     };
 }
 
+/**
+ * V8.1-CLOSE-01 (G-02) — el mismo resumen limitado a un subconjunto de la cohorte.
+ * Los agregados se recalculan con las MISMAS funciones a partir del detalle por
+ * lector, así que siguen siendo la suma de `readers`. No toca el objeto de
+ * entrada (puede venir de la caché).
+ * @param {object} summary  salida `summary` de buildGroupAnalyticsSummary
+ * @param {Set<string>} ids
+ */
+export function restrictSummaryToReaders(summary, ids) {
+    const readers = (summary.readers || []).filter(r => ids.has(r.userId));
+    return {
+        ...summary,
+        readerCount: readers.length,
+        reading: aggregateReading(readers.map(r => r.reading), readers.length),
+        leo: aggregateLeo(readers.map(r => r.leo), readers.length),
+        progress: aggregateProgress(readers.map(r => r.progress)),
+        readers,
+    };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1C) — caché por grupo.
 //

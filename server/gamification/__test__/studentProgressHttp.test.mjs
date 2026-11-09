@@ -12,6 +12,8 @@
  *   [6] solo lectura, sin escritor vivo ⇒ 503 sin crear archivos
  *   [7] privacidad: solo xp, nivel, obras reconocidas y logros
  *   [8] los agregados del grupo siguen igual
+ *   [9] V8.1-CLOSE-01 (G-02): A2 Sí / No / pendiente / vencida / revocada, registro
+ *       dañado o ausente, restauración de la base, y el lector sigue con su XP
  * Nunca toca data/ ni data-critical/.
  *
  *   node server/gamification/__test__/studentProgressHttp.test.mjs
@@ -54,6 +56,7 @@ const D = await import('../db.mjs');
 const L = await import('../ledger.mjs');
 const M = await import('../mookSource.mjs');
 const E = await import('../erasure.mjs');
+const A2 = await import('../../privacy/a2Registry.mjs');
 (await import('../../royalties/publishersStore.mjs')).getRoyaltiesDb();
 
 const SINCE = Date.now() - 60_000;
@@ -65,9 +68,10 @@ const PILOT = { approvalRef: 'PRUEBA-SINTETICA', amounts: { xp: { reading: 10, r
 const ORG_A = 'org-a', ORG_B = 'org-b';
 const P = { data: path.join(tmp, 'data'), users: path.join(tmp, 'users.json'), groups: path.join(tmp, 'data', 'groups.json'),
     schools: path.join(tmp, 'data', 'schools.json'), access: path.join(tmp, 'access.json'), content: path.join(tmp, 'data', 'content.json'),
-    mook: path.join(tmp, 'data', 'mook_db.json'), gamDir: path.join(tmp, 'gam'), reg: path.join(tmp, 'reg', 'exclusions.jsonl') };
+    mook: path.join(tmp, 'data', 'mook_db.json'), gamDir: path.join(tmp, 'gam'), reg: path.join(tmp, 'reg', 'exclusions.jsonl'),
+    a2: path.join(tmp, 'a2', 'a2.jsonl') };
 P.gamDb = path.join(P.gamDir, 'gamification.db');
-for (const d of [P.data, P.gamDir, path.dirname(P.reg), path.join(tmp, 'uploads'), path.join(tmp, 'sqlite')]) fs.mkdirSync(d, { recursive: true });
+for (const d of [P.data, P.gamDir, path.dirname(P.reg), path.dirname(P.a2), path.join(tmp, 'uploads'), path.join(tmp, 'sqlite')]) fs.mkdirSync(d, { recursive: true });
 const lec = (id, org, g) => ({ id, nombre_completo: `Nombre ${id}`, roles: ['lector'], organizationId: org, colegio: org === ORG_A ? 'Colegio Alfa' : 'Colegio Beta', accountStatus: 'active', groupIds: [g] });
 const MEMBERS = { 'g-a': ['a1', 'a2', 'a3'], 'g-a2': ['x1'], 'g-b': ['b1'] };
 const USERS = [
@@ -91,6 +95,10 @@ const lectors = USERS.filter((u) => u.roles.includes('lector')).map((u) => u.id)
 fs.writeFileSync(P.access, JSON.stringify(lectors.map((u) => ({ id: `r-${u}`, scope: 'user', scopeId: u, titleIds: ['obra-a'], collectionIds: [], expiresAt: null }))));
 for (const f of ['progress_db.json', 'leo_evidence_db.json']) fs.writeFileSync(path.join(P.data, f), f === 'progress_db.json' ? '{"progressMap":{}}' : '[]');
 fs.writeFileSync(P.reg, '');
+// G-02: A2 verificada para todos los lectores sintéticos (cada prueba la cambia en [9]).
+fs.writeFileSync(P.a2, '');
+const A2ENV = { CHP_A2_REGISTRY: P.a2, GAMIFICATION_EXCLUSION_REGISTRY: P.reg };
+for (const u of ['a1', 'a2', 'a3', 'x1', 'b1']) A2.appendA2Decision({ userId: u, status: 'granted', requestRef: `A2-SINT-${u}` }, { env: A2ENV });
 
 // ── MOOK: tres experiencias sobre la MISMA obra (obra-a) ─────────────────────
 const doc = Store.emptyMookStore();
@@ -111,7 +119,7 @@ const deliver = (u, exp) => {
 const approve = (ev, reviewer) => Store.reviewEvidence(doc, ev.id, { reviewerId: reviewer, decision: 'aprobado' });
 
 const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: P.gamDb,
-    GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
+    GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString(), CHP_A2_REGISTRY: P.a2 };
 Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_REGISTRY: P.reg });
 let writer = D.getGamificationDb({ env: ENV }); // réplica escritora viva durante toda la prueba
 // Regla válida SIN campos de PM.
@@ -264,6 +272,55 @@ try {
     ok('solo las claves xp, level, recognizedWorks y achievements', again.body && Object.keys(again.body).sort().join() === 'achievements,level,recognizedWorks,xp'
         && Object.keys(again.body.level).join() === 'id', again.text);
     ok('sin nombres, ids, claves HMAC, historial, obras ni comparaciones', !/Nombre|a1|med-|subject|work_key|[0-9a-f]{32}|history|"works"|title|rank|percentil|promedio/i.test(again.text), again.text);
+
+    section('[9] G-02: A2 del lector (criterio único)');
+    const a2Raw = fs.readFileSync(P.a2, 'utf8');
+    const nfText = nf[0].text;
+    const setA2 = (u, status, extra = {}) => A2.appendA2Decision({ userId: u, status, requestRef: `A2-SINT-${u}-${status}`, ...extra }, { env: A2ENV });
+    const yes = await get(on, 'g-a', 'a1', 'med-a');
+    ok('A2 = Sí y vigente ⇒ 200 con su XP', yes.status === 200 && yes.body?.xp === 50, yes.text);
+    setA2('a3', 'denied');
+    const no = await get(on, 'g-a', 'a3', 'med-a');
+    ok('A2 = No ⇒ 404 byte a byte igual al de una persona ajena', no.status === 404 && no.text === nfText, `${no.status} ${no.text}`);
+    const stillYes = await get(on, 'g-a', 'a1', 'med-a');
+    ok('la negativa de otro lector no cierra a quien sí tiene A2', stillYes.status === 200 && stillYes.body?.xp === 50, stillYes.text);
+    const afterDeny = fs.readFileSync(P.a2, 'utf8');
+    const pend = await get(on, 'g-a2', 'x1', 'med-a2');
+    ok('x1 con A2 = Sí ⇒ 200', pend.status === 200, pend.text);
+    fs.writeFileSync(P.a2, afterDeny.split(/\n/).filter((l) => l && !l.includes('A2-SINT-x1')).map((l) => `${l}${String.fromCharCode(10)}`).join(''));
+    const pending = await get(on, 'g-a2', 'x1', 'med-a2');
+    ok('A2 pendiente (sin decisión registrada) ⇒ el mismo 404', pending.status === 404 && pending.text === nfText, `${pending.status} ${pending.text}`);
+    fs.writeFileSync(P.a2, afterDeny);
+    setA2('x1', 'granted', { validUntil: '2000-01-01' });
+    const expired = await get(on, 'g-a2', 'x1', 'med-a2');
+    ok('A2 vencida ⇒ el mismo 404', expired.status === 404 && expired.text === nfText, `${expired.status}`);
+    setA2('x1', 'granted', { validUntil: '2999-12-31' });
+    ok('A2 renovada con vigencia futura ⇒ 200', (await get(on, 'g-a2', 'x1', 'med-a2')).status === 200);
+    setA2('x1', 'revoked');
+    const revoked = await get(on, 'g-a2', 'x1', 'med-a2');
+    ok('A2 revocada ⇒ el mismo 404, de inmediato (sin caché)', revoked.status === 404 && revoked.text === nfText, `${revoked.status}`);
+    const xpKept = L.getXp(writer, 'x1');
+    ok('el lector conserva su XP: A2 no toca el ledger (006 §3.5)', xpKept === 30, String(xpKept));
+    const permsStill = [await get(on, 'g-a', 'a1', 'adm'), await get(on, 'g-a', 'a1', 'med-b'), await get(on, 'g-a', 'a1')];
+    ok('A2 no amplía nada: administrador 403, mediador ajeno 403, sin sesión 401', permsStill.map((r) => r.status).join() === '403,403,401', permsStill.map((r) => r.status).join());
+    const goodRaw = fs.readFileSync(P.a2, 'utf8');
+    const forged = goodRaw.replace(/"a":"revoked"/, '"a":"granted"');
+    fs.writeFileSync(P.a2, forged);
+    const tampered = [await get(on, 'g-a', 'a1', 'med-a'), await get(on, 'g-a2', 'x1', 'med-a2')];
+    ok('registro A2 alterado ⇒ 503 para todos, nunca 200', tampered.every((r) => r.status === 503 && !/"xp"/.test(r.text)), tampered.map((r) => r.status).join());
+    fs.rmSync(P.a2);
+    const missing = await get(on, 'g-a', 'a1', 'med-a');
+    ok('registro A2 ausente ⇒ 503, nunca 200', missing.status === 503 && !/"xp"/.test(missing.text), `${missing.status}`);
+    fs.writeFileSync(P.a2, goodRaw);
+    // Restaurar la base de gamificación no reabre una A2 retirada: el registro no es parte de ella.
+    writer.pragma('wal_checkpoint(TRUNCATE)');
+    ok('A2 vive fuera de la base: la revocación sigue tras volver a abrir la base', (await get(on, 'g-a2', 'x1', 'med-a2')).status === 404);
+    const sumA2 = await summary(on, 'g-a', 'med-a');
+    ok('analytics-summary: a3 (A2 = No) fuera de readers[], a1 dentro', sumA2.status === 200 && !sumA2.body.readers.some((r) => r.userId === 'a3')
+        && sumA2.body.readers.some((r) => r.userId === 'a1'), JSON.stringify(sumA2.body?.readers?.map((r) => r.userId)));
+    ok('analytics-summary: con 1 retenido los agregados se limitan a los visibles', sumA2.body.individualAccess?.aggregateOver === 'allowed'
+        && sumA2.body.readerCount === sumA2.body.readers.length, JSON.stringify(sumA2.body.individualAccess));
+    fs.writeFileSync(P.a2, a2Raw);
 
     section('[8] agregados del grupo intactos');
     const sum = await summary(on, 'g-a', 'med-a');

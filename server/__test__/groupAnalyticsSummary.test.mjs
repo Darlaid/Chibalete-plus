@@ -69,6 +69,13 @@ const LEO = path.join(P.data, 'leo_interactions_db.json');
 // ── Usuarios y grupos (ningún id real) ────────────────────────────────────────
 const pad = (n, w = 3) => String(n).padStart(w, '0');
 const LECTORES = Array.from({ length: 80 }, (_, i) => `lec-${pad(i + 1)}`);
+// V8.1-CLOSE-01 (G-02): readers[] exige A2 vigente. Registro sintético con A2 = Sí
+// para toda la cohorte; sin registro, el detalle individual queda cerrado.
+const A2 = await import('../privacy/a2Registry.mjs');
+fs.mkdirSync(path.join(tmp, 'a2'));
+const A2_REG = path.join(tmp, 'a2', 'a2.jsonl');
+fs.writeFileSync(A2_REG, '');
+for (const u of LECTORES) A2.appendA2Decision({ userId: u, status: 'granted', requestRef: `A2-SINT-${u}` }, { env: { CHP_A2_REGISTRY: A2_REG } });
 const MEDIADORES = Array.from({ length: 10 }, (_, i) => `med-${pad(i + 1, 2)}`);
 const USERS = [
     ...LECTORES.map(id => ({ id, roles: ['lector'], organizationId: ORG_A, colegio: 'Colegio Alfa', accountStatus: 'active', groupIds: ['g-a1'] })),
@@ -244,6 +251,7 @@ function spawnApi(port, extraEnv = {}) {
             ACCESS_FALLBACK_MODE: 'restricted',
             SESSION_AUTH_MODE: 'off',
             OPENAI_API_KEY: '', GEMINI_API_KEY: '',
+            CHP_A2_REGISTRY: A2_REG,
             ...extraEnv,
         },
     });
@@ -410,12 +418,20 @@ async function main() {
     section('[A–I] contenido del resumen (admin sobre g-a1)');
     let body;
     {
+        // G-02: sin registro A2 verificable, readers[] vacío y agregados intactos.
+        const raw = fs.readFileSync(A2_REG, 'utf8');
+        fs.rmSync(A2_REG);
+        const closed = await json(await GET('adm', ROUTE('g-a1')));
+        fs.writeFileSync(A2_REG, raw);
+        ok('G-02: sin registro A2 ⇒ readers[] vacío, individualAccess unavailable, agregados de la cohorte',
+            Array.isArray(closed?.readers) && closed.readers.length === 0 && closed.individualAccess?.status === 'unavailable'
+            && closed.readerCount === 80 && closed.reading?.all?.totalEffectiveMs === expectedAllMs, JSON.stringify(closed?.individualAccess));
         const r = await GET('adm', ROUTE('g-a1'));
         body = await json(r);
         ok('adm → 200', r.status === 200, `${r.status} ${JSON.stringify(body)}`);
         ok('Cache-Control: no-store', r.headers.get('cache-control') === 'no-store', String(r.headers.get('cache-control')));
         ok('A readerCount = 80 (10 mediadores + admin con groupIds fuera)', body?.readerCount === 80, String(body?.readerCount));
-        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers"]', JSON.stringify(Object.keys(body ?? {})));
+        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess"]', JSON.stringify(Object.keys(body ?? {})));
         const all = body?.reading?.all, d28 = body?.reading?.last28d;
         ok('B all > 0 y == Σ autoridad por lector', all?.totalEffectiveMs > 0 && all.totalEffectiveMs === expectedAllMs, `${all?.totalEffectiveMs} vs ${expectedAllMs}`);
         ok('B lec-001 aporta 130 min (100 hot canónico + 30 archive legacy)',

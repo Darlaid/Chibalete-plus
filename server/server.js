@@ -41,6 +41,8 @@ import {
 // CHP-GAMIFICACION-G3-03 — MOOK como fuente de hechos. Inerte con
 // GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
 import * as gamificationMook from './gamification/mookSource.mjs';
+// CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
+import { individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -287,7 +289,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
-import { buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort } from './analytics/groupAnalyticsSummary.mjs';
+import { buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -9057,6 +9059,10 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
 //
 // 1C: caché por grupo en memoria de la réplica (TTL 5 min, single-flight). El
 // scope se resuelve SIEMPRE antes de mirar la caché: un HIT nunca salta authz.
+//
+// V8.1-CLOSE-01 (G-02): `readers[]` solo incluye lectores con A2 vigente
+// (`individualDisclosure`, registro CHP_A2_REGISTRY). Sin registro verificable,
+// ninguno. `individualAccess` dice qué se aplicó, sin ids.
 // ─────────────────────────────────────────────────────────────────────────────
 const groupAnalyticsCache = createGroupAnalyticsCache();
 
@@ -9120,8 +9126,19 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
             : `[GROUP_ANALYTICS] group=${id} cache=${r.cache} ms=${ms}`);
         // G4-UX-U4: bloque de reconocimiento, FUERA de la caché (las entregas
         // pendientes cambian a cada revisión) y sin tocar el objeto cacheado.
-        const recognition = await groupRecognitionBlock((r.data.readers || []).map(x => x.userId));
-        res.json(recognition ? { ...r.data, recognition } : r.data);
+        // Es agregado: se calcula sobre la cohorte completa.
+        // V8.1-CLOSE-01 (G-02): `readers[]` es detalle individual ⇒ solo lectores
+        // con A2 vigente, según el criterio único; se evalúa en cada petición, fuera
+        // de la caché, para que una revocación rija de inmediato. Con pocos
+        // retenidos, los agregados (y el reconocimiento) se limitan a los visibles.
+        const cohortIds = (r.data.readers || []).map(x => x.userId);
+        const a2 = individualDisclosure(cohortIds);
+        const shown = a2.aggregateOver === 'allowed'
+            ? restrictSummaryToReaders(r.data, a2.allowed)
+            : { ...r.data, readers: (r.data.readers || []).filter(x => a2.allowed.has(x.userId)) };
+        const data = { ...shown, individualAccess: { status: a2.status, aggregateOver: a2.aggregateOver } };
+        const recognition = await groupRecognitionBlock(a2.aggregateOver === 'allowed' ? [...a2.allowed] : cohortIds);
+        res.json(recognition ? { ...data, recognition } : data);
     } catch (e) {
         log(`GET /api/groups/${req.params.id}/analytics-summary error: ${e.message}`, 'ERROR');
         res.status(500).json({ error: 'group_analytics_unavailable' });
@@ -9139,7 +9156,8 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
  *     identidad no está disponible);
  *  4. la persona debe estar en la cohorte lectora de ESE grupo (la misma que usan
  *     los agregados) ⇒ si no, 404 idéntico al de una persona inexistente: no se
- *     puede sondear quién existe ni quién está en otro grupo.
+ *     puede sondear quién existe ni quién está en otro grupo;
+ *  5. V8.1-CLOSE-01: A2 vigente (`individualDisclosure`) ⇒ si no, el mismo 404.
  * Solo XP, nivel y reconocimientos (`readStudentRecognition`): ni nombre, ni
  * claves, ni exclusiones, ni historial, ni rankings. Fallo ⇒ 503 genérico, nunca
  * 0 XP. El limitador general de /api/ (por cuenta) acota el volumen de consultas.
@@ -9169,6 +9187,12 @@ app.get('/api/groups/:groupId/students/:studentId/progress', requireAuth, async 
         if (!group) return notFound();
         const cohort = resolveGroupLectorCohort(group, readJSON(USERS_DB) || [], groups);
         if (!studentId || studentId === callerId || !cohort.includes(studentId)) return notFound();
+        // 5. V8.1-CLOSE-01 (G-02): A2 vigente del lector, con el criterio único.
+        //    Denegada, revocada, vencida, pendiente o retenida ⇒ el MISMO 404 que
+        //    una persona ajena; registro no verificable ⇒ 503 para todos.
+        const a2 = individualDisclosure(cohort);
+        if (a2.status === 'unavailable') return res.status(503).json({ error: 'No pudimos cargar el progreso.', code: 'PROGRESS_UNAVAILABLE' });
+        if (!a2.allowed.has(studentId)) return notFound();
         const out = await gamificationMook.readStudentProgress(studentId);
         if (out?.status === 404) return notFound();
         return res.json(out);
@@ -13029,6 +13053,9 @@ app.listen(PORT, '0.0.0.0', () => {
     gamificationMook.startMookReconciler(
         { ...gamificationRecognition, readUsers: () => readJSON(USERS_DB), isUserActive, isSyntheticUser },
         { log: (m) => log(m, 'WARN') });
+    // V8.1-CLOSE-01 (G-02): el registro A2 se verifica con la clave de sujeto. Sin
+    // registro configurado o sin clave, toda consulta individual queda cerrada.
+    if (process.env.CHP_A2_REGISTRY) loadA2Key().catch((e) => log(`[A2] clave no disponible: ${e?.code || 'ERROR'}`, 'WARN'));
     // Build upload dedup index in background — never blocks startup
     buildHashIndex(UPLOAD_DIR, UPLOAD_DIR)
         .then(() => log(`[HASH_INDEX] Built: ${uploadHashIndex.size} entries`, 'INFO'))
