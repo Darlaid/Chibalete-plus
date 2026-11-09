@@ -218,5 +218,13 @@ jobs:
       - name: Núcleo del ledger de gamificación (G3)
         run: npm run test:gamification-core
 
+      # CHP-V8.1-CLOSE-02 — A2 (registro y criterio único), resumen de Aula Viva
+      # con A2 y el verificador O8 con anulaciones. O8 se ejecuta contra el
+      # checkout (O8_APP_ROOT): en la imagen es /app.
+      - name: A2, Aula Viva y O8 (V8.1)
+        env:
+          O8_APP_ROOT: ${{ github.workspace }}
+        run: npm run test:v81
+
       - name: Build de producción
         run: npm run build
