@@ -192,7 +192,7 @@ async function main() {
     const createdRec = userById(createdBody.id);
     ok('[11] crear con contraseña válida → 2xx', created.status >= 200 && created.status < 300 && !!createdRec);
     ok('[6] hash de servidor en la creación', isServerBcrypt(createdRec?.password) && bcrypt.compareSync('Creada-Segura-61!', createdRec.password));
-    ok('campos de credencial del cliente descartados en la creación', createdRec && !('inviteToken' in createdRec) && createdRec.credentialVersion !== 99);
+    ok('campos de credencial del cliente descartados en la creación (V8.1-CLOSE-06B: el token, si existe, lo genera el servidor)', createdRec && createdRec.inviteToken !== 'f'.repeat(64) && createdRec.credentialVersion !== 99 && createdRec.accountStatus === 'invited');
 
     const rdr2Before = userById('RDR2');
     const edit = await send('PUT', '/api/users/RDR2', admin, { nombre_completo: 'Lector Dos Editado', password: '' });
