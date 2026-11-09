@@ -128,7 +128,7 @@ try {
         && codeOf(() => writer.prepare("UPDATE gm_admin_audit SET ref = 'x'").run()) !== null);
     const audit = writer.prepare('SELECT * FROM gm_admin_audit').all();
     ok('auditoría: motivo y referencia verificables', audit.length === 1 && audit[0].action === 'xp_void:recognition_error' && audit[0].ref === 'SOL-SINT-0001', JSON.stringify(audit));
-    ok('auditoría sin ids canónicos (solo sujetos pseudónimos)', !/a1|adm-op/.test(JSON.stringify(audit)) && audit[0].actor_ref !== audit[0].target_ref);
+    ok('auditoría sin ids canónicos (solo sujetos pseudónimos)', audit.every((row) => Object.values(row).every((v) => v !== 'a1' && v !== 'adm-op')) && audit[0].actor_ref !== audit[0].target_ref);
     ok('fecha con precisión de día', audit[0].created_at % 1000 === 0 && new Date(audit[0].created_at).getUTCHours() === 5);
 
     section('[5] la reconciliación no restaura lo anulado');

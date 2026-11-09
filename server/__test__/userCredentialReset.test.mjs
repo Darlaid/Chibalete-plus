@@ -21,7 +21,7 @@
  */
 import './helpers/testMode.mjs';
 // V8.1-CLOSE-05: la activación exige decisiones y un registro verificable.
-import { a2RegistryPath, ADULT_ACTIVATION } from './helpers/testA2.mjs';
+import { a2RegistryPath, ADULT_ACTIVATION, MEDIATOR_ACTIVATION } from './helpers/testA2.mjs';
 a2RegistryPath();
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto';
@@ -84,7 +84,7 @@ const loginCookie = async (email, password) => cookieOf(await login(email, passw
 const send = (method, url, cookie, body) => fetch(`${base}${url}`, { method, headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', ...(cookie ? { cookie } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
 const me = async (cookie) => (await fetch(`${base}/api/auth/me`, { headers: { cookie } })).status;
 const tokenOf = (url) => (String(url || '').match(/token=([0-9a-f]+)/) || [])[1];
-const acceptInvite = (token, password) => fetch(`${base}/api/accept-invite`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password, acceptance: ADULT_ACTIVATION }) });
+const acceptInvite = (token, password, acceptance = ADULT_ACTIVATION) => fetch(`${base}/api/accept-invite`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password, acceptance }) });
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 const isServerBcrypt = (h) => typeof h === 'string' && /^\$2[ab]\$10\$/.test(h); // coste del servidor (fixtures usan 4)
 
@@ -170,7 +170,8 @@ async function main() {
     const riMed2 = await (await send('POST', '/api/users/MED/reinvite', admin)).json();
     const tMed2 = tokenOf(riMed2.activationUrl); secretsSeen.push(tMed2);
     ok('una nueva reinvitación invalida el token anterior', tMed2 !== tMed && (await acceptInvite(tMed, 'Mediadora-Nueva-88!')).status === 404);
-    ok('el token nuevo funciona', (await acceptInvite(tMed2, 'Mediadora-Nueva-88!')).status === 200);
+    ok('V8.1-CLOSE-05: la mediadora sin compromiso 005 → 422 con C005', ((r) => r.status === 422)(await acceptInvite(tMed2, 'Mediadora-Nueva-88!')));
+    ok('el token nuevo funciona', (await acceptInvite(tMed2, 'Mediadora-Nueva-88!', MEDIATOR_ACTIVATION)).status === 200);
 
     console.log('\n[10] recuperación de la cuenta desactivada conservando el progreso');
     const riR = await (await send('POST', '/api/users/RDR/reinvite', admin)).json();

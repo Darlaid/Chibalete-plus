@@ -33,3 +33,6 @@ export function grantA2(ids, status = 'granted') {
 /** V8.1-CLOSE-05: decisiones de un titular adulto sin institución (B2C), para activar cuentas en pruebas. */
 export const ADULT_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version,
     dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' });
+/** V8.1-CLOSE-05: decisiones de un mediador (titular adulto con el compromiso 005). */
+export const MEDIATOR_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, adultDeclared: true,
+    mediatorCommitment: true, mediatorVersion: ACCEPTANCE_DOCUMENTS.mediator.version });
