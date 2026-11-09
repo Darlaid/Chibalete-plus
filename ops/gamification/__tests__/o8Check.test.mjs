@@ -87,6 +87,15 @@ try {
         ok('umbral superado ⇒ WARN (no FAIL), rc 0', w.by.anomalies_d41?.status === 'WARN' && w.rc === 0 && w.summary.summary === 'WARN', JSON.stringify(w.summary));
     }
 
+    console.log('\n[2c] rectificación (V8.1-CLOSE-01 G-03)');
+    {
+        const RX = await import(path.join(ROOT, 'server/gamification/rectification.mjs'));
+        const ack = RX.voidRecognition(writer, { userId: 'lec-b', evidenceId: 'e4', reason: 'recognition_error', requestRef: 'SOL-SINT-0001', actorId: 'adm-lab' }, { env: ENV });
+        const r = run(ENV);
+        ok('tras anular: todo OK, 1 anulación válida', ack.voided && r.rc === 0 && r.summary.summary === 'OK' && r.by.facts_entries?.voids === 1 && r.by.facts_entries.badVoids === 0, r.raw);
+        ok('work_caps sigue OK (los actos no cambian)', r.by.work_caps?.status === 'OK');
+    }
+
     console.log('\n[3] regla distinta del acta');
     ok('SHA esperado distinto ⇒ FAIL en rules', run({ ...ENV, O8_EXPECT_RULES_SHA: 'f'.repeat(64) }).by.rules?.status === 'FAIL');
 
@@ -99,6 +108,7 @@ try {
     writer.prepare("INSERT INTO gm_xp_entries VALUES ('x-old', ?, 'award', 15, 'f-old', NULL, 'a7a12-v3-xp-o1', 1)").run(fid.subject_ref);
     writer.prepare("INSERT INTO gm_work_cycles VALUES ('f-old', ?, 'wk-x', 1, 'reading', 15, 0)").run(fid.subject_ref);
     writer.prepare("INSERT INTO gm_work_cycles VALUES ('f-old', ?, 'wk-x', 1, 'reflection', 40, 0)").run(fid.subject_ref);
+    writer.prepare("INSERT INTO gm_xp_entries VALUES ('v-bad', 'otro-sujeto', 'void', 0, NULL, 'x-old', 'a7a12-v3-xp-o1', 1)").run();
     {
         const r = run(ENV);
         ok('rc 1 y resumen FAIL', r.rc === 1 && r.summary.summary === 'FAIL');
@@ -106,6 +116,7 @@ try {
         ok('fuente ajena y hecho sin asiento detectados', r.by.facts_entries?.badSources === 1 && r.by.facts_entries.factsWithoutEntry === 1);
         ok('acto por encima de su importe, techo superado y desajuste ciclo/asiento', r.by.work_caps?.actsOverAmount === 2 && r.by.work_caps.cyclesOverCeiling === 1 && r.by.work_caps.factsCycleXpMismatch === 1, JSON.stringify(r.by.work_caps));
         ok('hecho anterior al corte detectado', r.by.cutoff?.factsBeforeCutoff === 1);
+        ok('anulación sobre un asiento de otro sujeto detectada', r.by.facts_entries?.badVoids === 1, JSON.stringify(r.by.facts_entries));
     }
 
     console.log('\n[5] registro desalineado');

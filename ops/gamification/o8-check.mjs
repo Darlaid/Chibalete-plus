@@ -99,8 +99,11 @@ else {
             const multiEntry = n("SELECT COUNT(*) n FROM (SELECT fact_id FROM gm_xp_entries WHERE kind = 'award' GROUP BY fact_id HAVING COUNT(*) > 1)");
             const orphanEntry = n("SELECT COUNT(*) n FROM gm_xp_entries a WHERE a.kind = 'award' AND NOT EXISTS (SELECT 1 FROM gm_source_facts f WHERE f.fact_id = a.fact_id)");
             const dupKeys = n('SELECT COUNT(*) n FROM (SELECT source, source_event_id, fact_type FROM gm_source_facts GROUP BY 1,2,3 HAVING COUNT(*) > 1)');
-            const ok = badSources + capped + noEntry + multiEntry + orphanEntry + dupKeys === 0;
-            out('facts_entries', ok ? 'OK' : 'FAIL', { facts, xpEntries: n("SELECT COUNT(*) n FROM gm_xp_entries WHERE kind = 'award'"), badSources, nonAwarded: capped, factsWithoutEntry: noEntry, factsWithSeveralEntries: multiEntry, orphanEntries: orphanEntry, duplicateFactKeys: dupKeys });
+            // V8.1-CLOSE-01 (G-03): cada anulación apunta a un `award` del mismo sujeto.
+            const voids = n("SELECT COUNT(*) n FROM gm_xp_entries WHERE kind = 'void'");
+            const badVoids = n("SELECT COUNT(*) n FROM gm_xp_entries v WHERE v.kind = 'void' AND NOT EXISTS (SELECT 1 FROM gm_xp_entries a WHERE a.entry_id = v.voids_entry_id AND a.kind = 'award' AND a.subject_ref = v.subject_ref)");
+            const ok = badSources + capped + noEntry + multiEntry + orphanEntry + dupKeys + badVoids === 0;
+            out('facts_entries', ok ? 'OK' : 'FAIL', { facts, xpEntries: n("SELECT COUNT(*) n FROM gm_xp_entries WHERE kind = 'award'"), badSources, nonAwarded: capped, factsWithoutEntry: noEntry, factsWithSeveralEntries: multiEntry, orphanEntries: orphanEntry, duplicateFactKeys: dupKeys, voids, badVoids });
 
             // Reconocimiento por obra: actos 10/20 como máximo y techo por obra y ciclo.
             const overAct = n("SELECT COUNT(*) n FROM gm_work_cycles WHERE (act = 'reading' AND xp > 10) OR (act = 'reflection' AND xp > 20)");
