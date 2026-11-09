@@ -31,6 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import bcrypt from 'bcryptjs';
+import { grantA2 } from '../../__test__/helpers/testA2.mjs';
 
 if (process.platform === 'win32') {
     console.log('platformIntegration: SKIP en Windows (sesión firmada POSIX). Corre en CI (Linux) o dentro de la imagen.');
@@ -95,6 +96,8 @@ const USERS = [
     user('ind1'), user('ind2'), user('adm', { roles: ['administrador'] }),
 ];
 fs.writeFileSync(P.users, JSON.stringify(USERS));
+// V8.1-CLOSE-02: A2 = Sí para los lectores sintéticos (revisión y vistas individuales del mediador).
+grantA2(USERS.filter((x) => x.roles.includes('lector')).map((x) => x.id));
 const work = (id) => ({ id, titulo: `Título ${id}`, autor: 'A', tipo: 'libro', status: 'disponible', editorial: 'Chibalete', etiquetas: ['x'], descripcion_corta: 'd' });
 fs.writeFileSync(P.content, JSON.stringify(['obra-1', 'obra-2', 'obra-3'].map(work)));
 const group = (id, org, mediator, students) => ({ id, name: id, type: 'course', organizationId: org, mediatorIds: [mediator], teacherId: mediator, studentIds: students, memberIds: students });

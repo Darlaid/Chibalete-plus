@@ -28,6 +28,7 @@ import {
     emptyMookStore, createExperience, createDraftVersion, publishVersion,
     startRun, submitEvidence,
 } from '../lib/experienceStore.js';
+import { grantA2 } from './helpers/testA2.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '../..');
@@ -104,6 +105,8 @@ fs.chmodSync(P.key, 0o400);
 // ─────────────────────────────── servidor ────────────────────────────────────
 const PORT = 4800 + (process.pid % 150);
 const BASE = `http://127.0.0.1:${PORT}`;
+// V8.1-CLOSE-02: revisar es consulta institucional individual ⇒ A2 = Sí para P1 y P2.
+const A2_REG = grantA2(['P1', 'P2']);
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,
     env: {
@@ -310,6 +313,33 @@ try {
             actor === 'P1' && row.payload?.reviewerId === 'MED1' && row.payload?.evidenceId === EV.P1.id
             && !JSON.stringify(row).includes('@fx.test') && !JSON.stringify(row).includes('Nombre P1'),
             `→ actor=${actor} reviewer=${row.payload?.reviewerId}`);
+
+        console.log('\n[B9] V8.1-CLOSE-02: revisión condicionada por A2');
+        const a2Raw = fs.readFileSync(A2_REG, 'utf8');
+        grantA2(['P2'], 'denied');
+        const h9 = storeHash();
+        const b9q = await call('GET', Q, S.MED1);
+        const b9d = await call('GET', detail(EV.P2.id), S.MED1);
+        const b9f = await call('POST', `/api/experiences/review/${EV.P2.id}/feedback`, S.MED1, { comment: 'x' });
+        const b9r = await call('POST', decide(EV.P2.id), S.MED1, { decision: 'aprobado' });
+        ok('B9a. A2 = No: P2 sale de la bandeja de MED1; detalle, comentario y decisión → 403 REVIEW_FORBIDDEN (igual que fuera de grupo)',
+            b9q.status === 200 && !b9q.body.some(x => x.id === EV.P2.id)
+            && [b9d, b9f, b9r].every(r => r.status === 403 && r.body?.code === 'REVIEW_FORBIDDEN'),
+            `→ ${b9q.status}/${b9d.status}/${b9f.status}/${b9r.status}`);
+        ok('B9b. …y nada se escribió', storeHash() === h9);
+        const b9a = await call('GET', detail(EV.P2.id), S.ADM);
+        const b9o = await call('GET', `/api/experiences/${EXP.id}/route`, S.P2);
+        ok('B9c. administración y el propio participante no dependen de A2',
+            b9a.status === 200 && b9o.status === 200 && (b9o.body?.evidence ?? []).some(e => e.id === EV.P2.id), `→ ${b9a.status}/${b9o.status}`);
+        fs.writeFileSync(A2_REG, a2Raw.replace('"a":"granted"', '"a":"denied"'));
+        const b9t = await call('GET', Q, S.MED1);
+        const b9u = await call('POST', decide(EV.P2.id), S.MED1, { decision: 'aprobado' });
+        ok('B9d. registro A2 alterado → 503 INDIVIDUAL_ACCESS_UNAVAILABLE en bandeja y decisión, sin escribir',
+            b9t.status === 503 && b9t.body?.code === 'INDIVIDUAL_ACCESS_UNAVAILABLE' && b9u.status === 503 && storeHash() === h9,
+            `→ ${b9t.status}/${b9u.status}`);
+        fs.writeFileSync(A2_REG, a2Raw);
+        const b9g = await call('GET', detail(EV.P2.id), S.MED1);
+        ok('B9e. registro restaurado: MED1 vuelve a ver a P2', b9g.status === 200, `→ ${b9g.status}`);
     }
 } catch (e) {
     failed++;

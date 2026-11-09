@@ -12,6 +12,7 @@
  */
 import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
+import { grantA2 } from './helpers/testA2.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -74,6 +75,9 @@ const writeStores = () => {
     fs.writeFileSync(P.subs, JSON.stringify(SUBS));
 };
 writeStores();
+// V8.1-CLOSE-02: A2 = Sí para los lectores sintéticos (sin ella el mediador no exporta).
+const A2_REG = grantA2(['u-ana', 'u-beto', 'u-carla']);
+const A2_RAW = fs.readFileSync(A2_REG, 'utf8');
 
 let port, BASE, child;
 let logs = '';
@@ -180,6 +184,27 @@ try {
     ok('grupo que deja de estar activo: sin acceso', isDenied(await get('/api/tasks/t-4/export-submissions', 'u-med2')));
     edit((g) => { g.length = 0; GROUPS.forEach((x) => g.push(x)); });
     ok('restaurado: vuelve el acceso', (await get(TASK, 'u-med')).status === 200);
+
+    section('[A2] V8.1-CLOSE-02: exportación institucional condicionada');
+    grantA2(['u-beto'], 'denied');
+    const a2t = readZip((await get(TASK, 'u-med')).body);
+    ok('A2 = No: la entrega de ese lector sale del ZIP colectivo', !all(a2t).includes('SECRETO-BETO') && !all(a2t).includes('u-beto') && all(a2t).includes('SECRETO-ANA-G1'), Object.keys(a2t.files).join(' | '));
+    const deniedA2 = await get('/api/students/u-beto/export-submissions', 'u-med');
+    const deniedOut = await get('/api/students/u-carla/export-submissions', 'u-med');
+    ok('A2 = No: exportación individual ⇒ la misma respuesta que fuera de alcance', isDenied(deniedA2) && deniedA2.body.equals(deniedOut.body), `${deniedA2.status} ${deniedA2.body}`);
+    ok('A2 = No: el propio lector conserva su exportación', (await get('/api/students/u-beto/export-submissions', 'u-beto')).status === 200);
+    ok('A2 = No: la administración de plataforma no cambia', all(readZip((await get(TASK, 'u-admin')).body)).includes('SECRETO-BETO'));
+    fs.writeFileSync(A2_REG, A2_RAW.split(String.fromCharCode(10)).filter((l) => l && !l.includes('A2-SINT-u-beto')).map((l) => `${l}${String.fromCharCode(10)}`).join(''));
+    ok('A2 pendiente: igual que No', isDenied(await get('/api/students/u-beto/export-submissions', 'u-med')));
+    grantA2(['u-beto'], 'revoked');
+    ok('A2 revocada: igual que No', isDenied(await get('/api/students/u-beto/export-submissions', 'u-med')));
+    fs.writeFileSync(A2_REG, A2_RAW.replace('"a":"granted"', '"a":"denied"'));
+    const tam = await get(TASK, 'u-med');
+    ok('registro A2 alterado ⇒ 503 sin datos', tam.status === 503 && !/SECRETO/.test(tam.body.toString()), String(tam.status));
+    ok('…lo propio y la administración no dependen de A2', (await get(STUDENT, 'u-ana')).status === 200 && (await get(TASK, 'u-admin')).status === 200);
+    ok('…un lector sin nómina sigue en 403, no 503', isDenied(await get(TASK, 'u-out')));
+    fs.writeFileSync(A2_REG, A2_RAW);
+    ok('registro restaurado: vuelve el acceso', all(readZip((await get(TASK, 'u-med')).body)).includes('SECRETO-BETO'));
 
     section('[identidad no disponible] sin colapsar a una decisión');
     fs.writeFileSync(P.groups, '{ roto');

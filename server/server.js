@@ -42,7 +42,7 @@ import {
 // GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
-import { individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
+import { a2Gate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -623,7 +623,15 @@ const requireAdminAccess = async (req, res, next) => {
  * listados (`/api/users`, `/api/groups`) los acota por tenant la fase 2 con
  * `resolveListingScope`, más abajo.
  */
-async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true } = {}) {
+/**
+ * V8.1-CLOSE-02 (G-02): con `a2: true`, el acceso que llega por la relación de
+ * mediación (`mediator_of_member_group`) exige además A2 vigente del sujeto. Sin
+ * ella, la MISMA respuesta que fuera de alcance; registro no verificable ⇒ 503.
+ * Lo propio (`self`) y la administración de plataforma no son consulta
+ * institucional y no cambian.
+ */
+const a2Unavailable = (res) => { res.status(503).json({ error: 'individual_access_unavailable' }); return false; };
+async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true, a2 = false } = {}) {
     if (await isAdminRequest(req)) return true;
     const sid = String(scopeId ?? '');
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
@@ -638,6 +646,11 @@ async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = t
     if (d.decision === 'allow') {
         if (d.via === 'self' && !allowSelf) {
             return denied(403, { error: 'scope_access_denied', scope_type: scopeType, scope_id: sid });
+        }
+        if (a2 && d.via === 'mediator_of_member_group') {
+            let gate;
+            try { gate = a2Gate(); } catch { return a2Unavailable(res); }
+            if (!gate.allows(sid)) return denied(403, { error: 'scope_access_denied', scope_type: scopeType, scope_id: sid });
         }
         return true;
     }
@@ -2708,6 +2721,7 @@ const mookErrStatus = (e) => (
     ['EXPERIENCE_NOT_FOUND', 'VERSION_NOT_FOUND', 'RUN_NOT_FOUND', 'NODE_NOT_FOUND', 'EVIDENCE_NOT_FOUND', 'RESOURCE_NOT_FOUND', 'NOT_PUBLISHED'].includes(e.code) ? 404
     : ['NOT_RUN_OWNER', 'NOT_EVIDENCE_OWNER', 'REVIEW_FORBIDDEN', 'MEDIATOR_SCOPE_GATED'].includes(e.code) ? 403
     : ['VERSION_IMMUTABLE', 'NODE_LOCKED', 'NODE_NEEDS_EVIDENCE', 'NODE_NO_EVIDENCE', 'LEO_MIN_INTERCHANGES', 'ACTIVITY_INCOMPLETE', 'PRODUCTION_LENGTH', 'ALREADY_REVIEWED', 'NOT_REVIEWABLE', 'INVALID_DECISION', 'EXPERIENCE_ARCHIVED', 'ALREADY_ARCHIVED', 'INVALID_TRANSITION'].includes(e.code) ? 409
+    : e.code === 'INDIVIDUAL_ACCESS_UNAVAILABLE' ? 503
     : e.code ? 400 : 500
 );
 
@@ -3038,11 +3052,15 @@ function mediatorReviewScope(req) {
         // Institución: si grupo y mediador declaran organizationId, deben coincidir.
         .filter(g => !g.organizationId || !me.organizationId || g.organizationId === me.organizationId);
     if (mine.length === 0) return { ok: false, reason: 'no_active_membership' };
+    // V8.1-CLOSE-02 (G-02): revisar y consultar una producción es consulta
+    // institucional individual (004 A2: D4 «para revisar, retroalimentar»).
+    let a2;
+    try { a2 = a2Gate(); } catch { return { ok: false, reason: 'a2_unavailable' }; }
     // El dueño de la producción debe ser miembro de uno de esos grupos y, si
     // ambos declaran institución, pertenecer a la misma que el grupo.
     let usersById;
     try { usersById = new Map(readJSON(USERS_DB).map(x => [x.id, x])); } catch { usersById = new Map(); }
-    const allows = (ownerId) => mine.some(g => {
+    const allows = (ownerId) => a2.allows(ownerId) && mine.some(g => {
         if (!g.memberIds.includes(ownerId)) return false;
         const owner = usersById.get(ownerId);
         const ownerOrg = owner ? normalizeUser(owner).organizationId : null;
@@ -3058,6 +3076,10 @@ function requireReviewAccess(req, res) {
     if (isMediatorRole(req.user)) {
         const scope = mediatorReviewScope(req);
         if (scope.ok) return scope;
+        if (scope.reason === 'a2_unavailable') {
+            res.status(503).json({ error: 'No pudimos verificar las autorizaciones de seguimiento.', code: 'INDIVIDUAL_ACCESS_UNAVAILABLE' });
+            return false;
+        }
         res.status(403).json({
             error: 'La revisión para mediadores exige sesión canónica y membership activa como mediador en un grupo.',
             code: 'MEDIATOR_SCOPE_GATED',
@@ -3102,6 +3124,7 @@ function assertReviewScopeInLock(req, doc, evidenceId) {
     if (!isMediatorRole(req.user)) fail('REVIEW_FORBIDDEN', 'No autorizado para revisar producciones');
     _jsonCache.delete(GROUPS_DB);
     const scope = mediatorReviewScope(req);
+    if (!scope.ok && scope.reason === 'a2_unavailable') fail('INDIVIDUAL_ACCESS_UNAVAILABLE', 'No pudimos verificar las autorizaciones de seguimiento.');
     if (!scope.ok) fail('MEDIATOR_SCOPE_GATED', 'La revisión para mediadores exige sesión canónica y membership activa como mediador en un grupo.');
     const ev = doc.evidence.find(e => e.id === evidenceId);
     // Sin evidencia: el store responde 404 como hasta ahora.
@@ -9227,7 +9250,8 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
         const { id } = req.params;
         // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: expone nombre y lectura
         // pedagógica de un menor; exige alcance sobre el sujeto.
-        if (!(await requireSubjectScope(req, res, 'user', id))) return;
+        // V8.1-CLOSE-02: para su mediador es consulta institucional ⇒ A2.
+        if (!(await requireSubjectScope(req, res, 'user', id, { a2: true }))) return;
         const users  = readJSON(USERS_DB)  || [];
         const groups = readJSON(GROUPS_DB) || [];
 
@@ -10445,7 +10469,17 @@ async function resolveExportScope(req, res) {
     if (isSyntheticUser(req.user)) { exportDenied(res); return null; }
     try {
         if (await isAdminRequest(req) || getPrincipal(req.user.id)?.platformAdmin) return { admin: true, rosters: new Map() };
-        return { admin: false, rosters: mediatedGroupRosters(req.user.id) };
+        // V8.1-CLOSE-02 (G-02): la nómina exportable de un mediador solo incluye
+        // lectores con A2 vigente. Sin A2, la entrega responde como fuera de
+        // alcance; registro no verificable ⇒ 503 antes de leer nada.
+        // Sin nómina mediada (lector, rol sin grupo) la respuesta no cambia.
+        const mediated = mediatedGroupRosters(req.user.id);
+        if (mediated.size === 0) return { admin: false, rosters: mediated };
+        let gate;
+        try { gate = a2Gate(); } catch { res.status(503).json({ error: 'individual_access_unavailable' }); return null; }
+        const rosters = new Map();
+        for (const [gid, members] of mediated) rosters.set(gid, new Set([...members].filter(id => gate.allows(id))));
+        return { admin: false, rosters };
     } catch (e) {
         if (!(e instanceof IdentityUnavailableError)) throw e;
         log(`[AUTHZ] export scope unavailable: ${e.causeTag}`, 'ERROR');

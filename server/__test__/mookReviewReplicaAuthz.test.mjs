@@ -32,6 +32,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import { emptyMookStore, createExperience, createDraftVersion, publishVersion } from '../lib/experienceStore.js';
+import { grantA2 } from './helpers/testA2.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '../..');
@@ -89,6 +90,8 @@ fs.writeFileSync(P.groups, JSON.stringify([G1, G2], null, 2));
 for (const f of ['schools', 'access', 'content']) fs.writeFileSync(P[f], '[]');
 fs.writeFileSync(P.key, crypto.randomBytes(48).toString('hex'));
 fs.chmodSync(P.key, 0o400);
+// V8.1-CLOSE-02: revisar exige A2 vigente del participante (registro compartido por las dos réplicas).
+grantA2([...PARTS, 'LECT']);
 
 // ───────────────────────────── dos réplicas ──────────────────────────────────
 const basePort = 5100 + (process.pid % 300) * 2;

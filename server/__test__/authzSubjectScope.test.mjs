@@ -23,6 +23,7 @@
  */
 import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
+import { grantA2 } from './helpers/testA2.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -156,6 +157,8 @@ const RUTAS_GRUPO = (gid) => [
 
 // ────────────────────────────────────────────────────────────────────────────
 async function main() {
+    // V8.1-CLOSE-02: A2 = Sí para lec-a1 (el caso legítimo); lec-a2 sin decisión.
+    const A2_REG = grantA2(['lec-a1']);
     api = spawnApi(PORT);
     await waitHealthy(BASE, api);
 
@@ -187,6 +190,27 @@ async function main() {
         const acc = await json(await GET('med-a', '/api/access/by-user/lec-a1'));
         ok('   …y el cuerpo sigue siendo el contrato de siempre',
             Array.isArray(acc?.titleIds) && acc.titleIds.includes('c-1'), JSON.stringify(acc));
+    }
+
+    section('[2b] V8.1-CLOSE-02: status individual condicionado por A2');
+    {
+        const pend = await GET('med-a', '/api/students/lec-a2/status');
+        const pb = await json(pend);
+        ok('A2 pendiente ⇒ 403 con el mismo error que fuera de alcance', pend.status === 403 && pb?.error === 'scope_access_denied'
+            && JSON.stringify(Object.keys(pb)) === '["error","scope_type","scope_id"]', `${pend.status} ${JSON.stringify(pb)}`);
+        ok('…sin nombre ni lectura del lector', !/Nombre|lastReading|progress/i.test(JSON.stringify(pb)));
+        grantA2(['lec-a2']);
+        ok('A2 = Sí ⇒ 200', (await GET('med-a', '/api/students/lec-a2/status')).status === 200);
+        grantA2(['lec-a2'], 'denied');
+        ok('A2 = No ⇒ 403', (await GET('med-a', '/api/students/lec-a2/status')).status === 403);
+        ok('el propio lector conserva su status', (await GET('lec-a2', '/api/students/lec-a2/status')).status === 200);
+        ok('A2 no gobierna las reglas de acceso a contenidos (no es dato pedagógico)', (await GET('med-a', '/api/access/by-user/lec-a2')).status === 200);
+        const raw = fs.readFileSync(A2_REG, 'utf8');
+        fs.writeFileSync(A2_REG, raw.replace('"a":"denied"', '"a":"granted"'));
+        const t = await GET('med-a', '/api/students/lec-a1/status');
+        ok('registro A2 alterado ⇒ 503, nunca 200', t.status === 503, String(t.status));
+        ok('…lo propio no depende de A2', (await GET('lec-a1', '/api/students/lec-a1/status')).status === 200);
+        fs.writeFileSync(A2_REG, raw);
     }
 
     section('[3] UN LECTOR NO ES UN MEDIADOR');
