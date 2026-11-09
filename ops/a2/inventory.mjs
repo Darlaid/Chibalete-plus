@@ -24,10 +24,21 @@ for (const g of groups) {
     rows.push({ grupo: g.id, tipo: g.type ?? null, grado: g.gradeLevel ?? null, seccion: g.section ?? null,
         institucion: orgName.get(g.organizationId) ?? g.organizationId, lectores: cohort.length, mediadoresActivos: meds });
 }
+// V8.1-CLOSE-05: cobertura de decisiones (solo recuentos) si el registro está configurado.
+let coverage = null;
+if (process.env.CHP_A2_REGISTRY) {
+    try {
+        const R = await import('/app/server/privacy/a2Registry.mjs');
+        await R.loadA2Key();
+        const gate = R.decisionGate();
+        const count = (kind) => { const c = {}; for (const id of all) { const st = gate.status(kind, id); c[st] = (c[st] ?? 0) + 1; } return c; };
+        coverage = { A1: count('A1'), A2: count('A2') };
+    } catch (e) { coverage = { unavailable: e?.code || 'ERROR' }; }
+}
 const lectorAccounts = users.filter((u) => active(u) && !synthetic(u) && roles(u).some((r) => /lector/i.test(r))).length;
 console.log(JSON.stringify({ gruposTotal: groups.length, porClase: classes, institucionesRegistradas: schools.length,
     gruposActivos: rows.length, gruposConMediador: rows.filter((r) => r.mediadoresActivos > 0).length,
     lectoresDistintosEnGruposMediados: all.size, cuentasLectorActivas: lectorAccounts,
-    lectoresPorInstitucion: Object.fromEntries([...byOrg].map(([k, v]) => [orgName.get(k) ?? k, v.size])) }));
+    lectoresPorInstitucion: Object.fromEntries([...byOrg].map(([k, v]) => [orgName.get(k) ?? k, v.size])), coberturaEnGruposMediados: coverage }));
 rows.sort((a, b) => String(a.institucion).localeCompare(String(b.institucion)) || String(a.grupo).localeCompare(String(b.grupo)));
 for (const r of rows) console.log(JSON.stringify(r));

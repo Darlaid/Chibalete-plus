@@ -42,7 +42,8 @@ import {
 // GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
-import { a2Gate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
+import { a2Gate, appendDecisions, dayOf as a2DayOf, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
+import { planActivationDecisions } from './privacy/acceptance.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -5874,6 +5875,27 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
 
     // Hash BEFORE lock — async work must not run while holding the cross-process lock
     const hashedPassword = await hashNewPassword(password);
+
+    // V8.1-CLOSE-05 (DIR-V81-01): la activación es el punto de vinculación. Exige
+    // las decisiones de 002/004/005 explícitas (nada premarcado) y las deja en el
+    // registro de decisiones ANTES de activar. Sin registro verificable no se
+    // activa: la evidencia no se aplaza ni se presume.
+    _jsonCache.delete(USERS_DB);
+    const invited = (readJSON(USERS_DB) || []).find(u => u?.inviteToken === token);
+    if (invited && invited.accountStatus === 'invited' && invited.inviteExpiresAt && Date.now() <= invited.inviteExpiresAt) {
+        const acceptanceRef = `ACT-${crypto.randomUUID()}`;
+        const plan = planActivationDecisions(invited, req.body?.acceptance, { today: a2DayOf(Date.now()), ref: acceptanceRef });
+        if (!plan.ok) {
+            return res.status(422).json({ error: 'Faltan decisiones para activar la cuenta.', code: plan.code, ...(plan.required ? { required: plan.required } : {}) });
+        }
+        try {
+            appendDecisions(plan.decisions);
+        } catch (e) {
+            log(`[ACCEPTANCE] registro no disponible: ${e?.code || 'ERROR'}`, 'ERROR');
+            return res.status(503).json({ error: 'No pudimos registrar tus decisiones. Intenta más tarde.', code: 'ACCEPTANCE_REGISTRY_UNAVAILABLE' });
+        }
+        log(`[ACCEPTANCE] user=${invited.id} ref=${acceptanceRef} profile=${plan.profile} kinds=${plan.decisions.map(d => `${d.kind}:${d.status}`).join(',')}`, 'ACCESS');
+    }
 
     // Lock: re-read -> validate token -> activate -> write (atomic across containers)
     let activated = null;

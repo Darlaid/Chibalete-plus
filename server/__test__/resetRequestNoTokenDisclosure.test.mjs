@@ -11,6 +11,9 @@
  * Usa un almacén temporal de fixtures: NUNCA toca datos productivos. POSIX-only.
  */
 import './helpers/testMode.mjs';
+// V8.1-CLOSE-05: la activación exige decisiones y un registro verificable.
+import { a2RegistryPath, ADULT_ACTIVATION } from './helpers/testA2.mjs';
+a2RegistryPath();
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto'; import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';
@@ -120,7 +123,7 @@ try {
 
     // --- SEPARACIÓN: la invitación/activación NO se rompe (Fase E) ---
     console.log('CHP-SEC-PASSWORD-RESET-01 — separación con invitación/activación');
-    const act = await post('/api/accept-invite', { token: INVITE_TOKEN, password: 'contrasena-nueva-1' });
+    const act = await post('/api/accept-invite', { token: INVITE_TOKEN, password: 'contrasena-nueva-1', acceptance: ADULT_ACTIVATION });
     ok('accept-invite sigue activando al invitado', act.status === 200, `status=${act.status} body=${JSON.stringify(act.body)}`);
     const trasActivar = leerUsuarios().find(u => u.id === 'INVITADO');
     ok('el invitado queda activo', trasActivar && trasActivar.accountStatus === 'active', `status=${trasActivar && trasActivar.accountStatus}`);

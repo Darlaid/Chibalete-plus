@@ -20,6 +20,9 @@
  *   node server/__test__/userCredentialReset.test.mjs
  */
 import './helpers/testMode.mjs';
+// V8.1-CLOSE-05: la activación exige decisiones y un registro verificable.
+import { a2RegistryPath, ADULT_ACTIVATION } from './helpers/testA2.mjs';
+a2RegistryPath();
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
@@ -81,7 +84,7 @@ const loginCookie = async (email, password) => cookieOf(await login(email, passw
 const send = (method, url, cookie, body) => fetch(`${base}${url}`, { method, headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', ...(cookie ? { cookie } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
 const me = async (cookie) => (await fetch(`${base}/api/auth/me`, { headers: { cookie } })).status;
 const tokenOf = (url) => (String(url || '').match(/token=([0-9a-f]+)/) || [])[1];
-const acceptInvite = (token, password) => fetch(`${base}/api/accept-invite`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password }) });
+const acceptInvite = (token, password) => fetch(`${base}/api/accept-invite`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password, acceptance: ADULT_ACTIVATION }) });
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 const isServerBcrypt = (h) => typeof h === 'string' && /^\$2[ab]\$10\$/.test(h); // coste del servidor (fixtures usan 4)
 

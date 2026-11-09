@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { appendA2Decision } from '../../privacy/a2Registry.mjs';
+import { ACCEPTANCE_DOCUMENTS } from '../../../utils/acceptanceDocuments.mjs';
 
 export function a2RegistryPath() {
     if (!process.env.CHP_A2_REGISTRY) {
@@ -28,3 +29,7 @@ export function grantA2(ids, status = 'granted') {
     for (const userId of ids) appendA2Decision({ userId, status, requestRef: `A2-SINT-${String(userId).replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 100)}` }, { env });
     return env.CHP_A2_REGISTRY;
 }
+
+/** V8.1-CLOSE-05: decisiones de un titular adulto sin institución (B2C), para activar cuentas en pruebas. */
+export const ADULT_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version,
+    dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' });

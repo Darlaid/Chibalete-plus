@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { Lock, Eye, EyeOff, ChevronLeft, CheckCircle, AlertCircle } from 'lucide-react';
+// V8.1-CLOSE-05 (DIR-V81-01): mismas versiones que exige el servidor.
+import { ACCEPTANCE_DOCUMENTS as DOCS } from '../utils/acceptanceDocuments.mjs';
 
 type UIState = 'idle' | 'submitting' | 'success' | 'error';
 
@@ -8,6 +10,29 @@ interface ErrorInfo {
     message: string;
     code?: string;
 }
+
+const DECISION_MESSAGES: Record<string, string> = {
+    DECISIONS_REQUIRED: 'Faltan decisiones para activar la cuenta. Revisa los apartados señalados.',
+    A1_DENIED: 'Sin la autorización de cuenta y lectura (A1) la cuenta no puede activarse. Puedes cambiar tu decisión o escribir a contacto@chibaleteeditores.com.',
+    A0_DENIED: 'Sin autorizar los datos del representante (A0) no podemos registrar la representación.',
+    A2_NOT_APPLICABLE: 'El seguimiento institucional (A2) solo aplica a cuentas de un colegio o club. Marca «No aplica».',
+    VERSION_MISMATCH: 'Los documentos cambiaron. Recarga la página para ver la versión vigente.',
+};
+
+const versionOf = (v: string) => v.split('@')[1];
+const flag = (on: boolean) => (on ? 'ring-2 ring-red-400 rounded p-1' : '');
+
+/** Radio sin valor inicial: la decisión es siempre explícita. */
+const Choice: React.FC<{ name: string; value: string; options: [string, string][]; onChange: (v: any) => void }> = ({ name, value, options, onChange }) => (
+    <div className="flex flex-wrap gap-4 mt-1">
+        {options.map(([v, label]) => (
+            <label key={v} className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+                <input type="radio" name={name} value={v} checked={value === v} onChange={() => onChange(v)} />
+                {label}
+            </label>
+        ))}
+    </div>
+);
 
 const ActivarCuenta: React.FC = () => {
     const [searchParams] = useSearchParams();
@@ -20,6 +45,15 @@ const ActivarCuenta: React.FC = () => {
     const [uiState, setUiState]         = useState<UIState>('idle');
     const [errorInfo, setErrorInfo]     = useState<ErrorInfo | null>(null);
     const [validationError, setValidationError] = useState('');
+    // Decisiones (002/004/005). Ninguna viene marcada: '' / false = sin decidir.
+    const [actingAs, setActingAs]       = useState<'' | 'titular' | 'legal_representative'>('');
+    const [adultDeclared, setAdultDeclared] = useState(false);
+    const [a0, setA0]                   = useState<'' | 'yes' | 'no'>('');
+    const [a1, setA1]                   = useState<'' | 'yes' | 'no'>('');
+    const [a2, setA2]                   = useState<'' | 'yes' | 'no' | 'not_applicable'>('');
+    const [terms, setTerms]             = useState(false);
+    const [mediatorCommitment, setMediatorCommitment] = useState(false);
+    const [required, setRequired]       = useState<string[]>([]);
 
     const navigate = useNavigate();
 
@@ -74,7 +108,19 @@ const ActivarCuenta: React.FC = () => {
             const res = await fetch('/api/accept-invite', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token, password }),
+                body: JSON.stringify({
+                    token, password,
+                    acceptance: {
+                        terms, termsVersion: DOCS.terms.version,
+                        dataNoticeVersion: DOCS.dataNotice.version,
+                        ...(actingAs ? { actingAs } : {}),
+                        adultDeclared,
+                        ...(a0 ? { A0: a0 } : {}),
+                        ...(a1 ? { A1: a1 } : {}),
+                        ...(a2 ? { A2: a2 } : {}),
+                        mediatorCommitment, mediatorVersion: DOCS.mediator.version,
+                    },
+                }),
             });
 
             const data = await res.json();
@@ -85,7 +131,10 @@ const ActivarCuenta: React.FC = () => {
             }
 
             // Mapear códigos de error del backend a mensajes claros
-            if (res.status === 410 || data.code === 'TOKEN_EXPIRED') {
+            if (res.status === 422) {
+                setRequired(Array.isArray(data.required) ? data.required : []);
+                setErrorInfo({ message: DECISION_MESSAGES[data.code] ?? 'Revisa las decisiones marcadas para continuar.', code: data.code });
+            } else if (res.status === 410 || data.code === 'TOKEN_EXPIRED') {
                 setErrorInfo({
                     message: 'Este enlace expiró. Pide a tu administrador que reenvíe la invitación.',
                     code: 'TOKEN_EXPIRED',
@@ -229,6 +278,56 @@ const ActivarCuenta: React.FC = () => {
                             {showConfirm ? <EyeOff size={20} /> : <Eye size={20} />}
                         </button>
                     </div>
+
+                    {/* V8.1-CLOSE-05 — decisiones diferenciadas, sin casillas premarcadas */}
+                    <fieldset className="space-y-4 text-left border-t border-gray-200 dark:border-gray-700 pt-4" aria-describedby="decisiones-ayuda">
+                        <legend className="text-sm font-semibold text-gray-900 dark:text-white">Tus decisiones</legend>
+                        <p id="decisiones-ayuda" className="text-xs text-gray-500 dark:text-gray-400">
+                            Cada decisión es independiente. Puedes consultarlas o cambiarlas escribiendo a contacto@chibaleteeditores.com.
+                        </p>
+
+                        <div className={flag(required.includes('actingAs'))}>
+                            <span className="text-sm text-gray-800 dark:text-gray-100">Activo esta cuenta como</span>
+                            <Choice name="actingAs" value={actingAs} onChange={setActingAs}
+                                options={[['titular', 'Titular mayor de edad'], ['legal_representative', 'Representante legal de un lector menor de edad']]} />
+                        </div>
+
+                        <label className={'flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200 ' + flag(required.includes('adultDeclared'))}>
+                            <input type="checkbox" checked={adultDeclared} onChange={(e) => setAdultDeclared(e.target.checked)} className="mt-1" />
+                            <span>Declaro que soy mayor de edad.</span>
+                        </label>
+
+                        {actingAs === 'legal_representative' && (
+                            <div className={flag(required.includes('A0'))}>
+                                <span className="text-sm text-gray-800 dark:text-gray-100">A0 · Autorizo el tratamiento de mis datos como representante ({DOCS.dataNotice.id}, v{versionOf(DOCS.dataNotice.version)}).</span>
+                                <Choice name="A0" value={a0} onChange={setA0} options={[['yes', 'Sí'], ['no', 'No']]} />
+                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Verificaremos la representación antes de habilitar las funciones que la requieren.</p>
+                            </div>
+                        )}
+
+                        <div className={flag(required.includes('A1'))}>
+                            <span className="text-sm text-gray-800 dark:text-gray-100">A1 · Cuenta, lectura y funciones educativas informadas ({DOCS.dataNotice.title}, v{versionOf(DOCS.dataNotice.version)}).</span>
+                            <Choice name="A1" value={a1} onChange={setA1} options={[['yes', 'Sí, autorizo'], ['no', 'No autorizo']]} />
+                        </div>
+
+                        <div className={flag(required.includes('A2'))}>
+                            <span className="text-sm text-gray-800 dark:text-gray-100">A2 · Seguimiento pedagógico por los mediadores asignados de mi colegio o club.</span>
+                            <Choice name="A2" value={a2} onChange={setA2} options={[['yes', 'Sí, autorizo'], ['no', 'No autorizo'], ['not_applicable', 'No aplica (sin colegio ni club)']]} />
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Es independiente de A1: sin A2 sigues leyendo, pero tus mediadores no ven tu detalle individual.</p>
+                        </div>
+
+                        {required.includes('C005') && (
+                            <label className={'flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200 ' + flag(true)}>
+                                <input type="checkbox" checked={mediatorCommitment} onChange={(e) => setMediatorCommitment(e.target.checked)} className="mt-1" />
+                                <span>Acepto el {DOCS.mediator.title} ({DOCS.mediator.id}, v{versionOf(DOCS.mediator.version)}) para los grupos que me asigne la institución.</span>
+                            </label>
+                        )}
+
+                        <label className={'flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200 ' + flag(required.includes('T'))}>
+                            <input type="checkbox" checked={terms} onChange={(e) => setTerms(e.target.checked)} className="mt-1" />
+                            <span>Acepto los {DOCS.terms.title} ({DOCS.terms.id}, v{versionOf(DOCS.terms.version)}) y las condiciones de la oferta contratada.</span>
+                        </label>
+                    </fieldset>
 
                     <button
                         type="submit"

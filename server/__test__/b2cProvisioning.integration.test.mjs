@@ -13,6 +13,9 @@
  * POSIX-only. Nunca toca datos productivos.
  */
 import './helpers/testMode.mjs';
+// V8.1-CLOSE-05: la activación exige decisiones y un registro verificable.
+import { a2RegistryPath, ADULT_ACTIVATION } from './helpers/testA2.mjs';
+a2RegistryPath();
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -87,7 +90,7 @@ const order = (orderId, email, extra = {}) => ({ orderId, productId: 345, plan: 
 const cookieOf = (res) => { const m = (res.headers.get('set-cookie') || '').match(/chp_session=([^;]+)/); return m ? `chp_session=${m[1]}` : null; };
 const login = async (email) => { const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: PW }) }); return { status: r.status, cookie: cookieOf(r) }; };
 const activate = async (activationUrl) => { const token = activationUrl.split('token=')[1];
-    const r = await fetch(base + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: PW }) }); return r.status; };
+    const r = await fetch(base + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: PW, acceptance: ADULT_ACTIVATION }) }); return r.status; };
 const canRead = async (cookie, userId, contentId) => { const r = await fetch(`${base}/api/content/${contentId}/access?userId=${userId}`, { headers: { cookie } });
     let b = null; try { b = await r.json(); } catch { /* */ } return r.status === 200 && b?.allowed === true; };
 const arrancado = async () => { for (let i = 0; i < 120; i++) { try { if ((await fetch(base + '/api/health')).ok) return true; } catch { /* */ } await sleep(250); } return false; };
