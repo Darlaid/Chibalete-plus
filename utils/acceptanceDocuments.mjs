@@ -6,8 +6,14 @@
  * pantalla de activación (que la muestra). Cambiar una versión aquí exige que
  * Dirección haya aprobado y publicado ese texto: el registro guarda la versión
  * exacta con cada decisión.
+ *
+ * La versión aquí es la que el código exige; que esté APROBADA y PUBLICADA lo
+ * declara Dirección en la configuración del servidor (`CHP_ACCEPTANCE_DOCUMENTS`,
+ * ver server/privacy/acceptance.mjs). Sin esa declaración, la activación no se
+ * ofrece: ningún borrador se presenta como documento aprobado.
  */
 export const ACCEPTANCE_DOCUMENTS = Object.freeze({
+    policy:     Object.freeze({ id: '001', version: '001@1.0', title: 'Política de tratamiento de datos personales' }),
     terms:      Object.freeze({ id: '002', version: '002@1.0', title: 'Términos y condiciones de Chibalete+' }),
     dataNotice: Object.freeze({ id: '004', version: '004@1.0', title: 'Información y autorización de tratamiento de datos' }),
     mediator:   Object.freeze({ id: '005', version: '005@1.0', title: 'Compromiso de acceso y confidencialidad de mediadores' }),

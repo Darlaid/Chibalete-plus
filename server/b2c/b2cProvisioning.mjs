@@ -20,6 +20,7 @@
  * tokens ni el secreto.
  */
 import crypto from 'node:crypto';
+import { ACCEPTANCE_DOCUMENTS } from '../../utils/acceptanceDocuments.mjs';
 
 export const B2C_TEMPLATE_RULE_ID = 'access-b2c-lectores';
 export const B2C_PLANS = Object.freeze(['digital', 'mi_biblioteca']);
@@ -109,8 +110,18 @@ export function validateProvisionInput(body, nowMs) {
     }
     if (b.idempotencyKey !== idempotencyKeyFor(b.source, orderId)) throw new B2cError(400, 'invalid_idempotency_key');
     const fullName = typeof b.fullName === 'string' ? b.fullName.trim().slice(0, 120) : '';
+    // V8.1-CLOSE-06B: constancia opcional de la aceptación del checkout, firmada con el resto del
+    // cuerpo. Solo la versión vigente de los términos (002) y una fecha no futura. Ausente ⇒ como antes.
+    let termsAcceptance = null;
+    if (b.termsAcceptance !== undefined) {
+        const t = b.termsAcceptance;
+        const at = Number(t?.acceptedAt);
+        if (!t || typeof t !== 'object' || t.version !== ACCEPTANCE_DOCUMENTS.terms.version) throw new B2cError(400, 'invalid_terms_acceptance');
+        if (!Number.isInteger(at) || at < MIN_ACTIVATION_MS || at > nowMs) throw new B2cError(400, 'invalid_terms_acceptance');
+        termsAcceptance = { version: t.version, acceptedAt: at };
+    }
     return { orderId, productId, plan: b.plan, source: b.source, email: b.email, fullName, activationAt,
-        idempotencyKey: b.idempotencyKey, dryRun: b.dryRun === true };
+        idempotencyKey: b.idempotencyKey, dryRun: b.dryRun === true, termsAcceptance };
 }
 
 /** Valida la entrada de /revoke. */

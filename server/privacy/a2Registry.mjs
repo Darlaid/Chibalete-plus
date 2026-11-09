@@ -38,7 +38,8 @@ import { getSubjectKey, loadSubjectKey } from '../gamification/subjectKey.mjs';
 
 export const A2_STATUSES = Object.freeze(['granted', 'denied', 'revoked']);
 export const DECISION_KINDS = Object.freeze(['T', 'A0', 'A1', 'A2', 'C003', 'C005']);
-export const MEDIA = Object.freeze(['in_app', 'paper', 'electronic_signature', 'verifiable_message', 'admin_record']);
+// `checkout`: aceptación en la compra, recibida por la integración autenticada de la tienda (HMAC servidor a servidor).
+export const MEDIA = Object.freeze(['in_app', 'paper', 'electronic_signature', 'verifiable_message', 'admin_record', 'checkout']);
 export const CAPACITIES = Object.freeze(['titular', 'legal_representative', 'institution', 'mediator']);
 export const VERIFICATIONS = Object.freeze(['self_authenticated', 'verified', 'unverified']);
 /** Mínimo de lectores retenidos para publicar detalle del resto (mismo umbral k que los agregados). */
@@ -179,6 +180,8 @@ export function decisionGate(env = process.env, now = Date.now()) {
     const stateOf = (kind, id) => (typeof id === 'string' && id ? registry.get(slot(subjectRef(id), kind)) ?? null : null);
     return {
         effective: (kind, id) => isEffective(stateOf(kind, id), today),
+        /** Última línea (versión, medio, calidad…) o null. Solo para decidir; nunca sale del servidor. */
+        state: (kind, id) => stateOf(kind, id),
         /** pending | granted_unverified | effective | expired | denied | revoked */
         status: (kind, id) => {
             const st = stateOf(kind, id);
