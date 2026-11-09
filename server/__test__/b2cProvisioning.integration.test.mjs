@@ -14,14 +14,16 @@
  */
 import './helpers/testMode.mjs';
 // V8.1-CLOSE-05: la activación exige decisiones y un registro verificable.
-import { a2RegistryPath, ADULT_ACTIVATION } from './helpers/testA2.mjs';
-a2RegistryPath();
+import { a2RegistryPath, approveTestDocuments, ADULT_ACTIVATION } from './helpers/testA2.mjs';
+a2RegistryPath(); approveTestDocuments();
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { signB2cRequest, computeExpiresAt, B2C_TS_HEADER, B2C_SIG_HEADER } from '../b2c/b2cProvisioning.mjs';
 import { B2C_PROVISIONING_SECRET_PATH } from '../lib/b2cProvisioningSecret.js';
 import bcrypt from 'bcryptjs';
+import * as R from '../privacy/a2Registry.mjs';
+import { ACCEPTANCE_DOCUMENTS } from '../../utils/acceptanceDocuments.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..', '..');
@@ -214,6 +216,31 @@ try {
     const pD = await premium(L4.cookie, 'COLE');
     ok('D. colegio con B2C reembolsado: Leo/Experiencias sin bloqueo (ningún 403) y su obra de colegio intacta', Object.values(pD).every(r => r.status !== 403) && await canRead(L4.cookie, 'COLE', 'obra-colegio'));
     ok('D. las reglas de colegio siguen intactas en el almacén', JSON.stringify(J(P.access).find(r => r.id === 'rule-colegio').titleIds) === '["obra-colegio"]');
+
+    console.log('[9b] V8.1-CLOSE-06B: aceptación del checkout (integración autenticada)');
+    {
+        const T_ACC = { version: ACCEPTANCE_DOCUMENTS.terms.version, acceptedAt: Date.now() - 5000 };
+        const c1 = await signed('/api/b2c/provision', order(1101, 'checkout.uno@fixture.invalid', { termsAcceptance: T_ACC }));
+        ok('compra nueva con aceptación ⇒ 200 y termsRecorded', c1.status === 200 && c1.body.termsRecorded === true, JSON.stringify(c1.body));
+        const g = () => R.decisionGate();
+        ok('T del comprador, medio checkout y referencia del pedido', g().effective('T', c1.body.userId) && g().state('T', c1.body.userId)?.medium === 'checkout');
+        ok('la compra no concede A1 ni A2', g().status('A1', c1.body.userId) === 'pending' && g().status('A2', c1.body.userId) === 'pending');
+        const token = c1.body.activationUrl.split('token=')[1];
+        const noTerms = { ...ADULT_ACTIVATION, terms: undefined, termsVersion: undefined };
+        const act = await fetch(base + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: PW, acceptance: noTerms }) });
+        ok('activación sin repetir T, con A1 del titular ⇒ 200', act.status === 200 && g().effective('A1', c1.body.userId));
+        const reuse = await signed('/api/b2c/provision', order(1102, 'lector.colegio@fixture.invalid', { termsAcceptance: T_ACC }));
+        ok('cuenta reutilizada (ya activa): la compra deja su T', reuse.status === 200 && reuse.body.reusedAccount === true && reuse.body.termsRecorded === true, JSON.stringify(reuse.body));
+        const regBefore = fs.readFileSync(process.env.CHP_A2_REGISTRY, 'utf8');
+        const bad = await signed('/api/b2c/provision', order(1103, 'checkout.dos@fixture.invalid', { termsAcceptance: { version: '002@0.9', acceptedAt: Date.now() } }));
+        ok('versión distinta ⇒ 400 invalid_terms_acceptance, sin escribir', bad.status === 400 && bad.body?.code === 'invalid_terms_acceptance' && fs.readFileSync(process.env.CHP_A2_REGISTRY, 'utf8') === regBefore);
+        const dry = await signed('/api/b2c/provision', order(1104, 'checkout.tres@fixture.invalid', { termsAcceptance: T_ACC, dryRun: true }));
+        ok('dry-run ⇒ termsRecorded false y sin escribir', dry.status === 200 && dry.body.termsRecorded === false && fs.readFileSync(process.env.CHP_A2_REGISTRY, 'utf8') === regBefore);
+        const forged = await signed('/api/b2c/provision', order(1105, 'checkout.cuatro@fixture.invalid', { termsAcceptance: T_ACC }), { tamper: true });
+        ok('cuerpo alterado tras firmar ⇒ 401, nada registrado', forged.status === 401 && fs.readFileSync(process.env.CHP_A2_REGISTRY, 'utf8') === regBefore);
+        const retry = await signed('/api/b2c/provision', order(1101, 'checkout.uno@fixture.invalid', { termsAcceptance: T_ACC }));
+        ok('reintento de la tienda ⇒ already_activated; la T sigue efectiva', retry.status === 200 && retry.body.status === 'already_activated' && g().effective('T', c1.body.userId));
+    }
 
     console.log('[10] entrada inválida y registros');
     ok('plan inválido → 400 invalid_plan', (await signed('/api/b2c/provision', order(1006, 'x@fixture.invalid', { plan: 'mensual' }))).body?.code === 'invalid_plan');

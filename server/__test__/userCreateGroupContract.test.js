@@ -324,7 +324,8 @@ console.log('\n[E] El handler real no divergió de la réplica');
 {
     const src = fs.readFileSync(path.join(REPO_ROOT, 'server', 'server.js'), 'utf8');
     const createIdx = src.indexOf("app.post('/api/users'");
-    const createBody = src.slice(createIdx, createIdx + 4500);
+    // V8.1-CLOSE-06B: el handler creció (regla de decisiones al crear); la ventana sigue siendo el handler.
+    const createBody = src.slice(createIdx, createIdx + 6500);
 
     ok('POST /api/users usa findGroupsForSchool', createBody.includes('findGroupsForSchool'));
     ok('POST /api/users responde 409 en ambigüedad',

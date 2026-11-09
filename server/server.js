@@ -42,8 +42,8 @@ import {
 // GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
-import { a2Gate, appendDecisions, dayOf as a2DayOf, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
-import { planActivationDecisions } from './privacy/acceptance.mjs';
+import { a2Gate, appendDecisions, dayOf as a2DayOf, decisionGate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
+import { acceptanceDocumentsStatus, adminActivationAllowed, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -5856,6 +5856,13 @@ app.post('/api/invite-user', requireAuth, async (req, res) => {
     });
 });
 
+// V8.1-CLOSE-06B — documentos aplicables a la activación: versión exigida, enlace
+// publicado y si Dirección los declaró aprobados (CHP_ACCEPTANCE_DOCUMENTS). Público.
+app.get('/api/acceptance/documents', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ documents: acceptanceDocumentsStatus() });
+});
+
 // ACCEPT INVITE
 // POST /api/accept-invite
 // Público (sin requireAuth). Valida token, fija contraseña, activa cuenta.
@@ -5883,13 +5890,23 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
     _jsonCache.delete(USERS_DB);
     const invited = (readJSON(USERS_DB) || []).find(u => u?.inviteToken === token);
     if (invited && invited.accountStatus === 'invited' && invited.inviteExpiresAt && Date.now() <= invited.inviteExpiresAt) {
+        // V8.1-CLOSE-06B: solo con los documentos aplicables aprobados y publicados por Dirección.
+        const docs = acceptanceDocumentsStatus();
+        const pendingDocs = requiredDocumentIds(invited).filter(id => !docs.find(d => d.id === id)?.approved);
+        if (pendingDocs.length) {
+            return res.status(503).json({ error: 'La activación no está disponible: hay documentos pendientes de aprobación.', code: 'DOCUMENTS_NOT_APPROVED', documents: pendingDocs });
+        }
+        let gateNow = null;
+        try { gateNow = decisionGate(); } catch { gateNow = null; }
         const acceptanceRef = `ACT-${crypto.randomUUID()}`;
-        const plan = planActivationDecisions(invited, req.body?.acceptance, { today: a2DayOf(Date.now()), ref: acceptanceRef });
+        const plan = planActivationDecisions(invited, req.body?.acceptance, { today: a2DayOf(Date.now()), ref: acceptanceRef,
+            termsAccepted: gateNow ? termsOnFile(gateNow, invited.id) : false });
         if (!plan.ok) {
             return res.status(422).json({ error: 'Faltan decisiones para activar la cuenta.', code: plan.code, ...(plan.required ? { required: plan.required } : {}) });
         }
         try {
-            appendDecisions(plan.decisions);
+            if (plan.decisions.length) appendDecisions(plan.decisions);
+            else decisionGate(); // nada que anotar: el registro debe seguir verificable
         } catch (e) {
             log(`[ACCEPTANCE] registro no disponible: ${e?.code || 'ERROR'}`, 'ERROR');
             return res.status(503).json({ error: 'No pudimos registrar tus decisiones. Intenta más tarde.', code: 'ACCEPTANCE_REGISTRY_UNAVAILABLE' });
@@ -6008,6 +6025,21 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
             return plan;
         });
 
+        // V8.1-CLOSE-06B: aceptación del checkout recibida por esta integración autenticada (HMAC).
+        // Solo T (002) del comprador, con el pedido como referencia. Nunca A0/A1/A2: esas se
+        // deciden en la activación. Reintentos de la tienda: la misma línea, sin efecto distinto.
+        let termsRecorded = false;
+        if (input.termsAcceptance && !input.dryRun) {
+            try {
+                appendDecisions([{ subjectId: userPhase.userId, kind: 'T', status: 'granted', actDay: a2DayOf(input.termsAcceptance.acceptedAt),
+                    version: input.termsAcceptance.version, medium: 'checkout', capacity: 'titular', verification: 'verified',
+                    requestRef: `WOO:${input.source}:order:${input.orderId}` }]);
+                termsRecorded = true;
+            } catch (e) {
+                log(`[B2C] aceptación no registrada ${input.source}:${input.orderId}: ${e?.code || 'ERROR'}`, 'ERROR');
+                return res.status(503).json({ status: 'error', code: 'acceptance_registry_unavailable' });
+            }
+        }
         const status = rulePhase.ruleOp === 'none' ? 'already_activated' : 'activated';
         log(`[B2C] provision ${input.source}:${input.orderId} → ${input.dryRun ? 'dry_run:' : ''}${status} user=${userPhase.userId} userOp=${userPhase.userOp}`, 'ACCESS');
         return res.status(200).json({
@@ -6019,6 +6051,7 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
             accountStatus: userPhase.user?.accountStatus || 'active',
             activationUrl: userPhase.activationUrl,
             reusedAccount: userPhase.reusedAccount,
+            termsRecorded,
         });
     } catch (e) { return b2cFail(res, e); }
 });
@@ -6169,6 +6202,21 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     newUser.email = normalizedEmail;
     const VALID_ACCOUNT_STATUSES = ['active', 'invited', 'disabled'];
     if (!VALID_ACCOUNT_STATUSES.includes(newUser.accountStatus)) newUser.accountStatus = 'active';
+    // V8.1-CLOSE-06B: un lector o mediador nuevo no queda habilitado sin sus decisiones.
+    // Activa solo si el registro ya tiene la decisión efectiva (regularización con ficha
+    // C.1: A1 del lector, C005 del mediador); si no, queda invitada y se activa por la
+    // vía existente (enlace de activación con decisiones).
+    let activationRequired = false;
+    if (newUser.accountStatus === 'active') {
+        let gate = null;
+        try { gate = decisionGate(); } catch { gate = null; }
+        if (!adminActivationAllowed({ ...newUser, roles: newUser.roles }, gate)) {
+            newUser.accountStatus = 'invited';
+            newUser.inviteToken = crypto.randomBytes(32).toString('hex');
+            newUser.inviteExpiresAt = Date.now() + 48 * 60 * 60 * 1000;
+            activationRequired = true;
+        }
+    }
 
     // CONTRATO DE GRUPOS (CHP-ID-CANON-01A).
     //
@@ -6255,7 +6303,7 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
         });
     }
 
-    log(`User created: user=${userToSave.id}`, 'ACCESS');
+    log(`User created: user=${userToSave.id}${activationRequired ? ' status=invited reason=decisions_required' : ''}`, 'ACCESS');
     writeAuditLog({
         action:       'create_user',
         targetUserId: userToSave.id,
@@ -6263,11 +6311,16 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
         details:      { email: userToSave.email, roles: userToSave.roles, colegio: userToSave.colegio || null },
     });
 
-    res.json(sanitizeUserForClient(userToSave));
+    res.json(activationRequired
+        ? { ...sanitizeUserForClient(userToSave), activationRequired: true, activationUrl: `/#/activar?token=${userToSave.inviteToken}` }
+        : sanitizeUserForClient(userToSave));
 });
 
 // UPDATE USER
 app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
+    // V8.1-CLOSE-06B: puerta de decisiones leída antes del lock (activación administrativa).
+    let putGate = null;
+    try { putGate = decisionGate(); } catch { putGate = null; }
     const { id } = req.params;
     const updates = req.body;
     if (updates.id && updates.id !== id) return res.status(400).json({ error: 'No se puede cambiar el ID del usuario' });
@@ -6321,6 +6374,11 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
                 });
                 if (violation) { conflict = { conflict: 'protected', reason: violation }; return; }
             }
+            // V8.1-CLOSE-06B: una invitada no se activa por edición sin su decisión efectiva
+            // (A1 del lector, C005 del mediador). Reactivar una cuenta desactivada no cambia.
+            if (users[index].accountStatus === 'invited' && mergedUser.accountStatus === 'active' && !adminActivationAllowed(mergedUser, putGate)) {
+                conflict = { conflict: 'decisions_required' }; return;
+            }
             const newGroupIds = Array.isArray(mergedUser.groupIds) ? [...mergedUser.groupIds] : [];
 
             const { added, removed } = diffIds(oldGroupIds, newGroupIds);
@@ -6371,6 +6429,9 @@ app.put('/api/users/:id', requireAdminAccess, async (req, res) => {
         catch (e) { log(`[SESSION] revoke-on-update error: ${e.message}`, 'WARN'); }
     }
     if (conflict?.conflict === 'not_found')    return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict?.conflict === 'decisions_required') {
+        return res.status(409).json({ error: 'La cuenta se activa con sus decisiones (enlace de activación) o con una regularización registrada.', code: 'DECISIONS_REQUIRED' });
+    }
     if (conflict?.conflict === 'dup_email')    return res.status(409).json({ error: 'El nuevo email ya está en uso' });
     if (conflict?.conflict === 'protected') {
         log(`User update rechazado: cuenta protegida user=${id} motivo=${conflict.reason}`, 'ACCESS');

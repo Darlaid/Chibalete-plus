@@ -21,8 +21,8 @@
  */
 import './helpers/testMode.mjs';
 // V8.1-CLOSE-05: la activación exige decisiones y un registro verificable.
-import { a2RegistryPath, ADULT_ACTIVATION, MEDIATOR_ACTIVATION } from './helpers/testA2.mjs';
-a2RegistryPath();
+import { a2RegistryPath, approveTestDocuments, ADULT_ACTIVATION, MEDIATOR_ACTIVATION } from './helpers/testA2.mjs';
+a2RegistryPath(); approveTestDocuments();
 import { spawn } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';

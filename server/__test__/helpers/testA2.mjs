@@ -48,3 +48,13 @@ export function grantA1(ids, { status = 'granted', actDay = '2000-01-01', verifi
     if (decisions.length) appendDecisions(decisions, { env });
     return env.CHP_A2_REGISTRY;
 }
+
+/**
+ * V8.1-CLOSE-06B: documentos declarados aprobados SOLO para pruebas (enlaces .invalid). En producción
+ * los declara Dirección en `CHP_ACCEPTANCE_DOCUMENTS`; sin ellos la activación no se ofrece.
+ */
+export function approveTestDocuments() {
+    const docs = Object.fromEntries(Object.values(ACCEPTANCE_DOCUMENTS).map((d) => [d.id, { version: d.version, url: `https://docs.example.invalid/${d.id}/${d.version}` }]));
+    process.env.CHP_ACCEPTANCE_DOCUMENTS = JSON.stringify(docs);
+    return process.env.CHP_ACCEPTANCE_DOCUMENTS;
+}

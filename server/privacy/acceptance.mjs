@@ -33,13 +33,13 @@ export const isInstitutionalReader = (user) => typeof user?.organizationId === '
  * @param {{ today: string, ref: string }} ctx
  * @returns {{ ok: true, decisions: object[], profile: string } | { ok: false, code: string, required?: string[] }}
  */
-export function planActivationDecisions(user, acceptance, { today, ref }) {
+export function planActivationDecisions(user, acceptance, { today, ref, termsAccepted = false }) {
     const a = acceptance && typeof acceptance === 'object' ? acceptance : {};
     const staff = isMediatorAccount(user) || isAdminAccount(user);
     const mediator = isMediatorAccount(user);
     const institutional = !staff && isInstitutionalReader(user);
     const missing = [];
-    if (a.terms !== true) missing.push('T');
+    if (a.terms !== true && !termsAccepted) missing.push('T');
     if (!staff && !OPT.actingAs.includes(a.actingAs)) missing.push('actingAs');
     if (!staff && !OPT.A1.includes(a.A1)) missing.push('A1');
     if (institutional && !['yes', 'no'].includes(a.A2)) missing.push('A2');
@@ -48,7 +48,7 @@ export function planActivationDecisions(user, acceptance, { today, ref }) {
     if (mediator && a.mediatorCommitment !== true) missing.push('C005');
     if (missing.length) return { ok: false, code: 'DECISIONS_REQUIRED', required: missing };
 
-    if (a.termsVersion !== DOCS.terms.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['T'] };
+    if (!termsAccepted && a.termsVersion !== DOCS.terms.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['T'] };
     if (!staff && a.dataNoticeVersion !== DOCS.dataNotice.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['A1'] };
     if (mediator && a.mediatorVersion !== DOCS.mediator.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['C005'] };
     if (!staff && !institutional && a.A2 !== undefined && a.A2 !== 'not_applicable') return { ok: false, code: 'A2_NOT_APPLICABLE', required: ['A2'] };
@@ -59,10 +59,56 @@ export function planActivationDecisions(user, acceptance, { today, ref }) {
     const capacity = representative ? 'legal_representative' : 'titular';
     const verification = representative ? 'unverified' : 'self_authenticated';
     const base = { subjectId: user.id, actDay: today, medium: 'in_app', requestRef: ref };
-    const decisions = [{ ...base, kind: 'T', status: 'granted', version: DOCS.terms.version, capacity, verification }];
+    // T ya vigente (compra) ⇒ no se duplica. Nunca aporta A0/A1/A2: esas son del representante o titular aquí.
+    const decisions = termsAccepted ? [] : [{ ...base, kind: 'T', status: 'granted', version: DOCS.terms.version, capacity, verification }];
     if (representative) decisions.push({ ...base, kind: 'A0', status: 'granted', version: DOCS.dataNotice.version, capacity, verification });
     if (!staff) decisions.push({ ...base, kind: 'A1', status: 'granted', version: DOCS.dataNotice.version, capacity, verification });
     if (institutional) decisions.push({ ...base, kind: 'A2', status: a.A2 === 'yes' ? 'granted' : 'denied', version: DOCS.dataNotice.version, capacity, verification });
     if (mediator) decisions.push({ ...base, kind: 'C005', status: 'granted', version: DOCS.mediator.version, capacity: 'mediator', verification: 'self_authenticated' });
     return { ok: true, decisions, profile: mediator ? 'mediator' : staff ? 'staff' : representative ? 'representative' : 'titular' };
+}
+
+// ── V8.1-CLOSE-06B ──────────────────────────────────────────────────────────
+
+/**
+ * Documentos aprobados y publicados según Dirección. Configuración del servidor
+ * (`CHP_ACCEPTANCE_DOCUMENTS`), JSON `{"002": {"version": "002@1.0", "url": "https://…"}, …}`.
+ * Un documento cuenta como aprobado solo si la versión declarada es la que exige el
+ * código y su enlace es https. Cualquier otra cosa ⇒ pendiente de aprobación.
+ * @returns {{ id, version, title, url: string|null, approved: boolean }[]}
+ */
+export function acceptanceDocumentsStatus(env = process.env) {
+    let declared = {};
+    try { declared = JSON.parse(env.CHP_ACCEPTANCE_DOCUMENTS || '{}') || {}; } catch { declared = {}; }
+    return Object.values(DOCS).map((d) => {
+        const e = declared[d.id];
+        let url = null;
+        try { url = e && e.version === d.version && new URL(e.url).protocol === 'https:' ? new URL(e.url).toString() : null; } catch { url = null; }
+        return { id: d.id, version: d.version, title: d.title, url, approved: url !== null };
+    });
+}
+
+/** Documentos que una activación necesita aprobados, según la cuenta. */
+export function requiredDocumentIds(user) {
+    if (isMediatorAccount(user)) return ['001', '002', '005'];
+    if (isAdminAccount(user)) return ['001', '002'];
+    return ['001', '002', '004'];
+}
+
+/** T vigente para la versión actual (p. ej. aceptada en la compra): no se vuelve a pedir al activar. */
+export const termsOnFile = (gate, userId) => {
+    try { return gate.effective('T', userId) && gate.state('T', userId)?.version === DOCS.terms.version; } catch { return false; }
+};
+
+/**
+ * Altas y cambios administrativos: una cuenta de lector o mediador solo queda ACTIVA
+ * sin pasar por la activación si el registro ya tiene su decisión efectiva
+ * (regularización con evidencia verificable: A1 del lector, C005 del mediador).
+ * Administración de plataforma: sin cambio. Registro no verificable ⇒ no.
+ */
+export function adminActivationAllowed(user, gate) {
+    const pureAdmin = isAdminAccount(user) && !isMediatorAccount(user) && !roleNames(user).some((r) => /lector/i.test(r));
+    if (pureAdmin) return true;
+    if (!gate) return false;
+    return isMediatorAccount(user) ? gate.effective('C005', user.id) : gate.effective('A1', user.id);
 }

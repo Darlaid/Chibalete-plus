@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { Lock, Eye, EyeOff, ChevronLeft, CheckCircle, AlertCircle } from 'lucide-react';
 // V8.1-CLOSE-05 (DIR-V81-01): mismas versiones que exige el servidor.
@@ -11,7 +11,17 @@ interface ErrorInfo {
     code?: string;
 }
 
+interface DocStatus { id: string; version: string; title: string; url: string | null; approved: boolean }
+
+/** Enlace al texto publicado, o aviso de que aún no está aprobado (nunca se presenta un borrador como aprobado). */
+const DocLink: React.FC<{ doc: DocStatus | null; fallbackTitle: string }> = ({ doc, fallbackTitle }) => (
+    doc?.approved && doc.url
+        ? <a href={doc.url} target="_blank" rel="noopener noreferrer" className="underline text-indigo-600 dark:text-indigo-400">{doc.title} (v{doc.version.split('@')[1]})</a>
+        : <span className="text-amber-700 dark:text-amber-400">{doc?.title ?? fallbackTitle}: pendiente de aprobación por Dirección</span>
+);
+
 const DECISION_MESSAGES: Record<string, string> = {
+    DOCUMENTS_NOT_APPROVED: 'La activación todavía no está disponible: hay documentos pendientes de aprobación.',
     DECISIONS_REQUIRED: 'Faltan decisiones para activar la cuenta. Revisa los apartados señalados.',
     A1_DENIED: 'Sin la autorización de cuenta y lectura (A1) la cuenta no puede activarse. Puedes cambiar tu decisión o escribir a contacto@chibaleteeditores.com.',
     A0_DENIED: 'Sin autorizar los datos del representante (A0) no podemos registrar la representación.',
@@ -54,6 +64,18 @@ const ActivarCuenta: React.FC = () => {
     const [terms, setTerms]             = useState(false);
     const [mediatorCommitment, setMediatorCommitment] = useState(false);
     const [required, setRequired]       = useState<string[]>([]);
+    // V8.1-CLOSE-06B: estado de los documentos según Dirección (aprobado + enlace publicado).
+    const [docs, setDocs]               = useState<DocStatus[] | null>(null);
+    useEffect(() => {
+        let alive = true;
+        fetch('/api/acceptance/documents', { cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((b) => { if (alive) setDocs(Array.isArray(b?.documents) ? b.documents : []); })
+            .catch(() => { if (alive) setDocs([]); });
+        return () => { alive = false; };
+    }, []);
+    const docOf = (id: string) => docs?.find((d) => d.id === id) ?? null;
+    const baseDocsApproved = !!docs && ['001', '002'].every((id) => docOf(id)?.approved === true);
 
     const navigate = useNavigate();
 
@@ -285,6 +307,17 @@ const ActivarCuenta: React.FC = () => {
                         <p id="decisiones-ayuda" className="text-xs text-gray-500 dark:text-gray-400">
                             Cada decisión es independiente. Puedes consultarlas o cambiarlas escribiendo a contacto@chibaleteeditores.com.
                         </p>
+                        <ul className="text-xs space-y-1" aria-label="Documentos">
+                            <li><DocLink doc={docOf('001')} fallbackTitle={DOCS.policy.title} /></li>
+                            <li><DocLink doc={docOf('002')} fallbackTitle={DOCS.terms.title} /></li>
+                            <li><DocLink doc={docOf('004')} fallbackTitle={DOCS.dataNotice.title} /></li>
+                            {required.includes('C005') && <li><DocLink doc={docOf('005')} fallbackTitle={DOCS.mediator.title} /></li>}
+                        </ul>
+                        {docs && !baseDocsApproved && (
+                            <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
+                                La activación estará disponible cuando Dirección publique las versiones aprobadas de estos documentos.
+                            </p>
+                        )}
 
                         <div className={flag(required.includes('actingAs'))}>
                             <span className="text-sm text-gray-800 dark:text-gray-100">Activo esta cuenta como</span>
@@ -331,7 +364,7 @@ const ActivarCuenta: React.FC = () => {
 
                     <button
                         type="submit"
-                        disabled={uiState === 'submitting'}
+                        disabled={uiState === 'submitting' || !baseDocsApproved}
                         className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 disabled:cursor-not-allowed text-white font-semibold rounded-md transition-colors"
                     >
                         {uiState === 'submitting' ? 'Activando...' : 'Activar cuenta'}

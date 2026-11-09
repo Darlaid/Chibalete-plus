@@ -17,7 +17,7 @@
  */
 import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
-import { a2RegistryPath } from './helpers/testA2.mjs';
+import { a2RegistryPath, approveTestDocuments } from './helpers/testA2.mjs';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -54,6 +54,7 @@ const P = { data: path.join(tmp, 'data'), users: path.join(tmp, 'users.json'), g
     schools: path.join(tmp, 'schools.json'), access: path.join(tmp, 'access.json'), content: path.join(tmp, 'content.json'), uploads: path.join(tmp, 'uploads') };
 fs.mkdirSync(P.data, { recursive: true }); fs.mkdirSync(P.uploads, { recursive: true });
 const REG = a2RegistryPath();
+approveTestDocuments();
 const later = Date.now() + 3_600_000;
 const invited = (id, extra = {}) => ({ id, email: `${id}@fixture.invalid`, nombre_completo: `Sint ${id}`, roles: ['lector'], accountStatus: 'invited',
     inviteToken: `tok-${id}-${'x'.repeat(24)}`, inviteExpiresAt: later, ...extra });

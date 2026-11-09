@@ -33,6 +33,14 @@ ok('solo envía lo decidido (lo vacío no viaja)', /\.\.\.\(a1 \? \{ A1: a1 \} :
 ok('las opciones de la pantalla son las admitidas', ['titular', 'legal_representative'].every((v) => DECISION_OPTIONS.actingAs.includes(v) && src.includes(`'${v}'`)));
 ok('versiones con formato documento@versión', Object.values(ACCEPTANCE_DOCUMENTS).every((d) => /^\d{3}@\d+(\.\d+)*$/.test(d.version)));
 ok('422 muestra lo que falta', /res\.status === 422/.test(src) && /setRequired/.test(src));
+// V8.1-CLOSE-06B — documentos
+ok('lee el estado de los documentos del servidor', src.includes("fetch('/api/acceptance/documents'"));
+ok('enlace solo si Dirección lo declaró aprobado; si no, «pendiente de aprobación»', /doc\?\.approved && doc\.url/.test(src) && /pendiente de aprobación por Dirección/.test(src));
+ok('enlaces externos seguros', /target="_blank" rel="noopener noreferrer"/.test(src));
+ok('muestra 001, 002 y 004 (y 005 para mediadores)', ["docOf('001')", "docOf('002')", "docOf('004')", "docOf('005')"].every((x) => src.includes(x)));
+ok('sin 001 y 002 aprobados no se puede activar', /disabled=\{uiState === 'submitting' \|\| !baseDocsApproved\}/.test(src) && /\['001', '002'\]\.every/.test(src));
+ok('mensaje para DOCUMENTS_NOT_APPROVED', /DOCUMENTS_NOT_APPROVED:/.test(src));
+ok('la política (001) está en la fuente única', ACCEPTANCE_DOCUMENTS.policy?.id === '001');
 
 console.log(`\nActivarCuenta decisiones (V8.1-CLOSE-05): ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);
