@@ -152,6 +152,6 @@ try {
 
 ## 4. Lo que queda fuera
 
-- **Otras vistas individuales del mediador:** `GET /api/students/:id/status`, `/export-submissions` y la revisión MOOK de entregas. Se rigen por `requireSubjectScope`, no por A2. Que la revisión pedagógica de entregas requiera A2 es una decisión de Dirección (004 §3 frente a 005 §2), no de esta unidad.
+- **Otras vistas individuales del mediador:** `GET /api/students/:id/status`, `/export-submissions` y la revisión MOOK de entregas. **Cerradas en V8.1-CLOSE-02** (`GAMIFICACION_V81_CLOSE_02_A2_ALCANCE.md`): 004 A2 incluye D4 «para revisar, retroalimentar», así que las tres exigen A2.
 - **Agregados de Aula Viva en grupos de menos de 5 lectores:** ya se mostraban sin umbral k antes de esta unidad.
 - **G-01, G-04 a G-08:** siguen la secuencia de la matriz (§6).
