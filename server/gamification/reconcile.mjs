@@ -30,6 +30,7 @@
 import { GamificationError } from './db.mjs';
 import { exclusionGate } from './exclusions.mjs';
 import { hasFact, recordFact } from './ledger.mjs';
+import { a1Gate } from '../privacy/a2Registry.mjs';
 
 export const RECOVERABLE_SOURCES = Object.freeze({
     mook_review: { recoverable: true },
@@ -117,13 +118,16 @@ export function* reconcileSteps(db, candidates, { resolveUser, env = process.env
         if (!RECOVERABLE_SOURCES[c?.source]?.recoverable) throw bad('SOURCE_NOT_RECOVERABLE', String(c?.source));
     }
     let gate = exclusionGate(db, env); // falla cerrado: sin registro válido no se barre nada
+    // G-01: puerta A1 del lote, releída tras cada cesión como las exclusiones; la aplica `recordFact`.
+    const a1Of = () => { try { return a1Gate(env, now()); } catch { return { allowsAt: () => false }; } };
+    let a1 = a1Of();
     const res = { scanned: candidates.length, alreadyRecorded: 0, recorded: 0, raced: 0, byDecision: {} };
     for (const c of candidates) {
         const eligibility = candidateEligibility(resolveUser, c);
         if (eligibility === 'eligible' && hasFact(db, c)) {
             res.alreadyRecorded++;
         } else {
-            const r = recordFact(db, { ...c, eligibility, now: now() }, { env, gate });
+            const r = recordFact(db, { ...c, eligibility, now: now() }, { env, gate, a1 });
             if (r.inserted || !r.persisted) res.byDecision[r.decision] = (res.byDecision[r.decision] || 0) + 1;
             if (r.inserted) {
                 res.recorded++;
@@ -132,7 +136,7 @@ export function* reconcileSteps(db, candidates, { resolveUser, env = process.env
             }
             onFact?.(c, r);
         }
-        if (yield) gate = exclusionGate(db, env);
+        if (yield) { gate = exclusionGate(db, env); a1 = a1Of(); }
     }
     return res;
 }

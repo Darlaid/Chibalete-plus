@@ -24,6 +24,11 @@
  *  - PRIV-01D: sin registro de exclusiones válido no se escribe nada, y una
  *    persona excluida no vuelve a tener sujeto;
  *
+ *  - V8.1-CLOSE-06A (G-01): ningún XP sin A1 concedida, verificada y vigente, con
+ *    fecha del acto ≤ el día del hecho (`a1Gate`). Es la puerta común de escritura:
+ *    barrido, gancho de revisión y cualquier fuente pasan por aquí. Sin registro
+ *    de decisiones verificable, nada se emite. La consulta no cambia;
+ *
  * No importa nada de server/royalties/ ni escribe otro store (P6).
  */
 import crypto from 'node:crypto';
@@ -33,6 +38,7 @@ import { WORK_CYCLE_ACTS, decideRecognition, hasRetiredPm, validateApprovedRecog
 import { exclusionGate } from './exclusions.mjs';
 import { deriveSourceKey, deriveWorkKey, ensureSubject, findSubject, isExcluded } from './subjects.mjs';
 import { getSubjectKey } from './subjectKey.mjs';
+import { a1Gate } from '../privacy/a2Registry.mjs';
 
 export const FACT_SOURCES = Object.freeze(Object.keys(SOURCE_GRADE));
 /** Decisiones que puede contener `gm_source_facts`. `capped` solo en filas anteriores a V8-UNIFIED-XP-01 (topes de PM). */
@@ -58,6 +64,12 @@ const ID_RX = /^[A-Za-z0-9._:@-]+$/;
 const BOGOTA_OFFSET_MS = 5 * 3_600_000; // UTC−5, sin horario de verano
 
 const bad = (code, message) => new GamificationError(code, message);
+/** G-01: `a1` es la puerta del lote (como `gate`); sin ella se lee el registro. Registro no verificable ⇒ no. */
+function a1Allows(a1, env, now, userId, atMs) {
+    let g = a1;
+    if (!g) { try { g = a1Gate(env, now); } catch { return false; } }
+    return g.allowsAt(userId, atMs) === true;
+}
 const isId = (s) => typeof s === 'string' && s.length > 0 && s.length <= MAX_ID && ID_RX.test(s);
 const isInt = (n) => Number.isSafeInteger(n);
 const randomId = () => crypto.randomUUID();
@@ -143,7 +155,7 @@ export function createRuleSet(db, { ruleVersion, rules, createdBy, effectiveFrom
  * @param {{ env?: object }} [opts]  `XP_EARNING_ENABLED` se lee aquí, por llamada
  * @returns {{ inserted: boolean, persisted: boolean, factId: string|null, decision: string, xp: number, xpEntryId: string|null }}
  */
-export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
+export function recordFact(db, fact, { env = process.env, gate = null, a1 = null } = {}) {
     const unknown = Object.keys(fact || {}).filter((k) => !FACT_FIELDS.has(k));
     if (unknown.length) throw bad('CALLER_FIELD_NOT_ALLOWED', `el llamador no fija ${unknown.join(',')}`);
     const { source, sourceEventId, factType, userId, actorId = null, occurredAt, eligibility, features = null, now = Date.now() } = fact;
@@ -167,6 +179,7 @@ export function recordFact(db, fact, { env = process.env, gate = null } = {}) {
     if (!xpEnabled) return noRow('disabled_source');
     const open = gate ?? exclusionGate(db, env);
     if (open.excludes(userId) || (actorId !== null && open.excludes(actorId))) return noRow('rejected_excluded_user');
+    if (!a1Allows(a1, env, now, userId, occurredAt)) return noRow('rejected_not_eligible');
 
     return db.transaction(() => {
         // La puerta se leyó fuera de la transacción: esta comprobación cierra la
@@ -235,7 +248,7 @@ export function workCycleHistory(db, subjectRef, workKey) {
  * @param {{ evidenceId, userId, actorId, at, workRef, decision }} evidence
  * @returns {{ inserted: boolean, factId: string|null, acts: string[], xp: number, reason: string|null }}
  */
-export function recordWorkRecognition(db, evidence, { env = process.env, gate = null, now = Date.now() } = {}) {
+export function recordWorkRecognition(db, evidence, { env = process.env, gate = null, a1 = null, now = Date.now() } = {}) {
     const { evidenceId, userId, actorId, at, workRef, decision } = evidence ?? {};
     if (!isId(evidenceId) || !isId(userId) || !isId(actorId) || !isId(workRef) || !isInt(at) || at <= 0) throw bad('INVALID_FACT');
     const none = (reason) => ({ inserted: false, factId: null, acts: [], xp: 0, reason });
@@ -244,6 +257,7 @@ export function recordWorkRecognition(db, evidence, { env = process.env, gate = 
     getSubjectKey();
     const open = gate ?? exclusionGate(db, env);
     if (open.excludes(userId) || open.excludes(actorId)) return none('subject_excluded');
+    if (!a1Allows(a1, env, now, userId, at)) return none('a1_not_effective');
     return db.transaction(() => {
         if (isExcluded(db, userId) || isExcluded(db, actorId)) return none('subject_excluded');
         let subject = findSubject(db, userId);

@@ -191,6 +191,25 @@ export function decisionGate(env = process.env, now = Date.now()) {
 }
 
 /**
+ * V8.1-CLOSE-06A (G-01) — puerta A1 para emitir XP. `allowsAt(userId, atMs)` solo
+ * es verdadero con A1 `granted`, verificada (o del titular adulto autenticado),
+ * vigente HOY y con fecha del acto ≤ el día del hecho: una autorización posterior
+ * no habilita hechos anteriores (prospectiva, como las reglas D48).
+ * @throws A2_REGISTRY_UNAVAILABLE | A2_REGISTRY_NOT_INDEPENDENT
+ */
+export function a1Gate(env = process.env, now = Date.now()) {
+    const registry = readDecisions(env);
+    const today = dayOf(now);
+    return {
+        allowsAt: (userId, atMs) => {
+            if (typeof userId !== 'string' || !userId || !Number.isFinite(atMs)) return false;
+            const st = registry.get(slot(subjectRef(userId), 'A1'));
+            return isEffective(st, today) && st.actDay <= dayOf(atMs);
+        },
+    };
+}
+
+/**
  * Puerta A2 vigente. `allows(userId)` solo es verdadero con A2 `granted`,
  * verificada y dentro de su vigencia (inclusive).
  * @throws A2_REGISTRY_UNAVAILABLE | A2_REGISTRY_NOT_INDEPENDENT

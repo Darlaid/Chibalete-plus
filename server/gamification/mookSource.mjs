@@ -29,6 +29,7 @@ import { attributedEvidence } from './mookWorks.mjs';
 import { catalogActivities, readGroupRecognitionCounts, readStudentRecognition, readWorkProgress, recognitionActive, workAccessCounts } from './progress.mjs';
 import { candidateEligibility, drainSteps, mookReviewCandidates, mookExperienceCandidates, reconcileSteps } from './reconcile.mjs';
 import { loadSubjectKey } from './subjectKey.mjs';
+import { a1Gate } from '../privacy/a2Registry.mjs';
 
 export const RECONCILE_BUSY_MS = 250;
 export const DEFAULT_INTERVAL_MS = 15 * 60_000;
@@ -92,21 +93,28 @@ function withdrawnReader(readRights) {
  * Tras una cesión (`yield` devuelve `true`) relee exclusiones y derechos: una
  * retirada legal o una exclusión posterior al inicio del barrido cuenta desde ahí.
  */
+/** Registro de decisiones no verificable ⇒ ninguna A1 (fallo cerrado, el lote sigue sin emitir). */
+function batchA1Gate(env, now) {
+    try { return a1Gate(env, now); } catch { return { allowsAt: () => false }; }
+}
+
 function* recognizeMookWorksSteps(db, doc, { workRefOf, readRights, resolveUser, sinceMs, onlyEvidenceId = null, env = process.env, now = Date.now() } = {}) {
     if (!isXpEarningEnabled(env)) return { skipped: 'disabled' };
     if (typeof workRefOf !== 'function' || typeof readRights !== 'function') return { skipped: 'not_wired' };
-    const live = { workRefOf, resolveUser, sinceMs, gate: exclusionGate(db, env), isWithdrawn: withdrawnReader(readRights) };
+    // G-01: la puerta A1 se lee una vez por lote, como las exclusiones; el ledger la aplica.
+    const live = { workRefOf, resolveUser, sinceMs, gate: exclusionGate(db, env), a1: batchA1Gate(env, now), isWithdrawn: withdrawnReader(readRights) };
     const scope = onlyEvidenceId ? { ...doc, evidence: (doc.evidence ?? []).filter((e) => e.id === onlyEvidenceId) } : doc;
     const res = { recognized: 0, already: 0, unattributed: {}, notRecorded: {} };
     for (const e of attributedEvidence(scope, live, res.unattributed)) {
         if (e) {
-            const r = recordWorkRecognition(db, e, { env, gate: live.gate, now });
+            const r = recordWorkRecognition(db, e, { env, gate: live.gate, a1: live.a1, now });
             if (r.inserted) res.recognized++;
             else if (r.factId) res.already++;
             else res.notRecorded[r.reason] = (res.notRecorded[r.reason] ?? 0) + 1;
         }
         if (yield) {
             live.gate = exclusionGate(db, env);
+            live.a1 = batchA1Gate(env, now);
             live.isWithdrawn = withdrawnReader(readRights);
         }
     }

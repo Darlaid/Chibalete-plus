@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { appendA2Decision } from '../../privacy/a2Registry.mjs';
+import { appendA2Decision, appendDecisions } from '../../privacy/a2Registry.mjs';
 import { ACCEPTANCE_DOCUMENTS } from '../../../utils/acceptanceDocuments.mjs';
 
 export function a2RegistryPath() {
@@ -36,3 +36,15 @@ export const ADULT_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEP
 /** V8.1-CLOSE-05: decisiones de un mediador (titular adulto con el compromiso 005). */
 export const MEDIATOR_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, adultDeclared: true,
     mediatorCommitment: true, mediatorVersion: ACCEPTANCE_DOCUMENTS.mediator.version });
+
+/**
+ * V8.1-CLOSE-06A (G-01): A1 concedida y verificada (ficha C.1 sintética) para cada id, con fecha del
+ * acto antigua para cubrir los hechos sintéticos de la suite. Sin esto, el ledger no emite XP.
+ */
+export function grantA1(ids, { status = 'granted', actDay = '2000-01-01', verification = 'verified' } = {}) {
+    const env = { CHP_A2_REGISTRY: a2RegistryPath() };
+    const decisions = [...new Set(ids)].map((userId) => ({ subjectId: userId, kind: 'A1', status, actDay, version: '004@1.0', medium: 'admin_record',
+        capacity: 'legal_representative', verification, requestRef: `AUT-SINT-A1-${String(userId).replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 90)}` }));
+    if (decisions.length) appendDecisions(decisions, { env });
+    return env.CHP_A2_REGISTRY;
+}

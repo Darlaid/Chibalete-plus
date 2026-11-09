@@ -64,6 +64,13 @@ try {
     const L = await import(path.join(ROOT, 'server/gamification/ledger.mjs'));
     const SK = await import(path.join(ROOT, 'server/gamification/subjectKey.mjs'));
     await SK.loadSubjectKey({ path: P.key });
+    // V8.1-CLOSE-06A (G-01): sin A1 verificada no hay XP. Fichas C.1 sintéticas para los lectores de la siembra.
+    const A2R = await import(path.join(ROOT, 'server/privacy/a2Registry.mjs'));
+    process.env.CHP_A2_REGISTRY = path.join(tmp, 'a2', 'decisions.jsonl');
+    fs.mkdirSync(path.dirname(process.env.CHP_A2_REGISTRY), { recursive: true });
+    fs.writeFileSync(process.env.CHP_A2_REGISTRY, '');
+    A2R.appendDecisions(['lec-a', 'lec-b'].map((u) => ({ subjectId: u, kind: 'A1', status: 'granted', actDay: '2000-01-01', version: '004@1.0',
+        medium: 'paper', capacity: 'legal_representative', verification: 'verified', requestRef: `AUT-SINT-${u}` })));
     let writer = D.getGamificationDb({ env: ENV });
     L.createRuleSet(writer, { ruleVersion: 'a7a12-v3-xp-o1', createdBy: 'lab', rules: ACTA, now: SINCE, effectiveFrom: SINCE });
     const rec = (ev, user, work) => L.recordWorkRecognition(writer, { evidenceId: ev, userId: user, actorId: 'med-lab', at: Date.now(), workRef: work, decision: 'aprobado' }, { env: ENV });

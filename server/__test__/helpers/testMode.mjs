@@ -77,6 +77,12 @@ const subjectKeyUrl = new URL('./testSubjectKey.mjs', import.meta.url).href;
 if (!process.env.NODE_OPTIONS.includes('testSubjectKey')) process.env.NODE_OPTIONS += ` --import ${subjectKeyUrl}`;
 await import(subjectKeyUrl);
 
+// V8.1-CLOSE-06A (G-01): puerta A1 permisiva en las suites del motor que no tratan A1;
+// `CHP_TEST_A1=real` usa la real (suite G-01 y los servidores que lance con esa variable).
+const a1HookUrl = new URL('./testA1Hook.mjs', import.meta.url).href;
+if (!process.env.NODE_OPTIONS.includes('testA1Hook')) process.env.NODE_OPTIONS += ` --import ${a1HookUrl}`;
+await import(a1HookUrl);
+
 if (!process.env.REAL_STORE_GUARD_LOG) {
     const violations = tmpFor('real_store_violations.log');
     process.env.REAL_STORE_GUARD_LOG = violations;
