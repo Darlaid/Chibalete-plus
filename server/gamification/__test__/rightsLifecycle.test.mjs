@@ -96,7 +96,7 @@ try {
     ok('sin fecha del trámite ⇒ INVALID_ACT_DATE (no se fabrica)', codeOf(() => SUP.suppressAccount(writer, { userId: 'sup-1', requestRef: 'SOL-1', capacity: 'legal_representative' }, { env: ENV })) === 'INVALID_ACT_DATE');
     ok('calidad no admitida ⇒ INVALID_CAPACITY', codeOf(() => SUP.suppressAccount(writer, { userId: 'sup-1', requestRef: 'SOL-1', requestDay: TODAY, capacity: 'institution' }, { env: ENV })) === 'INVALID_CAPACITY');
     const ack = SUP.suppressAccount(writer, { userId: 'sup-1', requestRef: 'SOL-SINT-0001', requestDay: TODAY, capacity: 'legal_representative' }, { env: ENV });
-    ok('acuse: constancia, desvinculado, A1 y A2 retiradas, sin ids', ack.tombstoned && ack.unlinked && ack.decisionsRevoked.join() === 'A1,A2' && !JSON.stringify(ack).includes('sup-1'), JSON.stringify(ack));
+    ok('acuse: constancia, desvinculado, A1 y A2 retiradas, sin ids', ack.tombstoned && ack.unlinked && ack.decisionsRevoked.join() === 'T,A1,A2' && !JSON.stringify(ack).includes('sup-1'), JSON.stringify(ack));
     ok('el sujeto ya no existe y su XP no es atribuible', writer.prepare('SELECT COUNT(*) n FROM gm_subjects WHERE user_id = ?').get('sup-1').n === 0 && xp('sup-1') === 0);
     ok('constancia en el registro de exclusiones (independiente de respaldos)', X.readRegistry(ENV).has(X.tombstoneOf('sup-1')));
     ok('A1 y A2 revocadas en el registro de decisiones', R.decisionGate().status('A1', 'sup-1') === 'revoked' && R.decisionGate().status('A2', 'sup-1') === 'revoked');
@@ -104,7 +104,7 @@ try {
     const again = SUP.suppressAccount(writer, { userId: 'sup-1', requestRef: 'SOL-SINT-0001', requestDay: TODAY, capacity: 'legal_representative' }, { env: ENV });
     ok('repetir es idempotente: una sola constancia', again.tombstoned && fs.readFileSync(P.reg, 'utf8').trim().split('\n').length === 1);
     const noDb = SUP.suppressAccount(null, { userId: 'nogam-1', requestRef: 'SOL-SINT-0002', requestDay: TODAY, capacity: 'titular', mediator: true }, { env: ENV });
-    ok('sin base de gamificación: solo constancia y retiros (también C005 del mediador)', noDb.tombstoned && !noDb.unlinked && noDb.decisionsRevoked.join() === 'A1,A2,C005'
+    ok('sin base de gamificación: solo constancia y retiros (también C005 del mediador)', noDb.tombstoned && !noDb.unlinked && noDb.decisionsRevoked.join() === 'T,A1,A2,C005'
         && X.readRegistry(ENV).has(X.tombstoneOf('nogam-1')));
     ok('…la base existente exige reaplicar antes de ingerir (fallo cerrado)', codeOf(() => X.exclusionGate(writer, ENV)) === 'EXCLUSION_REPLAY_REQUIRED');
     const E = await import('../erasure.mjs');

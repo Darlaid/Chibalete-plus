@@ -123,12 +123,17 @@ try {
         && !(await readers(api)).includes('sup') && (await exportOf(api, 'sup')) === 403);
     const restrict = SUP.accountsToRestrictAfterRestore(J(P.users));
     ok('la conciliación identifica la cuenta que no puede volver', restrict.join() === 'sup', restrict.join());
+    // V8.1-CLOSE-09A: suprimida ⇒ se vuelve a ELIMINAR (no basta desactivarla).
+    const acts = SUP.restoreActions(J(P.users));
+    ok('…como cuenta a eliminar, no solo a desactivar', acts.toDelete.join() === 'sup' && acts.toDisable.length === 0, JSON.stringify(acts));
     const dis = await req(api, 'POST', '/api/users/sup/disable', 'adm');
     const rm = await SUP.reapplyMookSuppressionsAfterRestore({ mookPath: P.mook });
     const rs = await SUP.reapplySubmissionSuppressionsAfterRestore({ submissionsPath: P.subs });
     ok('AT la desactiva y se vuelven a suprimir MOOK y entregas', dis.status === 200 && J(P.users).find((u) => u.id === 'sup').accountStatus === 'disabled'
         && rm.participants === 1 && rm.evidenceRemoved === 1 && rs.submissionsRemoved === 1 && !mookHas('sup') && !subsHas('sup'), JSON.stringify({ dis: dis.status, rm, rs }));
-    ok('…y la lista queda vacía', SUP.accountsToRestrictAfterRestore(J(P.users)).length === 0);
+    ok('…desactivada sigue pendiente de eliminación', SUP.restoreActions(J(P.users)).toDelete.join() === 'sup');
+    const del2 = await req(api, 'DELETE', '/api/users/sup', 'adm');
+    ok('…eliminada otra vez, la lista queda vacía', del2.status === 200 && SUP.accountsToRestrictAfterRestore(J(P.users)).length === 0);
     ok('repetir la conciliación no cambia nada', (await SUP.reapplyMookSuppressionsAfterRestore({ mookPath: P.mook })).participants === 0);
     ok('los demás siguen visibles para su mediador', (await status(api, 'k1')) === 200);
 
