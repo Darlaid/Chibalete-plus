@@ -52,6 +52,8 @@ export function planActivationDecisions(user, acceptance, { today, ref, termsAcc
     if (!staff && a.dataNoticeVersion !== DOCS.dataNotice.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['A1'] };
     if (mediator && a.mediatorVersion !== DOCS.mediator.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['C005'] };
     if (!staff && !institutional && a.A2 !== undefined && a.A2 !== 'not_applicable') return { ok: false, code: 'A2_NOT_APPLICABLE', required: ['A2'] };
+    // V8.1-PROD-02B: A3 y A5 son opcionales; si llegan, solo «yes» o «no».
+    for (const k of ['A3', 'A5']) if (a[k] !== undefined && !OPT[k].includes(a[k])) return { ok: false, code: 'DECISIONS_REQUIRED', required: [k] };
     if (!staff && a.actingAs === 'legal_representative' && a.A0 === 'no') return { ok: false, code: 'A0_DENIED' };
     if (!staff && a.A1 === 'no') return { ok: false, code: 'A1_DENIED' };
 
@@ -64,6 +66,8 @@ export function planActivationDecisions(user, acceptance, { today, ref, termsAcc
     if (representative) decisions.push({ ...base, kind: 'A0', status: 'granted', version: DOCS.dataNotice.version, capacity, verification });
     if (!staff) decisions.push({ ...base, kind: 'A1', status: 'granted', version: DOCS.dataNotice.version, capacity, verification });
     if (institutional) decisions.push({ ...base, kind: 'A2', status: a.A2 === 'yes' ? 'granted' : 'denied', version: DOCS.dataNotice.version, capacity, verification });
+    // V8.1-PROD-02B: A3/A5 del lector solo si las decide; sin respuesta quedan pendientes (no se presumen).
+    if (!staff) for (const k of ['A3', 'A5']) if (a[k] !== undefined) decisions.push({ ...base, kind: k, status: a[k] === 'yes' ? 'granted' : 'denied', version: DOCS.dataNotice.version, capacity, verification });
     if (mediator) decisions.push({ ...base, kind: 'C005', status: 'granted', version: DOCS.mediator.version, capacity: 'mediator', verification: 'self_authenticated' });
     return { ok: true, decisions, profile: mediator ? 'mediator' : staff ? 'staff' : representative ? 'representative' : 'titular' };
 }
@@ -111,4 +115,18 @@ export function adminActivationAllowed(user, gate) {
     if (pureAdmin) return true;
     if (!gate) return false;
     return isMediatorAccount(user) ? gate.effective('C005', user.id) : gate.effective('A1', user.id);
+}
+
+/**
+ * V8.1-PROD-02B — tratamientos opcionales del 004 para una cuenta:
+ *  - `leo` (A3): Leo e IA;
+ *  - `voiceTranscription` (A5): transcripción automática de la voz en la oralidad.
+ * Mediadores y administración no deciden A3/A5 (no son lectores): `true`. Un lector necesita la
+ * decisión EFECTIVA (concedida y verificada, o del titular adulto autenticado); pendiente, negada,
+ * revocada o sin verificar ⇒ `false`. Lanza si el registro no es verificable (el llamador decide
+ * el fallo cerrado).
+ */
+export function optionalProcessingFor(user, gate) {
+    if (isMediatorAccount(user) || isAdminAccount(user)) return { leo: true, voiceTranscription: true };
+    return { leo: gate.effective('A3', user.id), voiceTranscription: gate.effective('A5', user.id) };
 }

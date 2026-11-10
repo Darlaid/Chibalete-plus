@@ -43,7 +43,7 @@ import {
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
 import { a2Gate, appendDecisions, dayOf as a2DayOf, decisionGate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
-import { acceptanceDocumentsStatus, adminActivationAllowed, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
+import { acceptanceDocumentsStatus, adminActivationAllowed, optionalProcessingFor, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -10164,7 +10164,18 @@ app.post('/api/admin/album-cache/gc', requireAdminAccess, async (req, res) => {
 });
 
 // --- LEO PEDAGOGICAL ENGINE (Fase 5 / D1) ---
-app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), async (req, res) => {
+// V8.1-PROD-02B — A3 (004 §6.1): Leo y el procesamiento con IA de un LECTOR exigen su A3 efectiva
+// (registro de decisiones; no se presume por A1, A2, la compra ni la matrícula). Pendiente, negada,
+// revocada o sin verificar ⇒ 403 sin llamar al proveedor ni guardar nada. Registro no verificable ⇒ 503.
+// Mediadores y administración no son lectores: sin cambios. Va DESPUÉS de las guardias existentes (B2C y
+// derechos editoriales), que conservan sus códigos, y ANTES del handler: sin A3 no se llama al proveedor.
+const requireLeoAuthorization = (req, res, next) => {
+    let p;
+    try { p = optionalProcessingFor(req.user, decisionGate()); } catch { return res.status(503).json({ error: 'leo_authorization_unavailable' }); }
+    if (!p.leo) return res.status(403).json({ error: 'leo_not_authorized', code: 'A3_REQUIRED' });
+    next();
+};
+app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), requireLeoAuthorization, async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'companion', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -10216,7 +10227,7 @@ const leoMemoryOwnerDenied = (req, res) => {
     return true;
 };
 
-app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), (req, res) => {
+app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), requireLeoAuthorization, (req, res) => {
     try {
         const { userId, contentId } = req.params;
         if (leoMemoryOwnerDenied(req, res)) return;
@@ -10243,7 +10254,7 @@ app.get('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGua
     }
 });
 
-app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), async (req, res) => {
+app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), requireLeoAuthorization, async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         if (leoMemoryOwnerDenied(req, res)) return;
@@ -10337,7 +10348,7 @@ app.post('/api/leo/ingest', requireAuth, upload.single('file'), async (req, res)
 });
 
 // --- LEO CHAT (Fase 6 / D1) ---
-app.post('/api/leo/chat', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), async (req, res) => {
+app.post('/api/leo/chat', requireUserAuth, b2cEntitlementGuard, rightsCapabilityGuard('ai_leo'), requireLeoAuthorization, async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'chatbot', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -10355,7 +10366,7 @@ app.post('/api/leo/chat', requireUserAuth, b2cEntitlementGuard, rightsCapability
 });
 
 // --- LEO RECAP (Fase 6 / D1) ---
-app.post('/api/leo/recap', requireUserAuth, b2cEntitlementGuard, async (req, res) => {
+app.post('/api/leo/recap', requireUserAuth, b2cEntitlementGuard, requireLeoAuthorization, async (req, res) => {
     try {
         const leoReq = normalizeRequest(req.body, 'recap', reqUserId(req));
         const result = await dispatchInteraction(leoReq);
@@ -12145,6 +12156,9 @@ app.get('/api/auth/me', requireUserAuth, (req, res) => {
         roles,
         colegio: u.colegio ?? null,
         accountStatus: u.accountStatus ?? 'active',
+        // V8.1-PROD-02B: tratamientos opcionales del 004 (A3 Leo, A5 transcripción de voz), decididos en
+        // el servidor. Registro no verificable ⇒ ambos false (fallo cerrado). Solo la cuenta propia.
+        optionalProcessing: (() => { try { return optionalProcessingFor(u, decisionGate()); } catch { return { leo: false, voiceTranscription: false }; } })(),
     });
 });
 

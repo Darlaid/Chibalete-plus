@@ -216,6 +216,12 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                 signal: abortControllerRef.current.signal
             });
             const data = await res.json();
+            // V8.1-PROD-02B — A3: sin autorización para Leo/IA, mensaje claro (no se llamó al proveedor).
+            if (res.status === 403 && data?.code === 'A3_REQUIRED') {
+                setAnswer('Leo no está habilitado para esta cuenta: requiere la autorización A3 (Leo / inteligencia artificial). Tu lectura no cambia.');
+                setMode('result');
+                return;
+            }
             if (data && data.success) {
                 setAnswer(data.answer);
                 // Track Leo interaction in analytics pipeline

@@ -61,6 +61,9 @@ const ActivarCuenta: React.FC = () => {
     const [a0, setA0]                   = useState<'' | 'yes' | 'no'>('');
     const [a1, setA1]                   = useState<'' | 'yes' | 'no'>('');
     const [a2, setA2]                   = useState<'' | 'yes' | 'no' | 'not_applicable'>('');
+    // V8.1-PROD-02B — A3 (Leo / IA) y A5 (transcripción de voz), opcionales: sin respuesta quedan pendientes.
+    const [a3, setA3]                   = useState<'' | 'yes' | 'no'>('');
+    const [a5, setA5]                   = useState<'' | 'yes' | 'no'>('');
     const [terms, setTerms]             = useState(false);
     const [mediatorCommitment, setMediatorCommitment] = useState(false);
     const [required, setRequired]       = useState<string[]>([]);
@@ -140,6 +143,8 @@ const ActivarCuenta: React.FC = () => {
                         ...(a0 ? { A0: a0 } : {}),
                         ...(a1 ? { A1: a1 } : {}),
                         ...(a2 ? { A2: a2 } : {}),
+                        ...(a3 ? { A3: a3 } : {}),
+                        ...(a5 ? { A5: a5 } : {}),
                         mediatorCommitment, mediatorVersion: DOCS.mediator.version,
                     },
                 }),
@@ -347,6 +352,18 @@ const ActivarCuenta: React.FC = () => {
                             <span className="text-sm text-gray-800 dark:text-gray-100">A2 · Seguimiento pedagógico por los mediadores asignados de mi colegio o club.</span>
                             <Choice name="A2" value={a2} onChange={setA2} options={[['yes', 'Sí, autorizo'], ['no', 'No autorizo'], ['not_applicable', 'No aplica (sin colegio ni club)']]} />
                             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Es independiente de A1: sin A2 sigues leyendo, pero tus mediadores no ven tu detalle individual.</p>
+                        </div>
+
+                        <div>
+                            <span className="text-sm text-gray-800 dark:text-gray-100">A3 · Leo, el asistente con inteligencia artificial (opcional).</span>
+                            <Choice name="A3" value={a3} onChange={setA3} options={[['yes', 'Sí, autorizo'], ['no', 'No autorizo']]} />
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Las preguntas a Leo y el contexto de la lectura se procesan con un proveedor de inteligencia artificial. Sin A3 no se usa Leo; la lectura no cambia. Si no respondes, queda pendiente.</p>
+                        </div>
+
+                        <div>
+                            <span className="text-sm text-gray-800 dark:text-gray-100">A5 · Transcripción automática de la lectura en voz alta (opcional).</span>
+                            <Choice name="A5" value={a5} onChange={setA5} options={[['yes', 'Sí, autorizo'], ['no', 'No autorizo']]} />
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Para medir la lectura en voz alta, el navegador envía la voz a su servicio de reconocimiento. Sin A5 no se usa el micrófono en esa actividad. Si no respondes, queda pendiente.</p>
                         </div>
 
                         {required.includes('C005') && (

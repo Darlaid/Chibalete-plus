@@ -37,7 +37,9 @@ import path from 'node:path';
 import { getSubjectKey, loadSubjectKey } from '../gamification/subjectKey.mjs';
 
 export const A2_STATUSES = Object.freeze(['granted', 'denied', 'revoked']);
-export const DECISION_KINDS = Object.freeze(['T', 'A0', 'A1', 'A2', 'C003', 'C005']);
+// V8.1-PROD-02B: A3 (Leo / IA) y A5 (transcripción de voz) del 004, independientes de A1/A2. A4 (LU) no tiene
+// tratamiento opcional propio en esta plataforma: queda comprendido en A1 (ver el documento de la unidad).
+export const DECISION_KINDS = Object.freeze(['T', 'A0', 'A1', 'A2', 'A3', 'A5', 'C003', 'C005']);
 // `checkout`: aceptación en la compra, recibida por la integración autenticada de la tienda (HMAC servidor a servidor).
 export const MEDIA = Object.freeze(['in_app', 'paper', 'electronic_signature', 'verifiable_message', 'admin_record', 'checkout']);
 export const CAPACITIES = Object.freeze(['titular', 'legal_representative', 'institution', 'mediator']);

@@ -19,6 +19,7 @@
  *   node server/__test__/leoMemoryOwnership.test.mjs
  */
 import './helpers/testMode.mjs';
+import { grantOptional } from './helpers/testA2.mjs';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import crypto from 'node:crypto';
@@ -46,6 +47,9 @@ const USERS = [
     { id: 'OTHER', email: 'other@fx.test', password: HASH, roles: ['lector'], organizationId: ORG, colegio: 'Colegio FX', accountStatus: 'active', groupIds: ['G1'] },
 ];
 const GROUPS = [{ id: 'G1', name: 'Grado FX', type: 'course', organizationId: ORG, school: 'Colegio FX', memberIds: ['OWN', 'OTHER'], studentIds: ['OWN', 'OTHER'], mediatorIds: ['MED'] }];
+
+// V8.1-PROD-02B: Leo exige A3 efectiva del lector (registro sintético heredado por los servidores).
+grantOptional('A3', ['OWN', 'OTHER']);
 
 function makeStores(tag) {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `chp_leomem_${tag}_`));

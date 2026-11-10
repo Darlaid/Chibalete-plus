@@ -25,4 +25,7 @@ export const DECISION_OPTIONS = Object.freeze({
     A0: Object.freeze(['yes', 'no']),
     A1: Object.freeze(['yes', 'no']),
     A2: Object.freeze(['yes', 'no', 'not_applicable']),
+    // V8.1-PROD-02B — opcionales: sin respuesta quedan pendientes (no se presumen por A1, A2 ni la compra).
+    A3: Object.freeze(['yes', 'no']),   // Leo / inteligencia artificial
+    A5: Object.freeze(['yes', 'no']),   // transcripción automática de la voz (oralidad)
 });

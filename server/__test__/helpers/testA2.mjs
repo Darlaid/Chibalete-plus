@@ -68,3 +68,16 @@ export function grantC005(ids, { status = 'granted', validUntil = null } = {}) {
     if (decisions.length) appendDecisions(decisions, { env });
     return env.CHP_A2_REGISTRY;
 }
+
+/**
+ * V8.1-PROD-02B: decisión opcional del 004 (A3 Leo/IA, A5 transcripción de voz) concedida y verificada
+ * (ficha C.1 sintética) para cada id, o con el estado indicado. Sin esto, Leo responde 403 A3_REQUIRED.
+ */
+export function grantOptional(kind, ids, { status = 'granted', actDay = '2000-01-01', verification = 'verified' } = {}) {
+    if (!['A3', 'A5'].includes(kind)) throw new Error(`grantOptional: tipo no admitido ${kind}`);
+    const env = { CHP_A2_REGISTRY: a2RegistryPath() };
+    const decisions = [...new Set(ids)].map((userId) => ({ subjectId: userId, kind, status, actDay, version: '004@1.0', medium: 'admin_record',
+        capacity: 'legal_representative', verification, requestRef: `AUT-SINT-${kind}-${String(userId).replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 90)}` }));
+    if (decisions.length) appendDecisions(decisions, { env });
+    return env.CHP_A2_REGISTRY;
+}

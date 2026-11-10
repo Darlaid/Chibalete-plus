@@ -50,6 +50,18 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
     // Phase 8: duration tracking + history
     const [history, setHistory] = useState<OralityAttempt[]>([]);
     const recordingStartMs = useRef<number>(0);
+    // V8.1-PROD-02B — A5 (004 §6.3): la transcripción usa el reconocimiento de voz del navegador, que
+    // envía la voz a su servicio. Solo con la A5 efectiva del lector (decidida en el servidor, /api/auth/me).
+    // Sin A5, o si no se puede comprobar, no se abre el micrófono ni la transcripción.
+    const [voiceAllowed, setVoiceAllowed] = useState<boolean | null>(null);
+    useEffect(() => {
+        let alive = true;
+        fetch('/api/auth/me', { credentials: 'same-origin', cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((me) => { if (alive) setVoiceAllowed(me?.optionalProcessing?.voiceTranscription === true); })
+            .catch(() => { if (alive) setVoiceAllowed(false); });
+        return () => { alive = false; };
+    }, []);
 
     const streamRef = useRef<MediaStream | null>(null);
     const recorderRef = useRef<MediaRecorder | null>(null);
@@ -132,6 +144,10 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
 
     const startRecording = async () => {
         if (!isMountedRef.current) return;
+        if (voiceAllowed !== true) {
+            setError('La lectura en voz alta con transcripción automática requiere la autorización A5 de tu cuenta. Puedes seguir leyendo en voz alta sin grabar.');
+            return;
+        }
         setError(null);
         setTranscript('');
         setScore(null);
