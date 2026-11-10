@@ -33,6 +33,8 @@ import * as learnings from '../services/institutionalLearning.mjs';
 import * as patterns from '../services/predictivePatterns.mjs';
 import * as cohorts from '../services/cohortBuilder.mjs';
 import * as reader from '../services/insightReader.mjs';
+// V8.1-PROD-01 (DIR-V81-05): agregados de cohorte solo con ≥ 5 lectores y sin inferencias por diferencia.
+import { cohortDisclosure, suppressedAggregate, MIN_COHORT_READERS } from '../analytics/cohortDisclosure.mjs';
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
 import { evaluateScopeAccess } from './scopeAccess.mjs';
@@ -61,6 +63,9 @@ function parseLimit(q) {
     return Math.min(MAX_LIMIT, Math.max(1, Math.floor(n)));
 }
 
+/** DIR-V81-05: el administrador de plataforma no tiene umbral; el resto, ≥ 5 lectores sin diferencias. */
+const cohortGate = (req, scopeType, scopeId) => (req.aulaVivaPlatformAdmin ? { allowed: true } : cohortDisclosure(scopeType, scopeId));
+
 function requireScope(req, res, scope_type, scope_id) {
     // CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A: el principal es la identidad que
     // requireUserAuth ya estableció (sesión firmada → req.auth / req.user); el header
@@ -68,7 +73,7 @@ function requireScope(req, res, scope_type, scope_id) {
     // Misma precedencia que scopeAccess.requireScopeAccess y que reqUserId en server.js.
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     const d = evaluateScopeAccess(callerId, scope_type, scope_id);
-    if (d.decision === 'allow') return true;
+    if (d.decision === 'allow') { req.aulaVivaPlatformAdmin = String(d.via ?? '').startsWith('policy:platform_admin'); return true; }
     if (d.decision === 'unavailable') {
         // IDENTITY_UNAVAILABLE jamás se presenta como 403 (CHP-ADR-01 §I-2).
         res.status(503).json({ ok: false, error: 'identity_unavailable', cause: d.cause });
@@ -126,6 +131,8 @@ export function createInstitutionalRouter({ requireUserAuth }) {
         if (!requireScope(req, res, req.params.type, req.params.id)) return;
         try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
         const limit = parseLimit(req.query.limit);
+        const gate = cohortGate(req, req.params.type, req.params.id);
+        if (!gate.allowed) return res.json(suppressedAggregate({ scope: { type: req.params.type, id: req.params.id }, total_outcomes: 0, distribution: {}, outcomes: [] }, gate.reason));
         instrument('institutional.outcomes_scope', () => {
             safeJson(res, () => impact.getImpactSummary(req.params.type, req.params.id, { limit }),
                      { scope: { type: req.params.type, id: req.params.id },
@@ -201,12 +208,16 @@ export function createInstitutionalRouter({ requireUserAuth }) {
                 return res.status(404).json({ ok: false, error: 'cohort_not_found' });
             }
             if (!requireScope(req, res, cohort.scope_type, cohort.scope_id)) return;
+            const gate = cohortGate(req, cohort.scope_type, cohort.scope_id);
+            if (!gate.allowed) return res.json(suppressedAggregate({ cohort_id: req.params.cohort_id, period: String(req.query.period || '28d'), series: [] }, gate.reason));
             try { trajectoryViewsTotal.labels('cohort').inc(); } catch {}
             const period = String(req.query.period || '28d');
             const limit = parseLimit(req.query.limit);
             instrument('institutional.cohort_trajectory', () => {
                 const rows = stmts.listTrajectoryByCohort.all(req.params.cohort_id, period, limit);
-                const series = rows.map(r => ({
+                // DIR-V81-05: en cohortes tipadas (sin grupo), cada punto exige ≥ 5 miembros.
+                const visibleRows = req.aulaVivaPlatformAdmin ? rows : rows.filter(r => Number(r.sample_size) >= MIN_COHORT_READERS);
+                const series = visibleRows.map(r => ({
                     period_start: r.period_start, period_end: r.period_end,
                     metrics: safeJsonParse(r.metrics_json),
                     trend:   safeJsonParse(r.trend_json),
@@ -223,6 +234,7 @@ export function createInstitutionalRouter({ requireUserAuth }) {
     // ── INSTITUTIONAL LEARNINGS ──────────────────────────────────────────
     router.get('/institutional/learnings/scope/:type/:id', requireUserAuth, (req, res) => {
         if (!requireScope(req, res, req.params.type, req.params.id)) return;
+        if (!cohortGate(req, req.params.type, req.params.id).allowed) return res.json([]); // misma forma, sin pistas
         try { learningViewsTotal.labels('by_scope').inc(); } catch {}
         instrument('institutional.learnings_scope', () => {
             safeJson(res, () => {

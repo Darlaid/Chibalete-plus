@@ -35,6 +35,9 @@
  */
 import express from 'express';
 import * as reader from '../services/insightReader.mjs';
+// V8.1-PROD-01 (DIR-V81-05): agregados de cohorte solo con ≥ 5 lectores y sin inferencias por diferencia.
+import { cohortDisclosure, suppressedAggregate } from '../analytics/cohortDisclosure.mjs';
+const cohortGate = (req, scopeType, scopeId) => (req.aulaVivaRole === 'admin' ? { allowed: true } : cohortDisclosure(scopeType, scopeId));
 import * as intervention from '../services/interventionEngine.mjs';
 import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
@@ -325,6 +328,7 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     router.get('/recommendations/scope/:type/:id', requireUserAuth, requireOperationalRole, (req, res) => {
         if (!requireTenantScope(req.params.type, req.params.id, req, res)) return;
+        if (!cohortGate(req, req.params.type, req.params.id).allowed) return res.json([]); // misma forma, sin pistas
         safeJson(res, () => reader.getRecommendations(req.params.type, req.params.id,
             { includeAcknowledged: req.query.includeAcknowledged === '1',
               limit: Math.min(200, Number(req.query.limit) || 50) }), []);
@@ -450,6 +454,8 @@ export function createOperationalRouter({ requireUserAuth }) {
                     scopeId:   req.params.scope_id,
                 });
             } catch { /* nunca bloquea */ }
+            const gate = cohortGate(req, req.params.scope_type, req.params.scope_id);
+            if (!gate.allowed) return res.json(suppressedAggregate({ scope: { type: req.params.scope_type, id: req.params.scope_id }, period: req.query.period || '28d', metrics: [], global_baseline: [] }, gate.reason));
             safeJson(res, () => reader.getCohortComparison(
                 req.params.scope_type, req.params.scope_id,
                 { period: req.query.period || '28d',
@@ -461,6 +467,8 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     router.get('/cohorts/:scope_type/:scope_id/rollups', requireUserAuth, requireOperationalRole, (req, res) => {
         if (!requireTenantScope(req.params.scope_type, req.params.scope_id, req, res)) return;
+        const gate = cohortGate(req, req.params.scope_type, req.params.scope_id);
+        if (!gate.allowed) return res.json(suppressedAggregate({ daily: [], weekly: [], monthly: [] }, gate.reason));
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
         safeJson(res, () => ({
             daily:   reader.getDailyRollups(req.params.scope_type, req.params.scope_id, sinceTs),

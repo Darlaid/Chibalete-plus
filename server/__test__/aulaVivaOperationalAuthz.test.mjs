@@ -43,12 +43,14 @@ const USERS = [
     { id: 'med-a', role: 'mediador', organizationId: 'org-a' },
     { id: 'med-b', role: 'mediador', organizationId: 'org-b' },
     { id: 'lec-a', role: 'lector',   organizationId: 'org-a' },
+    // V8.1-PROD-01 (DIR-V81-05): la cohorte propia necesita ≥ 5 lectores para que se muestre su agregado.
+    ...['2', '3', '4', '5'].map((n) => ({ id: `lec-a${n}`, role: 'lector', organizationId: 'org-a' })),
     { id: 'lec-b', role: 'lector',   organizationId: 'org-b' },
 ];
 const USERS_JSON = JSON.stringify(USERS);
 fs.writeFileSync(process.env.USERS_DB, USERS_JSON);
 fs.writeFileSync(process.env.GROUPS_DB, JSON.stringify([
-    { id: 'g-a', type: 'course', organizationId: 'org-a', mediatorIds: ['med-a'], memberIds: ['lec-a'] },
+    { id: 'g-a', type: 'course', organizationId: 'org-a', mediatorIds: ['med-a'], memberIds: ['lec-a', 'lec-a2', 'lec-a3', 'lec-a4', 'lec-a5'] },
     { id: 'g-b', type: 'course', organizationId: 'org-b', mediatorIds: ['med-b'], memberIds: ['lec-b'] },
 ]));
 fs.writeFileSync(process.env.SCHOOLS_DB, JSON.stringify([{ id: 'org-a', name: 'Alfa' }, { id: 'org-b', name: 'Beta' }]));
