@@ -812,3 +812,54 @@ export function computeRouteView(doc, run, contentList) {
         status: run.status, progress, modules, nodes,
     };
 }
+
+// ─── V8.1-CLOSE-08A (G-08) — supresión de un participante ────────────────────
+/** Seudónimo del revisor suprimido en las producciones de OTROS participantes. */
+export const SUPPRESSED_REVIEWER = 'suppressed-reviewer';
+
+/**
+ * Trata en el documento MOOK una solicitud de supresión ya verificada. Pura: muta
+ * `doc` y devuelve recuentos, sin ids.
+ *  - Eliminación: recorridos y producciones del participante (D4), con su historial.
+ *  - Conservación justificada: solo las producciones listadas en `hold.evidenceIds`
+ *    (orden escrita de Dirección, 006 P08): quedan con `legalHold: { ref, until }`.
+ *    Se conserva también su recorrido. Al vencer, se vuelve a ejecutar sin `hold`.
+ *  - Si era revisor, su id se sustituye por un seudónimo en las producciones ajenas:
+ *    la revisión de los demás se conserva sin identificar a quien revisó.
+ * Las constancias contra reactivaciones viven fuera (registros de exclusión y decisiones).
+ * @param {{ evidenceIds?: string[], ref?: string, until?: string }|null} hold
+ */
+export function suppressParticipant(doc, userId, { hold = null } = {}) {
+    if (typeof userId !== 'string' || !userId) throw err('INVALID_ACTOR', 'participante requerido');
+    const held = new Set(hold?.evidenceIds ?? []);
+    if (held.size && !(typeof hold.ref === 'string' && hold.ref && /^\d{4}-\d{2}-\d{2}$/.test(hold.until ?? ''))) {
+        throw err('INVALID_HOLD', 'la conservación exige referencia de la orden y fecha de fin');
+    }
+    const mine = (e) => e?.userId === userId;
+    const keptEvidence = doc.evidence.filter((e) => mine(e) && held.has(e.id));
+    for (const e of keptEvidence) e.legalHold = { ref: hold.ref, until: hold.until };
+    const keptRuns = new Set(keptEvidence.map((e) => e.runId));
+    const evidenceBefore = doc.evidence.length, runsBefore = doc.runs.length;
+    doc.evidence = doc.evidence.filter((e) => !mine(e) || held.has(e.id));
+    doc.runs = doc.runs.filter((r) => r?.userId !== userId || keptRuns.has(r.id));
+    let reviewerRefs = 0;
+    for (const e of doc.evidence) {
+        if (mine(e)) continue;
+        if (e.review?.reviewerId === userId) { e.review.reviewerId = SUPPRESSED_REVIEWER; reviewerRefs++; }
+        for (const h of e.history ?? []) if (h?.reviewerId === userId) { h.reviewerId = SUPPRESSED_REVIEWER; reviewerRefs++; }
+    }
+    return { evidenceRemoved: evidenceBefore - doc.evidence.length, runsRemoved: runsBefore - doc.runs.length,
+        evidenceHeld: keptEvidence.length, reviewerRefsPseudonymized: reviewerRefs };
+}
+
+/** Participantes y revisores presentes en el documento (para conciliar tras una restauración). */
+export function participantIds(doc) {
+    const ids = new Set();
+    for (const r of doc.runs ?? []) if (r?.userId) ids.add(r.userId);
+    for (const e of doc.evidence ?? []) {
+        if (e?.userId) ids.add(e.userId);
+        if (e?.review?.reviewerId && e.review.reviewerId !== SUPPRESSED_REVIEWER) ids.add(e.review.reviewerId);
+        for (const h of e?.history ?? []) if (h?.reviewerId && h.reviewerId !== SUPPRESSED_REVIEWER) ids.add(h.reviewerId);
+    }
+    return [...ids];
+}

@@ -22,6 +22,10 @@ import crypto from 'node:crypto';
 import { appendDecisions, decisionGate, dayOf } from './a2Registry.mjs';
 import { appendRegistry, readRegistry, tombstoneOf } from '../gamification/exclusions.mjs';
 import { excludeUser } from '../gamification/erasure.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { withFileLock } from '../usersLock.js';
+import { normalizeMookStore, participantIds, suppressParticipant } from '../lib/experienceStore.js';
 
 const REF_RX = /^[A-Za-z0-9._:-]{1,128}$/;
 const DAY_RX = /^\d{4}-\d{2}-\d{2}$/;
@@ -71,4 +75,84 @@ export function accountsToRestrictAfterRestore(users, { env = process.env, now =
         .filter((u) => u?.id && (u.accountStatus ?? 'active') !== 'disabled')
         .filter((u) => excluded.has(tombstoneOf(u.id)) || gate.status('A1', u.id) === 'revoked')
         .map((u) => u.id);
+}
+
+// ─── V8.1-CLOSE-08A (G-08) — fuentes MOOK ────────────────────────────────────
+
+/** Lectura-modificación-escritura de `mook_db.json` con el MISMO lock y escritura atómica que `mutateMook`. */
+async function mutateMookFile(mookPath, fn) {
+    return withFileLock(mookPath, () => {
+        const doc = normalizeMookStore(JSON.parse(fs.readFileSync(mookPath, 'utf8')));
+        const out = fn(doc);
+        const tmp = path.join(path.dirname(mookPath), `.${path.basename(mookPath)}.${process.pid}.${Date.now()}.tmp`);
+        fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+        fs.renameSync(tmp, mookPath);
+        return out;
+    }, 'mookLock');
+}
+
+/**
+ * Paso MOOK de una supresión verificada (después de `suppressAccount`): elimina los
+ * recorridos y producciones de la persona, conserva solo lo que una orden escrita
+ * de Dirección retiene (`hold`) y seudonimiza su id de revisor en lo ajeno.
+ * @returns acuse sin ids
+ */
+export async function suppressMookParticipant({ mookPath, userId, requestRef, hold = null }) {
+    if (typeof requestRef !== 'string' || !REF_RX.test(requestRef)) throw bad('INVALID_REQUEST_REF');
+    if (hold && hold.ref !== undefined && !REF_RX.test(hold.ref)) throw bad('INVALID_HOLD');
+    return mutateMookFile(mookPath, (doc) => suppressParticipant(doc, userId, { hold }));
+}
+
+/**
+ * Tras restaurar `mook_db.json` desde un respaldo: vuelve a aplicar la supresión a
+ * toda persona con constancia en el registro de exclusiones. `holds` (de G.1) mantiene
+ * las conservaciones vigentes: `{ [userId]: { evidenceIds, ref, until } }`.
+ * Registro no verificable ⇒ error y nada se escribe.
+ * @returns acuse: personas tratadas y recuentos agregados, sin ids
+ */
+export async function reapplyMookSuppressionsAfterRestore({ mookPath, holds = {} }, { env = process.env } = {}) {
+    const excluded = readRegistry(env); // antes de tocar nada
+    return mutateMookFile(mookPath, (doc) => {
+        const targets = participantIds(doc).filter((id) => excluded.has(tombstoneOf(id)));
+        const total = { participants: targets.length, evidenceRemoved: 0, runsRemoved: 0, evidenceHeld: 0, reviewerRefsPseudonymized: 0 };
+        for (const id of targets) {
+            const r = suppressParticipant(doc, id, { hold: holds[id] ?? null });
+            for (const k of Object.keys(r)) total[k] += r[k];
+        }
+        return total;
+    });
+}
+
+// ─── V8.1-CLOSE-08A (G-08) — entregas de tareas (`submissions_db.json`, D4) ───
+async function mutateSubmissionsFile(submissionsPath, fn) {
+    return withFileLock(submissionsPath, () => {
+        let rows = [];
+        try { rows = JSON.parse(fs.readFileSync(submissionsPath, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        const out = fn(Array.isArray(rows) ? rows : []);
+        if (out.changed) {
+            const tmp = path.join(path.dirname(submissionsPath), `.${path.basename(submissionsPath)}.${process.pid}.${Date.now()}.tmp`);
+            fs.writeFileSync(tmp, JSON.stringify(out.rows, null, 2));
+            fs.renameSync(tmp, submissionsPath);
+        }
+        return out.ack;
+    }, 'submissionsLock');
+}
+
+/** Elimina las entregas de tareas de la persona (mismo lock que `mutateSubmissions`). Acuse sin ids. */
+export async function suppressSubmissions({ submissionsPath, userId, requestRef }) {
+    if (typeof requestRef !== 'string' || !REF_RX.test(requestRef)) throw bad('INVALID_REQUEST_REF');
+    if (typeof userId !== 'string' || !userId) throw bad('INVALID_USER');
+    return mutateSubmissionsFile(submissionsPath, (rows) => {
+        const kept = rows.filter((s) => s?.studentId !== userId);
+        return { changed: kept.length !== rows.length, rows: kept, ack: { submissionsRemoved: rows.length - kept.length } };
+    });
+}
+
+/** Tras restaurar `submissions_db.json`: vuelve a eliminar las de toda persona con constancia de exclusión. */
+export async function reapplySubmissionSuppressionsAfterRestore({ submissionsPath }, { env = process.env } = {}) {
+    const excluded = readRegistry(env);
+    return mutateSubmissionsFile(submissionsPath, (rows) => {
+        const kept = rows.filter((s) => !(s?.studentId && excluded.has(tombstoneOf(s.studentId))));
+        return { changed: kept.length !== rows.length, rows: kept, ack: { submissionsRemoved: rows.length - kept.length } };
+    });
 }
