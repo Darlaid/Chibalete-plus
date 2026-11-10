@@ -8,6 +8,9 @@
 // Modo conciliación tras restaurar respaldos (en CUARENTENA, nunca sobre los stores vivos): {"reconcileAfterRestore":true,"holds":{…}}.
 //   Devuelve `accountsToDelete` (suprimidas: DELETE) y `accountsToDisable` (A1 revocada: /disable), solo en la terminal, y recuentos.
 //   Repetir tras ejecutar esas acciones: la puerta de promoción exige listas vacías y `changes` = 0 en todo.
+// Modo compactación (V8.1-CLOSE-09B), APARTE y nunca por defecto: {"compact":true}. Elimina de los archivos SQLite las copias
+//   antiguas que dejan las réplicas en páginas libres (VACUUM con preflight de espacio, quick_check y recuentos; si una
+//   réplica ocupa la base ⇒ "busy" sin cambios). En la cuarentena antes de promover, o en una ventana controlada.
 // Salida: acuses agregados, sin contenidos; los ids solo en el modo conciliación.
 const S = await import('/app/server/privacy/suppression.mjs');
 const { loadA2Key } = await import('/app/server/privacy/a2Registry.mjs');
@@ -21,6 +24,12 @@ try {
     await loadA2Key();
     const mookPath = `${DATA}/mook_db.json`, submissionsPath = `${DATA}/submissions_db.json`;
     const paths = S.residualPaths(process.env);
+    if (req.compact) {
+        const r = S.compactAfterSuppression(paths);
+        const ok = Object.values(r).every((x) => !x || ['compacted', 'checkpointed'].includes(x.status));
+        console.log(JSON.stringify({ ok, compaction: r }));
+        process.exit(ok ? 0 : 1);
+    }
     const users = JSON.parse(fs.readFileSync(process.env.USERS_DB, 'utf8'));
     if (req.reconcileAfterRestore) {
         const { toDelete, toDisable } = S.restoreActions(users);

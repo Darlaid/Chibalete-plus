@@ -37,6 +37,8 @@
  */
 
 import fs from 'fs';
+import { withFileLockSync } from './usersLock.js';
+import { leoSubjectWritable } from './leoMemoryService.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -388,17 +390,21 @@ function _projectEvidenceEntry(entry) {
  */
 export function persistLeoEvidence(entry) {
     try {
-        const db = _loadEvidenceDb();
-        // Solo la entrada NUEVA se proyecta; las entradas históricas del array se
-        // reescriben tal cual (esta unidad no purga ni altera lo ya almacenado).
-        db.entries.push(_projectEvidenceEntry(entry));
+        // V8.1-CLOSE-09B: mismo lock que el operador de supresión; solo si la persona sigue en el padrón.
+        withFileLockSync(_EVIDENCE_DB, () => {
+            if (entry?.userId && !leoSubjectWritable(entry.userId)) return;
+            const db = _loadEvidenceDb();
+            // Solo la entrada NUEVA se proyecta; las entradas históricas del array se
+            // reescriben tal cual (esta unidad no purga ni altera lo ya almacenado).
+            db.entries.push(_projectEvidenceEntry(entry));
 
-        if (db.entries.length > _MAX_ENTRIES) {
-            db.entries = db.entries.slice(db.entries.length - _TRIM_TO);
-            _log(`Evidence DB trimmed to ${_TRIM_TO} entries`);
-        }
+            if (db.entries.length > _MAX_ENTRIES) {
+                db.entries = db.entries.slice(db.entries.length - _TRIM_TO);
+                _log(`Evidence DB trimmed to ${_TRIM_TO} entries`);
+            }
 
-        _writeEvidenceDb(db);
+            _writeEvidenceDb(db);
+        }, 'leoEvidenceLock');
     } catch (e) {
         _log(`persistLeoEvidence failed: ${e.message}`, 'ERROR');
     }

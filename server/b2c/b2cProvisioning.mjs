@@ -154,6 +154,11 @@ export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, norm
         ? users.find(u => u && u.id === existingRule.scopeId)
         : users.find(u => u && normalizeEmail(u.email) === email);
 
+    // V8.1-CLOSE-09B — reenvío firmado de un pedido cuya cuenta ya no existe (supresión: la regla
+    // se conserva sin titular con `b2c.suppressedAt`; o baja): NUNCA se recrea ni se invita. Mismo
+    // código que una cuenta no disponible, sin revelar nada del titular. Un pedido nuevo tiene otra
+    // regla (id por pedido) y sigue el flujo normal.
+    if (existingRule && (existingRule.b2c?.suppressedAt || !user)) throw new B2cError(409, 'account_not_available');
     if (!existingRule && user && rules.some(r => r && r.id !== ruleId && isActiveB2cRuleFor(r, user.id, nowMs))) {
         throw new B2cError(409, 'conflict_active_subscription');
     }

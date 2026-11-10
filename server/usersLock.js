@@ -70,6 +70,37 @@ export async function withFileLock(dbFile, fn, label = 'fileLock') {
 }
 
 /**
+ * withFileLockSync(dbFile, fn, label?) — V8.1-CLOSE-09B. El MISMO lock (mismo archivo
+ * `<db>.lock`, O_EXCL, caducidad y timeout) para escritores síncronos (Leo). Espera sin
+ * ocupar CPU con Atomics.wait. fn() debe releer el archivo dentro.
+ */
+const _waitCell = new Int32Array(new SharedArrayBuffer(4));
+export function withFileLockSync(dbFile, fn, label = 'fileLock') {
+    const lp = lockPath(dbFile);
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    let acquired = false;
+    while (Date.now() < deadline) {
+        try {
+            const fd = fs.openSync(lp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+            fs.writeSync(fd, String(process.pid));
+            fs.closeSync(fd);
+            acquired = true;
+            break;
+        } catch (err) {
+            // Windows: un .lock en borrado pendiente responde EPERM/EACCES en lugar de EEXIST ⇒ reintentar.
+            if (!['EEXIST', 'EPERM', 'EACCES'].includes(err.code)) throw err;
+            try {
+                const st = fs.statSync(lp);
+                if (Date.now() - st.mtimeMs > LOCK_STALE_MS) { console.warn(`[${label}] removing stale lock path=${lp}`); fs.unlinkSync(lp); continue; }
+            } catch (_) {}
+            Atomics.wait(_waitCell, 0, 0, LOCK_RETRY_MS);
+        }
+    }
+    if (!acquired) throw Object.assign(new Error(`[${label}] lock timeout (${LOCK_TIMEOUT_MS}ms) pid=${process.pid}`), { code: 'ELOCKTIMEOUT' });
+    try { return fn(); } finally { releaseLock(lp); }
+}
+
+/**
  * withUsersLock(dbFile, fn) — Named alias kept for backward compat.
  */
 export async function withUsersLock(dbFile, fn) {

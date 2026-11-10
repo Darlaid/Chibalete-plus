@@ -88,6 +88,7 @@ import { ZipArchive } from 'archiver';
 import { buildHealthPayload, getHealthDefaults, runtimeInstanceId } from './healthHandler.js';
 import { ingestPedagogicalFile } from './leoIngester.js';
 import { normalizeRequest, dispatchInteraction } from './leoOrchestrator.js';
+import { setLeoSubjectGuard, leoSubjectWritable } from './leoMemoryService.js';
 import { getMediatorStudentSummary, getMediatorContentHistory } from './leoMediatorViewService.js';
 import { getActivationOutputsForUser } from './leoActivationService.js';
 import {
@@ -1345,6 +1346,20 @@ async function mutateAccessRules(fn) {
         return fn(Array.isArray(data) ? data : []);
     }, 'accessLock');
 }
+// V8.1-CLOSE-09B — control de escrituras de Leo: solo para una cuenta que sigue en el padrón (la
+// supresión exige la baja antes; una petición en curso no reintroduce a la persona). Lectura del
+// archivo canónico con caché por mtime/tamaño, nunca la caché JSON de 30 s (otra réplica pudo borrar).
+let _rosterIds = { key: null, ids: new Set() };
+function isAccountInRoster(userId) {
+    const st = fs.statSync(USERS_DB);
+    const key = `${st.mtimeMs}:${st.size}:${st.ino}`;
+    if (_rosterIds.key !== key) {
+        const raw = JSON.parse(fs.readFileSync(USERS_DB, 'utf8'));
+        _rosterIds = { key, ids: new Set((Array.isArray(raw) ? raw : []).map(u => u?.id).filter(Boolean)) };
+    }
+    return _rosterIds.ids.has(String(userId));
+}
+setLeoSubjectGuard(isAccountInRoster);
 async function mutateLeoMemory(fn) {
     return withFileLock(LEO_MEMORY_DB, () => {
         _jsonCache.delete(LEO_MEMORY_DB);
@@ -10164,6 +10179,8 @@ app.post('/api/leo/ask', requireUserAuth, b2cEntitlementGuard, rightsCapabilityG
                 const surface = req.body?.surface ?? 'reader';
                 const entry = { userId, contentId, timestamp: Date.now(), interactionType, surface };
                 await withFileLock(LEO_INTERACTIONS_DB, () => {
+                    if (!leoSubjectWritable(userId)) return; // V8.1-CLOSE-09B
+                    _jsonCache.delete(LEO_INTERACTIONS_DB); // V8.1-CLOSE-09B: sin caché dentro del lock (otra réplica pudo suprimir)
                     const existing = readJSON(LEO_INTERACTIONS_DB) || [];
                     const updated = [...existing, entry];
                     const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
@@ -10235,6 +10252,7 @@ app.post('/api/leo/memory/:userId/:contentId', requireUserAuth, b2cEntitlementGu
 
         let newMemory = null;
         await mutateLeoMemory((raw) => {
+            if (!leoSubjectWritable(userId)) return; // V8.1-CLOSE-09B
             const db = ensureLeoMemoryDbShape(raw);
             const existing = db.memoryMap[key] || {
                 recentAnchors: [],

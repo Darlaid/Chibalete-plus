@@ -23,6 +23,7 @@ import { appendDecisions, decisionGate, dayOf } from './a2Registry.mjs';
 import { appendRegistry, readRegistry, tombstoneOf } from '../gamification/exclusions.mjs';
 import { excludeUser } from '../gamification/erasure.mjs';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { withFileLock } from '../usersLock.js';
@@ -225,19 +226,14 @@ const openSqlite = (file) => {
     if (!file || !fs.existsSync(file)) return null;
     const db = new Database(file, { fileMustExist: true });
     db.pragma('busy_timeout = 10000');
-    // Lo borrado o reescrito se sobrescribe con ceros (no queda en páginas libres) y el WAL se
-    // trunca al cerrar si ninguna réplica retiene una lectura; si no, se vacía en su próximo checkpoint.
+    // Lo que borra o reescribe ESTA conexión se sobrescribe con ceros (no queda en páginas libres).
     db.pragma('secure_delete = ON');
     return db;
 };
-/**
- * Copias antiguas en páginas libres: las conexiones del servidor no usan secure_delete y cada
- * reescritura (upsert de progreso, espejo de identidad) deja la versión anterior de la fila en
- * espacio libre. Tras un cambio efectivo se compacta la base (VACUUM). Si una réplica la tiene
- * ocupada, `vacuumed: false` y el procedimiento repite la pasada.
- */
-const vacuum = (db) => { try { db.exec('VACUUM'); return true; } catch { return false; } };
-const closeScrub = (db) => { try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* lector activo: lo completa el checkpoint siguiente */ } db.close(); };
+// V8.1-CLOSE-09B: la supresión lógica NUNCA bloquea a las réplicas: checkpoint PASSIVE al cerrar.
+// Las copias antiguas que dejaron las conexiones del servidor (sin secure_delete) en páginas
+// libres se eliminan con `compactAfterSuppression`, una operación aparte y controlada.
+const closeScrub = (db) => { try { db.pragma('wal_checkpoint(PASSIVE)'); } catch { /* sin efecto */ } db.close(); };
 const hasTable = (db, t) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t);
 const columnsOf = (db, t) => new Set(db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name));
 const swapId = (v, userId) => (v === userId ? SUPPRESSED_SUBJECT : Array.isArray(v) ? v.map((x) => (x === userId ? SUPPRESSED_SUBJECT : x)) : v);
@@ -257,6 +253,7 @@ export function residualPaths(env = process.env, appRoot = '/app') {
         audit: env.USER_AUDIT_DB || path.join(data, 'user_audit_log.json'),
         access: env.ACCESS_DB || path.join(data, 'access_db.json'),
         identityDb: env.IDENTITY_DB || null,
+        insightsDb: env.INSIGHTS_SQLITE_PATH || path.join(appRoot, 'data-critical', 'insights.db'),
     };
 }
 
@@ -271,7 +268,7 @@ function treatEvents(file, userId) {
             const mentions = db.prepare('UPDATE events SET payload_json = replace(payload_json, ?, ?) WHERE instr(payload_json, ?) > 0')
                 .run(needle, JSON.stringify(SUPPRESSED_SUBJECT), needle).changes;
             return { ownRemoved: own, mentionsPseudonymized: mentions };
-        })();
+        }).immediate();
     } finally { closeScrub(db); }
 }
 
@@ -281,7 +278,7 @@ function treatProgressDb(file, userId) {
     try {
         if (!hasTable(db, 'progress')) return null;
         const removed = db.prepare('DELETE FROM progress WHERE user_id = ?').run(userId).changes;
-        return removed ? { removed, vacuumed: vacuum(db) } : { removed };
+        return removed ? { removed, compactionPending: true } : { removed };
     }
     finally { closeScrub(db); }
 }
@@ -292,6 +289,36 @@ const dropKeyed = (map, userId) => {
     for (const k of Object.keys(map ?? {})) if (k.startsWith(`${userId}__`) || map[k]?.userId === userId) { delete map[k]; n++; }
     return n;
 };
+
+/**
+ * V8.1-CLOSE-09B — insights.db (materializaciones de Aula Viva y pedagogía). Por columna, sin lista
+ * fija de tablas: filas PERSONALES de la persona (`user_id`, `student_id`, ámbito `user`) se
+ * eliminan; su id como mediador (`teacher_id`) o dentro de un JSON/nota de otra fila pasa a
+ * SUPPRESSED_SUBJECT. Los agregados de grupo, colegio u organización no se tocan.
+ */
+const INSIGHT_TEXT_COL = /(_json|^notes$|^payload)/;
+function treatInsights(file, userId) {
+    const db = openSqlite(file);
+    if (!db) return null;
+    try {
+        return db.transaction(() => {
+            const out = { rowsRemoved: 0, refsPseudonymized: 0 };
+            const needle = JSON.stringify(userId), marker = JSON.stringify(SUPPRESSED_SUBJECT);
+            for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) {
+                const cols = columnsOf(db, name);
+                const own = [];
+                if (cols.has('user_id')) own.push('user_id = @id');
+                if (cols.has('student_id')) own.push('student_id = @id');
+                for (const lvl of ['scope_type', 'scope_level']) if (cols.has(lvl) && cols.has('scope_id')) own.push(`(${lvl} = 'user' AND scope_id = @id)`);
+                if (own.length) out.rowsRemoved += db.prepare(`DELETE FROM ${name} WHERE ${own.join(' OR ')}`).run({ id: userId }).changes;
+                if (cols.has('teacher_id')) out.refsPseudonymized += db.prepare(`UPDATE ${name} SET teacher_id = ? WHERE teacher_id = ?`).run(SUPPRESSED_SUBJECT, userId).changes;
+                for (const c of cols) if (INSIGHT_TEXT_COL.test(c)) out.refsPseudonymized += db.prepare(`UPDATE ${name} SET ${c} = replace(${c}, ?, ?) WHERE instr(${c}, ?) > 0`).run(needle, marker, needle).changes;
+            }
+            if (out.rowsRemoved + out.refsPseudonymized > 0) out.compactionPending = true;
+            return out;
+        }).immediate();
+    } finally { closeScrub(db); }
+}
 
 function treatIdentity(file, userId, b2cRules) {
     const db = openSqlite(file);
@@ -326,8 +353,8 @@ function treatIdentity(file, userId, b2cRules) {
                 }
             }
             return out;
-        })();
-        if (r.users + r.memberships + r.accessRules > 0) r.vacuumed = vacuum(db);
+        }).immediate();
+        if (r.users + r.memberships + r.accessRules > 0) r.compactionPending = true;
         return r;
     } finally { closeScrub(db); }
 }
@@ -393,6 +420,7 @@ export async function suppressResidualSources(paths, userId, { now = Date.now() 
     });
     for (const r of (readJsonIfExists(paths.access) ?? [])) if (r?.b2c?.suppressedAt && r.scopeId === SUPPRESSED_SUBJECT) b2cRules.set(r.id, r);
     ack.identity = treatIdentity(paths.identityDb, userId, b2cRules);
+    ack.insights = treatInsights(paths.insightsDb, userId);
     return ack;
 }
 
@@ -416,6 +444,16 @@ export function residualSubjectIds(paths) {
             }
             if (hasTable(idb, 'access_rules')) for (const r of idb.prepare("SELECT DISTINCT scope_id u FROM access_rules WHERE scope = 'user'").all()) add(r.u);
         } finally { idb.close(); }
+    }
+    const idb2 = openSqlite(paths.insightsDb);
+    if (idb2) {
+        try {
+            for (const { name } of idb2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) {
+                const cols = columnsOf(idb2, name);
+                for (const c of ['user_id', 'student_id', 'teacher_id']) if (cols.has(c)) for (const r of idb2.prepare(`SELECT DISTINCT ${c} u FROM ${name}`).all()) add(r.u);
+                for (const lvl of ['scope_type', 'scope_level']) if (cols.has(lvl) && cols.has('scope_id')) for (const r of idb2.prepare(`SELECT DISTINCT scope_id u FROM ${name} WHERE ${lvl} = 'user'`).all()) add(r.u);
+            }
+        } finally { idb2.close(); }
     }
     const keyed = (m) => { for (const k of Object.keys(m ?? {})) add(k.split('__')[0]); };
     keyed(readJsonIfExists(paths.progressJson)?.progressMap);
@@ -442,4 +480,57 @@ export async function reapplyResidualAfterRestore(paths, { extraIds = [], env = 
     const count = (o) => { for (const v of Object.values(o ?? {})) if (typeof v === 'number') changes += v; else if (v && typeof v === 'object') count(v); };
     for (const id of targets) count(await suppressResidualSources(paths, id, { now }));
     return { subjects: targets.length, changes };
+}
+
+// ─── V8.1-CLOSE-09B — compactación posterior y controlada ─────────────────────
+//
+// Separada de la supresión lógica, NUNCA por defecto. VACUUM toma el lock de escritura de la base
+// durante toda la reconstrucción (las réplicas esperan su busy_timeout y pueden fallar), necesita
+// espacio para una copia temporal y el WAL, y el checkpoint TRUNCATE bloquea escritores mientras
+// espera a los lectores. Por eso:
+//  - preflight de espacio (≥ minFreeFactor × base+WAL en su directorio; ≥ base en el temporal);
+//  - quick_check y recuento de filas por tabla antes y después (integridad de lo NO suprimido);
+//  - busy_timeout corto: si una réplica la ocupa ⇒ `busy`, sin cambios (VACUUM es transaccional:
+//    una interrupción deja la base anterior intacta);
+//  - `events*`: solo checkpoint TRUNCATE (sus filas no se reescriben; lo borrado por el operador ya
+//    se sobrescribió con ceros), para vaciar del WAL las páginas antiguas.
+// Se ejecuta en la cuarentena antes de promover, o en una ventana controlada en producción.
+const fileSize = (f) => { try { return fs.statSync(f).size; } catch { return 0; } };
+const freeBytes = (dir, statfs) => { const st = statfs(dir); return Number(st.bavail) * Number(st.bsize); };
+const userTables = (db) => db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
+
+export function compactAfterSuppression(paths, {
+    vacuum = ['progressDb', 'identityDb', 'insightsDb'], checkpointOnly = ['eventsDb', 'archiveDb'],
+    minFreeFactor = 2.5, busyTimeoutMs = 2000, statfs = fs.statfsSync, tmpDir = os.tmpdir(),
+} = {}) {
+    const out = {};
+    for (const k of [...vacuum, ...checkpointOnly]) {
+        const file = paths[k];
+        if (!file || !fs.existsSync(file)) { out[k] = null; continue; }
+        const bytesBefore = fileSize(file) + fileSize(`${file}-wal`);
+        const full = vacuum.includes(k);
+        if (full && (freeBytes(path.dirname(file), statfs) < Math.ceil(bytesBefore * minFreeFactor) || freeBytes(tmpDir, statfs) < bytesBefore)) {
+            out[k] = { status: 'insufficient_space', bytesBefore };
+            continue;
+        }
+        const db = new Database(file, { fileMustExist: true });
+        try {
+            db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+            if (full) {
+                if (db.pragma('quick_check', { simple: true }) !== 'ok') { out[k] = { status: 'integrity_failed_before' }; continue; }
+                const counts = () => JSON.stringify(userTables(db).map((t) => [t, db.prepare(`SELECT COUNT(*) n FROM "${t}"`).get().n]));
+                const before = counts();
+                try { db.exec('VACUUM'); } catch (e) { out[k] = { status: e.code === 'SQLITE_BUSY' ? 'busy' : 'error', code: e.code ?? 'ERROR' }; continue; }
+                const ck = db.pragma('wal_checkpoint(TRUNCATE)')[0] ?? {};
+                const ok = db.pragma('quick_check', { simple: true }) === 'ok' && counts() === before;
+                out[k] = { status: ok ? 'compacted' : 'integrity_failed_after', walTruncated: ck.busy === 0, bytesBefore, bytesAfter: fileSize(file) + fileSize(`${file}-wal`) };
+            } else {
+                const ck = db.pragma('wal_checkpoint(TRUNCATE)')[0] ?? {};
+                out[k] = { status: ck.busy === 0 ? 'checkpointed' : 'busy', walTruncated: ck.busy === 0 };
+            }
+        } catch (e) {
+            out[k] = { status: e.code === 'SQLITE_BUSY' ? 'busy' : 'error', code: e.code ?? 'ERROR' };
+        } finally { db.close(); }
+    }
+    return out;
 }

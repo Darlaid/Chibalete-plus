@@ -36,12 +36,15 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { withFileLockSync } from './usersLock.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const _MEMORY_DB  = path.resolve(__dirname, '../data/leo_memory_db.json');
-const _PROFILE_DB = path.resolve(__dirname, '../data/leo_profile_db.json');
+// V8.1-CLOSE-09B: mismo directorio que server.js (CHP_DATA_DIR; sin definir en producción ⇒ ../data, como antes).
+const _DATA_DIR   = process.env.CHP_DATA_DIR || path.resolve(__dirname, '../data');
+const _MEMORY_DB  = path.join(_DATA_DIR, 'leo_memory_db.json');
+const _PROFILE_DB = path.join(_DATA_DIR, 'leo_profile_db.json');
 
 // ── Profile hint policy ───────────────────────────────────────────────────────
 // Only these profile fields may be contributed by the frontend as hints.
@@ -94,6 +97,30 @@ function _writeJsonSync(file, data) {
     } catch (e) {
         _log(`Error writing ${file}: ${e.message}`, 'ERROR');
         // Intentionally not re-throwing — write failure must not break Leo response
+    }
+}
+
+// ── V8.1-CLOSE-09B: escrituras coordinadas con la supresión ──────────────────
+// Toda escritura de Leo con datos de una persona se hace bajo el MISMO lock del archivo que usan
+// server.js y el operador de supresión, y solo si la persona sigue en el padrón (el operador exige
+// la baja antes de suprimir). Una petición en curso que termina después de la baja no la reintroduce.
+let _subjectGuard = null;
+/** server.js registra el control (¿la cuenta sigue en el padrón?). Sin registrar: como antes. */
+export function setLeoSubjectGuard(fn) { _subjectGuard = typeof fn === 'function' ? fn : null; }
+export function leoSubjectWritable(userId) {
+    if (!_subjectGuard) return true;
+    try { return _subjectGuard(userId) === true; } catch { return false; }
+}
+/** RMW bajo lock: `mutate(db)` devuelve false para no escribir. Nunca lanza (Leo no se rompe). */
+function _mutateJsonSync(file, load, mutate) {
+    try {
+        withFileLockSync(file, () => {
+            const db = load();
+            if (mutate(db) === false) return;
+            _writeJsonSync(file, db);
+        }, 'leoLock');
+    } catch (e) {
+        _log(`Locked write failed ${path.basename(file)}: ${e.message}`, 'WARN');
     }
 }
 
@@ -316,16 +343,17 @@ export function getAllSessionMemoriesForUser(userId) {
  */
 export function updateLeoSessionMemory(userId, contentId, patch) {
     if (!userId || !contentId) return;
-    const db  = _loadMemoryDb();
-    const key = _makeKey(userId, contentId);
-    const existing = db.memoryMap[key] ?? _defaultSessionMemory();
-    db.memoryMap[key] = {
-        schemaVersion: 1,   // safe default — preserved if existing has higher version
-        ...existing,
-        ...patch,
-        updatedAt: _ts(),
-    };
-    _writeJsonSync(_MEMORY_DB, db);
+    _mutateJsonSync(_MEMORY_DB, _loadMemoryDb, (db) => {
+        if (!leoSubjectWritable(userId)) return false;
+        const key = _makeKey(userId, contentId);
+        const existing = db.memoryMap[key] ?? _defaultSessionMemory();
+        db.memoryMap[key] = {
+            schemaVersion: 1,   // safe default — preserved if existing has higher version
+            ...existing,
+            ...patch,
+            updatedAt: _ts(),
+        };
+    });
 }
 
 /**
@@ -343,18 +371,19 @@ export function getLeoLearnerProfile(userId) {
  */
 export function updateLeoLearnerProfile(userId, patch) {
     if (!userId) return;
-    const db = _loadProfileDb();
-    const existing = db.profileMap[userId] ?? _defaultProfile(userId);
-    const updated = {
-        schemaVersion: 1,   // safe default — preserved if existing has higher version
-        ...existing,
-        ...patch,
-        updatedAt: _ts(),
-    };
-    // Recompute every time we touch the profile
-    updated.preferredSupportType = _derivePreferredSupportType(updated);
-    db.profileMap[userId] = updated;
-    _writeJsonSync(_PROFILE_DB, db);
+    _mutateJsonSync(_PROFILE_DB, _loadProfileDb, (db) => {
+        if (!leoSubjectWritable(userId)) return false;
+        const existing = db.profileMap[userId] ?? _defaultProfile(userId);
+        const updated = {
+            schemaVersion: 1,   // safe default — preserved if existing has higher version
+            ...existing,
+            ...patch,
+            updatedAt: _ts(),
+        };
+        // Recompute every time we touch the profile
+        updated.preferredSupportType = _derivePreferredSupportType(updated);
+        db.profileMap[userId] = updated;
+    });
 }
 
 /**
@@ -410,18 +439,19 @@ export function recordInteraction({ userId, contentId, surface, interactionType,
     // ── 1. Session memory update ──────────────────────────────────────────────
     if (contentId) {
         try {
-            const db  = _loadMemoryDb();
-            const key = _makeKey(userId, contentId);
-            const existing = db.memoryMap[key] ?? _defaultSessionMemory();
-            db.memoryMap[key] = {
-                schemaVersion: 1,   // safe default — preserved if existing has higher version
-                ...existing,
-                lastInterventionAt: now,
-                interactionCount:   (existing.interactionCount ?? 0) + 1,
-                ...(chunkIndex != null ? { lastChunkIndex: chunkIndex } : {}),
-                updatedAt: now,
-            };
-            _writeJsonSync(_MEMORY_DB, db);
+            _mutateJsonSync(_MEMORY_DB, _loadMemoryDb, (db) => {
+                if (!leoSubjectWritable(userId)) return false;
+                const key = _makeKey(userId, contentId);
+                const existing = db.memoryMap[key] ?? _defaultSessionMemory();
+                db.memoryMap[key] = {
+                    schemaVersion: 1,   // safe default — preserved if existing has higher version
+                    ...existing,
+                    lastInterventionAt: now,
+                    interactionCount:   (existing.interactionCount ?? 0) + 1,
+                    ...(chunkIndex != null ? { lastChunkIndex: chunkIndex } : {}),
+                    updatedAt: now,
+                };
+            });
         } catch (e) {
             _log(`recordInteraction: session write failed userId=${userId} contentId=${contentId}: ${e.message}`, 'WARN');
         }
@@ -432,17 +462,18 @@ export function recordInteraction({ userId, contentId, surface, interactionType,
     if (!counterField) return;
 
     try {
-        const db       = _loadProfileDb();
-        const existing = db.profileMap[userId] ?? _defaultProfile(userId);
-        const updated  = {
-            schemaVersion: 1,   // safe default — preserved if existing has higher version
-            ...existing,
-            [counterField]: (existing[counterField] ?? 0) + 1,
-            updatedAt: now,
-        };
-        updated.preferredSupportType = _derivePreferredSupportType(updated);
-        db.profileMap[userId] = updated;
-        _writeJsonSync(_PROFILE_DB, db);
+        _mutateJsonSync(_PROFILE_DB, _loadProfileDb, (db) => {
+            if (!leoSubjectWritable(userId)) return false;
+            const existing = db.profileMap[userId] ?? _defaultProfile(userId);
+            const updated  = {
+                schemaVersion: 1,   // safe default — preserved if existing has higher version
+                ...existing,
+                [counterField]: (existing[counterField] ?? 0) + 1,
+                updatedAt: now,
+            };
+            updated.preferredSupportType = _derivePreferredSupportType(updated);
+            db.profileMap[userId] = updated;
+        });
     } catch (e) {
         _log(`recordInteraction: profile write failed userId=${userId}: ${e.message}`, 'WARN');
     }

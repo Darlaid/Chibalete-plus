@@ -242,6 +242,35 @@ try {
         ok('reintento de la tienda ⇒ already_activated; la T sigue efectiva', retry.status === 200 && retry.body.status === 'already_activated' && g().effective('T', c1.body.userId));
     }
 
+    console.log('[11] V8.1-CLOSE-09B: reenvío firmado tras una supresión o una baja');
+    {
+        const SUP = await import('../privacy/suppression.mjs');
+        const adm = await login('admin@fixture.invalid');
+        const del = (id) => fetch(`${base}/api/users/${id}`, { method: 'DELETE', headers: { cookie: adm.cookie, origin: 'https://app.test' } });
+        const sA = await signed('/api/b2c/provision', order(1201, 'suprimida@fixture.invalid'));
+        ok('alta B2C de la persona', sA.status === 200 && sA.body.status === 'activated');
+        ok('baja con la operación existente', (await del(sA.body.userId)).status === 200);
+        const sAck = await SUP.suppressResidualSources({ access: P.access }, sA.body.userId); // paso del operador sobre access_db.json
+        ok('la regla del pedido queda sin titular y vencida', sAck.access.b2cKeptWithoutSubject === 1);
+        const n0 = J(P.users).length;
+        const rep = await signed('/api/b2c/provision', order(1201, 'suprimida@fixture.invalid'));
+        ok('reenvío firmado del mismo pedido ⇒ 409 account_not_available', rep.status === 409 && rep.body?.code === 'account_not_available', JSON.stringify(rep));
+        ok('…sin crear ni invitar a nadie', J(P.users).length === n0 && !J(P.users).some((u) => u.email === 'suprimida@fixture.invalid'));
+        ok('…sin enlace, id ni datos del titular en la respuesta', !('activationUrl' in (rep.body ?? {})) && !('userId' in (rep.body ?? {})) && !JSON.stringify(rep.body).includes('suprimida'));
+        const otraIdentidad = await signed('/api/b2c/provision', order(1201, 'otra@fixture.invalid'));
+        ok('…misma respuesta con otro correo (no revela al titular)', otraIdentidad.status === 409 && otraIdentidad.body?.code === 'account_not_available');
+        const nuevo = await signed('/api/b2c/provision', order(1202, 'suprimida@fixture.invalid'));
+        ok('pedido NUEVO de la misma persona ⇒ alta nueva legítima', nuevo.status === 200 && nuevo.body.status === 'activated' && nuevo.body.userId !== sA.body.userId);
+        const otro = await signed('/api/b2c/provision', order(1203, 'otra.persona@fixture.invalid'));
+        ok('pedido de otra persona ⇒ alta normal', otro.status === 200 && otro.body.status === 'activated');
+        ok('reintento normal (cuenta viva) sigue idempotente', (await signed('/api/b2c/provision', order(1203, 'otra.persona@fixture.invalid'))).body?.status === 'already_activated');
+        ok('baja SIN supresión todavía (entre DELETE y operador)', (await del(otro.body.userId)).status === 200);
+        const gap = await signed('/api/b2c/provision', order(1203, 'otra.persona@fixture.invalid'));
+        ok('…el reenvío tampoco recrea la cuenta', gap.status === 409 && gap.body?.code === 'account_not_available' && !J(P.users).some((u) => u.email === 'otra.persona@fixture.invalid'));
+        const rv = await signed('/api/b2c/revoke', { orderId: 1201, source: 'test', idempotencyKey: 'test:order:1201', reason: 'refunded' });
+        ok('el reembolso del pedido suprimido sigue funcionando (contrato con la tienda)', rv.status === 200);
+    }
+
     console.log('[10] entrada inválida y registros');
     ok('plan inválido → 400 invalid_plan', (await signed('/api/b2c/provision', order(1006, 'x@fixture.invalid', { plan: 'mensual' }))).body?.code === 'invalid_plan');
     ok('clave de idempotencia ajena → 400', (await signed('/api/b2c/provision', order(1007, 'x@fixture.invalid', { idempotencyKey: 'test:order:1' }))).status === 400);

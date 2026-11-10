@@ -1,5 +1,6 @@
 /**
- * suppressionResidualHttp.test.mjs — CHP-V8.1-CLOSE-09A (G-08, fuentes residuales).
+ * suppressionResidualHttp.test.mjs — CHP-V8.1-CLOSE-09A/09B (G-08, fuentes residuales).
+ *  09B: insights.db, reenvío B2C, concurrencia de Leo y compactación separada y controlada.
  *
  * Con server.js REAL (dos réplicas, identity.db con dual-write) y datos sintéticos:
  *  [0] siembra de las seis fuentes para `sup` (a suprimir), `xpo` (solo retiro de XP) y `k1`
@@ -19,6 +20,7 @@ import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
 import { a2RegistryPath, grantA1, grantA2, grantC005 } from './helpers/testA2.mjs';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,12 +47,12 @@ const stage = (name) => {
         eventsDb: path.join(crit, 'events.db'), archiveDb: path.join(crit, 'events.archive.db'), progressDb: path.join(data, 'progress.db'),
         progressJson: path.join(data, 'progress_db.json'), leoMemory: path.join(data, 'leo_memory_db.json'), leoProfile: path.join(data, 'leo_profile_db.json'),
         leoInteractions: path.join(data, 'leo_interactions_db.json'), leoEvidence: path.join(data, 'leo_evidence_db.json'),
-        audit: path.join(base, 'user_audit_log.json'), access: path.join(base, 'access_db.json'), identityDb: path.join(crit, 'identity.db'),
+        audit: path.join(base, 'user_audit_log.json'), access: path.join(base, 'access_db.json'), identityDb: path.join(crit, 'identity.db'), insightsDb: path.join(crit, 'insights.db'),
     };
 };
 const LIVE = stage('live'), BAK = stage('backup'), Q = stage('quarantine');
 const JSON_STORES = ['users', 'groups', 'schools', 'content', 'mook', 'subs', 'progressJson', 'leoMemory', 'leoProfile', 'leoInteractions', 'leoEvidence', 'audit', 'access'];
-const SQLITE_STORES = ['eventsDb', 'archiveDb', 'progressDb', 'identityDb'];
+const SQLITE_STORES = ['eventsDb', 'archiveDb', 'progressDb', 'identityDb', 'insightsDb'];
 
 // Registros independientes (fuera de los respaldos), como en producción.
 a2RegistryPath();
@@ -59,6 +61,7 @@ fs.mkdirSync(path.dirname(REG)); fs.writeFileSync(REG, '');
 process.env.GAMIFICATION_EXCLUSION_REGISTRY = REG;
 process.env.EVENTS_SQLITE_PATH = LIVE.eventsDb;
 process.env.PROGRESS_SQLITE_PATH = LIVE.progressDb;
+process.env.INSIGHTS_SQLITE_PATH = LIVE.insightsDb;
 
 const SUP = await import('../privacy/suppression.mjs');
 const X = await import('../gamification/exclusions.mjs');
@@ -98,6 +101,11 @@ for (const u of READERS) {
 // Evento de un mediador que menciona a la persona (auditoría de Aula Viva).
 Events.insertEvent({ eventId: 'ev-med-view-sup', schemaVersion: 1, event: 'teacher_viewed_student', mode: 'aula_viva', userId: 'med', contentId: null, sessionId: 'ses-med', clientTs: Date.now(), payload: { groupId: 'g-a1', studentId: 'sup', at: 1 } });
 Events.closeDb(); Progress.closeDb();
+// insights.db con su esquema REAL (los mismos módulos que lo crean en producción).
+for (const [m, open, close] of [['../insightsStore.js', 'ensureDbOpen', 'closeDb'], ['../db/insightsDbExt.mjs', 'getInsightsExtDb', 'closeInsightsExtDb'],
+    ['../db/outcomesDbExt.mjs', 'getOutcomesExtDb', 'closeOutcomesExtDb'], ['../db/pedagogyDbExt.mjs', 'getPedagogyExtDb', 'closePedagogyExtDb'], ['../db/rollupsDbExt.mjs', 'getRollupsExtDb', 'closeRollupsExtDb']]) {
+    const mod = await import(m); mod[open](); mod[close]();
+}
 { const db = new Database(LIVE.eventsDb); db.exec(`VACUUM INTO '${LIVE.archiveDb.replace(/\\/g, '/')}'`); db.close(); }
 W(LIVE.progressJson, { progressMap: Object.fromEntries(READERS.map((u) => [`${u}__c1`, { userId: u, contentId: 'c1', note: TOKEN(u) }])) });
 W(LIVE.leoMemory, { memoryMap: Object.fromEntries(READERS.map((u) => [`${u}__c1`, { recentAnchors: [TOKEN(u)] }])) });
@@ -120,13 +128,13 @@ const envFor = (P, port) => ({
     ...process.env, NODE_ENV: 'test', PORT: String(port), CHP_DATA_DIR: P.data,
     USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: P.schools, ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: P.uploads,
     USER_AUDIT_DB: P.audit, PROGRESS_SQLITE_PATH: P.progressDb, EVENTS_SQLITE_PATH: P.eventsDb, ARCHIVE_SQLITE_PATH: P.archiveDb,
-    INSIGHTS_SQLITE_PATH: path.join(P.data, 'insights.db'), OFFLINE_ASSIGNMENT_DB_PATH: path.join(P.data, 'offline.db'),
+    INSIGHTS_SQLITE_PATH: P.insightsDb, OFFLINE_ASSIGNMENT_DB_PATH: path.join(P.data, 'offline.db'),
     IDENTITY_DB: P.identityDb, IDENTITY_SQLITE_ENABLED: '1', IDENTITY_DUAL_WRITE: '1', IDENTITY_READ: 'json',
     SESSIONS_DB: path.join(P.data, 'sessions.db'), LEO_EVIDENCE_DB: P.leoEvidence,
     ACCESS_FALLBACK_MODE: 'restricted', SESSION_AUTH_MODE: 'off', OPENAI_API_KEY: '', GEMINI_API_KEY: '',
 });
 const paths = (P) => ({ eventsDb: P.eventsDb, archiveDb: P.archiveDb, progressDb: P.progressDb, progressJson: P.progressJson, leoMemory: P.leoMemory,
-    leoProfile: P.leoProfile, leoInteractions: P.leoInteractions, leoEvidence: P.leoEvidence, audit: P.audit, access: P.access, identityDb: P.identityDb });
+    leoProfile: P.leoProfile, leoInteractions: P.leoInteractions, leoEvidence: P.leoEvidence, audit: P.audit, access: P.access, identityDb: P.identityDb, insightsDb: P.insightsDb });
 const spawnApi = async (P) => {
     const port = await freePort();
     const child = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env: envFor(P, port) });
@@ -135,7 +143,7 @@ const spawnApi = async (P) => {
     for (let i = 0; i < 200; i++) { if (child.exitCode !== null) throw new Error(logs.slice(-1500)); try { if ((await fetch(`${child.base}/api/health`)).ok) return child; } catch { /* */ } await sleep(300); }
     throw new Error('nunca healthy');
 };
-const stop = async (c) => { if (c && c.exitCode === null) { c.kill('SIGKILL'); await new Promise((r) => c.once('exit', r)); } };
+const stop = async (c) => { if (c && c.exitCode === null && c.signalCode === null) { const exited = new Promise((r) => c.once('exit', r)); c.kill('SIGKILL'); await exited; } };
 const req = (c, method, url, as, body) => fetch(`${c.base}${url}`, { method, headers: { 'x-user-id': as, 'sec-fetch-site': 'same-origin', ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
 const login = async (c, id) => (await fetch(`${c.base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ email: `${id}@fixture.invalid`, password: PW }) })).status;
 const status = async (c, s) => (await req(c, 'GET', `/api/students/${s}/status`, 'med')).status;
@@ -149,10 +157,82 @@ const residualOf = (P, u) => ({
     progress: q1(P.progressDb, 'SELECT COUNT(*) n FROM progress WHERE user_id = ?', u).n,
     identity: q1(P.identityDb, 'SELECT COUNT(*) n FROM users WHERE canonical_id = ? AND (email_raw IS NOT NULL OR raw_json <> \'{}\')', u).n
         + q1(P.identityDb, 'SELECT COUNT(*) n FROM access_rules WHERE scope_id = ?', u).n + q1(P.identityDb, 'SELECT COUNT(*) n FROM memberships WHERE user_id = ?', u).n,
+    insights: insightsOf(P.insightsDb, u),
     bytes: SQLITE_STORES.filter((k) => bytesHave(P[k], TOKEN(u)) || bytesHave(P[k], `${u}@fixture.invalid`)).length,
     json: JSON_STORES.filter((k) => k !== 'users' && fs.existsSync(P[k]) && (fs.readFileSync(P[k], 'utf8').includes(`"${u}"`) || fs.readFileSync(P[k], 'utf8').includes(`"${u}__`) || fs.readFileSync(P[k], 'utf8').includes(TOKEN(u)) || fs.readFileSync(P[k], 'utf8').includes(`${u}@fixture`))).length,
 });
 const clean = (r) => Object.values(r).every((v) => v === 0);
+// ── insights.db: filas sintéticas genéricas sobre el esquema REAL (lo crea el servidor) ──
+const LVL = (cols) => ['scope_type', 'scope_level'].find((c) => cols.has(c) && cols.has('scope_id'));
+const tablesOf = (db) => db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
+const infoOf = (db, t) => db.prepare(`PRAGMA table_info(${t})`).all();
+const jsonCols = (info) => info.filter((c) => /(_json|^notes$|^payload)/.test(c.name)).map((c) => c.name);
+let seq = 0;
+function insertRow(db, t, values) {
+    const info = infoOf(db, t);
+    const row = {};
+    for (const c of info) {
+        if (c.name in values) { row[c.name] = values[c.name]; continue; }
+        if (c.pk && /INT/i.test(c.type)) continue;
+        if (c.notnull && c.dflt_value === null) row[c.name] = /INT/i.test(c.type) ? 1000 + (seq++) : /REAL|NUM/i.test(c.type) ? 1.5 : `${c.name}-${seq++}`;
+    }
+    for (const c of jsonCols(info)) if (!(c in values) && c in row) row[c] = '{}';
+    const keys = Object.keys(row);
+    try { db.prepare(`INSERT INTO ${t} (${keys.join(',')}) VALUES (${keys.map((k) => '@' + k).join(',')})`).run(row); return true; } catch { return false; }
+}
+function seedInsights(file) {
+    const db = new Database(file); db.pragma('busy_timeout = 5000');
+    const out = { personal: 0, group: 0, tables: [] };
+    try {
+        for (const t of tablesOf(db)) {
+            const info = infoOf(db, t), cols = new Set(info.map((c) => c.name)), lvl = LVL(cols), jc = jsonCols(info);
+            const withJson = (v, u) => { for (const c of jc) v[c] = JSON.stringify({ note: TOKEN(u) }); return v; };
+            for (const u of READERS) {
+                let v = null;
+                if (cols.has('user_id')) v = { user_id: u };
+                else if (cols.has('student_id')) v = { student_id: u, ...(cols.has('teacher_id') ? { teacher_id: 'med' } : {}) };
+                else if (lvl) v = { [lvl]: 'user', scope_id: u };
+                if (v && insertRow(db, t, withJson(v, u))) { out.personal++; if (!out.tables.includes(t)) out.tables.push(t); }
+            }
+            if (lvl && !cols.has('user_id') && !cols.has('student_id')) {
+                const v = { [lvl]: 'group', scope_id: 'g-a1' };
+                for (const c of jc) v[c] = JSON.stringify({ readers: READERS, note: 'GRUPO' });
+                if (insertRow(db, t, v)) out.group++;
+            }
+        }
+    } finally { db.close(); }
+    return out;
+}
+/** Filas personales de `u` y referencias a su id en insights.db. */
+function insightsOf(file, u) {
+    const db = new Database(file, { readonly: true });
+    let n = 0;
+    try {
+        for (const t of tablesOf(db)) {
+            const info = infoOf(db, t), cols = new Set(info.map((c) => c.name)), lvl = LVL(cols);
+            const w = [];
+            if (cols.has('user_id')) w.push('user_id = @u');
+            if (cols.has('student_id')) w.push('student_id = @u');
+            if (cols.has('teacher_id')) w.push('teacher_id = @u');
+            if (lvl) w.push(`(${lvl} = 'user' AND scope_id = @u)`);
+            for (const c of jsonCols(info)) w.push(`instr(${c}, @q) > 0`);
+            if (w.length) n += db.prepare(`SELECT COUNT(*) n FROM ${t} WHERE ${w.join(' OR ')}`).get({ u, q: JSON.stringify(u) }).n;
+        }
+    } finally { db.close(); }
+    return n;
+}
+/** Huella de los agregados de grupo (todas las columnas salvo los JSON). */
+function groupFingerprint(file) {
+    const db = new Database(file, { readonly: true });
+    try {
+        return JSON.stringify(tablesOf(db).flatMap((t) => {
+            const info = infoOf(db, t), lvl = LVL(new Set(info.map((c) => c.name)));
+            if (!lvl) return [];
+            const plain = info.map((c) => c.name).filter((c) => !jsonCols(info).includes(c));
+            return db.prepare(`SELECT ${plain.join(',')} FROM ${t} WHERE ${lvl} = 'group' ORDER BY rowid`).all().map((r) => [t, r]);
+        }));
+    } finally { db.close(); }
+}
 const copyStage = (from, to) => {
     for (const k of JSON_STORES) if (fs.existsSync(from[k])) fs.copyFileSync(from[k], to[k]);
     for (const k of SQLITE_STORES) { fs.rmSync(to[k], { force: true }); for (const s of ['-wal', '-shm']) fs.rmSync(to[k] + s, { force: true }); const db = new Database(from[k]); db.exec(`VACUUM INTO '${to[k].replace(/\\/g, '/')}'`); db.close(); }
@@ -170,6 +250,7 @@ const reconcileIn = (P) => new Promise((resolve) => {
     c.on('exit', (rc) => { try { resolve({ rc, ...JSON.parse(out.trim().split('\n').pop()) }); } catch { resolve({ rc, raw: out }); } });
 });
 const TODAY = R.dayOf(Date.now());
+const fileUrl = (rel) => path.join(REPO, rel).replace(/\\/g, '/').replace(/^([A-Za-z]):/, 'file:///$1:').replace(/^\//, 'file:///');
 
 let api1, api2, q;
 try {
@@ -179,6 +260,10 @@ try {
     for (let i = 0; i < 50 && !(fs.existsSync(LIVE.identityDb) && q1(LIVE.identityDb, "SELECT COUNT(*) n FROM sqlite_master WHERE name='users'").n && q1(LIVE.identityDb, 'SELECT COUNT(*) n FROM users').n >= 5); i++) await sleep(200);
     // Espejo de accesos con la MISMA función que usa el hook en cada escritura del archivo.
     { const { mirrorAccess } = await import('../db/identityShadow.js'); const db = new Database(LIVE.identityDb); db.pragma('busy_timeout = 5000'); mirrorAccess(db, J(LIVE.access), () => {}, 'test-seed'); db.close(); }
+    for (let i = 0; i < 50 && !(fs.existsSync(LIVE.insightsDb) && q1(LIVE.insightsDb, "SELECT COUNT(*) n FROM sqlite_master WHERE type='table'").n >= 10); i++) await sleep(200);
+    const seeded = seedInsights(LIVE.insightsDb);
+    ok('insights.db sembrada sobre su esquema real (personales y agregados de grupo)', seeded.personal >= 12 && seeded.group >= 3, JSON.stringify(seeded));
+    const groupBefore = groupFingerprint(LIVE.insightsDb);
 
     section('[0] antes');
     ok('identity.db espeja el padrón (correo y nombre de la persona)', q1(LIVE.identityDb, 'SELECT email_raw e FROM users WHERE canonical_id = ?', 'sup')?.e === 'sup@fixture.invalid');
@@ -214,10 +299,51 @@ try {
     const kept = rules.find((r) => r.id === 'access-b2c-test-order-77');
     ok('regla personal eliminada; regla B2C conservada sin titular y vencida (antirreenvío)', ack.access.removed === 1 && ack.access.b2cKeptWithoutSubject === 1
         && !rules.some((r) => r.id === 'access-user-sup') && kept?.scopeId === SUP.SUPPRESSED_SUBJECT && kept.expiresAt <= Date.now() && kept.b2c.idempotencyKey === 'test:order:77');
+    const B = await import('../b2c/b2cProvisioning.mjs');
+    const plan = (order, email) => { try { return B.planUserPhase({ users: J(LIVE.users), rules: J(LIVE.access), input: { source: 'test', orderId: order, idempotencyKey: `test:order:${order}`, email, fullName: 'X', activationAt: Date.now(), plan: 'digital', productId: 9 }, nowMs: Date.now(), normalizeEmail: (e) => String(e ?? '').trim().toLowerCase(), normalizeUser: (x) => x, newUserId: 'user-new', newToken: 't' }); } catch (e) { return { status: e.status, code: e.code }; } };
+    ok('B2C: reenvío firmado del pedido suprimido ⇒ 409 account_not_available, sin crear ni invitar', plan(77, 'sup@fixture.invalid').code === 'account_not_available');
+    ok('B2C: la respuesta no depende del titular (otro correo, misma respuesta)', JSON.stringify(plan(77, 'otro@fixture.invalid')) === JSON.stringify(plan(77, 'sup@fixture.invalid')));
+    ok('B2C: pedido NUEVO de la misma persona ⇒ alta nueva legítima', plan(78, 'sup@fixture.invalid').userOp === 'create', JSON.stringify(plan(78, 'sup@fixture.invalid')));
+    ok('B2C: pedido nuevo de otra persona ⇒ alta normal', plan(79, 'nuevo@fixture.invalid').userOp === 'create');
     const idr = q1(LIVE.identityDb, 'SELECT * FROM users WHERE canonical_id = ?', 'sup');
     ok('identity.db: baja sin correo, nombre ni raw_json; sin membresías ni reglas con su id', idr && idr.email_raw === null && idr.nombre_completo === null && idr.raw_json === '{}'
         && idr.deleted_at && idr.email_norm.startsWith(`${SUP.SUPPRESSED_SUBJECT}:`) && ack.identity.accessRules === 2);
-    ok('progress.db e identity.db compactadas tras el cambio (sin copias antiguas)', ack.progress.vacuumed === true && ack.identity.vacuumed === true, JSON.stringify([ack.progress, ack.identity]));
+    ok('insights.db: filas personales eliminadas, referencias en agregados desvinculadas', ack.insights.rowsRemoved >= seeded.tables.length && ack.insights.refsPseudonymized >= seeded.group, JSON.stringify(ack.insights));
+    ok('…agregados de grupo intactos (mismas filas y valores)', groupFingerprint(LIVE.insightsDb) === groupBefore);
+    ok('…filas de xpo y k1 intactas', insightsOf(LIVE.insightsDb, 'xpo') > 0 && insightsOf(LIVE.insightsDb, 'k1') > 0);
+    ok('supresión lógica sin compactar: queda pendiente, nunca por defecto', ack.progress.compactionPending === true && ack.identity.compactionPending === true && !('vacuumed' in ack.progress));
+
+    section('[1a] compactación separada (dos réplicas abiertas)');
+    const holder = new Database(LIVE.progressDb); holder.pragma('busy_timeout = 100'); holder.exec('BEGIN IMMEDIATE');
+    const busy = SUP.compactAfterSuppression(paths(LIVE), { vacuum: ['progressDb'], checkpointOnly: [], busyTimeoutMs: 200 });
+    holder.exec('ROLLBACK'); holder.close();
+    ok('base ocupada por un escritor ⇒ busy, sin cambios', busy.progressDb?.status === 'busy' && q1(LIVE.progressDb, 'PRAGMA quick_check').quick_check === 'ok', JSON.stringify(busy));
+    const hashOf = (fl) => crypto.createHash('sha256').update(fs.readFileSync(fl)).digest('hex');
+    const hBefore = hashOf(LIVE.identityDb);
+    const nospace = SUP.compactAfterSuppression(paths(LIVE), { vacuum: ['identityDb'], checkpointOnly: [], statfs: () => ({ bavail: 1, bsize: 1 }) });
+    ok('sin espacio suficiente ⇒ insufficient_space, archivo intacto', nospace.identityDb?.status === 'insufficient_space' && hashOf(LIVE.identityDb) === hBefore);
+    const k1Before = q1(LIVE.progressDb, 'SELECT canonical_progress c FROM progress WHERE user_id = ?', 'k1').c;
+    const comp = SUP.compactAfterSuppression(paths(LIVE));
+    ok('compactación con las réplicas abiertas: integridad y recuentos iguales', ['progressDb', 'identityDb', 'insightsDb'].every((k) => comp[k]?.status === 'compacted')
+        && ['eventsDb', 'archiveDb'].every((k) => ['checkpointed', 'busy'].includes(comp[k]?.status)), JSON.stringify(comp));
+    ok('…datos no suprimidos idénticos', q1(LIVE.progressDb, 'SELECT canonical_progress c FROM progress WHERE user_id = ?', 'k1').c === k1Before);
+    ok('…las réplicas siguen sirviendo (lectura y escritura)', (await login(api1, 'k1')) === 200 && (await req(api2, 'PUT', '/api/users/k1', 'adm', { bio_corta: 'y' })).status === 200);
+    // Interrupción: SIGKILL a un proceso a mitad de la compactación (VACUUM es transaccional).
+    const big = path.join(tmp, 'interrupt.db');
+    { const db = new Database(big); db.pragma('journal_mode = WAL'); db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)'); const ins = db.prepare('INSERT INTO t (v) VALUES (?)'); db.transaction(() => { for (let i = 0; i < 60000; i++) ins.run(`fila-${i}-${'x'.repeat(200)}`); })(); db.exec('DELETE FROM t WHERE id % 3 = 0'); db.close(); }
+    const expected = q1(big, 'SELECT COUNT(*) n, SUM(length(v)) s FROM t');
+    let killedMidway = 0;
+    for (const delay of [40, 120, 250]) {
+        const c = spawn(process.execPath, ['--input-type=module', '-e', `const S=await import(${JSON.stringify(fileUrl('server/privacy/suppression.mjs'))});console.log(JSON.stringify(S.compactAfterSuppression({ progressDb: ${JSON.stringify(big)} }, { vacuum: ['progressDb'], checkpointOnly: [] })));`], { env: envFor(LIVE, 0) });
+        const exited = new Promise((r) => c.once('exit', r)); // antes de nada: el proceso puede terminar antes del kill
+        let o = ''; c.stdout.on('data', (d) => { o += d; });
+        await sleep(delay); c.kill('SIGKILL'); await exited;
+        if (!o.includes('compacted')) killedMidway++;
+        const after = q1(big, 'SELECT COUNT(*) n, SUM(length(v)) s FROM t');
+        ok(`interrupción a los ${delay} ms: base íntegra y mismos datos`, q1(big, 'PRAGMA quick_check').quick_check === 'ok' && after.n === expected.n && after.s === expected.s, JSON.stringify(after));
+    }
+    ok('…al menos una interrupción ocurrió a mitad de la compactación', killedMidway >= 1);
+    ok('…y una compactación posterior termina bien', SUP.compactAfterSuppression({ progressDb: big }, { vacuum: ['progressDb'], checkpointOnly: [] }).progressDb.status === 'compacted');
     ok('nada identificable en las seis fuentes, ni en los bytes de los SQLite', clean(residualOf(LIVE, 'sup')), JSON.stringify(residualOf(LIVE, 'sup')));
     ok('retiro de XP y terceros intactos', !clean(residualOf(LIVE, 'xpo')) && residualOf(LIVE, 'xpo').events === 1 && residualOf(LIVE, 'k1').progress === 1
         && rules.some((r) => r.id === 'access-user-k1') && J(LIVE.mook).evidence.some((e) => e.userId === 'xpo'));
@@ -228,6 +354,33 @@ try {
     // Escritura posterior del padrón (otra réplica): no vuelve a espejar a la persona.
     await req(api2, 'PUT', '/api/users/k1', 'adm', { bio_corta: 'x' }); await sleep(800);
     ok('una escritura posterior del padrón no la reintroduce en identity.db', q1(LIVE.identityDb, 'SELECT email_raw e FROM users WHERE canonical_id = ?', 'sup')?.e === null);
+
+    section('[1b] Leo: dos procesos escriben sin pausa mientras se elimina y suprime a una persona');
+    ok('alta de la persona de la prueba', (await req(api1, 'POST', '/api/users', 'adm', { id: 'lsup', email: 'lsup@fixture.invalid', nombre_completo: 'Sint lsup', password: PW, roles: ['lector'], colegio: 'Colegio Alfa', groupIds: [] })).status < 300);
+    const writerCode = `const M=await import(${JSON.stringify(fileUrl('server/leoMemoryService.js'))});const E=await import(${JSON.stringify(fileUrl('server/leoEvidenceService.js'))});
+        const fs=await import('node:fs');M.setLeoSubjectGuard((id)=>JSON.parse(fs.readFileSync(process.env.USERS_DB,'utf8')).some(u=>u.id===id));
+        const end=Date.now()+Number(process.env.LEO_MS);let k1=0,err=0;
+        while(Date.now()<end){for(const uid of ['lsup','k1']){try{M.recordInteraction({userId:uid,contentId:'c9',surface:'reader',interactionType:'chat'});E.persistLeoEvidence({id:'e'+Math.random(),userId:uid,contentId:'c9',evidenceType:'x',timestamp:Date.now()});M.updateLeoLearnerProfile(uid,{note:'n'});if(uid==='k1')k1++;}catch{err++;}}}
+        console.log(JSON.stringify({k1,err}));`;
+    const runWriter = () => new Promise((resolve) => { const c = spawn(process.execPath, ['--input-type=module', '-e', writerCode], { env: { ...envFor(LIVE, 0), LEO_MS: '5000' } }); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.stderr.on('data', (d) => { o += d; }); c.on('exit', (rc) => {
+        const fsErrors = o.match(/(Error writing|Locked write failed|persistLeoEvidence failed)[^\n]{0,120}/g) || [];
+        try { resolve({ rc, writeErrors: fsErrors.length, detail: [...new Set(fsErrors)].slice(0, 3), ...JSON.parse(o.trim().split('\n').pop()) }); } catch { resolve({ rc, writeErrors: fsErrors.length, raw: o.slice(-500) }); }
+    }); });
+    const k1Mem0 = J(LIVE.leoMemory).memoryMap['k1__c9']?.interactionCount ?? 0;
+    const k1Ev0 = J(LIVE.leoEvidence).entries.filter((e) => e.userId === 'k1' && e.contentId === 'c9').length;
+    const writers = [runWriter(), runWriter()];
+    await sleep(1500);
+    ok('…escribiendo para la persona antes de la baja', J(LIVE.leoMemory).memoryMap['lsup__c9']?.interactionCount > 0);
+    ok('…baja con la operación existente', (await req(api2, 'DELETE', '/api/users/lsup', 'adm')).status === 200);
+    SUP.suppressAccount(null, { userId: 'lsup', requestRef: 'SOL-SINT-0902', requestDay: TODAY, capacity: 'titular' });
+    await SUP.suppressResidualSources(paths(LIVE), 'lsup');
+    const [w1, w2] = await Promise.all(writers);
+    ok('escritores sin errores', w1.rc === 0 && w2.rc === 0 && w1.err === 0 && w2.err === 0, JSON.stringify([w1, w2]));
+    ok('…ni escrituras descartadas por el sistema de archivos', w1.writeErrors === 0 && w2.writeErrors === 0, JSON.stringify([w1.detail, w2.detail]));
+    const leoText = ['leoMemory', 'leoProfile', 'leoInteractions', 'leoEvidence'].map((k) => fs.readFileSync(LIVE[k], 'utf8')).join('');
+    ok('ninguna escritura posterior reintroduce a la persona (memoria, perfil, evidencia)', !leoText.includes('"lsup') && !leoText.includes('lsup__') && !leoText.includes(TOKEN('lsup')));
+    ok('sin escrituras perdidas: el contador de k1 suma exactamente las de los dos procesos', (J(LIVE.leoMemory).memoryMap['k1__c9']?.interactionCount ?? 0) - k1Mem0 === w1.k1 + w2.k1, JSON.stringify([J(LIVE.leoMemory).memoryMap['k1__c9'], w1.k1, w2.k1]));
+    ok('…y la evidencia de k1 también', J(LIVE.leoEvidence).entries.filter((e) => e.userId === 'k1' && e.contentId === 'c9').length - k1Ev0 === w1.k1 + w2.k1);
     await stop(api1); await stop(api2); api1 = api2 = null;
 
     section('[2] restauración en CUARENTENA');
@@ -249,6 +402,8 @@ try {
     section('[3] puerta de promoción');
     const g = await reconcileIn(Q);
     ok('ABIERTA: sin cuentas pendientes y una pasada más no cambia nada', g.rc === 0 && g.a.toDelete.length === 0 && g.a.toDisable.length === 0 && g.r.changes === 0 && g.m.participants === 0 && g.s.submissionsRemoved === 0, JSON.stringify(g));
+    const qc = SUP.compactAfterSuppression(paths(Q));
+    ok('compactación en la cuarentena (sin tráfico) antes de promover', ['progressDb', 'identityDb', 'insightsDb'].every((k) => qc[k]?.status === 'compacted') && ['eventsDb', 'archiveDb'].every((k) => qc[k]?.status === 'checkpointed'), JSON.stringify(qc));
     ok('nada identificable de la persona en la cuarentena', clean(residualOf(Q, 'sup')), JSON.stringify(residualOf(Q, 'sup')));
     const prev = process.env.GAMIFICATION_EXCLUSION_REGISTRY; fs.renameSync(REG, `${REG}.off`);
     const broken = await reconcileIn(Q);
@@ -273,5 +428,5 @@ try {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* Windows */ }
 }
 
-console.log(`\nsuppression residual sources HTTP (V8.1-CLOSE-09A G-08): ${pass} ✓, ${fail} ✗`);
+console.log(`\nsuppression residual sources HTTP (V8.1-CLOSE-09A/09B G-08): ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);
