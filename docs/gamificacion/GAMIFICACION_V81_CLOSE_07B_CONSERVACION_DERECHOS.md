@@ -41,7 +41,7 @@
 
 **Transición segura** (no se borra ni se modifica ningún respaldo en esta unidad):
 1. Dirección aprueba las filas D.3 anteriores, o las corrige, y su revisión en D.4.
-2. Durante **4 semanas**, `restic forget --dry-run --keep-daily 7 --keep-weekly 4 --keep-monthly 6` (subcomando ya permitido). AT registra qué instantáneas expirarían.
+2. Durante **4 semanas**, simulación por tipo: `restic forget --dry-run --tag <tipo> --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 6`. AT registra qué instantáneas expirarían. **Corrección (CLOSE-08A):** el runner real **no** permite `forget` ni con `--dry-run` (`restic.py`, `DESTRUCTIVE_SUBCOMMANDS`); habilitar solo el `--dry-run` es un cambio aprobado de esa lista. Ver `GAMIFICACION_V81_CLOSE_08A_SUPRESION_FECHAS.md` §3.
 3. Ensayo de restauración desde la instantánea **más antigua que se conservaría** (patrón 01C), con la conciliación posterior:
    - `replayExclusions`;
    - `accountsToRestrictAfterRestore` (G-05);
