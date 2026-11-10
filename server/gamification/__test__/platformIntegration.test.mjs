@@ -362,7 +362,7 @@ try {
     {
         const p = (await progress(r2, 'a1')).body;
         const h = p?.history ?? [];
-        const today = new Date().toISOString().slice(0, 10);
+        const today = L.periodsFor(Date.now()).day; // V8.1-CLOSE-08A: día de Bogotá, la convención del ledger (no el día UTC)
         ok('cinco actos: lectura y dos reflexiones de obra-1, lectura y reflexiÃ³n de obra-2', h.length === 5 && h.reduce((s, e) => s + e.xp, 0) === 80, JSON.stringify(h));
         ok('cada entrada con dÃ­a, obra, tÃ­tulo y acto', h.every((e) => e.day === today && ['obra-1', 'obra-2'].includes(e.contentId) && e.title?.startsWith('TÃ­tulo') && ['reading', 'reflection'].includes(e.act)));
         const all = JSON.stringify(p);

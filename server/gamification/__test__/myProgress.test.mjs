@@ -210,7 +210,7 @@ try {
 
     section('[4b] historial de reconocimiento (V8-INTEGRATION-01)');
     {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = L.periodsFor(Date.now()).day; // V8.1-CLOSE-08A: día de Bogotá, la convención del ledger (no el día UTC)
         const h30 = R['u-30'].history, h50 = R['u-50'].history;
         ok('30 XP â‡’ lectura 10 y reflexiÃ³n 20, en ese orden', h30.length === 2 && h30[0].act === 'reading' && h30[0].xp === 10
             && h30[1].act === 'reflection' && h30[1].xp === 20, JSON.stringify(h30));
