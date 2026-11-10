@@ -99,6 +99,9 @@ fs.writeFileSync(P.reg, '');
 fs.writeFileSync(P.a2, '');
 const A2ENV = { CHP_A2_REGISTRY: P.a2, GAMIFICATION_EXCLUSION_REGISTRY: P.reg };
 for (const u of ['a1', 'a2', 'a3', 'x1', 'b1']) A2.appendA2Decision({ userId: u, status: 'granted', requestRef: `A2-SINT-${u}` }, { env: A2ENV });
+// V8.1-CLOSE-07B (G-07): los mediadores con su 005 vigente.
+A2.appendDecisions(['med-a', 'med-a2', 'med-b'].map((u) => ({ subjectId: u, kind: 'C005', status: 'granted', actDay: '2000-01-01', version: '005@1.0', medium: 'paper',
+    capacity: 'mediator', verification: 'verified', requestRef: `C2-SINT-${u}` })), { env: A2ENV });
 
 // ── MOOK: tres experiencias sobre la MISMA obra (obra-a) ─────────────────────
 const doc = Store.emptyMookStore();

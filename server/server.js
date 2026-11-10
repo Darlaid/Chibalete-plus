@@ -650,7 +650,7 @@ async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = t
         }
         if (a2 && d.via === 'mediator_of_member_group') {
             let gate;
-            try { gate = a2Gate(); } catch { return a2Unavailable(res); }
+            try { gate = a2Gate(undefined, undefined, { mediatorId: callerId }); } catch { return a2Unavailable(res); } // G-07: con su C005
             if (!gate.allows(sid)) return denied(403, { error: 'scope_access_denied', scope_type: scopeType, scope_id: sid });
         }
         return true;
@@ -3056,7 +3056,7 @@ function mediatorReviewScope(req) {
     // V8.1-CLOSE-02 (G-02): revisar y consultar una producción es consulta
     // institucional individual (004 A2: D4 «para revisar, retroalimentar»).
     let a2;
-    try { a2 = a2Gate(); } catch { return { ok: false, reason: 'a2_unavailable' }; }
+    try { a2 = a2Gate(undefined, undefined, { mediatorId: me.id }); } catch { return { ok: false, reason: 'a2_unavailable' }; } // G-07: con su C005
     // El dueño de la producción debe ser miembro de uno de esos grupos y, si
     // ambos declaran institución, pertenecer a la misma que el grupo.
     let usersById;
@@ -9238,7 +9238,13 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         // de la caché, para que una revocación rija de inmediato. Con pocos
         // retenidos, los agregados (y el reconocimiento) se limitan a los visibles.
         const cohortIds = (r.data.readers || []).map(x => x.userId);
-        const a2 = individualDisclosure(cohortIds);
+        // V8.1-CLOSE-07B (G-07): si consulta un mediador, también su C005 vigente.
+        let viewerMediatorId = null;
+        if (!(await isAdminRequest(req))) {
+            const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+            try { if (evaluateScopeAccess(viewerId, 'group', id).via === 'mediator_of_group') viewerMediatorId = viewerId; } catch { viewerMediatorId = viewerId; }
+        }
+        const a2 = individualDisclosure(cohortIds, { mediatorId: viewerMediatorId });
         const shown = a2.aggregateOver === 'allowed'
             ? restrictSummaryToReaders(r.data, a2.allowed)
             : { ...r.data, readers: (r.data.readers || []).filter(x => a2.allowed.has(x.userId)) };
@@ -9296,7 +9302,7 @@ app.get('/api/groups/:groupId/students/:studentId/progress', requireAuth, async 
         // 5. V8.1-CLOSE-01 (G-02): A2 vigente del lector, con el criterio único.
         //    Denegada, revocada, vencida, pendiente o retenida ⇒ el MISMO 404 que
         //    una persona ajena; registro no verificable ⇒ 503 para todos.
-        const a2 = individualDisclosure(cohort);
+        const a2 = individualDisclosure(cohort, { mediatorId: callerId }); // G-07: con su C005
         if (a2.status === 'unavailable') return res.status(503).json({ error: 'No pudimos cargar el progreso.', code: 'PROGRESS_UNAVAILABLE' });
         if (!a2.allowed.has(studentId)) return notFound();
         const out = await gamificationMook.readStudentProgress(studentId);
@@ -10559,7 +10565,7 @@ async function resolveExportScope(req, res) {
         const mediated = mediatedGroupRosters(req.user.id);
         if (mediated.size === 0) return { admin: false, rosters: mediated };
         let gate;
-        try { gate = a2Gate(); } catch { res.status(503).json({ error: 'individual_access_unavailable' }); return null; }
+        try { gate = a2Gate(undefined, undefined, { mediatorId: req.user.id }); } catch { res.status(503).json({ error: 'individual_access_unavailable' }); return null; } // G-07
         const rosters = new Map();
         for (const [gid, members] of mediated) rosters.set(gid, new Set([...members].filter(id => gate.allows(id))));
         return { admin: false, rosters };

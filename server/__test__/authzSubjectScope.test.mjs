@@ -23,7 +23,7 @@
  */
 import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
-import { grantA2 } from './helpers/testA2.mjs';
+import { grantA2, grantC005 } from './helpers/testA2.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -159,6 +159,7 @@ const RUTAS_GRUPO = (gid) => [
 async function main() {
     // V8.1-CLOSE-02: A2 = Sí para lec-a1 (el caso legítimo); lec-a2 sin decisión.
     const A2_REG = grantA2(['lec-a1']);
+    grantC005(['med-a']); // V8.1-CLOSE-07B (G-07): el mediador con su 005 vigente
     api = spawnApi(PORT);
     await waitHealthy(BASE, api);
 

@@ -58,3 +58,13 @@ export function approveTestDocuments() {
     process.env.CHP_ACCEPTANCE_DOCUMENTS = JSON.stringify(docs);
     return process.env.CHP_ACCEPTANCE_DOCUMENTS;
 }
+
+/** V8.1-CLOSE-07B (G-07): compromiso 005 verificado para mediadores sintéticos (consulta individual). */
+export function grantC005(ids, { status = 'granted', validUntil = null } = {}) {
+    const env = { CHP_A2_REGISTRY: a2RegistryPath() };
+    const decisions = [...new Set(ids)].map((userId) => ({ subjectId: userId, kind: 'C005', status, actDay: '2000-01-01', version: '005@1.0', medium: 'paper',
+        capacity: 'mediator', verification: 'verified', validUntil: status === 'granted' ? validUntil : null,
+        requestRef: `C2-SINT-${String(userId).replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 90)}` }));
+    if (decisions.length) appendDecisions(decisions, { env });
+    return env.CHP_A2_REGISTRY;
+}

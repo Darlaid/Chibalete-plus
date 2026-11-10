@@ -17,7 +17,7 @@
  */
 import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
-import { a2RegistryPath, approveTestDocuments } from './helpers/testA2.mjs';
+import { a2RegistryPath, approveTestDocuments, grantC005 } from './helpers/testA2.mjs';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -152,6 +152,7 @@ try {
     ok('…registro idéntico', regRaw() === before);
 
     section('[3] lector institucional con A2 = No');
+    grantC005(['med-a']); // V8.1-CLOSE-07B (G-07): su mediador, con el 005 vigente
     ok('institucional sin A2 ⇒ 422 con A2', (await activate(r1, 'inst-1', adult)).body?.required?.includes('A2'));
     const inst = await activate(r1, 'inst-1', { ...adult, A2: 'no' });
     ok('A2 = No ⇒ 200 (A2 es independiente de la activación)', inst.status === 200);

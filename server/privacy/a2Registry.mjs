@@ -214,12 +214,16 @@ export function a1Gate(env = process.env, now = Date.now()) {
 
 /**
  * Puerta A2 vigente. `allows(userId)` solo es verdadero con A2 `granted`,
- * verificada y dentro de su vigencia (inclusive).
+ * verificada y dentro de su vigencia (inclusive). Con `mediatorId`, exige además
+ * C005 efectivo del mediador (consulta institucional por un mediador).
  * @throws A2_REGISTRY_UNAVAILABLE | A2_REGISTRY_NOT_INDEPENDENT
  */
-export function a2Gate(env = process.env, now = Date.now()) {
+export function a2Gate(env = process.env, now = Date.now(), { mediatorId = null } = {}) {
     const gate = decisionGate(env, now);
-    return { allows: (userId) => gate.effective('A2', userId) };
+    // V8.1-CLOSE-07B (G-07): para un mediador, además su compromiso 005 (C005) efectivo y
+    // vigente: la vigencia del 005 caduca sola y su retiro rige en la petición siguiente.
+    const mediatorOk = mediatorId === null || gate.effective('C005', mediatorId);
+    return { allows: (userId) => mediatorOk && gate.effective('A2', userId) };
 }
 
 /**
@@ -234,9 +238,9 @@ export function a2Gate(env = process.env, now = Date.now()) {
  * @param {string[]} cohort
  * @returns {{ status: 'ok'|'partial'|'unavailable', allowed: Set<string>, aggregateOver: 'cohort'|'allowed' }}
  */
-export function individualDisclosure(cohort, { env = process.env, now = Date.now() } = {}) {
+export function individualDisclosure(cohort, { env = process.env, now = Date.now(), mediatorId = null } = {}) {
     let gate;
-    try { gate = a2Gate(env, now); } catch { return { status: 'unavailable', allowed: new Set(), aggregateOver: 'cohort' }; }
+    try { gate = a2Gate(env, now, { mediatorId }); } catch { return { status: 'unavailable', allowed: new Set(), aggregateOver: 'cohort' }; }
     const ids = [...new Set((cohort ?? []).filter((id) => typeof id === 'string' && id))];
     const allowed = new Set(ids.filter((id) => gate.allows(id)));
     const withheld = ids.length - allowed.size;

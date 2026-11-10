@@ -28,7 +28,7 @@ import {
     emptyMookStore, createExperience, createDraftVersion, publishVersion,
     startRun, submitEvidence,
 } from '../lib/experienceStore.js';
-import { grantA2 } from './helpers/testA2.mjs';
+import { grantA2, grantC005 } from './helpers/testA2.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '../..');
@@ -106,6 +106,7 @@ fs.chmodSync(P.key, 0o400);
 const PORT = 4800 + (process.pid % 150);
 const BASE = `http://127.0.0.1:${PORT}`;
 // V8.1-CLOSE-02: revisar es consulta institucional individual ⇒ A2 = Sí para P1 y P2.
+grantC005(['MED1', 'MED2', 'MED3', 'MED4', 'MED0']); // V8.1-CLOSE-07B (G-07)
 const A2_REG = grantA2(['P1', 'P2']);
 const child = spawn(process.execPath, ['server/server.js'], {
     cwd: REPO,

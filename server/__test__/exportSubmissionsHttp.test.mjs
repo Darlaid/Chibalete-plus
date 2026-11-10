@@ -12,7 +12,7 @@
  */
 import './helpers/testMode.mjs';
 import { freePort } from './helpers/freePort.mjs';
-import { grantA2 } from './helpers/testA2.mjs';
+import { grantA2, grantC005 } from './helpers/testA2.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -76,6 +76,7 @@ const writeStores = () => {
 };
 writeStores();
 // V8.1-CLOSE-02: A2 = Sí para los lectores sintéticos (sin ella el mediador no exporta).
+grantC005(['u-med', 'u-med2', 'u-med3']); // V8.1-CLOSE-07B (G-07)
 const A2_REG = grantA2(['u-ana', 'u-beto', 'u-carla']);
 const A2_RAW = fs.readFileSync(A2_REG, 'utf8');
 
