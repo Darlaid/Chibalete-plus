@@ -24,6 +24,19 @@ ok('Oralidad: consulta el estado decidido en el servidor (/api/auth/me · voiceT
 ok('Oralidad: sin A5 no abre el micrófono (la comprobación va antes de getUserMedia)', gateIdx > 0 && micIdx > gateIdx);
 ok('Oralidad: fallo cerrado si no se puede comprobar', /\.catch\(\(\) => \{ if \(alive\) setVoiceAllowed\(false\); \}\)/.test(orl));
 
+// V8.1-PROD-02F — A5 también en el dictado a Leo (Chatbot) y comprobación fresca en la oralidad.
+const bot = src('components/Chatbot.tsx');
+const tl = bot.slice(bot.indexOf('const toggleListening'));
+ok('Dictado a Leo: usa la consulta común de A5 (utils/voiceAuthorization.mjs)', /from '\.\.\/utils\/voiceAuthorization\.mjs'/.test(bot));
+ok('Dictado a Leo: A5 se comprueba antes de crear el reconocimiento y de start()', tl.indexOf('isVoiceCaptureAllowed()') > 0 && tl.indexOf('isVoiceCaptureAllowed()') < tl.indexOf('new SpeechRecognition()') && tl.indexOf('if (!allowed) return;') < tl.indexOf('recognition.start()'));
+ok('Dictado a Leo: vigila la A5 mientras escucha y corta al revocarse', /watchVoiceAuthorization\(\{ onRevoked: handleVoiceRevoked \}\)/.test(tl) && /voiceRevokedRef\.current = true/.test(bot) && /if \(voiceRevokedRef\.current\) return;/.test(bot));
+ok('Dictado a Leo: sin A5 no se muestra el micrófono', /\(voiceAllowed === true \|\| isListening\) && \(/.test(bot));
+ok('Dictado a Leo: la entrada escrita no depende de A5', /<input\s+type="text"/.test(bot) && !/disabled=\{[^}]*voiceAllowed/.test(bot));
+ok('Dictado a Leo: no pide autorización por uso (sin confirm/prompt)', !/window\.confirm|\bconfirm\(|\bprompt\(/.test(bot));
+const orlStart = orl.slice(orl.indexOf('const startRecording'));
+ok('Oralidad: A5 se vuelve a consultar justo antes de getUserMedia', orlStart.indexOf('isVoiceCaptureAllowed()') > 0 && orlStart.indexOf('isVoiceCaptureAllowed()') < orlStart.indexOf('getUserMedia'));
+ok('Oralidad: vigila la A5 durante la grabación y descarta el intento al revocarse', /watchVoiceAuthorization\(\{/.test(orlStart) && /voiceRevokedRef\.current = true;\s*\n\s*cleanupMedia\(\);/.test(orlStart));
+
 const leo = src('components/LeoCompanion.tsx');
 ok('Leo: mensaje claro ante A3_REQUIRED, sin mostrar el código', /res\.status === 403 && data\?\.code === 'A3_REQUIRED'/.test(leo));
 
