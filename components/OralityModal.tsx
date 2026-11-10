@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, Square, X, RefreshCw } from 'lucide-react';
 import { dataService } from '../services/dataService';
+import { isVoiceCaptureAllowed, watchVoiceAuthorization } from '../utils/voiceAuthorization.mjs';
+import type { VoiceAuthorizationWatch } from '../utils/voiceAuthorization.mjs';
 import type { OralityAttempt } from '../types';
 
 interface OralityModalProps {
@@ -102,6 +104,7 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
 
         recognition.onresult = (event: any) => {
             if (!isMountedRef.current) return; // A4: skip if already unmounted
+            if (voiceRevokedRef.current) return; // V8.1-PROD-02F: A5 revocada durante la captura
             let currentTranscript = '';
             for (let i = event.resultIndex; i < event.results.length; i++) {
                 currentTranscript += event.results[i][0].transcript;
@@ -129,7 +132,14 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
         };
     }, []);
 
+    // V8.1-PROD-02F — vigilancia de A5 mientras el micrófono está abierto.
+    const voiceWatchRef = useRef<VoiceAuthorizationWatch | null>(null);
+    const voiceRevokedRef = useRef(false);
+    const A5_REQUIRED_MSG = 'La lectura en voz alta con transcripción automática requiere la autorización A5 de tu cuenta. Puedes seguir leyendo en voz alta sin grabar.';
+
     const cleanupMedia = () => {
+        voiceWatchRef.current?.stop();
+        voiceWatchRef.current = null;
         if (recognitionRef.current) {
             try { recognitionRef.current.stop(); } catch (e) { }
         }
@@ -145,9 +155,18 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
     const startRecording = async () => {
         if (!isMountedRef.current) return;
         if (voiceAllowed !== true) {
-            setError('La lectura en voz alta con transcripción automática requiere la autorización A5 de tu cuenta. Puedes seguir leyendo en voz alta sin grabar.');
+            setError(A5_REQUIRED_MSG);
             return;
         }
+        // V8.1-PROD-02F: A5 comprobada de nuevo justo antes de abrir el micrófono (revocación posterior a abrir el modal).
+        const stillAllowed = await isVoiceCaptureAllowed();
+        if (!isMountedRef.current) return;
+        if (!stillAllowed) {
+            setVoiceAllowed(false);
+            setError(A5_REQUIRED_MSG);
+            return;
+        }
+        voiceRevokedRef.current = false;
         setError(null);
         setTranscript('');
         setScore(null);
@@ -192,6 +211,20 @@ export const OralityModal: React.FC<OralityModalProps> = ({ expectedText, onClos
             }
 
             if (isMountedRef.current) setRecording(true);
+
+            // A5 revocada (o no comprobable) durante la grabación: se corta y se descarta el intento,
+            // sin puntuar ni guardar nada.
+            voiceWatchRef.current = watchVoiceAuthorization({
+                onRevoked: () => {
+                    voiceRevokedRef.current = true;
+                    cleanupMedia();
+                    if (!isMountedRef.current) return;
+                    setRecording(false);
+                    setTranscript('');
+                    setVoiceAllowed(false);
+                    setError(A5_REQUIRED_MSG);
+                },
+            });
         } catch (err: any) {
             console.error('[OralityModal] getUserMedia error:', err);
             if (isMountedRef.current) {

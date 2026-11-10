@@ -8,6 +8,8 @@ import type { LeoSessionMemory } from '../services/geminiService';
 import { useLocation } from 'react-router-dom';
 import { dataService } from '../services/dataService';
 import { stripAwardPointsTokens } from '../utils/leoActionTokens.mjs';
+import { isVoiceCaptureAllowed, watchVoiceAuthorization } from '../utils/voiceAuthorization.mjs';
+import type { VoiceAuthorizationWatch } from '../utils/voiceAuthorization.mjs';
 
 // --- ACTION TOKEN TYPES ---
 type InteractionType = 'vocab' | 'inferential' | 'reflection';
@@ -138,6 +140,13 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
   const recognitionRef = useRef<any>(null); // For SpeechRecognition
+  // V8.1-PROD-02F — A5 (004 §6.3): el dictado a Leo usa el reconocimiento de voz del navegador, que
+  // envía la voz a su servicio. Solo con la A5 efectiva (decidida en el servidor, /api/auth/me).
+  // null = sin comprobar; false = sin A5 o no comprobable (fallo cerrado). La escritura no depende de A5.
+  const [voiceAllowed, setVoiceAllowed] = useState<boolean | null>(null);
+  const voiceWatchRef = useRef<VoiceAuthorizationWatch | null>(null);
+  const voiceRevokedRef = useRef(false);
+  const voiceStartingRef = useRef(false);
   const leoProfileRef = useRef<LeoReaderProfile | undefined>(undefined);
   const leoMemoryRef = useRef<LeoSessionMemory | null>(null);
   const sessionStorageKeyRef = useRef<string | null>(null);
@@ -308,8 +317,41 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
   }
 
   // --- STT LOGIC (Browser Native Speech Recognition) ---
-  const toggleListening = () => {
+  const stopVoiceWatch = () => {
+    voiceWatchRef.current?.stop();
+    voiceWatchRef.current = null;
+  };
+
+  // A5 revocada (o no comprobable) con el micrófono abierto: se corta la captura y se descarta lo
+  // que llegue después. El campo de texto sigue disponible.
+  const handleVoiceRevoked = () => {
+    voiceRevokedRef.current = true;
+    stopVoiceWatch();
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    try { rec?.abort ? rec.abort() : rec?.stop(); } catch { /* ya detenido */ }
+    setIsListening(false);
+    setVoiceAllowed(false);
+  };
+
+  // Estado A5 para mostrar u ocultar el micrófono. Se vuelve a comprobar antes de cada captura.
+  useEffect(() => {
+    if (!user) { setVoiceAllowed(null); return; }
+    let alive = true;
+    isVoiceCaptureAllowed().then((ok) => { if (alive) setVoiceAllowed(ok); });
+    return () => { alive = false; };
+  }, [user?.id]);
+
+  // Al desmontar: sin captura ni vigilancia colgadas.
+  useEffect(() => () => {
+    stopVoiceWatch();
+    try { recognitionRef.current?.abort?.(); } catch { /* nada */ }
+    recognitionRef.current = null;
+  }, []);
+
+  const toggleListening = async () => {
     if (isListening) {
+      stopVoiceWatch();
       recognitionRef.current?.stop();
       setIsListening(false);
       return;
@@ -322,6 +364,15 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
       return;
     }
 
+    // A5 vigente en el servidor, comprobada justo antes de abrir el micrófono. Sin ella no hay captura.
+    if (voiceStartingRef.current) return; // doble clic mientras se comprueba
+    voiceStartingRef.current = true;
+    let allowed = false;
+    try { allowed = await isVoiceCaptureAllowed(); } finally { voiceStartingRef.current = false; }
+    setVoiceAllowed(allowed);
+    if (!allowed) return;
+
+    voiceRevokedRef.current = false;
     const recognition = new SpeechRecognition();
     recognition.lang = 'es-ES';
     recognition.interimResults = false;
@@ -330,18 +381,22 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
     recognition.onstart = () => setIsListening(true);
 
     recognition.onresult = (event: any) => {
+      if (voiceRevokedRef.current) return; // A5 revocada durante la captura: se descarta
       const transcript = event.results[0][0].transcript;
       setInput(prev => prev + (prev ? ' ' : '') + transcript);
     };
 
     recognition.onerror = (event: any) => {
       console.error("Speech error", event.error);
+      stopVoiceWatch();
       setIsListening(false);
     };
 
-    recognition.onend = () => setIsListening(false);
+    recognition.onend = () => { stopVoiceWatch(); setIsListening(false); };
 
     recognitionRef.current = recognition;
+    stopVoiceWatch();
+    voiceWatchRef.current = watchVoiceAuthorization({ onRevoked: handleVoiceRevoked });
     recognition.start();
   }
 
@@ -559,13 +614,17 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
           {/* Input Area */}
           <div className="p-3 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700">
             <div className="relative flex items-center gap-2">
+              {/* V8.1-PROD-02F: el micrófono solo aparece con A5 efectiva (o mientras se escucha). */}
+              {(voiceAllowed === true || isListening) && (
               <button
                 onClick={toggleListening}
                 className={`p-2 rounded-full transition-colors ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700'}`}
                 title={isListening ? "Detener dictado" : "Dictar a Leo"}
+                aria-label={isListening ? "Detener dictado" : "Dictar a Leo"}
               >
                 {isListening ? <StopCircle size={20} /> : <Mic size={20} />}
               </button>
+              )}
 
               <input
                 type="text"
