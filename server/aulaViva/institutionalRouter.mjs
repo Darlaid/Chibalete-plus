@@ -37,7 +37,7 @@ import * as reader from '../services/insightReader.mjs';
 import { cohortDisclosure, suppressedAggregate, MIN_COHORT_READERS } from '../analytics/cohortDisclosure.mjs';
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
-import { evaluateScopeAccess } from './scopeAccess.mjs';
+import { evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision } from './scopeAccess.mjs';
 import {
     outcomesViewsTotal, cohortViewsTotal, trajectoryViewsTotal,
     learningViewsTotal, comparativeQueriesTotal, scopeSwitchTotal,
@@ -72,6 +72,12 @@ function requireScope(req, res, scope_type, scope_id) {
     // x-user-id queda solo como claim legacy_asserted de respaldo (CHP-ADR-01 §G.13).
     // Misma precedencia que scopeAccess.requireScopeAccess y que reqUserId en server.js.
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    // DIR-V81-07: un sujeto individual exige además A2/C005 si se llega por mediación.
+    if (String(scope_type) === 'user') {
+        const di = individualAccess(callerId, scope_id);
+        if (di.decision === 'allow') req.aulaVivaPlatformAdmin = String(di.via ?? '').startsWith('policy:platform_admin');
+        return respondScopeDecision(di, res, scope_type, scope_id);
+    }
     const d = evaluateScopeAccess(callerId, scope_type, scope_id);
     if (d.decision === 'allow') { req.aulaVivaPlatformAdmin = String(d.via ?? '').startsWith('policy:platform_admin'); return true; }
     if (d.decision === 'unavailable') {
@@ -146,6 +152,19 @@ export function createInstitutionalRouter({ requireUserAuth }) {
         const olderThanDays = Math.max(1, Math.min(90, Number(req.query.olderThanDays) || 14));
         const limit = parseLimit(req.query.limit);
         instrument('institutional.followup_queue', () => {
+            // DIR-V81-07: fuera de la administración, solo lectores con A2/C005 (ámbito 'all' = política de agregados, no de personas).
+            if (!req.aulaVivaPlatformAdmin) {
+                const check = individualAccessChecker(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']);
+                let rows;
+                try { rows = impact.getFollowupQueue({ olderThanDays, limit: 1000 }); } catch { rows = []; }
+                const out = [];
+                for (const r of Array.isArray(rows) ? rows : []) {
+                    const d = check(r?.student_id);
+                    if (d.decision === 'unavailable') return respondScopeDecision(d, res, 'user', null);
+                    if (d.decision === 'allow') out.push(r);
+                }
+                return res.json(out.slice(0, limit));
+            }
             safeJson(res, () => impact.getFollowupQueue({ olderThanDays, limit }), []);
         });
     });
@@ -188,7 +207,18 @@ export function createInstitutionalRouter({ requireUserAuth }) {
             if (!requireScope(req, res, cohort.scope_type, cohort.scope_id)) return;
             try { cohortViewsTotal.labels('members').inc(); } catch {}
             instrument('institutional.cohort_members', () => {
-                const members = stmts.listMembersOfCohort.all(req.params.cohort_id);
+                let members = stmts.listMembersOfCohort.all(req.params.cohort_id);
+                // DIR-V81-07: miembros identificables solo con A2/C005; los demás se excluyen (y no se cuentan).
+                if (!req.aulaVivaPlatformAdmin) {
+                    const check = individualAccessChecker(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']);
+                    const visible = [];
+                    for (const m of members) {
+                        const d = check(m?.user_id);
+                        if (d.decision === 'unavailable') return respondScopeDecision(d, res, 'user', null);
+                        if (d.decision === 'allow') visible.push(m);
+                    }
+                    members = visible;
+                }
                 res.json({ cohort_id: req.params.cohort_id,
                            cohort_key: cohort.cohort_key,
                            cohort_type: cohort.cohort_type,

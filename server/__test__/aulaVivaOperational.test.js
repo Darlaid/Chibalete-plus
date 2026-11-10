@@ -62,6 +62,9 @@ fs.writeFileSync(process.env.SCHOOLS_DB, JSON.stringify([
     { id: 'school_otro', name: 'Colegio Otro' },
 ]), 'utf8');
 
+// V8.1-PROD-01B (DIR-V81-07): seguimiento individual con A2 del lector y C005 del mediador (registro sintético).
+const { grantA2, grantC005 } = await import('./helpers/testA2.mjs');
+grantA2(['u_student', 'u_stranger', 'u_w']); grantC005(['u_mediator', 'u_mediator_otro', 'med_sesion']);
 const eventsService = await import('../eventsService.js');
 const insExt   = await import('../db/insightsDbExt.mjs');
 const pedExt   = await import('../db/pedagogyDbExt.mjs');

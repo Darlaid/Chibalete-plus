@@ -42,7 +42,7 @@ import * as intervention from '../services/interventionEngine.mjs';
 import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 // CHP-AULA-VIVA-MOOK-INTEGRATION-01A — autorización de scope vigente (CIS).
-import { requireScopeAccess, evaluateScopeAccess } from './scopeAccess.mjs';
+import { requireScopeAccess, evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision } from './scopeAccess.mjs';
 // CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01 — rol del principal, del CIS.
 import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import {
@@ -199,6 +199,8 @@ function allowDerivedScope(req, res, target) {
  * decisión sigue siendo del CIS: solo se lee por qué vía concedió.
  */
 function requireTenantScope(scopeType, scopeId, req, res) {
+    // DIR-V81-07: un sujeto individual (recomendaciones de un lector, ack/dismiss) exige A2/C005 por mediación.
+    if (String(scopeType) === 'user') return respondScopeDecision(individualAccess(callerIdOf(req), scopeId), res, scopeType, scopeId);
     const d = evaluateScopeAccess(callerIdOf(req), scopeType, scopeId);
     if (d.decision === 'allow') {
         if (d.via === 'policy:mediator_aggregate_read' && req.aulaVivaRole !== 'admin') {
@@ -485,14 +487,17 @@ export function createOperationalRouter({ requireUserAuth }) {
         // filtro por riesgo (ATTENTION_ENDPOINT_RISK_ZERO) NO se toca aquí.
         const callerId = callerIdOf(req);
         let unavailable = null;
+        // DIR-V81-07: en la cola solo entran lectores con A2 vigente y C005 vigente del mediador.
+        const check = individualAccessChecker(callerId);
         const inScope = (userId) => {
             if (req.aulaVivaRole === 'admin') return true;
-            const d = evaluateScopeAccess(callerId, 'user', userId);
+            const d = check(userId);
             if (d.decision === 'unavailable') unavailable = d.cause ?? 'unavailable';
             return d.decision === 'allow';
         };
         let queue = null;
         try { queue = buildAttentionQueue(inScope); } catch { queue = null; }
+        if (unavailable === 'individual_access_unavailable') return res.status(503).json({ ok: false, error: 'individual_access_unavailable' });
         if (unavailable) return res.status(503).json({ ok: false, error: 'identity_unavailable', cause: unavailable });
         safeJson(res, () => {
             if (queue === null) throw new Error('engine_unavailable');

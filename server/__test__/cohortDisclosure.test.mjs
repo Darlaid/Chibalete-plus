@@ -35,6 +35,9 @@ process.env.USERS_DB = path.join(data, 'usuarios_colegios_oro.json');
 process.env.GROUPS_DB = path.join(data, 'groups_db.json');
 process.env.SCHOOLS_DB = path.join(data, 'schools_db.json');
 
+// V8.1-PROD-01B (DIR-V81-07): seguimiento individual con A2 del lector y C005 del mediador (registro sintético).
+const { grantA2, grantC005 } = await import('./helpers/testA2.mjs');
+grantA2(['s-1']); grantC005(['med-a']);
 const C = await import('../analytics/cohortDisclosure.mjs');
 
 let pass = 0, fail = 0;

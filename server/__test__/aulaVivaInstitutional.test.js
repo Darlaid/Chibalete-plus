@@ -1,3 +1,4 @@
+import './helpers/testMode.mjs'; // V8.1-PROD-01B: clave de sujeto de prueba para el registro A2
 /**
  * aulaVivaInstitutional.test.js — PASO 7 §21.
  *
@@ -45,6 +46,9 @@ process.env.GROUPS_DB  = path.join(dataDir, 'groups_db.json');
 process.env.SCHOOLS_DB = path.join(dataDir, 'schools_db.json');
 
 // Importes después de setear env
+// V8.1-PROD-01B (DIR-V81-07): seguimiento individual con A2 del lector y C005 del mediador (registro sintético).
+const { grantA2, grantC005 } = await import('./helpers/testA2.mjs');
+grantA2(['u_student', 'u_stranger', 'lec_c']); grantC005(['u_mediator', 'med_c', 'med_x']);
 const eventsService = await import('../eventsService.js');
 const insExt = await import('../db/insightsDbExt.mjs');
 const pedExt = await import('../db/pedagogyDbExt.mjs');

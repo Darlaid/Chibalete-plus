@@ -26,6 +26,7 @@
  *   ni como false ordinario en los guards HTTP).
  */
 import { authorizeScope, IdentityUnavailableError } from '../identity/cis.mjs';
+import { a2Gate } from '../privacy/a2Registry.mjs';
 
 /**
  * Decisión tipificada de acceso a `(scope_type, scope_id)`.
@@ -59,12 +60,55 @@ export function canAccessScope(callerId, scope_type, scope_id) {
  * Middleware-helper para handlers institucionales. Si NO autoriza, responde
  * con el status de la taxonomía y NO continúa.
  */
+/**
+ * V8.1-PROD-01B (DIR-V81-07) — seguimiento individual institucional en Aula Viva.
+ * El MISMO criterio que status, exportaciones, MOOK y progreso XP
+ * (`requireSubjectScope({ a2: true })` en server.js): cuando el CIS concede un sujeto
+ * por la relación de mediación (`mediator_of_member_group`), además se exige A2
+ * vigente del lector y C005 vigente del mediador (`a2Gate`, registro
+ * CHP_A2_REGISTRY). Lo propio (`self`) y la administración de plataforma no son
+ * consulta institucional y no cambian. Sin A2/C005 ⇒ la MISMA decisión que fuera
+ * de alcance; registro no verificable ⇒ `unavailable` (fallo cerrado).
+ *
+ * Devuelve una función reutilizable en listados: el registro se lee una sola vez
+ * por petición. Nunca concede: solo puede restringir lo que el CIS ya permitió.
+ */
+export function individualAccessChecker(callerId) {
+    let gate = null, gateFailed = false;
+    return (subjectId) => {
+        const sid = String(subjectId ?? '');
+        const d = evaluateScopeAccess(callerId, 'user', sid);
+        if (d.decision !== 'allow' || d.via !== 'mediator_of_member_group') return d;
+        if (!gate && !gateFailed) { try { gate = a2Gate(undefined, undefined, { mediatorId: callerId }); } catch { gateFailed = true; } }
+        if (gateFailed) return { decision: 'unavailable', cause: 'individual_access_unavailable' };
+        return gate.allows(sid) ? d : { decision: 'forbidden', cause: 'individual_access_denied' };
+    };
+}
+/** Decisión individual de una sola consulta. */
+export const individualAccess = (callerId, subjectId) => individualAccessChecker(callerId)(subjectId);
+/** Respuesta HTTP de una decisión (misma taxonomía que `requireScopeAccess`). */
+export function respondScopeDecision(d, res, scope_type, scope_id) {
+    if (d.decision === 'allow') return true;
+    if (d.decision === 'unavailable') {
+        res.status(503).json(d.cause === 'individual_access_unavailable'
+            ? { ok: false, error: 'individual_access_unavailable' }
+            : { ok: false, error: 'identity_unavailable', cause: d.cause });
+        return false;
+    }
+    if (d.decision === 'unauthenticated') { res.status(401).json({ ok: false, error: 'identity_not_established' }); return false; }
+    // Sin A2/C005 o fuera de alcance: el mismo 403, sin revelar si pertenece a otro grupo.
+    res.status(403).json({ ok: false, error: 'scope_access_denied', scope_type, scope_id });
+    return false;
+}
+
 export function requireScopeAccess(scope_type, scope_id, req, res) {
     // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el principal es la identidad que
     // requireUserAuth ya estableció (sesión firmada → req.auth / req.user);
     // el header x-user-id queda solo como claim legacy_asserted de respaldo
     // (CHP-ADR-01 §G.13). Ningún dato del cliente amplía el alcance.
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    // DIR-V81-07: un sujeto individual exige además A2/C005 si se llega por mediación.
+    if (String(scope_type) === 'user') return respondScopeDecision(individualAccess(callerId, scope_id), res, scope_type, scope_id);
     const d = evaluateScopeAccess(callerId, scope_type, scope_id);
     if (d.decision === 'allow') return true;
     if (d.decision === 'unavailable') {
