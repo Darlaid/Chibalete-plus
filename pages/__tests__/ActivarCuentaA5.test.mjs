@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as esbuild from 'esbuild';
+import { createHash } from 'node:crypto';
 import { planActivationDecisions } from '../../server/privacy/acceptance.mjs';
 import { ACCEPTANCE_DOCUMENTS as DOCS } from '../../utils/acceptanceDocuments.mjs';
 
@@ -38,24 +39,13 @@ export { createElement } from 'react';
 export { MemoryRouter } from 'react-router-dom';
 `);
 const bundle = path.join(tmp, 'bundle.mjs');
-let M = null, BASE = null;
-const baseSrc = path.join(tmp, 'ActivarCuentaBase.tsx');
-try {
-    const { execFileSync } = await import('node:child_process');
-    const b = execFileSync('git', ['show', '7402072:pages/ActivarCuenta.tsx'], { cwd: ROOT }).toString('utf8');
-    fs.writeFileSync(baseSrc, b.replace("'../utils/acceptanceDocuments.mjs'", fwd(path.join(ROOT, 'utils', 'acceptanceDocuments.mjs'))));
-    const baseEntry = path.join(tmp, 'base.jsx');
-    fs.writeFileSync(baseEntry, `export { default as ActivarCuenta } from ${fwd(baseSrc)};
-export { renderToStaticMarkup } from 'react-dom/server';
-export { createElement } from 'react';
-export { MemoryRouter } from 'react-router-dom';
-`);
-    const baseBundle = path.join(tmp, 'base.mjs');
-    await esbuild.build({ entryPoints: [baseEntry], bundle: true, format: 'esm', platform: 'node', outfile: baseBundle, logLevel: 'silent',
-        nodePaths: [path.join(ROOT, 'node_modules')], jsx: 'automatic', define: { 'import.meta.env': '{"DEV":false}' },
-        banner: { js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);" } });
-    BASE = await import(pathToFileURL(baseBundle).href);
-} catch { BASE = null; }
+let M = null;
+// Referencia de la versión anterior (7402072), calculada al preparar esta unidad con el mismo render.
+// Fija en la prueba: la CI hace checkout superficial y no tiene ese commit.
+//  - controles del formulario (tipo:nombre:valor), ordenados;
+//  - SHA-256 del texto visible sin el bloque A5 (de «A5 ·» a «Si no respondes, queda pendiente.»).
+const BASE_CONTROLS = 'checkbox::|checkbox::|password::|password::|radio:A1:no|radio:A1:yes|radio:A2:no|radio:A2:not_applicable|radio:A2:yes|radio:A3:no|radio:A3:yes|radio:A5:no|radio:A5:yes|radio:actingAs:legal_representative|radio:actingAs:titular';
+const BASE_REST_SHA = '3a3c208a4613ad575f467381883c06ac2c146f2b39f2a7a36a84c4f2a1415b0d';
 try {
     await esbuild.build({
         entryPoints: [entry], bundle: true, format: 'esm', platform: 'node', outfile: bundle, logLevel: 'silent',
@@ -87,13 +77,11 @@ if (M) {
     ok('A5 sigue siendo Sí / No, sin premarcar', count(html, /name="A5"/g) === 2 && /value="yes"[^>]*\/?>Sí, autorizo/.test(g) && /value="no"[^>]*\/?>No autorizo/.test(g) && !/name="A5"[^>]*checked/.test(html));
     // Misma lista de controles que la versión base (7402072): sin casillas ni decisiones nuevas.
     const controls = (h) => (h.match(/<input [^>]*>/g) ?? []).map((i) => `${(i.match(/type="([^"]+)"/) ?? [])[1]}:${(i.match(/name="([^"]+)"/) ?? [])[1] ?? ''}:${(i.match(/value="([^"]+)"/) ?? [])[1] ?? ''}`).sort().join('|');
-    const baseHtml = BASE ? BASE.renderToStaticMarkup(BASE.createElement(BASE.MemoryRouter, { initialEntries: ['/activar-cuenta?token=t-prueba'] }, BASE.createElement(BASE.ActivarCuenta))) : null;
-    ok('no aparecen casillas ni decisiones nuevas (mismos controles que en 7402072)', baseHtml !== null && controls(html) === controls(baseHtml) && controls(html).length > 0, baseHtml ? `${controls(baseHtml)} -> ${controls(html)}` : 'sin base');
-    ok('solo cambia el bloque A5 (el resto del texto visible es idéntico)', baseHtml !== null && (() => {
-        // Se quita el bloque A5 completo: en la base la explicación iba después de Sí/No; ahora va antes.
-        const cut = (h, endMark) => { const x = text(h); const a = x.indexOf('A5 ·'); const e = x.indexOf(endMark, a); return a < 0 || e < 0 ? null : x.slice(0, a) + x.slice(e + endMark.length); };
-        const now = cut(html, 'Sí, autorizo No autorizo'), before = cut(baseHtml, 'Si no respondes, queda pendiente.');
-        return now !== null && now === before;
+    ok('no aparecen casillas ni decisiones nuevas (mismos controles que en 7402072)', controls(html) === BASE_CONTROLS, controls(html));
+    ok('solo cambia el bloque A5 (el resto del texto visible es idéntico a 7402072)', (() => {
+        // Se quita el bloque A5 completo: ahora la explicación va antes de Sí/No y el bloque termina en «No autorizo».
+        const x = text(html); const a = x.indexOf('A5 ·'); const end = 'Sí, autorizo No autorizo'; const e = x.indexOf(end, a);
+        return a >= 0 && e >= 0 && createHash('sha256').update(x.slice(0, a) + x.slice(e + end.length)).digest('hex') === BASE_REST_SHA;
     })());
     ok('el enlace al 004 sigue en la lista de documentos', t.includes(DOCS.dataNotice.title));
 }
