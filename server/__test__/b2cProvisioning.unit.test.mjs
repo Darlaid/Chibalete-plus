@@ -5,7 +5,10 @@ import crypto from 'node:crypto';
 import {
     computeExpiresAt, signB2cRequest, verifyB2cSignature, validateProvisionInput, validateRevokeInput,
     planUserPhase, planRulePhase, planRevoke, planTitleSync, ruleIdFor, idempotencyKeyFor, B2cError, B2C_TEMPLATE_RULE_ID,
+    assertB2cDocumentsApproved, b2cTemplateRule, B2C_REQUIRED_DOCUMENTS,
 } from '../b2c/b2cProvisioning.mjs';
+import { acceptanceDocumentsStatus, requiredDocumentIds } from '../privacy/acceptance.mjs';
+import { ACCEPTANCE_DOCUMENTS as DOCS } from '../../utils/acceptanceDocuments.mjs';
 
 let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
@@ -71,10 +74,38 @@ const expiredRules = [template, { ...R1.rule, expiresAt: now - 1 }];
 ok('con la suscripción anterior vencida sí se provisiona', planUserPhase({ users: users1, rules: expiredRules, input: input2, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'X', newToken: 'T3' }).status === 'activated');
 const activeUser = { id: 'U-ACT', email: 'Lector@Colegio.invalid', accountStatus: 'active', roles: ['lector'], groupIds: ['g-col'] };
 const input3 = validateProvisionInput({ ...base, orderId: 1003, idempotencyKey: 'test:order:1003', email: 'lector@colegio.invalid' }, now);
-const P3 = planUserPhase({ users: [activeUser], rules: [template], input: input3, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'X', newToken: 'T4' });
-ok('cuenta activa existente (colegio): se reutiliza sin tocarla y sin enlace', P3.userOp === 'none' && P3.userId === 'U-ACT' && P3.activationUrl === null && P3.reusedAccount === true && P3.user === activeUser);
+const P3 = planUserPhase({ users: [activeUser], rules: [template], input: input3, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'X', newToken: 'T4', termsOnFileFor: () => true });
+ok('cuenta activa existente (colegio) con T vigente: se reutiliza sin tocarla y sin enlace', P3.userOp === 'none' && P3.userId === 'U-ACT' && P3.activationUrl === null && P3.reusedAccount === true && P3.user === activeUser);
 ok('cuenta deshabilitada → account_not_available',
     throwsCode(() => planUserPhase({ users: [{ ...activeUser, accountStatus: 'disabled' }], rules: [template], input: input3, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'X', newToken: 'T' }), 'account_not_available'));
+// V8.1-PROD-05B (G3): cuenta YA ACTIVA y compra nueva sin T del checkout.
+const reuse = (extra) => planUserPhase({ users: [activeUser], rules: [template], input: input3, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'X', newToken: 'T', ...extra });
+ok('G3: activa sin T del checkout ni T previa → 422 terms_acceptance_required', throwsCode(() => reuse({ termsOnFileFor: () => false }), 'terms_acceptance_required'));
+ok('G3: sin consulta de T (por defecto) → fallo cerrado 422', throwsCode(() => reuse({}), 'terms_acceptance_required'));
+ok('G3: registro no verificable → 503 acceptance_registry_unavailable', throwsCode(() => reuse({ termsOnFileFor: () => null }), 'acceptance_registry_unavailable'));
+const input3T = validateProvisionInput({ ...base, orderId: 1003, idempotencyKey: 'test:order:1003', email: 'lector@colegio.invalid', termsAcceptance: { version: DOCS.terms.version, acceptedAt: now - 1000 } }, now);
+ok('G3: activa CON T del checkout → reutilizada', planUserPhase({ users: [activeUser], rules: [template], input: input3T, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'X', newToken: 'T', termsOnFileFor: () => false }).userOp === 'none');
+ok('G3: cuenta nueva (invitada) no lo exige: la T se pide al activar', planUserPhase({ users: [], rules: [template], input: input3, nowMs: now, normalizeEmail, normalizeUser, newUserId: 'N', newToken: 'T' }).userOp === 'create');
+const prevRule = planRulePhase({ rules: [template], input: input3, userId: 'U-ACT', nowMs: now }).rule;
+ok('G3: reintento de un pedido ya aprovisionado → idempotente sin exigir T', reuse({ rules: [template, prevRule], termsOnFileFor: () => false }).status === 'already_activated');
+
+console.log('V8.1-PROD-05B — documentos aprobados (G1) y aceptación acreditable (G2)');
+const docsWith = (ids, over = {}) => acceptanceDocumentsStatus({ CHP_ACCEPTANCE_DOCUMENTS: JSON.stringify(Object.fromEntries(Object.values(DOCS)
+    .filter((d) => ids.includes(d.id)).map((d) => [d.id, { version: d.version, url: `https://docs.example.invalid/${d.id}`, ...(over[d.id] || {}) }]))) });
+const T_OK = { version: DOCS.terms.version, acceptedAt: now - 1000 };
+ok('G1 = documentos de activación de un lector (001, 002, 004)', JSON.stringify([...B2C_REQUIRED_DOCUMENTS]) === JSON.stringify(requiredDocumentIds({ roles: ['lector'] })));
+ok('G1: sin configuración → 503 DOCUMENTS_NOT_APPROVED', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: acceptanceDocumentsStatus({}) }), 'DOCUMENTS_NOT_APPROVED'));
+ok('G1: JSON inválido → 503', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: acceptanceDocumentsStatus({ CHP_ACCEPTANCE_DOCUMENTS: '{x' }) }), 'DOCUMENTS_NOT_APPROVED'));
+ok('G1: 001 y 002 aprobados, 004 pendiente → 503', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: docsWith(['001', '002', '005']) }), 'DOCUMENTS_NOT_APPROVED'));
+ok('G1: 004 con otra versión → 503', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: docsWith(['001', '002', '004'], { '004': { version: '004@0.9' } }) }), 'DOCUMENTS_NOT_APPROVED'));
+ok('G1: 001 con enlace http → 503', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: docsWith(['001', '002', '004'], { '001': { url: 'http://docs.example.invalid/001' } }) }), 'DOCUMENTS_NOT_APPROVED'));
+ok('G1: sin el 002 aunque llegue T → 503 (la T nunca se valida contra un 002 no aprobado)', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: docsWith(['001', '004']), termsAcceptance: T_OK }), 'DOCUMENTS_NOT_APPROVED'));
+ok('G1: 001, 002 y 004 aprobados → sin error', (() => { assertB2cDocumentsApproved({ docsStatus: docsWith(['001', '002', '004']), termsAcceptance: T_OK }); return true; })());
+ok('G2: T de otra versión que la aprobada → 400', throwsCode(() => assertB2cDocumentsApproved({ docsStatus: docsWith(['001', '002', '004']), termsAcceptance: { ...T_OK, version: '002@0.9' } }), 'invalid_terms_acceptance'));
+ok('G2: aceptación posterior a la activación (>5 min) → 400', throwsCode(() => validateProvisionInput({ ...base, activationAt: now - 3600e3, termsAcceptance: { version: DOCS.terms.version, acceptedAt: now } }, now), 'invalid_terms_acceptance'));
+ok('G2: aceptación sin fecha → 400', throwsCode(() => validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version } }, now), 'invalid_terms_acceptance'));
+ok('G2: aceptación no objeto → 400', throwsCode(() => validateProvisionInput({ ...base, termsAcceptance: true }, now), 'invalid_terms_acceptance'));
+ok('plantilla vacía → template_rule_missing', throwsCode(() => b2cTemplateRule([{ ...template, titleIds: [] }]), 'template_rule_missing'));
 ok('sin plantilla → template_rule_missing (503)', throwsCode(() => planRulePhase({ rules: [], input, userId: 'U', nowMs: now }), 'template_rule_missing'));
 
 console.log('revocación');

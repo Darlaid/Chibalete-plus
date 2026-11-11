@@ -6,6 +6,8 @@
  *   caducidad aplicada por el autorizador sin cron · conflicto · revocación solo de la regla del
  *   pedido · cuenta de colegio reutilizada sin tocar su acceso · dry-run sin escrituras ·
  *   el comprador NO entra en el grupo B2C · los logs no contienen correos, tokens ni el secreto.
+ * V8.1-PROD-05B: documentos no aprobados (G1), aceptación no acreditable (G2) y cuenta activa sin T
+ *   (G3) ⇒ rechazo sin ninguna escritura; dos réplicas sobre el mismo almacén.
  *
  * El secreto file-only vive en una ruta constante (/app/secrets/b2c_provisioning_secret). Por eso la
  * prueba SOLO corre en un contenedor desechable y con opt-in explícito:
@@ -26,6 +28,7 @@ import { B2C_PROVISIONING_SECRET_PATH } from '../lib/b2cProvisioningSecret.js';
 import bcrypt from 'bcryptjs';
 import * as R from '../privacy/a2Registry.mjs';
 import { ACCEPTANCE_DOCUMENTS } from '../../utils/acceptanceDocuments.mjs';
+import { freePorts } from './helpers/freePort.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..', '..');
@@ -67,24 +70,27 @@ fs.writeFileSync(P.content, JSON.stringify([
 ]));
 fs.writeFileSync(P.key, crypto.randomBytes(48).toString('hex')); fs.chmodSync(P.key, 0o400);
 
-const PORT = 4700 + (process.pid % 80); const base = `http://127.0.0.1:${PORT}`;
-const child = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env: {
-    ...process.env, NODE_ENV: 'test', PORT: String(PORT), CHP_DATA_DIR: tmp + '/data',
+const [PORT, ...MORE_PORTS] = await freePorts(5); const base = `http://127.0.0.1:${PORT}`;
+// V8.1-PROD-05B: varias instancias sobre el MISMO almacén (como api_1/api_2); solo cambia la configuración documental.
+const children = [];
+const startServer = (port, envOver = {}) => { const c = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env: {
+    ...process.env, NODE_ENV: 'test', PORT: String(port), CHP_DATA_DIR: tmp + '/data',
     USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: P.schools, ACCESS_DB: P.access,
     CONTENT_DB: P.content, UPLOADS_ROOT: P.uploads, OFFLINE_ASSIGNMENT_DB_PATH: P.offline,
     USER_AUDIT_DB: tmp + '/au.json', IDENTITY_DB: P.identity, IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json',
     INSIGHTS_SQLITE_PATH: tmp + '/insights.db', EVENTS_SQLITE_PATH: tmp + '/events.db',
     SESSIONS_DB: P.sessions, SESSION_KEY_CURRENT_PATH: P.key,
     ACCESS_FALLBACK_MODE: 'restricted', SESSION_AUTH_MODE: 'enforce',
-    SESSION_ALLOWED_ORIGINS: 'https://app.test', ALLOWED_ORIGINS: 'https://app.test',
-} });
+    SESSION_ALLOWED_ORIGINS: 'https://app.test', ALLOWED_ORIGINS: 'https://app.test', ...envOver,
+} }); children.push(c); return c; };
+const child = startServer(PORT);
 let boot = ''; child.stdout.on('data', d => boot += d); child.stderr.on('data', d => boot += d);
 
 const J = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const tsNow = () => String(Math.floor(Date.now() / 1000));
-const signed = async (ruta, cuerpo, { secret = SECRET, ts = tsNow(), tamper = false } = {}) => {
+const signed = async (ruta, cuerpo, { secret = SECRET, ts = tsNow(), tamper = false, at = base } = {}) => {
     const raw = JSON.stringify(cuerpo);
-    const r = await fetch(base + ruta, { method: 'POST', headers: { 'content-type': 'application/json',
+    const r = await fetch(at + ruta, { method: 'POST', headers: { 'content-type': 'application/json',
         [B2C_TS_HEADER]: ts, [B2C_SIG_HEADER]: signB2cRequest(secret, ts, raw) }, body: tamper ? raw.replace('}', ',"x":1}') : raw });
     let body = null; try { body = await r.json(); } catch { /* */ }
     return { status: r.status, body };
@@ -97,7 +103,10 @@ const activate = async (activationUrl) => { const token = activationUrl.split('t
     const r = await fetch(base + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: PW, acceptance: { ...ADULT_ACTIVATION, A3: 'yes' } }) /* V8.1-PROD-02B: el comprador adulto autoriza Leo (A3) */ }); return r.status; };
 const canRead = async (cookie, userId, contentId) => { const r = await fetch(`${base}/api/content/${contentId}/access?userId=${userId}`, { headers: { cookie } });
     let b = null; try { b = await r.json(); } catch { /* */ } return r.status === 200 && b?.allowed === true; };
-const arrancado = async () => { for (let i = 0; i < 120; i++) { try { if ((await fetch(base + '/api/health')).ok) return true; } catch { /* */ } await sleep(250); } return false; };
+const arrancado = async (at = base) => { for (let i = 0; i < 120; i++) { try { if ((await fetch(at + '/api/health')).ok) return true; } catch { /* */ } await sleep(250); } return false; };
+// V8.1-PROD-05B: huella de todo lo que una provisión puede escribir (cuentas, reglas, decisiones).
+const stores = () => [P.users, P.access, process.env.CHP_A2_REGISTRY].map((f) => fs.readFileSync(f, 'utf8')).join('\u0000');
+const T_NOW = () => ({ version: ACCEPTANCE_DOCUMENTS.terms.version, acceptedAt: Date.now() - 5000 });
 
 try {
     if (!await arrancado()) { console.error('El servidor no arrancó:\n' + boot.slice(-3000)); process.exit(1); }
@@ -154,8 +163,17 @@ try {
     ok('no se crea regla para 1003', !J(P.access).some(r => r.id === 'access-b2c-test-order-1003'));
 
     console.log('[7] cuenta de colegio existente que compra');
-    const r4 = await signed('/api/b2c/provision', order(1004, 'lector.colegio@fixture.invalid'));
-    ok('activated reutilizando la cuenta, sin enlace', r4.status === 200 && r4.body.userId === 'COLE' && r4.body.reusedAccount === true && r4.body.activationUrl === null);
+    {   // V8.1-PROD-05B (G3): activa, sin T del checkout ni T previa ⇒ 422 y nada escrito.
+        const snap = stores();
+        const g3 = await signed('/api/b2c/provision', order(1004, 'lector.colegio@fixture.invalid'));
+        ok('G3: cuenta activa sin T ⇒ 422 terms_acceptance_required', g3.status === 422 && g3.body?.code === 'terms_acceptance_required', JSON.stringify(g3));
+        ok('G3: …ni cuenta, ni regla, ni decisión escritas', stores() === snap);
+        const g3d = await signed('/api/b2c/provision', order(1004, 'lector.colegio@fixture.invalid', { dryRun: true }));
+        ok('G3: el dry-run anticipa el mismo 422', g3d.status === 422 && g3d.body?.code === 'terms_acceptance_required');
+    }
+    const r4 = await signed('/api/b2c/provision', order(1004, 'lector.colegio@fixture.invalid', { termsAcceptance: T_NOW() }));
+    ok('activated reutilizando la cuenta, sin enlace, con su T', r4.status === 200 && r4.body.userId === 'COLE' && r4.body.reusedAccount === true && r4.body.activationUrl === null && r4.body.termsRecorded === true, JSON.stringify(r4.body));
+    ok('G3: reintento del pedido ya aprovisionado sin T ⇒ already_activated (idempotente)', (await signed('/api/b2c/provision', order(1004, 'lector.colegio@fixture.invalid'))).body?.status === 'already_activated');
     ok('la cuenta de colegio conserva sus grupos', JSON.stringify(J(P.users).find(u => u.id === 'COLE').groupIds) === '["g-colegio"]');
     const L4 = await login('lector.colegio@fixture.invalid');
     ok('ahora lee B2C y colegio', await canRead(L4.cookie, 'COLE', 'obra-1') && await canRead(L4.cookie, 'COLE', 'obra-colegio'));
@@ -208,7 +226,8 @@ try {
     ok('B. TTS → 403', expiredCode(pB.tts));
     ok('B. libros: tampoco abre la obra B2C', !(await canRead(L2b.cookie, r2.body.userId, 'obra-1')));
     // C. B2C vencido + colegio vigente → conserva solo lo del colegio
-    const rM = await signed('/api/b2c/provision', order(1010, 'mixto@fixture.invalid', { activationAt: Date.now() - 400 * 864e5 }));
+    const actM = Date.now() - 400 * 864e5; // V8.1-PROD-05B (G3): cuenta activa ⇒ con la T del checkout de ese pedido
+    const rM = await signed('/api/b2c/provision', order(1010, 'mixto@fixture.invalid', { activationAt: actM, termsAcceptance: { version: ACCEPTANCE_DOCUMENTS.terms.version, acceptedAt: actM } }));
     ok('C. identidad B2C mixta con suscripción vencida', rM.status === 200 && rM.body.userId === 'MIXTO' && rM.body.expiresAt < Date.now());
     const LM = await login('mixto@fixture.invalid');
     ok('C. abre la obra del colegio y NO la obra B2C', await canRead(LM.cookie, 'MIXTO', 'obra-colegio') && !(await canRead(LM.cookie, 'MIXTO', 'obra-1')));
@@ -273,6 +292,55 @@ try {
         ok('el reembolso del pedido suprimido sigue funcionando (contrato con la tienda)', rv.status === 200);
     }
 
+    console.log('[12] V8.1-PROD-05B: documentos no aprobados (G1/G2) y dos réplicas');
+    {
+        const [P_NONE, P_PART, P_BAD, P_R2] = MORE_PORTS;
+        const at = (p) => `http://127.0.0.1:${p}`;
+        const docs = (over = {}, ids = ['001', '002', '004', '005']) => JSON.stringify(Object.fromEntries(Object.values(ACCEPTANCE_DOCUMENTS)
+            .filter((d) => ids.includes(d.id)).map((d) => [d.id, { version: d.version, url: `https://docs.example.invalid/${d.id}`, ...(over[d.id] || {}) }])));
+        startServer(P_NONE, { CHP_ACCEPTANCE_DOCUMENTS: '' });
+        startServer(P_PART, { CHP_ACCEPTANCE_DOCUMENTS: docs({}, ['001', '002', '005']) });                       // 002 aprobado, 004 pendiente
+        startServer(P_BAD, { CHP_ACCEPTANCE_DOCUMENTS: docs({ '004': { version: '004@0.9' }, '001': { url: 'http://docs.example.invalid/001' } }) });
+        startServer(P_R2);                                                                                         // réplica 2, configuración completa
+        ok('arrancan las cuatro instancias sobre el mismo almacén', (await Promise.all([P_NONE, P_PART, P_BAD, P_R2].map((p) => arrancado(at(p))))).every(Boolean));
+        const casos = [
+            ['cuenta nueva con T válida', () => order(1301, 'g1.nueva@fixture.invalid', { termsAcceptance: T_NOW() })],
+            ['cuenta nueva sin T', () => order(1302, 'g1.sin@fixture.invalid')],
+            ['cuenta reutilizada (activa) con T', () => order(1303, 'lector.colegio@fixture.invalid', { termsAcceptance: T_NOW() })],
+            ['cuenta reutilizada (activa) sin T', () => order(1304, 'lector.colegio@fixture.invalid')],
+            ['T de versión incorrecta', () => order(1305, 'g1.version@fixture.invalid', { termsAcceptance: { version: '002@0.9', acceptedAt: Date.now() } })],
+            ['reintento de un pedido ya aprovisionado', () => order(1001, 'comprador.uno@fixture.invalid')],
+            ['dry-run', () => order(1306, 'g1.dry@fixture.invalid', { termsAcceptance: T_NOW(), dryRun: true })],
+        ];
+        for (const [nombre, p] of [['sin documentos', P_NONE], ['002 aprobado y 004 pendiente', P_PART], ['004 con otra versión y 001 sin https', P_BAD]]) {
+            const snap = stores(); const res = [];
+            for (const [, cuerpo] of casos) res.push(await signed('/api/b2c/provision', cuerpo(), { at: at(p) }));
+            const codes = res.map((r) => `${r.status}:${r.body?.code}`);
+            // La versión incorrecta es entrada inválida (400) y se rechaza antes; todo lo demás ⇒ 503.
+            ok(`G1 ${nombre}: 503 DOCUMENTS_NOT_APPROVED en todos los casos válidos`, codes.every((c, i) => c === (casos[i][0] === 'T de versión incorrecta' ? '400:invalid_terms_acceptance' : '503:DOCUMENTS_NOT_APPROVED')), JSON.stringify(codes));
+            ok(`G1 ${nombre}: cero escrituras (cuentas, reglas y registro de decisiones idénticos)`, stores() === snap);
+            ok(`G1 ${nombre}: la respuesta no revela cuenta ni enlace`, res.every((r) => !('userId' in (r.body ?? {})) && !('activationUrl' in (r.body ?? {}))));
+        }
+        ok('G1: sin firma válida sigue siendo 401 antes que 503', (await signed('/api/b2c/provision', order(1307, 'g1.firma@fixture.invalid'), { at: at(P_NONE), secret: 'y'.repeat(64) })).status === 401);
+        ok('G1: la revocación (reembolso) no depende de los documentos', (await signed('/api/b2c/revoke', { orderId: 1004, source: 'test', idempotencyKey: 'test:order:1004', reason: 'refunded' }, { at: at(P_NONE) })).status === 200);
+
+        // Dos réplicas (base y P_R2) con configuración completa sobre el mismo almacén.
+        const usersN = J(P.users).length, rulesN = J(P.access).length;
+        const cuerpo = order(1401, 'dos.replicas@fixture.invalid', { termsAcceptance: T_NOW() });
+        const [ra, rb] = await Promise.all([signed('/api/b2c/provision', cuerpo), signed('/api/b2c/provision', cuerpo, { at: at(P_R2) })]);
+        ok('réplicas: el mismo pedido a la vez ⇒ 200 en ambas (activated + already_activated)', ra.status === 200 && rb.status === 200 &&
+            [ra.body.status, rb.body.status].sort().join() === 'activated,already_activated', JSON.stringify([ra.body, rb.body]));
+        ok('réplicas: una sola cuenta y una sola regla, del mismo titular', J(P.users).length === usersN + 1 && J(P.access).length === rulesN + 1 && ra.body.userId === rb.body.userId);
+        ok('réplicas: la T del checkout queda efectiva para esa cuenta', R.decisionGate().effective('T', ra.body.userId));
+        const snap2 = stores();
+        const [ga, gb] = await Promise.all([signed('/api/b2c/provision', order(1402, 'admin@fixture.invalid')), signed('/api/b2c/provision', order(1402, 'admin@fixture.invalid'), { at: at(P_R2) })]);
+        ok('réplicas: G3 en ambas ⇒ 422 si la cuenta activa no aporta T vigente', ga.status === 422 && gb.status === 422, JSON.stringify([ga.body, gb.body]));
+        ok('réplicas: …sin ninguna escritura', stores() === snap2);
+        // MIXTO ya tiene T vigente de 1010 (checkout) ⇒ una compra posterior sin T se acepta (aceptación previa aplicable).
+        const prev = await signed('/api/b2c/provision', order(1403, 'mixto@fixture.invalid'), { at: at(P_R2) });
+        ok('G3: T previa vigente de la misma versión ⇒ 200 sin inventar una nueva', prev.status === 200 && prev.body.termsRecorded === false, JSON.stringify(prev.body));
+    }
+
     console.log('[10] entrada inválida y registros');
     ok('plan inválido → 400 invalid_plan', (await signed('/api/b2c/provision', order(1006, 'x@fixture.invalid', { plan: 'mensual' }))).body?.code === 'invalid_plan');
     ok('clave de idempotencia ajena → 400', (await signed('/api/b2c/provision', order(1007, 'x@fixture.invalid', { idempotencyKey: 'test:order:1' }))).status === 400);
@@ -288,7 +356,7 @@ try {
 
     console.log(`\nresultado: ${pass} correctas, ${fail} fallidas`);
 } finally {
-    child.kill('SIGKILL');
+    for (const c of children) c.kill('SIGKILL');
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* */ }
     try { fs.rmSync(B2C_PROVISIONING_SECRET_PATH, { force: true }); } catch { /* */ }
 }
