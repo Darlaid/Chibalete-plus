@@ -11,6 +11,11 @@ import type { Content, ProgresoLectura, User, CommunityPost, Assignment } from '
 import { MessageSquare, Heart, PenTool, ClipboardList, CheckCircle, Camera, Video, X, Upload, Check, Mic, StopCircle, Play, Square, Lightbulb, Calendar as CalendarIcon, ChevronLeft, ChevronRight, CheckSquare, BookOpen, Users, Plus, Zap } from 'lucide-react';
 import { isMediator, isAdmin } from '../utils/permissions';
 import QuickClubModal from '../components/QuickClubModal';
+import { isVoiceCaptureAllowed, watchVoiceAuthorization } from '../utils/voiceAuthorization.mjs';
+import type { VoiceAuthorizationWatch } from '../utils/voiceAuthorization.mjs';
+
+// V8.1-PROD-02G: la grabación de respuestas orales también exige A5 (004 §6.3).
+const A5_RECORDING_MSG = 'Grabar respuestas de voz requiere la autorización A5 de tu cuenta.';
 
 // Helper to handle local dates without timezone shifting
 const toLocalISOString = (date: Date) => {
@@ -68,6 +73,18 @@ const Home: React.FC = () => {
     // Audio Recording Refs
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
+    const voiceWatchRef = useRef<VoiceAuthorizationWatch | null>(null);
+    const voiceRevokedRef = useRef(false);
+    const voiceStartingRef = useRef(false);
+    const [voiceBlockedMsg, setVoiceBlockedMsg] = useState<string | null>(null);
+
+    // Al desmontar: deja de vigilar A5 y cierra el micrófono si seguía abierto.
+    useEffect(() => () => {
+        voiceWatchRef.current?.stop();
+        voiceWatchRef.current = null;
+        voiceRevokedRef.current = true;
+        try { mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop()); } catch { /* sin micrófono */ }
+    }, []);
 
     // Community Reviews State
     const [misPublicaciones, setMisPublicaciones] = useState<CommunityPost[]>([]);
@@ -130,30 +147,66 @@ const Home: React.FC = () => {
         }
     };
 
+    const stopVoiceWatch = () => {
+        voiceWatchRef.current?.stop();
+        voiceWatchRef.current = null;
+    };
+
+    // A5 revocada (o no comprobable) durante la grabación: se corta y se descarta lo grabado.
+    const handleVoiceRevoked = () => {
+        voiceRevokedRef.current = true;
+        stopVoiceWatch();
+        const rec = mediaRecorderRef.current;
+        audioChunksRef.current = [];
+        try { if (rec && rec.state !== 'inactive') rec.stop(); } catch { /* ya detenido */ }
+        try { rec?.stream.getTracks().forEach(track => track.stop()); } catch { /* sin pistas */ }
+        setIsRecording(false);
+        setSubmissionAudioUrl(null);
+        setVoiceBlockedMsg(A5_RECORDING_MSG);
+    };
+
     const startRecording = async () => {
+        if (voiceStartingRef.current) return;
+        voiceStartingRef.current = true;
         try {
+            // Sin A5 efectiva (o si no puede comprobarse) no se abre el micrófono.
+            const allowed = await isVoiceCaptureAllowed();
+            if (!allowed) {
+                setVoiceBlockedMsg(A5_RECORDING_MSG);
+                return;
+            }
+            setVoiceBlockedMsg(null);
+            voiceRevokedRef.current = false;
+
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorderRef.current = new MediaRecorder(stream);
             audioChunksRef.current = [];
 
             mediaRecorderRef.current.ondataavailable = (event) => {
+                if (voiceRevokedRef.current) return;
                 if (event.data.size > 0) {
                     audioChunksRef.current.push(event.data);
                 }
             };
 
             mediaRecorderRef.current.onstop = () => {
+                stopVoiceWatch();
+                if (voiceRevokedRef.current) { audioChunksRef.current = []; return; }
                 const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 const audioUrl = URL.createObjectURL(audioBlob);
                 setSubmissionAudioUrl(audioUrl);
             };
 
+            voiceWatchRef.current = watchVoiceAuthorization({ onRevoked: handleVoiceRevoked });
             mediaRecorderRef.current.start();
             setIsRecording(true);
             setSubmissionAudioUrl(null); // Clear previous
         } catch (err) {
+            stopVoiceWatch();
             console.error("Error accessing microphone:", err);
             alert("No se pudo acceder al micrófono.");
+        } finally {
+            voiceStartingRef.current = false;
         }
     };
 
@@ -678,6 +731,9 @@ const Home: React.FC = () => {
                                 <div className="mb-4">
                                     <label className="block text-sm font-bold mb-2">Grabar Respuesta de Voz</label>
                                     <div className="flex flex-col items-center justify-center p-6 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                                        {voiceBlockedMsg && !isRecording && (
+                                            <p role="status" className="text-sm text-gray-600 dark:text-gray-300 text-center mb-3">{voiceBlockedMsg}</p>
+                                        )}
                                         {!isRecording && !submissionAudioUrl && (
                                             <button
                                                 type="button"
