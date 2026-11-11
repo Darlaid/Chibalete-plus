@@ -11,8 +11,8 @@ import type { Content, ProgresoLectura, User, CommunityPost, Assignment } from '
 import { MessageSquare, Heart, PenTool, ClipboardList, CheckCircle, Camera, Video, X, Upload, Check, Mic, StopCircle, Play, Square, Lightbulb, Calendar as CalendarIcon, ChevronLeft, ChevronRight, CheckSquare, BookOpen, Users, Plus, Zap } from 'lucide-react';
 import { isMediator, isAdmin } from '../utils/permissions';
 import QuickClubModal from '../components/QuickClubModal';
-import { isVoiceCaptureAllowed, watchVoiceAuthorization } from '../utils/voiceAuthorization.mjs';
-import type { VoiceAuthorizationWatch } from '../utils/voiceAuthorization.mjs';
+import { createAudioTaskRecorder } from '../utils/audioTaskRecorder.mjs';
+import type { AudioTaskRecorder } from '../utils/audioTaskRecorder.mjs';
 
 // V8.1-PROD-02G: la grabación de respuestas orales también exige A5 (004 §6.3).
 const A5_RECORDING_MSG = 'Grabar respuestas de voz requiere la autorización A5 de tu cuenta.';
@@ -70,20 +70,31 @@ const Home: React.FC = () => {
     const [selectedDate, setSelectedDate] = useState<string | null>(null);
     const [calendarView, setCalendarView] = useState<'week' | 'month'>('week');
 
-    // Audio Recording Refs
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef = useRef<Blob[]>([]);
-    const voiceWatchRef = useRef<VoiceAuthorizationWatch | null>(null);
-    const voiceRevokedRef = useRef(false);
-    const voiceStartingRef = useRef(false);
+    // Audio Recording (V8.1-PROD-02H): ciclo de vida en utils/audioTaskRecorder.mjs
+    // (A5 antes y durante la captura, cierre del micrófono y liberación de URLs blob:).
+    const audioRecorderRef = useRef<AudioTaskRecorder | null>(null);
     const [voiceBlockedMsg, setVoiceBlockedMsg] = useState<string | null>(null);
+    const getAudioRecorder = (): AudioTaskRecorder => {
+        if (!audioRecorderRef.current) {
+            audioRecorderRef.current = createAudioTaskRecorder({
+                onChange: (st) => {
+                    setIsRecording(st.isRecording);
+                    setSubmissionAudioUrl(st.audioUrl);
+                    setVoiceBlockedMsg(st.blocked === 'a5' ? A5_RECORDING_MSG : null);
+                },
+                onMicError: (err) => {
+                    console.error("Error accessing microphone:", err);
+                    alert("No se pudo acceder al micrófono.");
+                },
+            });
+        }
+        return audioRecorderRef.current;
+    };
 
-    // Al desmontar: deja de vigilar A5 y cierra el micrófono si seguía abierto.
+    // Al salir de Home: corta la grabación, cierra el micrófono, deja de vigilar A5 y libera la URL.
     useEffect(() => () => {
-        voiceWatchRef.current?.stop();
-        voiceWatchRef.current = null;
-        voiceRevokedRef.current = true;
-        try { mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop()); } catch { /* sin micrófono */ }
+        audioRecorderRef.current?.dispose();
+        audioRecorderRef.current = null;
     }, []);
 
     // Community Reviews State
@@ -147,75 +158,16 @@ const Home: React.FC = () => {
         }
     };
 
-    const stopVoiceWatch = () => {
-        voiceWatchRef.current?.stop();
-        voiceWatchRef.current = null;
-    };
+    const startRecording = () => { void getAudioRecorder().start(); };
 
-    // A5 revocada (o no comprobable) durante la grabación: se corta y se descarta lo grabado.
-    const handleVoiceRevoked = () => {
-        voiceRevokedRef.current = true;
-        stopVoiceWatch();
-        const rec = mediaRecorderRef.current;
-        audioChunksRef.current = [];
-        try { if (rec && rec.state !== 'inactive') rec.stop(); } catch { /* ya detenido */ }
-        try { rec?.stream.getTracks().forEach(track => track.stop()); } catch { /* sin pistas */ }
-        setIsRecording(false);
-        setSubmissionAudioUrl(null);
-        setVoiceBlockedMsg(A5_RECORDING_MSG);
-    };
+    const stopRecording = () => { audioRecorderRef.current?.stop(); };
 
-    const startRecording = async () => {
-        if (voiceStartingRef.current) return;
-        voiceStartingRef.current = true;
-        try {
-            // Sin A5 efectiva (o si no puede comprobarse) no se abre el micrófono.
-            const allowed = await isVoiceCaptureAllowed();
-            if (!allowed) {
-                setVoiceBlockedMsg(A5_RECORDING_MSG);
-                return;
-            }
-            setVoiceBlockedMsg(null);
-            voiceRevokedRef.current = false;
+    const discardRecording = () => { audioRecorderRef.current?.discard(); };
 
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorderRef.current = new MediaRecorder(stream);
-            audioChunksRef.current = [];
-
-            mediaRecorderRef.current.ondataavailable = (event) => {
-                if (voiceRevokedRef.current) return;
-                if (event.data.size > 0) {
-                    audioChunksRef.current.push(event.data);
-                }
-            };
-
-            mediaRecorderRef.current.onstop = () => {
-                stopVoiceWatch();
-                if (voiceRevokedRef.current) { audioChunksRef.current = []; return; }
-                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                const audioUrl = URL.createObjectURL(audioBlob);
-                setSubmissionAudioUrl(audioUrl);
-            };
-
-            voiceWatchRef.current = watchVoiceAuthorization({ onRevoked: handleVoiceRevoked });
-            mediaRecorderRef.current.start();
-            setIsRecording(true);
-            setSubmissionAudioUrl(null); // Clear previous
-        } catch (err) {
-            stopVoiceWatch();
-            console.error("Error accessing microphone:", err);
-            alert("No se pudo acceder al micrófono.");
-        } finally {
-            voiceStartingRef.current = false;
-        }
-    };
-
-    const stopRecording = () => {
-        if (mediaRecorderRef.current && isRecording) {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-            mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-        }
+    // Cierre del modal de entrega: no deja grabación, micrófono ni vigilancia A5 abiertos.
+    const closeAssignmentModal = () => {
+        audioRecorderRef.current?.reset();
+        setSelectedAssignment(null);
     };
 
     const handleAssignmentSubmit = (e: React.FormEvent) => {
@@ -242,7 +194,7 @@ const Home: React.FC = () => {
             setSelectedAssignment(null);
             setSubmissionText('');
             setSubmissionFile(null);
-            setSubmissionAudioUrl(null);
+            audioRecorderRef.current?.reset(); // la toma ya no se necesita: libera su URL
             alert('¡Tarea entregada con éxito!');
             fetchData(); // Refresh assignments list
         }, 1500);
@@ -670,7 +622,7 @@ const Home: React.FC = () => {
                     <div className="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-lg p-6 animate-in zoom-in-95">
                         <div className="flex justify-between items-center mb-4 border-b border-gray-100 dark:border-gray-800 pb-4">
                             <h3 className="text-xl font-bold">Entregar Tarea</h3>
-                            <button onClick={() => setSelectedAssignment(null)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full"><X size={20} /></button>
+                            <button onClick={closeAssignmentModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full"><X size={20} /></button>
                         </div>
 
                         <div className="mb-6">
@@ -762,7 +714,7 @@ const Home: React.FC = () => {
                                                 <audio src={submissionAudioUrl} controls className="w-full mb-4" />
                                                 <button
                                                     type="button"
-                                                    onClick={() => setSubmissionAudioUrl(null)}
+                                                    onClick={discardRecording}
                                                     className="text-sm text-red-500 hover:underline mx-auto block"
                                                 >
                                                     Borrar y grabar de nuevo

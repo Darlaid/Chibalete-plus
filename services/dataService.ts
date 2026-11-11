@@ -75,6 +75,7 @@ import {
 } from '../utils/libraryCatalogSelection.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de la Tienda (WooCommerce vía servidor).
 import { STORE_CATALOG_PATH, parseStoreCatalogResponse, type StoreCatalog } from '../utils/storeCatalog.mjs';
+import { storedSubmissionContent, isNonTextSubmissionContent } from '../utils/audioTaskRecorder.mjs';
 // CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B) — analítica real del grupo.
 import {
     GROUP_ANALYTICS_PATH, parseGroupAnalyticsSummary, lectorOnlyStudents, type GroupAnalyticsSummary,
@@ -3124,7 +3125,9 @@ class DataService {
             const submission: AssignmentSubmission = {
                 studentId,
                 studentName: student?.nombre_completo || 'Estudiante',
-                content, // This can be text, or a blob URL for audio/video/photo
+                // Text, or a blob URL for photo/video. V8.1-PROD-02H: an audio blob URL is not stored
+                // (it dies with the tab); a fixed local-only note is stored instead.
+                content: storedSubmissionContent(assignment.submissionType, content),
                 date: new Date().toISOString(),
                 status: 'submitted'
             };
@@ -3458,7 +3461,7 @@ class DataService {
         const enriched = groupAssignments
             .map(a => {
                 const sub = a.studentSubmissions?.find(s => s.studentId === studentId);
-                return sub && typeof sub.content === 'string' && !sub.content.startsWith('blob:')
+                return sub && typeof sub.content === 'string' && !isNonTextSubmissionContent(sub.content)
                     ? { assignment: a, sub }
                     : null;
             })
@@ -4075,7 +4078,7 @@ class DataService {
                 if (sub) {
                     // Only count text submissions for word-count analysis
                     // (blob: URLs are audio/video/photo — no word count)
-                    if (sub.content && !sub.content.startsWith('blob:')) {
+                    if (sub.content && !isNonTextSubmissionContent(sub.content)) {
                         textContents.push(sub.content);
                     }
                     if (!lastActivityAt || sub.date > lastActivityAt) {
