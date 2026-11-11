@@ -118,10 +118,37 @@ export function validateProvisionInput(body, nowMs) {
         const at = Number(t?.acceptedAt);
         if (!t || typeof t !== 'object' || t.version !== ACCEPTANCE_DOCUMENTS.terms.version) throw new B2cError(400, 'invalid_terms_acceptance');
         if (!Number.isInteger(at) || at < MIN_ACTIVATION_MS || at > nowMs) throw new B2cError(400, 'invalid_terms_acceptance');
+        // V8.1-PROD-05B (G2): la aceptación del checkout precede al pago; una posterior a la activación no es acreditable.
+        if (at > activationAt + MAX_FUTURE_SKEW_MS) throw new B2cError(400, 'invalid_terms_acceptance');
         termsAcceptance = { version: t.version, acceptedAt: at };
     }
     return { orderId, productId, plan: b.plan, source: b.source, email: b.email, fullName, activationAt,
         idempotencyKey: b.idempotencyKey, dryRun: b.dryRun === true, termsAcceptance };
+}
+
+/**
+ * V8.1-PROD-05B (G1, G2) — precondición documental, ANTES de cualquier escritura.
+ * `docsStatus` = `acceptanceDocumentsStatus()` (CHP_ACCEPTANCE_DOCUMENTS). El comprador B2C activa
+ * una cuenta de lector: necesita 001, 002 y 004 (= `requiredDocumentIds` de un lector). Una compra que
+ * no se podría activar no se aprovisiona (503 DOCUMENTS_NOT_APPROVED); la tienda reintenta cuando
+ * Dirección los apruebe. La aceptación del checkout solo vale para el 002 aprobado con esa versión.
+ */
+export const B2C_REQUIRED_DOCUMENTS = Object.freeze(['001', '002', '004']);
+export function assertB2cDocumentsApproved({ docsStatus, termsAcceptance = null }) {
+    const docs = Array.isArray(docsStatus) ? docsStatus : [];
+    const approved = (id) => docs.find(d => d && d.id === id && d.approved === true);
+    if (!B2C_REQUIRED_DOCUMENTS.every(approved)) throw new B2cError(503, 'DOCUMENTS_NOT_APPROVED');
+    if (termsAcceptance) {
+        const terms = approved(ACCEPTANCE_DOCUMENTS.terms.id);
+        if (!terms || terms.version !== termsAcceptance.version) throw new B2cError(400, 'invalid_terms_acceptance');
+    }
+}
+
+/** Plantilla B2C vigente (lista maestra). Se comprueba antes de escribir y de nuevo bajo el lock. */
+export function b2cTemplateRule(rules) {
+    const template = (Array.isArray(rules) ? rules : []).find(r => r && r.id === B2C_TEMPLATE_RULE_ID);
+    if (!template || !Array.isArray(template.titleIds) || template.titleIds.length === 0) throw new B2cError(503, 'template_rule_missing');
+    return template;
 }
 
 /** Valida la entrada de /revoke. */
@@ -144,7 +171,7 @@ const isActiveB2cRuleFor = (rule, userId, nowMs) =>
  *
  * @returns {{ status, userId, userOp: 'create'|'regenerate_token'|'none', user, activationUrl, reusedAccount }}
  */
-export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken }) {
+export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, termsOnFileFor }) {
     const ruleId = ruleIdFor(input.source, input.orderId);
     const existingRule = rules.find(r => r && r.id === ruleId);
     if (existingRule && existingRule.b2c?.idempotencyKey !== input.idempotencyKey) throw new B2cError(409, 'idempotency_mismatch');
@@ -182,6 +209,15 @@ export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, norm
         return { status: existingRule ? 'already_activated' : 'activated', userId: user.id, userOp: 'regenerate_token', user: regen(user),
             activationUrl: `/#/activar?token=${newToken}`, reusedAccount: !existingRule && !user.b2c };
     }
+    // V8.1-PROD-05B (G3): una cuenta YA ACTIVA no pasa por la activación, así que una compra nueva solo
+    // le da acceso con T de los términos exigibles: la del checkout o una previa vigente de esa misma
+    // versión (`termsOnFileFor` → true/false; null = registro no verificable). Sin dato ⇒ fallo cerrado.
+    // Reintento de un pedido ya aprovisionado: sin cambio (idempotencia).
+    if (!existingRule && !input.termsAcceptance) {
+        const onFile = typeof termsOnFileFor === 'function' ? termsOnFileFor(user.id) : false;
+        if (onFile === null) throw new B2cError(503, 'acceptance_registry_unavailable');
+        if (onFile !== true) throw new B2cError(422, 'terms_acceptance_required');
+    }
     return { status: existingRule ? 'already_activated' : 'activated', userId: user.id, userOp: 'none', user,
         activationUrl: null, reusedAccount: true };
 }
@@ -198,8 +234,7 @@ export function planRulePhase({ rules, input, userId, nowMs }) {
         return { ruleOp: 'none', rule: existing };
     }
     if (rules.some(r => r && isActiveB2cRuleFor(r, userId, nowMs))) throw new B2cError(409, 'conflict_active_subscription');
-    const template = rules.find(r => r && r.id === B2C_TEMPLATE_RULE_ID);
-    if (!template || !Array.isArray(template.titleIds) || template.titleIds.length === 0) throw new B2cError(503, 'template_rule_missing');
+    const template = b2cTemplateRule(rules);
     const expiresAt = computeExpiresAt(input.activationAt);
     const rule = {
         id: ruleId, scope: 'user', scopeId: userId,

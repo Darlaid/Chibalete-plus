@@ -65,7 +65,7 @@ import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js
 import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
 import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
 import { redactEmail } from './lib/logPrivacy.js';
-import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke } from './b2c/b2cProvisioning.mjs';
+import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -6023,9 +6023,19 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
         const newUserId = `user-${nowMs}-${crypto.randomBytes(3).toString('hex')}`;
         const readRulesFresh = () => { _jsonCache.delete(ACCESS_DB); const r = readJSON(ACCESS_DB); return Array.isArray(r) ? r : []; };
 
+        // V8.1-PROD-05B — precondiciones ANTES de cualquier escritura (cuenta, regla o decisión):
+        // G1/G2: 001, 002 y 004 aprobados en CHP_ACCEPTANCE_DOCUMENTS; T solo del 002 aprobado.
+        assertB2cDocumentsApproved({ docsStatus: acceptanceDocumentsStatus(), termsAcceptance: input.termsAcceptance });
+        // Registro de decisiones verificable (para anotar la T del checkout o comprobar una previa, G3).
+        let gate = null;
+        try { gate = decisionGate(); } catch { gate = null; }
+        if (input.termsAcceptance && !gate) throw new B2cError(503, 'acceptance_registry_unavailable');
+        const termsOnFileFor = (userId) => (gate ? termsOnFile(gate, userId) : null);
+        b2cTemplateRule(readRulesFresh());
+
         // Fase 1 — identidad (lock de usuarios). Sin regla todavía = sin acceso (modo restringido).
         const userPhase = await mutateUsers((users) => {
-            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken });
+            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, termsOnFileFor });
             if (input.dryRun || plan.userOp === 'none') return plan;
             if (plan.userOp === 'create') users.push(plan.user);
             else users[users.findIndex(u => u.id === plan.userId)] = plan.user;
@@ -6033,16 +6043,10 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
             return plan;
         });
 
-        // Fase 2 — regla personal con caducidad (lock de accesos).
-        const rulePhase = await mutateAccessRules((rules) => {
-            const plan = planRulePhase({ rules, input, userId: userPhase.userId, nowMs });
-            if (!input.dryRun && plan.ruleOp === 'create') { rules.push(plan.rule); writeJSON(ACCESS_DB, rules); }
-            return plan;
-        });
-
         // V8.1-CLOSE-06B: aceptación del checkout recibida por esta integración autenticada (HMAC).
         // Solo T (002) del comprador, con el pedido como referencia. Nunca A0/A1/A2: esas se
         // deciden en la activación. Reintentos de la tienda: la misma línea, sin efecto distinto.
+        // V8.1-PROD-05B (G3): se anota ANTES de conceder la regla: nunca hay acceso nuevo sin su T.
         let termsRecorded = false;
         if (input.termsAcceptance && !input.dryRun) {
             try {
@@ -6055,6 +6059,13 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
                 return res.status(503).json({ status: 'error', code: 'acceptance_registry_unavailable' });
             }
         }
+
+        // Fase 2 — regla personal con caducidad (lock de accesos).
+        const rulePhase = await mutateAccessRules((rules) => {
+            const plan = planRulePhase({ rules, input, userId: userPhase.userId, nowMs });
+            if (!input.dryRun && plan.ruleOp === 'create') { rules.push(plan.rule); writeJSON(ACCESS_DB, rules); }
+            return plan;
+        });
         const status = rulePhase.ruleOp === 'none' ? 'already_activated' : 'activated';
         log(`[B2C] provision ${input.source}:${input.orderId} → ${input.dryRun ? 'dry_run:' : ''}${status} user=${userPhase.userId} userOp=${userPhase.userOp}`, 'ACCESS');
         return res.status(200).json({
