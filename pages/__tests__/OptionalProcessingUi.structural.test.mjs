@@ -37,6 +37,20 @@ const orlStart = orl.slice(orl.indexOf('const startRecording'));
 ok('Oralidad: A5 se vuelve a consultar justo antes de getUserMedia', orlStart.indexOf('isVoiceCaptureAllowed()') > 0 && orlStart.indexOf('isVoiceCaptureAllowed()') < orlStart.indexOf('getUserMedia'));
 ok('Oralidad: vigila la A5 durante la grabación y descarta el intento al revocarse', /watchVoiceAuthorization\(\{/.test(orlStart) && /voiceRevokedRef\.current = true;\s*\n\s*cleanupMedia\(\);/.test(orlStart));
 
+// V8.1-PROD-02G — A5 también en la grabación de respuestas orales de las tareas (Home).
+const home = src('pages/Home.tsx');
+const hs = home.slice(home.indexOf('const startRecording'), home.indexOf('const stopRecording'));
+const hRev = home.slice(home.indexOf('const handleVoiceRevoked'), home.indexOf('const startRecording'));
+const hSubmit = home.slice(home.indexOf('const handleAssignmentSubmit'), home.indexOf('const getGreeting'));
+ok('Tareas de audio: usan la consulta común de A5 (utils/voiceAuthorization.mjs)', /from '\.\.\/utils\/voiceAuthorization\.mjs'/.test(home));
+ok('Tareas de audio: A5 se comprueba antes de getUserMedia y sin A5 no se abre el micrófono', hs.indexOf('isVoiceCaptureAllowed()') > 0 && hs.indexOf('if (!allowed)') > hs.indexOf('isVoiceCaptureAllowed()') && hs.indexOf('getUserMedia') > hs.indexOf('if (!allowed)'));
+ok('Tareas de audio: vigila la A5 durante la grabación', /watchVoiceAuthorization\(\{ onRevoked: handleVoiceRevoked \}\)/.test(hs) && hs.indexOf('watchVoiceAuthorization(') < hs.indexOf('.start()'));
+ok('Tareas de audio: al revocarse se cierran las pistas y se descarta lo grabado', /voiceRevokedRef\.current = true/.test(hRev) && /audioChunksRef\.current = \[\]/.test(hRev) && /getTracks\(\)\.forEach\(track => track\.stop\(\)\)/.test(hRev) && /setSubmissionAudioUrl\(null\)/.test(hRev));
+ok('Tareas de audio: tras revocar no se genera la grabación (onstop y ondataavailable la ignoran)', /if \(voiceRevokedRef\.current\) \{ audioChunksRef\.current = \[\]; return; \}/.test(hs) && /ondataavailable[\s\S]*?if \(voiceRevokedRef\.current\) return;/.test(hs));
+ok('Tareas de audio: al desmontar se detiene la vigilancia y el micrófono', /useEffect\(\(\) => \(\) => \{\s*\n\s*voiceWatchRef\.current\?\.stop\(\);/.test(home));
+ok('Tareas sin micrófono (texto, foto, video): la entrega no depende de A5', hSubmit.length > 0 && !/voice|A5/i.test(hSubmit));
+ok('Tareas de audio: no pide autorización por uso (sin confirm/prompt)', !/window\.confirm|\bconfirm\(|\bprompt\(/.test(home));
+
 const leo = src('components/LeoCompanion.tsx');
 ok('Leo: mensaje claro ante A3_REQUIRED, sin mostrar el código', /res\.status === 403 && data\?\.code === 'A3_REQUIRED'/.test(leo));
 
