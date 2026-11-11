@@ -360,10 +360,15 @@ const ActivarCuenta: React.FC = () => {
                             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Las preguntas a Leo y el contexto de la lectura se procesan con un proveedor de inteligencia artificial. Sin A3 no se usa Leo; la lectura no cambia. Si no respondes, queda pendiente.</p>
                         </div>
 
-                        <div>
-                            <span className="text-sm text-gray-800 dark:text-gray-100">A5 · Transcripción automática de la lectura en voz alta (opcional).</span>
+                        {/* V8.1-PROD-03D (DIR-V81-09): una sola A5 para las tres actividades de voz (004, ficha 6.3). Explicación antes de elegir. */}
+                        <div role="group" aria-labelledby="a5-titulo" aria-describedby="a5-ayuda">
+                            <span id="a5-titulo" className="text-sm text-gray-800 dark:text-gray-100">A5 · Voz: lectura en voz alta, dictado a Leo y respuestas orales (opcional).</span>
+                            <ul id="a5-ayuda" className="text-xs text-gray-600 dark:text-gray-300 mt-1 mb-1 list-disc pl-5 space-y-1">
+                                <li>Lectura en voz alta y dictado de preguntas a Leo: el servicio de reconocimiento de voz de tu navegador transcribe la voz (en Google Chrome es un servicio de Google). Chibalete no recibe la voz; del dictado solo recibe el texto de la pregunta, que además requiere A3.</li>
+                                <li>Respuestas orales a tareas: la grabación se queda en este dispositivo solo mientras la usas y no se envía a nadie, tampoco a Chibalete.</li>
+                                <li>Es una sola decisión para las tres actividades e independiente de A3. Sin A5 no se abre el micrófono: puedes seguir leyendo, leer en voz alta sin transcripción y escribir a Leo si autorizas A3. Si no respondes, queda pendiente.</li>
+                            </ul>
                             <Choice name="A5" value={a5} onChange={setA5} options={[['yes', 'Sí, autorizo'], ['no', 'No autorizo']]} />
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Para medir la lectura en voz alta, el navegador envía la voz a su servicio de reconocimiento. Sin A5 no se usa el micrófono en esa actividad. Si no respondes, queda pendiente.</p>
                         </div>
 
                         {required.includes('C005') && (
