@@ -65,7 +65,7 @@ import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js
 import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
 import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
 import { redactEmail } from './lib/logPrivacy.js';
-import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule } from './b2c/b2cProvisioning.mjs';
+import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -1105,9 +1105,44 @@ if (!fs.existsSync(USER_AUDIT_DB)) {
 // in production (api_1 + api_2). This Set is the single source of truth for
 // "do not cache this file in-process"; both _getCachedJSON and _setCachedJSON
 // consult it (defense in depth).
+//
 const UNCACHED_JSON_FILES = new Set([USERS_DB]);
 
-const _jsonCache = new Map(); // file → { data, expiresAt }
+// API-HARDEN-01 — STAT_VALIDATED_JSON_FILES (GROUPS_DB, ACCESS_DB)
+// ----------------------------------------------------------------
+// Con el TTL a secas, una revocación de acceso (reembolso B2C, regla vencida o
+// retirada) o un cambio de pertenencia/mediación atendido por una réplica seguía
+// sin efecto hasta 30 s en la otra (reproducido en G4-E2E-01). No cachearlos lo
+// corrige, pero parsea ambos archivos en cada decisión de acceso (medido: −26 % de
+// rendimiento). Estos archivos conservan la caché y la VALIDAN en cada lectura
+// contra la huella del archivo en disco (un `stat`, sin leer ni parsear):
+//
+//   huella = dispositivo + inodo + tamaño + mtime(ns) + ctime(ns)
+//
+//   · writeJSON y los operadores reemplazan el archivo por rename ⇒ inodo nuevo.
+//   · una edición en el sitio cambia mtime y ctime aunque el tamaño sea el mismo.
+//   · restaurar el mtime anterior (cp -p, rsync -t, utimes) cambia el ctime, que
+//     fija el núcleo y no se puede imponer.
+//   · regla «racy» (como el índice de git): los sellos de tiempo tienen
+//     granularidad; dos escrituras en el mismo instante podrían compartir huella.
+//     Por eso una lectura SOLO se guarda en caché si el archivo lleva más de
+//     _STAT_RACY_NS sin tocarse; hasta entonces cada lectura va al disco. Una
+//     escritura posterior tendrá, necesariamente, un sello distinto.
+//   · la huella se toma ANTES de leer: si el archivo cambia entre medias, lo
+//     guardado queda con huella vieja y la lectura siguiente lo descarta.
+//   · cualquier duda (stat falla, lectura servida por el seam SQLite, reloj
+//     inconsistente) ⇒ no se cachea. Fallo cerrado hacia «leer del disco».
+// El catálogo (content.json) y el resto de archivos conservan su TTL sin cambios.
+const STAT_VALIDATED_JSON_FILES = new Set([GROUPS_DB, ACCESS_DB]);
+const _STAT_RACY_NS = 2_000_000_000n; // 2 s: por encima de la granularidad de cualquier sistema de archivos habitual
+const _fileSignature = (file) => {
+    try {
+        const st = fs.statSync(file, { bigint: true });
+        return { key: `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`, newestNs: st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs };
+    } catch { return null; }
+};
+
+const _jsonCache = new Map(); // file → { data, expiresAt, sig? }
 const _JSON_TTL = {
     // Per-file TTL overrides. Empty by default — UNCACHED_JSON_FILES takes
     // precedence over any TTL set here, so files in that Set are never cached
@@ -1118,13 +1153,24 @@ const _JSON_TTL_DEFAULT = 30_000; // content.json and others — 30s
 const _getCachedJSON = (file) => {
     if (UNCACHED_JSON_FILES.has(file)) return null;
     const entry = _jsonCache.get(file);
-    if (entry && Date.now() < entry.expiresAt) return entry.data;
-    return null;
+    if (!entry || Date.now() >= entry.expiresAt) return null;
+    if (STAT_VALIDATED_JSON_FILES.has(file)) {
+        const sig = _fileSignature(file);
+        if (!sig || sig.key !== entry.sig) { _jsonCache.delete(file); return null; }
+    }
+    return entry.data;
 };
 
-const _setCachedJSON = (file, data) => {
+// `sig` = huella tomada ANTES de leer el archivo (solo STAT_VALIDATED_JSON_FILES).
+const _setCachedJSON = (file, data, sig) => {
     if (UNCACHED_JSON_FILES.has(file)) return;
     const ttl = _JSON_TTL[file] ?? _JSON_TTL_DEFAULT;
+    if (STAT_VALIDATED_JSON_FILES.has(file)) {
+        const quietNs = sig ? BigInt(Date.now()) * 1_000_000n - sig.newestNs : -1n;
+        if (!sig || quietNs <= _STAT_RACY_NS) { _jsonCache.delete(file); return; }
+        _jsonCache.set(file, { data, expiresAt: Date.now() + ttl, sig: sig.key });
+        return;
+    }
     _jsonCache.set(file, { data, expiresAt: Date.now() + ttl });
 };
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1132,13 +1178,16 @@ const _setCachedJSON = (file, data) => {
 const _readJSONOfficial = (file) => {
     const cached = _getCachedJSON(file);
     if (cached !== null) return cached;
+    // API-HARDEN-01: huella del archivo ANTES de leerlo (ver STAT_VALIDATED_JSON_FILES).
+    const sig = STAT_VALIDATED_JSON_FILES.has(file) ? _fileSignature(file) : undefined;
     // P4-A — cutover de lectura: SOLO si IDENTITY_READ=sqlite + dominio
     // habilitado + shadow ok. Cualquier duda → null → cae a JSON (abajo).
     // NUNCA lanza. Default (json) ⇒ overhead ~0 (un check de env).
     {
         const _sql = tryIdentitySqliteRead(file,
             { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB }, log);
-        if (_sql) { _setCachedJSON(file, _sql); return _sql; }
+        // Servido por SQLite: la huella del JSON no lo describe ⇒ los validados por huella no se cachean.
+        if (_sql) { _setCachedJSON(file, _sql, STAT_VALIDATED_JSON_FILES.has(file) ? null : undefined); return _sql; }
         markJsonRead(file, { usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB });
     }
     try {
@@ -1150,7 +1199,7 @@ const _readJSONOfficial = (file) => {
             return file === PROGRESS_DB ? { progressMap: {} } : [];
         }
         const parsed = JSON.parse(data);
-        _setCachedJSON(file, parsed);
+        _setCachedJSON(file, parsed, sig);
         return parsed;
     } catch (e) {
         log(`Error reading ${file}: ${e.message}`, 'ERROR');
@@ -6050,7 +6099,7 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
         let termsRecorded = false;
         if (input.termsAcceptance && !input.dryRun) {
             try {
-                appendDecisions([{ subjectId: userPhase.userId, kind: 'T', status: 'granted', actDay: a2DayOf(input.termsAcceptance.acceptedAt),
+                appendDecisions([{ subjectId: userPhase.userId, kind: 'T', status: 'granted', actDay: a2DayOf(termsActDayMs(input.termsAcceptance.acceptedAt, nowMs)),
                     version: input.termsAcceptance.version, medium: 'checkout', capacity: 'titular', verification: 'verified',
                     requestRef: `WOO:${input.source}:order:${input.orderId}` }]);
                 termsRecorded = true;

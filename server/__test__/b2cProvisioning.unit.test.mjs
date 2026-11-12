@@ -5,8 +5,9 @@ import crypto from 'node:crypto';
 import {
     computeExpiresAt, signB2cRequest, verifyB2cSignature, validateProvisionInput, validateRevokeInput,
     planUserPhase, planRulePhase, planRevoke, planTitleSync, ruleIdFor, idempotencyKeyFor, B2cError, B2C_TEMPLATE_RULE_ID,
-    assertB2cDocumentsApproved, b2cTemplateRule, B2C_REQUIRED_DOCUMENTS,
+    assertB2cDocumentsApproved, b2cTemplateRule, B2C_REQUIRED_DOCUMENTS, TERMS_CLOCK_SKEW_MS, termsActDayMs,
 } from '../b2c/b2cProvisioning.mjs';
+import { dayOf } from '../privacy/a2Registry.mjs';
 import { acceptanceDocumentsStatus, requiredDocumentIds } from '../privacy/acceptance.mjs';
 import { ACCEPTANCE_DOCUMENTS as DOCS } from '../../utils/acceptanceDocuments.mjs';
 
@@ -105,6 +106,31 @@ ok('G2: T de otra versión que la aprobada → 400', throwsCode(() => assertB2cD
 ok('G2: aceptación posterior a la activación (>5 min) → 400', throwsCode(() => validateProvisionInput({ ...base, activationAt: now - 3600e3, termsAcceptance: { version: DOCS.terms.version, acceptedAt: now } }, now), 'invalid_terms_acceptance'));
 ok('G2: aceptación sin fecha → 400', throwsCode(() => validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version } }, now), 'invalid_terms_acceptance'));
 ok('G2: aceptación no objeto → 400', throwsCode(() => validateProvisionInput({ ...base, termsAcceptance: true }, now), 'invalid_terms_acceptance'));
+
+console.log('API-HARDEN-01 — tolerancia de reloj de termsAcceptance.acceptedAt');
+const tIn = (acceptedAt, extra = {}) => validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version, acceptedAt }, ...extra }, now);
+const tCode = (acceptedAt, extra) => { try { tIn(acceptedAt, extra); return 'ok'; } catch (e) { return `${e.status}:${e.code}`; } };
+ok('tolerancia explícita: 120000 ms', TERMS_CLOCK_SKEW_MS === 120000);
+ok('adelanto de 4 s → aceptada, fecha original intacta', tIn(now + 4000).termsAcceptance.acceptedAt === now + 4000);
+ok('adelanto de 120 s (límite) → aceptada, fecha original intacta', tIn(now + 120000).termsAcceptance.acceptedAt === now + 120000);
+ok('adelanto de 120 s + 1 ms → 400', tCode(now + 120001) === '400:invalid_terms_acceptance');
+ok('adelanto de 121 s → 400', tCode(now + 121000) === '400:invalid_terms_acceptance');
+ok('adelanto de 3 min → 400', tCode(now + 180000) === '400:invalid_terms_acceptance');
+ok('pasada reciente → aceptada', tCode(now - 60000) === 'ok');
+ok('la tolerancia no ensancha el límite respecto de la activación: 5 min + 1 ms después de activationAt → 400', tCode(now - 3600e3 + 300001, { activationAt: now - 3600e3 }) === '400:invalid_terms_acceptance' && tCode(now - 3600e3 + 300000, { activationAt: now - 3600e3 }) === 'ok');
+ok('la tolerancia no afecta a activationAt (sigue con su propio margen de 5 min)', (() => { try { validateProvisionInput({ ...base, activationAt: now + 300001 }, now); return false; } catch (e) { return e.code === 'invalid_activation_at'; } })());
+ok('anterior a la cota mínima (2024-01-01) → 400', tCode(Date.UTC(2023, 11, 31)) === '400:invalid_terms_acceptance');
+for (const [label, bad] of [['cadena ISO', '2026-11-12T10:00:00Z'], ['decimal', now + 0.5], ['negativa', -1], ['cero', 0], ['segundos en vez de ms', Math.floor(now / 1000)], ['null', null], ['NaN', NaN], ['Infinity', Infinity], ['objeto', {}], ['arreglo', [now]], ['cadena numérica', String(now)], ['booleano', true]]) {
+    ok(`formato inválido (${label}) → 400`, tCode(bad) === '400:invalid_terms_acceptance');
+}
+ok('otra versión dentro de la tolerancia → 400 (la versión se valida igual)', (() => { try { validateProvisionInput({ ...base, termsAcceptance: { version: '002@0.9', acceptedAt: now + 4000 } }, now); return false; } catch (e) { return e.code === 'invalid_terms_acceptance'; } })());
+// Día del acto: cruce de medianoche en Bogotá (UTC−5). La app está a las 23:59:30 y la tienda va 60 s adelantada.
+const midnight = Date.UTC(2026, 10, 13, 5, 0, 0); // 2026-11-13 00:00:00 en Bogotá
+const appNow = midnight - 30000, storeAt = appNow + 60000;
+ok('sin acotar, la aceptación adelantada caería en el día SIGUIENTE al de la app', dayOf(storeAt) === '2026-11-13' && dayOf(appNow) === '2026-11-12');
+ok('día del acto acotado al reloj de la app → nunca futuro', dayOf(termsActDayMs(storeAt, appNow)) === dayOf(appNow));
+ok('aceptación pasada → su propio día, sin cambio', termsActDayMs(appNow - 86400000, appNow) === appNow - 86400000 && dayOf(termsActDayMs(appNow - 86400000, appNow)) === '2026-11-11');
+ok('acotar el día no altera la evidencia: validateProvisionInput devuelve el acceptedAt original', validateProvisionInput({ ...base, activationAt: appNow, termsAcceptance: { version: DOCS.terms.version, acceptedAt: storeAt } }, appNow).termsAcceptance.acceptedAt === storeAt);
 ok('plantilla vacía → template_rule_missing', throwsCode(() => b2cTemplateRule([{ ...template, titleIds: [] }]), 'template_rule_missing'));
 ok('sin plantilla → template_rule_missing (503)', throwsCode(() => planRulePhase({ rules: [], input, userId: 'U', nowMs: now }), 'template_rule_missing'));
 

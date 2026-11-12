@@ -276,7 +276,8 @@ try {
         const runG = await begin(b, e, 'u-gain', ONE);
         ok('b tiene las reglas en caché', (await access(b, 'u-cache')).status === 200 && (await access(b, 'u-gain')).status === 403);
         writeRules(e, [rule('r-cache', 'u-cache', []), rule('r-gain', 'u-gain', ['obra-a'])]);
-        ok('la caché de b sigue obsoleta', (await access(b, 'u-cache')).status === 200);
+        // API-HARDEN-01: las reglas de acceso se validan contra la huella del archivo; b ya no sirve la regla retirada.
+        ok('b aplica el cambio de reglas en la petición siguiente', (await access(b, 'u-cache')).status === 403 && (await access(b, 'u-gain')).status === 200);
         await deliver(b, 'u-cache', runC);
         await deliver(b, 'u-gain', runG);
         ok('revocada: no registra la autorización obsoleta', evidenceOf(e, 'u-cache')[0]?.workAccess.decision === 'denied', JSON.stringify(evidenceOf(e, 'u-cache')[0]?.workAccess));

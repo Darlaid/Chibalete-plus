@@ -31,6 +31,15 @@ export const B2C_SIGNATURE_WINDOW_SEC = 300;
 export const B2C_INVITE_TTL_MS = 48 * 60 * 60 * 1000;
 const BOGOTA_OFFSET_MS = 5 * 60 * 60 * 1000; // UTC-5, sin horario de verano
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+/** API-HARDEN-01: adelanto máximo admitido del reloj de la tienda en `termsAcceptance.acceptedAt`. */
+export const TERMS_CLOCK_SKEW_MS = 120_000;
+/**
+ * Instante con el que se clasifica el DÍA del acto en el registro de decisiones: nunca posterior al
+ * reloj de la app. Con la tolerancia anterior, una aceptación «adelantada» cerca de la medianoche
+ * caería en el día siguiente y el registro (que no admite días futuros) la rechazaría DESPUÉS de
+ * crear la cuenta. Solo acota la clasificación del día: `acceptedAt` se conserva tal como llegó.
+ */
+export const termsActDayMs = (acceptedAt, nowMs) => Math.min(acceptedAt, nowMs);
 const MIN_ACTIVATION_MS = Date.UTC(2024, 0, 1); // cota de cordura; admite fechas pasadas (reintentos, pruebas de caducidad)
 
 /** Error funcional con estado HTTP y código estable (sin datos personales). */
@@ -115,9 +124,11 @@ export function validateProvisionInput(body, nowMs) {
     let termsAcceptance = null;
     if (b.termsAcceptance !== undefined) {
         const t = b.termsAcceptance;
-        const at = Number(t?.acceptedAt);
+        const at = t?.acceptedAt; // API-HARDEN-01: sin coerción — solo un entero en ms (ni cadenas ni arreglos)
         if (!t || typeof t !== 'object' || t.version !== ACCEPTANCE_DOCUMENTS.terms.version) throw new B2cError(400, 'invalid_terms_acceptance');
-        if (!Number.isInteger(at) || at < MIN_ACTIVATION_MS || at > nowMs) throw new B2cError(400, 'invalid_terms_acceptance');
+        // API-HARDEN-01: la tienda y la app tienen relojes distintos. Solo se tolera un adelanto pequeño y
+        // acotado (TERMS_CLOCK_SKEW_MS); más allá, la fecha es futura y no acreditable. El valor no se altera.
+        if (!Number.isInteger(at) || at < MIN_ACTIVATION_MS || at > nowMs + TERMS_CLOCK_SKEW_MS) throw new B2cError(400, 'invalid_terms_acceptance');
         // V8.1-PROD-05B (G2): la aceptación del checkout precede al pago; una posterior a la activación no es acreditable.
         if (at > activationAt + MAX_FUTURE_SKEW_MS) throw new B2cError(400, 'invalid_terms_acceptance');
         termsAcceptance = { version: t.version, acceptedAt: at };

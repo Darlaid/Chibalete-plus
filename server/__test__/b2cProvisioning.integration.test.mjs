@@ -339,6 +339,39 @@ try {
         // MIXTO ya tiene T vigente de 1010 (checkout) ⇒ una compra posterior sin T se acepta (aceptación previa aplicable).
         const prev = await signed('/api/b2c/provision', order(1403, 'mixto@fixture.invalid'), { at: at(P_R2) });
         ok('G3: T previa vigente de la misma versión ⇒ 200 sin inventar una nueva', prev.status === 200 && prev.body.termsRecorded === false, JSON.stringify(prev.body));
+
+        // API-HARDEN-01 — tolerancia de reloj de la tienda (120 s) sin escrituras parciales.
+        const V = ACCEPTANCE_DOCUMENTS.terms.version;
+        const tAt = (ms) => ({ termsAcceptance: { version: V, acceptedAt: ms } });
+        const s4 = await signed('/api/b2c/provision', order(1501, 'reloj.cuatro@fixture.invalid', tAt(Date.now() + 4000)));
+        ok('reloj: aceptación 4 s adelantada ⇒ 200, T registrada y efectiva', s4.status === 200 && s4.body.termsRecorded === true && R.decisionGate().effective('T', s4.body.userId), JSON.stringify(s4.body));
+        const s110 = await signed('/api/b2c/provision', order(1502, 'reloj.cientodiez@fixture.invalid', tAt(Date.now() + 110000)));
+        ok('reloj: aceptación 110 s adelantada (dentro de la tolerancia) ⇒ 200 y T efectiva hoy', s110.status === 200 && s110.body.termsRecorded === true && R.decisionGate().effective('T', s110.body.userId), JSON.stringify(s110.body));
+        const snap3 = stores();
+        const rejected = [];
+        for (const [nombre, acc] of [['125 s adelantada', Date.now() + 125000], ['3 min adelantada', Date.now() + 180000], ['cadena numérica', String(Date.now() - 5000)], ['cadena ISO', new Date().toISOString()],
+            ['decimal', Date.now() - 5000.5], ['segundos', Math.floor(Date.now() / 1000)], ['nula', null], ['arreglo', [Date.now() - 5000]]]) {
+            const r = await signed('/api/b2c/provision', order(1503, 'reloj.rechazo@fixture.invalid', tAt(acc)));
+            rejected.push(`${nombre}=${r.status}:${r.body?.code}`);
+        }
+        ok('reloj: fuera de tolerancia o con formato inválido ⇒ 400 invalid_terms_acceptance', rejected.every((x) => x.endsWith('=400:invalid_terms_acceptance')), rejected.join(' · '));
+        ok('reloj: …con cero escrituras (cuentas, reglas y registro idénticos)', stores() === snap3 && !J(P.users).some((u) => u.email === 'reloj.rechazo@fixture.invalid'));
+
+        // API-HARDEN-01 — una réplica escribe, la OTRA lo aplica en la petición siguiente (sin esperar ningún TTL).
+        const readAt = async (b, cookie, userId, contentId) => { const r = await fetch(`${b}/api/content/${contentId}/access?userId=${userId}`, { headers: { cookie } });
+            let j = null; try { j = await r.json(); } catch { /* */ } return r.status === 200 && j?.allowed === true; };
+        const A_ = base, B_ = at(P_R2);
+        const o1 = await signed('/api/b2c/provision', order(1511, 'replica.uno@fixture.invalid', { termsAcceptance: T_NOW() }));                 // escribe A
+        const o2 = await signed('/api/b2c/provision', order(1512, 'replica.dos@fixture.invalid', { termsAcceptance: T_NOW() }), { at: B_ });    // escribe B
+        ok('réplicas: altas por A y por B', o1.status === 200 && o2.status === 200 && await activate(o1.body.activationUrl) === 200 && await activate(o2.body.activationUrl) === 200);
+        const c1 = (await login('replica.uno@fixture.invalid')).cookie, c2 = (await login('replica.dos@fixture.invalid')).cookie;
+        ok('réplicas: concedido por A ⇒ B lo permite en la petición siguiente (y A también)', await readAt(B_, c1, o1.body.userId, 'obra-1') && await readAt(A_, c1, o1.body.userId, 'obra-1'));
+        ok('réplicas: concedido por B ⇒ A lo permite en la petición siguiente (y B también)', await readAt(A_, c2, o2.body.userId, 'obra-1') && await readAt(B_, c2, o2.body.userId, 'obra-1'));
+        const rv1 = await signed('/api/b2c/revoke', { orderId: 1511, source: 'test', idempotencyKey: 'test:order:1511', reason: 'refunded' });            // revoca A
+        ok('réplicas: reembolso atendido por A ⇒ B deniega en la petición siguiente (y A también)', rv1.status === 200 && !(await readAt(B_, c1, o1.body.userId, 'obra-1')) && !(await readAt(A_, c1, o1.body.userId, 'obra-1')));
+        const rv2 = await signed('/api/b2c/revoke', { orderId: 1512, source: 'test', idempotencyKey: 'test:order:1512', reason: 'cancelled' }, { at: B_ }); // revoca B
+        ok('réplicas: cancelación atendida por B ⇒ A deniega en la petición siguiente (y B también)', rv2.status === 200 && !(await readAt(A_, c2, o2.body.userId, 'obra-1')) && !(await readAt(B_, c2, o2.body.userId, 'obra-1')));
+        ok('réplicas: la revocación de un pedido no toca el acceso de otra cuenta (colegio)', await readAt(B_, (await login('lector.colegio@fixture.invalid')).cookie, 'COLE', 'obra-colegio'));
     }
 
     console.log('[10] entrada inválida y registros');

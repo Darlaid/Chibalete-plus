@@ -168,7 +168,9 @@ try {
     ok('contrato: versión vigente y fecha ⇒ aceptado', JSON.stringify(validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version, acceptedAt: now - 5000 } }, now).termsAcceptance)
         === JSON.stringify({ version: DOCS.terms.version, acceptedAt: now - 5000 }));
     ok('contrato: otra versión ⇒ 400 invalid_terms_acceptance', codeOf(() => validateProvisionInput({ ...base, termsAcceptance: { version: '002@0.9', acceptedAt: now } }, now)) === 'invalid_terms_acceptance');
-    ok('contrato: fecha futura ⇒ 400', codeOf(() => validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version, acceptedAt: now + 60_000 } }, now)) === 'invalid_terms_acceptance');
+    // API-HARDEN-01: se tolera un adelanto de reloj de hasta 120 s; más allá, la fecha es futura.
+    ok('contrato: fecha futura (más allá de la tolerancia de reloj) ⇒ 400', codeOf(() => validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version, acceptedAt: now + 180_000 } }, now)) === 'invalid_terms_acceptance');
+    ok('contrato: adelanto de reloj dentro de la tolerancia (60 s) ⇒ aceptado con su fecha original', validateProvisionInput({ ...base, termsAcceptance: { version: DOCS.terms.version, acceptedAt: now + 60_000 } }, now).termsAcceptance.acceptedAt === now + 60_000);
     R.appendDecisions([{ subjectId: 'buyer-1', kind: 'T', status: 'granted', actDay: R.dayOf(now), version: DOCS.terms.version, medium: 'checkout',
         capacity: 'titular', verification: 'verified', requestRef: 'WOO:test:order:77' }]);
     const noTerms = { ...ADULT_ACTIVATION, terms: undefined, termsVersion: undefined };
