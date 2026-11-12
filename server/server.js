@@ -65,6 +65,7 @@ import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js
 import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
 import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
 import { redactEmail } from './lib/logPrivacy.js';
+import { findLoginIndex, matchesLoginIdentifier } from './lib/loginIdentity.mjs';
 import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs, makeB2cLoginId } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
@@ -5706,10 +5707,14 @@ app.get('/api/users', requireAuth, async (req, res) => {
 // LOGIN
 app.post('/api/auth/login', loginLimiters.ip, loginLimiters.ipFailures, validate({ body: loginSchema }), loginLimiters.account, async (req, res) => {
     const { email, password } = req.body;
+    // V9 F3-D2: el campo `email` admite el correo o el usuario de acceso (`loginId`) de una cuenta
+    // representada. Solo cambia QUÉ cuenta se intenta (server/lib/loginIdentity.mjs): contraseña,
+    // estado, sesión, respuestas y límites de intentos son los mismos. El contacto del representante
+    // no identifica a nadie.
     const normalizedEmail = normalizeEmail(email);
 
     const users = readCanonicalStoreForMutation(USERS_DB);
-    const userIndex = users.findIndex(u => normalizeEmail(u.email) === normalizedEmail);
+    const userIndex = findLoginIndex(users, normalizedEmail, normalizeEmail);
 
     // SEC-USERS-01 — un registro sin id no es una identidad direccionable: no
     // puede tener sesión firmada (sub = id) ni gestionarse desde Admin. Se
@@ -5750,7 +5755,7 @@ app.post('/api/auth/login', loginLimiters.ip, loginLimiters.ipFailures, validate
             const current = await mutateUsers((freshUsers) => {
                 const index = freshUsers.findIndex(u => u.id === user.id);
                 const fresh = index === -1 ? null : normalizeUser(freshUsers[index]);
-                if (!fresh || normalizeEmail(fresh.email) !== normalizedEmail || !isUserActive(fresh)
+                if (!fresh || !matchesLoginIdentifier(fresh, normalizedEmail, normalizeEmail) || !isUserActive(fresh)
                     || fresh.password !== user.password
                     || credentialVersionOf(fresh) !== credentialVersionOf(user)) return null;
                 const next = { ...fresh, ...(upgradedHash ? { password: upgradedHash } : {}), lastLoginAt: new Date().toISOString() };
