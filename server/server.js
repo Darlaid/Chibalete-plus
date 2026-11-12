@@ -5707,13 +5707,13 @@ app.get('/api/users', requireAuth, async (req, res) => {
 // LOGIN
 app.post('/api/auth/login', loginLimiters.ip, loginLimiters.ipFailures, validate({ body: loginSchema }), loginLimiters.account, async (req, res) => {
     const { email, password } = req.body;
+    const normalizedEmail = normalizeEmail(email);
+
+    const users = readCanonicalStoreForMutation(USERS_DB);
     // V9 F3-D2: el campo `email` admite el correo o el usuario de acceso (`loginId`) de una cuenta
     // representada. Solo cambia QUÉ cuenta se intenta (server/lib/loginIdentity.mjs): contraseña,
     // estado, sesión, respuestas y límites de intentos son los mismos. El contacto del representante
     // no identifica a nadie.
-    const normalizedEmail = normalizeEmail(email);
-
-    const users = readCanonicalStoreForMutation(USERS_DB);
     const userIndex = findLoginIndex(users, normalizedEmail, normalizeEmail);
 
     // SEC-USERS-01 — un registro sin id no es una identidad direccionable: no
