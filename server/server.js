@@ -65,7 +65,7 @@ import { createOperationalAdminSecretGuard } from './lib/operationalAdminAuth.js
 import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
 import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
 import { redactEmail } from './lib/logPrivacy.js';
-import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs } from './b2c/b2cProvisioning.mjs';
+import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs, makeB2cLoginId } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -5098,7 +5098,8 @@ const hashPasswordIfNeeded = async (password) => {
 // SEC-USERS-01 — campos de credencial que solo fija el servidor. Un cliente
 // (incluido un admin) no puede elegir su token de invitación/reset ni su
 // credentialVersion: se descartan del body en creación y edición.
-const SERVER_OWNED_CREDENTIAL_FIELDS = ['inviteToken', 'inviteExpiresAt', 'resetToken', 'resetExpiresAt', 'credentialVersion'];
+// V9 F3-D1: el usuario de acceso y el vínculo de una cuenta representada los fija solo la provisión B2C firmada.
+const SERVER_OWNED_CREDENTIAL_FIELDS = ['inviteToken', 'inviteExpiresAt', 'resetToken', 'resetExpiresAt', 'credentialVersion', 'loginId', 'representedBy', 'b2cOrigin'];
 const stripServerOwnedCredentialFields = (obj) => {
     for (const k of SERVER_OWNED_CREDENTIAL_FIELDS) delete obj[k];
     return obj;
@@ -6084,7 +6085,7 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
 
         // Fase 1 — identidad (lock de usuarios). Sin regla todavía = sin acceso (modo restringido).
         const userPhase = await mutateUsers((users) => {
-            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, termsOnFileFor });
+            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId: makeB2cLoginId, termsOnFileFor });
             if (input.dryRun || plan.userOp === 'none') return plan;
             if (plan.userOp === 'create') users.push(plan.user);
             else users[users.findIndex(u => u.id === plan.userId)] = plan.user;
@@ -6127,6 +6128,7 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
             activationUrl: userPhase.activationUrl,
             reusedAccount: userPhase.reusedAccount,
             termsRecorded,
+            ...(input.reader ? { loginId: userPhase.loginId } : {}), // V9 F3-D1: solo con `reader`; sin él, respuesta idéntica
         });
     } catch (e) { return b2cFail(res, e); }
 });

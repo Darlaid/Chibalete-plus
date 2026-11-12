@@ -12,6 +12,7 @@
  * El secreto file-only vive en una ruta constante (/app/secrets/b2c_provisioning_secret). Por eso la
  * prueba SOLO corre en un contenedor desechable y con opt-in explícito:
  *   CHP_B2C_TEST_SECRET_SANDBOX=1 y el archivo NO debe existir de antemano (nunca pisa un secreto real).
+ * V9 F3-D1: cuentas representadas (`reader`): varios menores con un mismo contacto, reintentos, vínculo, GVA.
  * POSIX-only. Nunca toca datos productivos.
  */
 import './helpers/testMode.mjs';
@@ -372,6 +373,91 @@ try {
         const rv2 = await signed('/api/b2c/revoke', { orderId: 1512, source: 'test', idempotencyKey: 'test:order:1512', reason: 'cancelled' }, { at: B_ }); // revoca B
         ok('réplicas: cancelación atendida por B ⇒ A deniega en la petición siguiente (y B también)', rv2.status === 200 && !(await readAt(A_, c2, o2.body.userId, 'obra-1')) && !(await readAt(B_, c2, o2.body.userId, 'obra-1')));
         ok('réplicas: la revocación de un pedido no toca el acceso de otra cuenta (colegio)', await readAt(B_, (await login('lector.colegio@fixture.invalid')).cookie, 'COLE', 'obra-colegio'));
+    }
+
+    console.log('[11] V9 F3-D1 — cuentas representadas (varios menores, un mismo contacto)');
+    {
+        const RX = /^lec-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}$/;
+        const C = 'representante@fixture.invalid';
+        const minor = (orderId, reader = {}, email = C, extra = {}) => order(orderId, email, { reader: { type: 'minor', ...reader }, ...extra });
+        const byId = (id) => J(P.users).find((u) => u.id === id);
+        const gate = () => R.decisionGate({ CHP_A2_REGISTRY: process.env.CHP_A2_REGISTRY });
+        const REP = { terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'legal_representative', A1: 'yes' };
+        const accept = async (activationUrl, acceptance) => { const r = await fetch(base + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: activationUrl.split('token=')[1], password: PW, acceptance }) }); let b = null; try { b = await r.json(); } catch { /* */ } return { status: r.status, body: b }; };
+        const u0 = J(P.users).length, a0 = J(P.access).length;
+
+        // 1. sin `reader`: contrato intacto
+        const s1 = await signed('/api/b2c/provision', order(3000, C, { termsAcceptance: T_NOW() }));
+        ok('[1] adulto para sí mismo: 200, cuenta por correo, respuesta SIN loginId', s1.status === 200 && s1.body.status === 'activated' && !('loginId' in s1.body) && byId(s1.body.userId).email === C && byId(s1.body.userId).loginId === undefined);
+        // 2 y 3. dos menores
+        const k1 = await signed('/api/b2c/provision', minor(3001, { name: 'Lupe' }));
+        const k2 = await signed('/api/b2c/provision', minor(3002));
+        ok('[2] primer menor: 200 activated con loginId, cuenta y regla propias', k1.status === 200 && k1.body.status === 'activated' && RX.test(k1.body.loginId) && k1.body.ruleId === 'access-b2c-test-order-3001' && k1.body.userId !== s1.body.userId, JSON.stringify(k1.body));
+        ok('[3] segundo menor, mismo contacto: otra cuenta, otro loginId, otra regla', k2.status === 200 && RX.test(k2.body.loginId) && k2.body.userId !== k1.body.userId && k2.body.loginId !== k1.body.loginId && k2.body.ruleId === 'access-b2c-test-order-3002');
+        const U1 = byId(k1.body.userId), U2 = byId(k2.body.userId);
+        ok('…en el padrón: sin correo propio, contacto del adulto, lector sin grupos, invitadas', [U1, U2].every((u) => u.email === '' && u.representedBy.email === C && u.b2c === true && JSON.stringify(u.roles) === '["lector"]' && u.groupIds.length === 0 && u.accountStatus === 'invited') && U1.nombre_completo === 'Lupe' && U2.nombre_completo === 'Lector');
+        ok('[4] adulto con suscripción propia + dos menores: tres cuentas y tres reglas; un solo correo en el padrón', J(P.users).length === u0 + 3 && J(P.access).length === a0 + 3 && J(P.users).filter((u) => u.email === C).length === 1);
+        ok('…la respuesta no devuelve el contacto ni el nombre', !JSON.stringify(k1.body).includes('fixture.invalid') && !JSON.stringify(k1.body).includes('Lupe'));
+        ok('…ninguna decisión anotada por pagar (ni T, ni A0, ni A1)', ['T', 'A0', 'A1', 'A3', 'A5'].every((k) => gate().state(k, k1.body.userId) === null && gate().state(k, k2.body.userId) === null));
+
+        // 10. decisiones independientes por lector
+        ok('activar sin A0 del representante → rechazado, la cuenta sigue invitada', (await accept(k1.body.activationUrl, REP)).body?.required?.includes('A0') && byId(k1.body.userId).accountStatus === 'invited');
+        const act1 = await accept(k1.body.activationUrl, { ...REP, A0: 'yes', A3: 'yes' });
+        ok('[10] el representante activa al primer menor con A0, A1 y A3', act1.status === 200 && byId(k1.body.userId).accountStatus === 'active', JSON.stringify(act1.body));
+        const g1 = gate();
+        ok('…sus decisiones quedan en SU cuenta, como representante y sin verificar (A3 no efectiva: GVA intacta)', ['T', 'A0', 'A1', 'A3'].every((k) => g1.state(k, k1.body.userId)?.status === 'granted' && g1.state(k, k1.body.userId).capacity === 'legal_representative' && g1.state(k, k1.body.userId).verification === 'unverified') && !g1.effective('A3', k1.body.userId) && g1.state('A5', k1.body.userId) === null);
+        ok('…el segundo menor no hereda ninguna decisión y sigue sin activar', ['T', 'A0', 'A1', 'A3', 'A5'].every((k) => g1.state(k, k2.body.userId) === null) && byId(k2.body.userId).accountStatus === 'invited');
+        const act2 = await accept(k2.body.activationUrl, { ...REP, A0: 'yes', A3: 'no', A5: 'no' });
+        const g2 = gate();
+        ok('…y decide distinto para el segundo (A3 no, A5 no) sin alterar al primero', act2.status === 200 && g2.state('A3', k2.body.userId)?.status === 'denied' && g2.state('A5', k2.body.userId)?.status === 'denied' && g2.state('A3', k1.body.userId)?.status === 'granted' && g2.state('A5', k1.body.userId) === null);
+        ok('…el correo de contacto no abre las cuentas de los menores (el inicio de sesión no cambió)', (await login(C)).status !== 200);
+
+        // 7. reintento con la misma clave
+        const before7 = stores();
+        const again = await signed('/api/b2c/provision', minor(3001, { name: 'Lupe' }));
+        ok('[7] reintento del pedido → already_activated, misma cuenta y loginId, sin escrituras', again.status === 200 && again.body.status === 'already_activated' && again.body.userId === k1.body.userId && again.body.loginId === k1.body.loginId && again.body.activationUrl === null && stores() === before7);
+        ok('…reintento que cambia de modalidad o de lector → 409 idempotency_mismatch, sin escrituras', (await signed('/api/b2c/provision', order(3001, C))).body?.code === 'idempotency_mismatch' && (await signed('/api/b2c/provision', minor(3001, { loginId: k2.body.loginId }))).body?.code === 'idempotency_mismatch' && (await signed('/api/b2c/provision', minor(3000))).body?.code === 'idempotency_mismatch' && stores() === before7);
+
+        // 6. loginId ajeno o inexistente, y entrada inválida
+        const eForeign = await signed('/api/b2c/provision', minor(3010, { loginId: k1.body.loginId }, 'otro.adulto@fixture.invalid'));
+        const eUnknown = await signed('/api/b2c/provision', minor(3011, { loginId: 'lec-zzzz-zzzz-zzzz' }));
+        ok('[6] loginId de otro representante y loginId inexistente → 409 con el MISMO cuerpo, sin datos', eForeign.status === 409 && eUnknown.status === 409 && JSON.stringify(eForeign.body) === JSON.stringify(eUnknown.body) && JSON.stringify(eForeign.body) === '{"status":"error","code":"account_not_available"}');
+        ok('…reader inválido, o con la aceptación del comprador como T del menor → 400', (await signed('/api/b2c/provision', minor(3012, { loginId: 'lupe' }))).body?.code === 'invalid_reader' && (await signed('/api/b2c/provision', order(3012, C, { reader: { type: 'adult' } }))).body?.code === 'invalid_reader' && (await signed('/api/b2c/provision', minor(3012, {}, C, { termsAcceptance: T_NOW() }))).body?.code === 'terms_acceptance_not_applicable');
+        ok('…ninguna de esas peticiones escribió cuentas, reglas ni decisiones', stores() === before7);
+
+        // 9. revocación de un pedido
+        const rv = await signed('/api/b2c/revoke', { orderId: 3001, source: 'test', idempotencyKey: 'test:order:3001', reason: 'refunded' });
+        const rule = (id) => J(P.access).find((r) => r.id === id);
+        ok('[9] reembolso del pedido del primer menor → solo su regla vence; las del hermano y del adulto siguen vigentes; cuentas intactas', rv.status === 200 && rv.body.status === 'revoked' && rule('access-b2c-test-order-3001').expiresAt <= Date.now() && rule('access-b2c-test-order-3002').expiresAt > Date.now() && rule('access-b2c-test-order-3000').expiresAt > Date.now() && byId(k1.body.userId).accountStatus === 'active' && gate().state('A0', k1.body.userId)?.status === 'granted');
+
+        // 5. recompra para un menor existente
+        const before5 = stores();
+        const re1 = await signed('/api/b2c/provision', minor(3003, { loginId: k1.body.loginId }));
+        ok('[5] recompra con la representación SIN verificar → 422 terms_acceptance_required, sin escrituras (revisión manual)', re1.status === 422 && re1.body.code === 'terms_acceptance_required' && stores() === before5);
+        // GVA verifica la representación sobre la ficha (operador; aquí, la misma escritura del registro).
+        R.appendDecisions([{ subjectId: k1.body.userId, kind: 'T', status: 'granted', actDay: R.dayOf(Date.now()), version: ACCEPTANCE_DOCUMENTS.terms.version, medium: 'paper', capacity: 'legal_representative', verification: 'verified', requestRef: 'AUT-SINT-F3D1-T' }], { env: { CHP_A2_REGISTRY: process.env.CHP_A2_REGISTRY } });
+        const re2 = await signed('/api/b2c/provision', minor(3003, { loginId: k1.body.loginId }));
+        ok('…representación verificada por GVA → 200 activated en la MISMA cuenta, sin enlace, regla nueva del pedido', re2.status === 200 && re2.body.status === 'activated' && re2.body.userId === k1.body.userId && re2.body.loginId === k1.body.loginId && re2.body.activationUrl === null && re2.body.ruleId === 'access-b2c-test-order-3003' && J(P.users).length === u0 + 3);
+        ok('…la verificación de un menor no sirve para su hermano', await (async () => { await signed('/api/b2c/revoke', { orderId: 3002, source: 'test', idempotencyKey: 'test:order:3002', reason: 'cancelled' }); const r = await signed('/api/b2c/provision', minor(3004, { loginId: k2.body.loginId })); return r.status === 422 && r.body.code === 'terms_acceptance_required'; })());
+        ok('…ni la recompra ni la revisión anotaron decisiones nuevas en nombre del representante', gate().state('T', k2.body.userId)?.verification === 'unverified' && gate().state('A3', k1.body.userId)?.verification === 'unverified');
+
+        // 8. reintentos concurrentes del mismo pedido (dos réplicas no pueden duplicar cuentas ni reglas)
+        const burst = await Promise.all(Array.from({ length: 6 }, () => signed('/api/b2c/provision', minor(3020, { name: 'Teo' }))));
+        const okBurst = burst.filter((r) => r.status === 200);
+        ok('[8] seis reintentos simultáneos del mismo pedido → UNA cuenta y UNA regla', okBurst.length >= 1 && new Set(okBurst.map((r) => r.body.userId)).size === 1 && new Set(okBurst.map((r) => r.body.loginId)).size === 1 && J(P.users).filter((u) => u.b2cOrigin === 'test:order:3020').length === 1 && J(P.access).filter((r) => r.id === 'access-b2c-test-order-3020').length === 1, JSON.stringify(burst.map((r) => [r.status, r.body?.code || r.body?.status])));
+        // Fallo intermedio real: la cuenta existe y su regla no. El reintento la reutiliza.
+        const orphanId = 'ORPH'; const all = J(P.users);
+        all.push({ ...byId(k2.body.userId), id: orphanId, loginId: 'lec-2222-3333-4444', accountStatus: 'invited', inviteToken: crypto.randomBytes(32).toString('hex'), inviteExpiresAt: Date.now() + 3600000, b2cOrigin: 'test:order:3021' });
+        fs.writeFileSync(P.users, JSON.stringify(all));
+        const rec = await signed('/api/b2c/provision', minor(3021));
+        ok('…fallo intermedio (cuenta sin regla): el reintento usa ESA cuenta y crea la regla; ninguna cuenta nueva', rec.status === 200 && rec.body.userId === orphanId && rec.body.loginId === 'lec-2222-3333-4444' && rec.body.status === 'activated' && J(P.users).length === all.length && J(P.access).filter((r) => r.scopeId === orphanId).length === 1);
+        ok('…todos los usuarios de acceso del padrón son distintos', (() => { const l = J(P.users).map((u) => u.loginId).filter(Boolean); return new Set(l).size === l.length; })());
+
+        // administración: los campos del vínculo no se fijan desde fuera
+        const adm = await login('admin@fixture.invalid');
+        const put = await fetch(`${base}/api/users/${k2.body.userId}`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie: adm.cookie, origin: 'https://app.test' }, body: JSON.stringify({ loginId: k1.body.loginId, representedBy: { email: 'intruso@fixture.invalid' }, bio_corta: 'x' }) });
+        ok('…una edición administrativa no cambia loginId ni el contacto de la cuenta', byId(k2.body.userId).loginId === k2.body.loginId && byId(k2.body.userId).representedBy.email === C, `PUT ${put.status}`);
+        ok('…los registros no contienen usuarios de acceso', !/lec-[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}/.test(boot));
     }
 
     console.log('[10] entrada inválida y registros');

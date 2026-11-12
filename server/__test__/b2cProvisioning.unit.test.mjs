@@ -3,6 +3,7 @@
  */
 import crypto from 'node:crypto';
 import {
+    makeB2cLoginId, B2C_LOGIN_ID_RX, isRepresentedAccount,
     computeExpiresAt, signB2cRequest, verifyB2cSignature, validateProvisionInput, validateRevokeInput,
     planUserPhase, planRulePhase, planRevoke, planTitleSync, ruleIdFor, idempotencyKeyFor, B2cError, B2C_TEMPLATE_RULE_ID,
     assertB2cDocumentsApproved, b2cTemplateRule, B2C_REQUIRED_DOCUMENTS, TERMS_CLOCK_SKEW_MS, termsActDayMs,
@@ -142,6 +143,100 @@ const RV2 = planRevoke({ rules: [template, RV.rule], input: validateRevokeInput(
 ok('revoke idempotente: already_revoked sin cambiar expiresAt', RV2.status === 'already_revoked' && RV2.rule.expiresAt === now + 5000);
 ok('revoke de un pedido sin regla → 404', throwsCode(() => planRevoke({ rules: [template], input: validateRevokeInput({ orderId: 9, source: 'test', idempotencyKey: 'test:order:9' }), nowMs: now }), 'rule_not_found'));
 ok('idempotencyKeyFor', idempotencyKeyFor('production', 5) === 'production:order:5');
+
+console.log('cuentas representadas (V9 F3-D1)');
+{
+    // — usuario de acceso —
+    const ids = new Set(Array.from({ length: 2000 }, () => makeB2cLoginId()));
+    ok('loginId: formato lec-xxxx-xxxx-xxxx, 2000 generados sin repetición', ids.size === 2000 && [...ids].every((x) => B2C_LOGIN_ID_RX.test(x)));
+    ok('loginId: 12 símbolos de 5 bits (60 bits), determinado solo por los bytes aleatorios', makeB2cLoginId(Buffer.alloc(12, 0)) === 'lec-aaaa-aaaa-aaaa' && makeB2cLoginId(Buffer.alloc(12, 31)) === 'lec-9999-9999-9999' && makeB2cLoginId(Buffer.alloc(12, 255)) === 'lec-9999-9999-9999');
+    // — contrato —
+    const C = 'madre@fixture.invalid';
+    const inp = (orderId, reader, extra = {}) => validateProvisionInput({ ...base, orderId, idempotencyKey: `test:order:${orderId}`, email: C, fullName: 'Madre Fixture', ...(reader === undefined ? {} : { reader }), ...extra }, now);
+    ok('sin `reader` el contrato no cambia (reader = null)', validateProvisionInput(base, now).reader === null && validateProvisionInput(base, now).email === base.email);
+    ok('reader menor válido: sin loginId, apodo opcional y normalizado', JSON.stringify(inp(1, { type: 'minor' }).reader) === '{"type":"minor","loginId":null,"name":""}' && inp(1, { type: 'minor', name: '  Lu\tpe \n' }).reader.name === 'Lu pe');
+    for (const [label, r] of [['tipo desconocido', { type: 'adult' }], ['sin tipo', {}], ['no es objeto', 'minor'], ['arreglo', [{ type: 'minor' }]], ['nulo', null], ['loginId mal formado', { type: 'minor', loginId: 'lupe' }],
+        ['loginId no cadena', { type: 'minor', loginId: 7 }], ['loginId con mayúsculas', { type: 'minor', loginId: 'LEC-AAAA-AAAA-AAAA' }], ['nombre no cadena', { type: 'minor', name: 5 }], ['nombre de 61 caracteres', { type: 'minor', name: 'ñ'.repeat(61) }]]) {
+        ok(`reader inválido (${label}) → 400 invalid_reader`, throwsCode(() => inp(1, r), 'invalid_reader'));
+    }
+    ok('nombre de 60 caracteres admitido', inp(1, { type: 'minor', name: 'ñ'.repeat(60) }).reader.name.length === 60);
+    ok('la aceptación del comprador no se admite como T de la cuenta del menor → 400', throwsCode(() => inp(1, { type: 'minor' }, { termsAcceptance: { version: DOCS.terms.version, acceptedAt: now - 1000 } }), 'terms_acceptance_not_applicable'));
+
+    // — almacén simulado: fase 1 + fase 2 como las aplica server.js —
+    const users = []; let rules = [template]; let n = 0; const seq = [];
+    const loginIds = () => makeB2cLoginId();
+    const phase1 = (input, { tof = () => false, gen = loginIds } = {}) => {
+        const p = planUserPhase({ users, rules, input, nowMs: now, normalizeEmail, normalizeUser, newUserId: `U${++n}`, newToken: `TK${n}`, newLoginId: gen, termsOnFileFor: tof });
+        if (p.userOp === 'create') users.push(p.user); else if (p.userOp !== 'none') users[users.findIndex((u) => u.id === p.userId)] = p.user;
+        return p;
+    };
+    const phase2 = (input, p) => { const r = planRulePhase({ rules, input, userId: p.userId, nowMs: now }); if (r.ruleOp === 'create') rules.push(r.rule); return r; };
+    const buy = (input, o) => { const p = phase1(input, o); return { ...p, rule: phase2(input, p) }; };
+    const snap = () => JSON.stringify([users, rules]);
+    const activateAcc = (id) => { const i = users.findIndex((u) => u.id === id); const { inviteToken, inviteExpiresAt, ...rest } = users[i]; users[i] = { ...rest, accountStatus: 'active' }; };
+    const expire = (ruleId) => { rules = rules.map((r) => (r.id === ruleId ? { ...r, expiresAt: now - 1 } : r)); };
+
+    // 1. la adulta compra para sí misma: sin regresión
+    const self = buy(validateProvisionInput({ ...base, orderId: 2000, idempotencyKey: 'test:order:2000', email: C, fullName: 'Madre Fixture', termsAcceptance: { version: DOCS.terms.version, acceptedAt: now - 1000 } }, now));
+    ok('[1] para sí misma: cuenta por correo, sin loginId ni vínculo', self.userOp === 'create' && self.user.email === C && self.user.loginId === undefined && self.user.representedBy === undefined && self.loginId === undefined && !isRepresentedAccount(self.user));
+    activateAcc(self.userId);
+    // 2. primer menor
+    const k1 = buy(inp(2001, { type: 'minor', name: 'Lupe' }));
+    ok('[2] primer menor: cuenta y regla propias', k1.userOp === 'create' && k1.userId !== self.userId && k1.rule.ruleOp === 'create' && k1.rule.rule.scopeId === k1.userId && k1.rule.rule.id === ruleIdFor('test', 2001));
+    ok('…cuenta representada: loginId del servidor, contacto del adulto, sin correo propio, invitada', isRepresentedAccount(k1.user) && B2C_LOGIN_ID_RX.test(k1.loginId) && k1.user.loginId === k1.loginId && k1.user.email === '' && k1.user.representedBy.email === C && k1.user.accountStatus === 'invited' && k1.activationUrl === `/#/activar?token=${k1.user.inviteToken}`);
+    ok('…lector sin grupos, colegio ni otro rol; el nombre de facturación no se copia a la cuenta', JSON.stringify(k1.user.roles) === '["lector"]' && k1.user.groupIds.length === 0 && k1.user.colegio === '' && k1.user.nombre_completo === 'Lupe' && !JSON.stringify(k1.user).includes('Madre Fixture'));
+    ok('…el loginId no deriva del nombre del menor', !k1.loginId.includes('lupe') && k1.user.nombre_usuario === k1.loginId);
+    // 3. segundo menor, mismo representante (con la adulta y el primer menor con suscripción vigente)
+    const k2 = buy(inp(2002, { type: 'minor' }));
+    ok('[3] segundo menor, mismo contacto: OTRA cuenta y OTRA regla, sin 409', k2.userOp === 'create' && k2.userId !== k1.userId && k2.loginId !== k1.loginId && k2.rule.rule.scopeId === k2.userId && k2.user.representedBy.email === C && k2.user.nombre_completo === 'Lector');
+    ok('[4] adulta con suscripción propia + menores: tres cuentas y tres reglas separadas', users.length === 3 && new Set(rules.filter((r) => r.b2c).map((r) => r.scopeId)).size === 3 && users.filter((u) => normalizeEmail(u.email) === C).length === 1);
+    // 6. loginId ajeno o inexistente
+    const before = snap();
+    const unknown = 'lec-zzzz-zzzz-zzzz';
+    const eUnknown = (() => { try { phase1(inp(2010, { type: 'minor', loginId: unknown })); } catch (e) { return e; } })();
+    const eForeign = (() => { try { phase1(validateProvisionInput({ ...base, orderId: 2011, idempotencyKey: 'test:order:2011', email: 'otro@fixture.invalid', reader: { type: 'minor', loginId: k1.loginId } }, now)); } catch (e) { return e; } })();
+    ok('[6] loginId inexistente y loginId de otro representante → la MISMA respuesta 409 account_not_available', eUnknown?.status === 409 && eUnknown.code === 'account_not_available' && eForeign?.status === 409 && eForeign.code === eUnknown.code && eForeign.message === eUnknown.message);
+    ok('…sin datos de nadie en el error y sin ninguna escritura', Object.keys(eForeign).sort().join() === 'code,status' && snap() === before);
+    ok('…conocer el correo de un adulto no da su cuenta: una compra «menor» con ese correo crea una cuenta nueva y no toca la suya', (() => { const a = JSON.stringify(users.find((u) => u.id === self.userId)); const p = phase1(inp(2012, { type: 'minor' })); const same = JSON.stringify(users.find((u) => u.id === self.userId)) === a; users.pop(); return p.userOp === 'create' && p.userId !== self.userId && same; })());
+    // 7. reintento con la misma clave
+    const cnt = [users.length, rules.length];
+    const again = buy(inp(2001, { type: 'minor', name: 'Lupe' }));
+    ok('[7] reintento del pedido: misma cuenta y regla, already_activated, enlace nuevo (invitación pendiente), sin duplicados', again.status === 'already_activated' && again.userId === k1.userId && again.loginId === k1.loginId && again.userOp === 'regenerate_token' && again.rule.ruleOp === 'none' && users.length === cnt[0] && rules.length === cnt[1]);
+    ok('…un reintento que cambia de lector o de modalidad → 409 idempotency_mismatch', throwsCode(() => phase1(inp(2001, { type: 'minor', loginId: k2.loginId })), 'idempotency_mismatch') && throwsCode(() => phase1(inp(2001, undefined)), 'idempotency_mismatch') && throwsCode(() => phase1(inp(2000, { type: 'minor' })), 'idempotency_mismatch'));
+    // 8. fallo intermedio: la cuenta se creó y la regla no llegó a escribirse
+    const p3 = phase1(inp(2003, { type: 'minor' }));
+    ok('[8] fallo intermedio: hay cuenta invitada y ninguna regla (sin acceso)', p3.userOp === 'create' && !rules.some((r) => r.scopeId === p3.userId));
+    const u3 = users.length;
+    const retry = buy(inp(2003, { type: 'minor' }));
+    ok('…el reintento reutiliza ESA cuenta (b2cOrigin), no crea otra, y escribe la regla una sola vez', retry.userId === p3.userId && retry.loginId === p3.loginId && retry.userOp === 'regenerate_token' && users.length === u3 && retry.rule.ruleOp === 'create' && rules.filter((r) => r.id === ruleIdFor('test', 2003)).length === 1);
+    ok('…y un tercer intento ya no escribe nada nuevo', (() => { const r = buy(inp(2003, { type: 'minor' })); return r.status === 'already_activated' && r.rule.ruleOp === 'none' && users.length === u3; })());
+    ok('…la misma clave con otro contacto → 409 idempotency_mismatch (no se crea una segunda cuenta)', (() => { users.push({ ...p3.user, id: 'TMP', b2cOrigin: 'test:order:2020', loginId: makeB2cLoginId() }); const t = throwsCode(() => phase1(validateProvisionInput({ ...base, orderId: 2020, idempotencyKey: 'test:order:2020', email: 'otro@fixture.invalid', reader: { type: 'minor' } }, now)), 'idempotency_mismatch'); users.pop(); return t; })());
+    // 5. recompra para un menor existente
+    ok('[5] recompra con la suscripción aún vigente → 409 conflict_active_subscription (una vigente por cuenta, como siempre)', throwsCode(() => phase1(inp(2004, { type: 'minor', loginId: k1.loginId })), 'conflict_active_subscription'));
+    expire(ruleIdFor('test', 2001));
+    const inv = buy(inp(2004, { type: 'minor', loginId: k1.loginId }));
+    ok('…cuenta aún sin activar + pedido nuevo → misma cuenta, enlace nuevo, regla del pedido nuevo', inv.userId === k1.userId && inv.userOp === 'regenerate_token' && inv.status === 'activated' && inv.reusedAccount === true && inv.rule.rule.id === ruleIdFor('test', 2004));
+    activateAcc(k1.userId); expire(ruleIdFor('test', 2004));
+    const b5 = snap();
+    ok('…cuenta ACTIVA, representación SIN verificar → 422 terms_acceptance_required, sin escrituras (revisión manual)', throwsCode(() => phase1(inp(2005, { type: 'minor', loginId: k1.loginId }), { tof: () => false }), 'terms_acceptance_required') && snap() === b5);
+    ok('…registro no verificable → 503 (fallo cerrado)', throwsCode(() => phase1(inp(2005, { type: 'minor', loginId: k1.loginId }), { tof: () => null }), 'acceptance_registry_unavailable'));
+    const ver = buy(inp(2005, { type: 'minor', loginId: k1.loginId }), { tof: (id) => id === k1.userId });
+    ok('…representación verificada por GVA (T efectiva) → activated en SU cuenta, sin enlace, regla nueva', ver.status === 'activated' && ver.userId === k1.userId && ver.userOp === 'none' && ver.activationUrl === null && ver.loginId === k1.loginId && ver.rule.rule.scopeId === k1.userId);
+    ok('…la verificación de un menor no vale para su hermano', (() => { activateAcc(k2.userId); expire(ruleIdFor('test', 2002)); return throwsCode(() => phase1(inp(2006, { type: 'minor', loginId: k2.loginId }), { tof: (id) => id === k1.userId }), 'terms_acceptance_required'); })());
+    ok('…cuenta deshabilitada → 409 account_not_available (misma respuesta que una ajena)', (() => { const i = users.findIndex((u) => u.id === k2.userId); const keep = users[i]; users[i] = { ...keep, accountStatus: 'disabled' }; const t = throwsCode(() => phase1(inp(2006, { type: 'minor', loginId: k2.loginId }), { tof: () => true }), 'account_not_available'); users[i] = keep; return t; })());
+    // 9. revocación de un pedido
+    const r9 = snap();
+    const rv = planRevoke({ rules, input: validateRevokeInput({ orderId: 2003, source: 'test', idempotencyKey: 'test:order:2003', reason: 'refunded' }), nowMs: now + 1000 });
+    ok('[9] revocar el pedido de un menor toca solo su regla; las demás cuentas y reglas quedan idénticas', rv.status === 'revoked' && rv.rule.id === ruleIdFor('test', 2003) && rv.rule.scopeId === p3.userId && snap() === r9 && rules.filter((r) => r.b2c && r.id !== rv.rule.id).every((r) => !r.b2c.revokedAt));
+    // — unicidad del usuario de acceso —
+    const taken = k1.loginId; let calls = 0;
+    const fresh = phase1(inp(2030, { type: 'minor' }), { gen: () => (++calls === 1 ? taken : 'lec-abcd-efgh-2345') });
+    ok('loginId repetido → se descarta y se genera otro', fresh.loginId === 'lec-abcd-efgh-2345' && calls === 2);
+    const u30 = users.length;
+    ok('sin loginId libre o con generador inválido → 503 login_id_unavailable, sin cuenta parcial', throwsCode(() => phase1(inp(2031, { type: 'minor' }), { gen: () => taken }), 'login_id_unavailable') && throwsCode(() => phase1(inp(2031, { type: 'minor' }), { gen: () => 'Lupe' }), 'login_id_unavailable') && users.length === u30);
+    ok('pedido suprimido (regla sin titular) → 409 account_not_available, nunca se recrea', (() => { const id = ruleIdFor('test', 2030); const keep = rules; rules = [...rules, { id, scope: 'user', scopeId: 'suppressed', expiresAt: now - 1, b2c: { idempotencyKey: 'test:order:2030', suppressedAt: now } }]; const t = throwsCode(() => phase1(inp(2030, { type: 'minor' })), 'account_not_available'); rules = keep; return t; })());
+    ok('ninguna cuenta representada comparte usuario, y ninguna entra por la búsqueda por correo', new Set(users.filter(isRepresentedAccount).map((u) => u.loginId)).size === users.filter(isRepresentedAccount).length && users.filter(isRepresentedAccount).every((u) => u.email === ''));
+}
 
 console.log('sincronización del catálogo B2C');
 const tpl2 = { ...template, titleIds: ['o1', 'o2', 'o3'] };

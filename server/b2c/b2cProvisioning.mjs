@@ -15,6 +15,13 @@
  *    no caduca, así que pertenecer al grupo anularía la caducidad personal;
  *  - reembolso → `expiresAt = ahora` SOLO en la regla de ese pedido (sin borrar nada).
  *
+ * Cuentas representadas (V9 F3-D1): con `reader: { type: 'minor' }` la cuenta de lectura es la de un
+ * menor sin correo propio. Tiene `loginId` (generado por el servidor, no derivado de su nombre),
+ * `representedBy.email` (contacto del adulto del pedido) y `email` vacío; varias pueden compartir
+ * contacto. Todo lo demás (regla, progreso, decisiones) sigue yendo por `user.id`. El contacto es una
+ * comprobación de VÍNCULO para reutilizar la cuenta, nunca prueba de representación legal: la
+ * representación se declara al activar y la verifica GVA. Sin `reader`, el contrato no cambia.
+ *
  * Autenticación: HMAC-SHA256 del cuerpo crudo con un secreto dedicado (file-only), marca de
  * tiempo con ventana de 300 s y comparación en tiempo constante. Nunca se registran correos,
  * tokens ni el secreto.
@@ -40,6 +47,17 @@ export const TERMS_CLOCK_SKEW_MS = 120_000;
  * crear la cuenta. Solo acota la clasificación del día: `acceptedAt` se conserva tal como llegó.
  */
 export const termsActDayMs = (acceptedAt, nowMs) => Math.min(acceptedAt, nowMs);
+/** V9 F3-D1 — usuario de acceso de una cuenta representada: `lec-xxxx-xxxx-xxxx`, 60 bits aleatorios. */
+const LOGIN_ID_ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789'; // 32 símbolos, sin l, o, 0 ni 1
+export const B2C_LOGIN_ID_RX = /^lec-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}$/;
+export function makeB2cLoginId(bytes = crypto.randomBytes(12)) {
+    let s = '';
+    for (let i = 0; i < 12; i++) s += LOGIN_ID_ALPHABET[bytes[i] & 31]; // 5 bits por símbolo, sin sesgo
+    return `lec-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`;
+}
+/** Cuenta B2C representada: usuario propio y contacto de un adulto, sin correo propio. */
+export const isRepresentedAccount = (u) => !!u && u.b2c === true && typeof u.loginId === 'string' && B2C_LOGIN_ID_RX.test(u.loginId)
+    && typeof u.representedBy?.email === 'string' && u.representedBy.email !== '';
 const MIN_ACTIVATION_MS = Date.UTC(2024, 0, 1); // cota de cordura; admite fechas pasadas (reintentos, pruebas de caducidad)
 
 /** Error funcional con estado HTTP y código estable (sin datos personales). */
@@ -133,8 +151,23 @@ export function validateProvisionInput(body, nowMs) {
         if (at > activationAt + MAX_FUTURE_SKEW_MS) throw new B2cError(400, 'invalid_terms_acceptance');
         termsAcceptance = { version: t.version, acceptedAt: at };
     }
+    // V9 F3-D1: lector menor representado. `email` es entonces el contacto del adulto del pedido. `loginId`
+    // solo para reutilizar una cuenta existente; `name` es un apodo opcional (nunca se exige). La aceptación
+    // del checkout es del comprador: no se admite como T de la cuenta del menor (la API la anotaría como
+    // `titular / verified`); el representante la da al activar y GVA la verifica.
+    let reader = null;
+    if (b.reader !== undefined) {
+        const r = b.reader;
+        if (!r || typeof r !== 'object' || Array.isArray(r) || r.type !== 'minor') throw new B2cError(400, 'invalid_reader');
+        if (r.loginId !== undefined && (typeof r.loginId !== 'string' || !B2C_LOGIN_ID_RX.test(r.loginId))) throw new B2cError(400, 'invalid_reader');
+        if (r.name !== undefined && typeof r.name !== 'string') throw new B2cError(400, 'invalid_reader');
+        const name = typeof r.name === 'string' ? r.name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+        if ([...name].length > 60) throw new B2cError(400, 'invalid_reader');
+        if (termsAcceptance) throw new B2cError(400, 'terms_acceptance_not_applicable');
+        reader = { type: 'minor', loginId: r.loginId ?? null, name };
+    }
     return { orderId, productId, plan: b.plan, source: b.source, email: b.email, fullName, activationAt,
-        idempotencyKey: b.idempotencyKey, dryRun: b.dryRun === true, termsAcceptance };
+        idempotencyKey: b.idempotencyKey, dryRun: b.dryRun === true, termsAcceptance, reader };
 }
 
 /**
@@ -182,10 +215,11 @@ const isActiveB2cRuleFor = (rule, userId, nowMs) =>
  *
  * @returns {{ status, userId, userOp: 'create'|'regenerate_token'|'none', user, activationUrl, reusedAccount }}
  */
-export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, termsOnFileFor }) {
+export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor }) {
     const ruleId = ruleIdFor(input.source, input.orderId);
     const existingRule = rules.find(r => r && r.id === ruleId);
     if (existingRule && existingRule.b2c?.idempotencyKey !== input.idempotencyKey) throw new B2cError(409, 'idempotency_mismatch');
+    if (input.reader) return planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, existingRule, ruleId });
 
     const email = normalizeEmail(input.email);
     let user = existingRule
@@ -197,6 +231,8 @@ export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, norm
     // código que una cuenta no disponible, sin revelar nada del titular. Un pedido nuevo tiene otra
     // regla (id por pedido) y sigue el flujo normal.
     if (existingRule && (existingRule.b2c?.suppressedAt || !user)) throw new B2cError(409, 'account_not_available');
+    // V9 F3-D1: un pedido aprovisionado para un lector representado no se reinterpreta sin `reader`.
+    if (existingRule && user.loginId) throw new B2cError(409, 'idempotency_mismatch');
     if (!existingRule && user && rules.some(r => r && r.id !== ruleId && isActiveB2cRuleFor(r, user.id, nowMs))) {
         throw new B2cError(409, 'conflict_active_subscription');
     }
@@ -231,6 +267,72 @@ export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, norm
     }
     return { status: existingRule ? 'already_activated' : 'activated', userId: user.id, userOp: 'none', user,
         activationUrl: null, reusedAccount: true };
+}
+
+/**
+ * V9 F3-D1 — fase 1 para un lector menor representado (`input.reader`). Pura.
+ *
+ * Resolución de la cuenta, sin usar nunca el correo como identidad:
+ *  1. el pedido ya tiene regla ⇒ su cuenta (reintento o reenvío: idempotencia por pedido);
+ *  2. `reader.loginId` ⇒ esa cuenta SOLO si es representada y su contacto es el del pedido. Usuario
+ *     inexistente, ajeno o de una cuenta no representada: la MISMA respuesta (409 `account_not_available`),
+ *     sin datos de nadie;
+ *  3. sin `loginId` ⇒ la cuenta que este mismo pedido ya creó (`b2cOrigin`: un fallo entre crear la
+ *     cuenta y su regla no duplica cuentas en el reintento) o, si no existe, una cuenta nueva.
+ * Cuenta ya ACTIVA + pedido nuevo: exige T EFECTIVA en el registro (representación verificada por
+ * GVA). Una T declarada y sin verificar no basta ⇒ 422 y revisión manual. Aquí no se anota ninguna
+ * decisión: pagar no acredita representación ni consentimiento.
+ */
+function planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, existingRule, ruleId }) {
+    const contact = normalizeEmail(input.email);
+    const linked = (u) => isRepresentedAccount(u) && normalizeEmail(u.representedBy.email) === contact;
+    let user = null;
+    if (existingRule) {
+        user = users.find(u => u && u.id === existingRule.scopeId);
+        if (existingRule.b2c?.suppressedAt || !user) throw new B2cError(409, 'account_not_available');
+        if (!linked(user) || (input.reader.loginId && input.reader.loginId !== user.loginId)) throw new B2cError(409, 'idempotency_mismatch');
+    } else if (input.reader.loginId) {
+        user = users.find(u => u && u.loginId === input.reader.loginId);
+        if (!linked(user)) throw new B2cError(409, 'account_not_available');
+    } else {
+        user = users.find(u => u && u.b2cOrigin === input.idempotencyKey) || null;
+        if (user && !linked(user)) throw new B2cError(409, 'idempotency_mismatch');
+    }
+    if (user && !['active', 'invited'].includes(user.accountStatus || 'active')) throw new B2cError(409, 'account_not_available');
+    if (user && !existingRule && rules.some(r => r && r.id !== ruleId && isActiveB2cRuleFor(r, user.id, nowMs))) {
+        throw new B2cError(409, 'conflict_active_subscription');
+    }
+    const status = existingRule ? 'already_activated' : 'activated';
+    if (!user) {
+        // Usuario de acceso: aleatorio (no deriva del nombre) y único frente a usuarios, correos e ids existentes.
+        let loginId = null;
+        for (let i = 0; i < 8 && !loginId; i++) {
+            const c = typeof newLoginId === 'function' ? newLoginId() : null;
+            if (typeof c === 'string' && B2C_LOGIN_ID_RX.test(c) && !users.some(u => u && (u.loginId === c || u.id === c || normalizeEmail(u.email) === c))) loginId = c;
+        }
+        if (!loginId) throw new B2cError(503, 'login_id_unavailable');
+        const created = normalizeUser({
+            id: newUserId, email: '', loginId, representedBy: { email: contact },
+            nombre_completo: input.reader.name || 'Lector', nombre_usuario: loginId,
+            roles: ['lector'], colegio: '', groupIds: [], avatar_url: '', bio_corta: '',
+            libros_leidos: 0, seguidores: 0, seguidos: 0, nivel_lectura: 'Novato',
+            accountStatus: 'invited', inviteToken: newToken, inviteExpiresAt: nowMs + B2C_INVITE_TTL_MS,
+            b2c: true, createdVia: 'b2c-provision', b2cOrigin: input.idempotencyKey,
+        });
+        return { status, userId: newUserId, userOp: 'create', user: created, loginId,
+            activationUrl: `/#/activar?token=${newToken}`, reusedAccount: false };
+    }
+    if ((user.accountStatus || 'active') === 'invited') {
+        return { status, userId: user.id, userOp: 'regenerate_token', loginId: user.loginId,
+            user: { ...user, inviteToken: newToken, inviteExpiresAt: nowMs + B2C_INVITE_TTL_MS },
+            activationUrl: `/#/activar?token=${newToken}`, reusedAccount: !existingRule && user.b2cOrigin !== input.idempotencyKey };
+    }
+    if (!existingRule) {
+        const onFile = typeof termsOnFileFor === 'function' ? termsOnFileFor(user.id) : false;
+        if (onFile === null) throw new B2cError(503, 'acceptance_registry_unavailable');
+        if (onFile !== true) throw new B2cError(422, 'terms_acceptance_required');
+    }
+    return { status, userId: user.id, userOp: 'none', user, loginId: user.loginId, activationUrl: null, reusedAccount: true };
 }
 
 /**
