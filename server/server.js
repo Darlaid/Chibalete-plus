@@ -66,6 +66,7 @@ import { readB2cProvisioningSecret } from './lib/b2cProvisioningSecret.js';
 import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
 import { redactEmail } from './lib/logPrivacy.js';
 import { findLoginIndex, matchesLoginIdentifier } from './lib/loginIdentity.mjs';
+import { validatePasswordResetInput, planPasswordReset, resetTokenMatches } from './b2c/b2cPasswordReset.mjs';
 import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs, makeB2cLoginId } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
@@ -6184,6 +6185,31 @@ app.post('/api/b2c/revoke', b2cGuard, async (req, res) => {
     } catch (e) { return b2cFail(res, e); }
 });
 
+// V9 F4-A — recuperación de contraseña de una cuenta B2C, pedida por la tienda por el canal firmado.
+// La app no tiene correo saliente: el token solo viaja en esta respuesta autenticada y la tienda lo
+// entrega al destinatario que decide el servidor (correo propio, o contacto del adulto si la cuenta es
+// representada). No cambia contraseña, sesiones ni versión de credencial: eso solo lo hace reset-confirm.
+// Todo «no emitido» responde igual. Lógica pura y pruebas: server/b2c/b2cPasswordReset.mjs.
+app.post('/api/b2c/password-reset', b2cGuard, async (req, res) => {
+    try {
+        const nowMs = Date.now();
+        const input = validatePasswordResetInput(req.body, normalizeEmail);
+        const token = crypto.randomBytes(32).toString('hex');
+        const plan = await mutateUsers((users) => {
+            const p = planPasswordReset({ users, input, nowMs, token, normalizeEmail });
+            if (p.issue) { users[p.index] = p.user; writeJSON(USERS_DB, users); }
+            return p;
+        });
+        if (!plan.issue) {
+            log(`[B2C] password-reset ${input.source} → not_issued (${plan.reason})`, 'ACCESS');
+            return res.status(200).json({ status: 'not_issued' });
+        }
+        log(`[B2C] password-reset ${input.source} → issued user=${plan.user.id} account=${plan.delivery.account.kind}`, 'ACCESS');
+        writeAuditLog({ action: 'reset_password_request', targetUserId: plan.user.id, actor: null, details: { via: 'b2c', source: input.source, account: plan.delivery.account.kind } });
+        return res.status(200).json(plan.delivery);
+    } catch (e) { return b2cFail(res, e); }
+});
+
 // ---------------------------------------------------------------------------
 // AUTH PRO — RESET PASSWORD
 // ---------------------------------------------------------------------------
@@ -6251,7 +6277,8 @@ const handleResetConfirm = async (req, res) => {
     // Lock: re-read -> validate token -> apply new password -> write (atomic across containers)
     let updated = null;
     const conflict = await mutateUsers((users) => {
-        const index = users.findIndex(u => u.resetToken === token);
+        // V9 F4-A: los tokens emitidos por /api/b2c/password-reset se guardan como resumen SHA-256.
+        const index = users.findIndex(u => resetTokenMatches(u?.resetToken, token));
         if (index === -1) return { conflict: 'not_found' };
         const user = users[index];
         if (!isUserActive(user)) {
