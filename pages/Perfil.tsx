@@ -281,6 +281,12 @@ const Perfil: React.FC = () => {
                 <div className="text-center md:text-left">
                     <h1 className="text-3xl font-bold">{user.nombre_completo}</h1>
                     <p className="text-lg text-gray-500">@{user.nombre_usuario}</p>
+                    {/* V9 F3-D4: cuenta representada (sin correo): su usuario de acceso, solo en el perfil propio y solo lectura. */}
+                    {isOwnProfile && !currentUser?.email && currentUser?.loginId && (
+                        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                            Usuario de acceso: <code className="font-mono select-all">{currentUser.loginId}</code>
+                        </p>
+                    )}
                     <p className="mt-2 max-w-md">{user.bio_corta}</p>
                     {isOwnProfile && (
                         <div className="mt-4 flex items-center justify-center md:justify-start space-x-2">

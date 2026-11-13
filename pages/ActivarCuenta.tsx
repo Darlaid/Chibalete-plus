@@ -29,6 +29,11 @@ const DECISION_MESSAGES: Record<string, string> = {
     VERSION_MISMATCH: 'Los documentos cambiaron. Recarga la página para ver la versión vigente.',
 };
 
+// V9 F3-D4 — usuario de acceso de una cuenta representada (lo genera el servidor; aquí solo se muestra).
+const LOGIN_ID_RX = /^lec-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}$/;
+/** Página de la tienda donde el comprador pide un enlace de activación nuevo (V9 F3-B). */
+const STORE_LINK_RECOVERY_URL = 'https://chibaleteeditores.com/?chplus-enlace=1';
+
 const versionOf = (v: string) => v.split('@')[1];
 const flag = (on: boolean) => (on ? 'ring-2 ring-red-400 rounded p-1' : '');
 
@@ -67,6 +72,9 @@ const ActivarCuenta: React.FC = () => {
     const [terms, setTerms]             = useState(false);
     const [mediatorCommitment, setMediatorCommitment] = useState(false);
     const [required, setRequired]       = useState<string[]>([]);
+    // V9 F3-D4: usuario de acceso que devuelve la activación de una cuenta representada (nunca se pide ni se busca).
+    const [loginId, setLoginId]         = useState('');
+    const [copied, setCopied]           = useState(false);
     // V8.1-CLOSE-06B: estado de los documentos según Dirección (aprobado + enlace publicado).
     const [docs, setDocs]               = useState<DocStatus[] | null>(null);
     useEffect(() => {
@@ -153,6 +161,9 @@ const ActivarCuenta: React.FC = () => {
             const data = await res.json();
 
             if (res.ok) {
+                // Solo el usuario de la cuenta recién activada, y solo si esa cuenta no entra por correo.
+                const lid = typeof data?.user?.loginId === 'string' && !data.user.email && LOGIN_ID_RX.test(data.user.loginId) ? data.user.loginId : '';
+                setLoginId(lid);
                 setUiState('success');
                 return;
             }
@@ -163,7 +174,7 @@ const ActivarCuenta: React.FC = () => {
                 setErrorInfo({ message: DECISION_MESSAGES[data.code] ?? 'Revisa las decisiones marcadas para continuar.', code: data.code });
             } else if (res.status === 410 || data.code === 'TOKEN_EXPIRED') {
                 setErrorInfo({
-                    message: 'Este enlace expiró. Pide a tu administrador que reenvíe la invitación.',
+                    message: 'Este enlace expiró. Si tu cuenta es de un colegio o club, pide a tu administrador que reenvíe la invitación.',
                     code: 'TOKEN_EXPIRED',
                 });
             } else if (res.status === 409) {
@@ -199,8 +210,28 @@ const ActivarCuenta: React.FC = () => {
                         ¡Cuenta activada!
                     </h1>
                     <p className="text-gray-600 dark:text-gray-400 text-sm">
-                        Tu cuenta está lista. Ya puedes ingresar con tu nueva contraseña.
+                        {loginId
+                            ? 'La cuenta del lector está lista. Para entrar se usa este usuario (no un correo) y la contraseña que acabas de crear.'
+                            : 'Tu cuenta está lista. Ya puedes ingresar con tu nueva contraseña.'}
                     </p>
+                    {loginId && (
+                        <div className="text-left border border-gray-200 dark:border-gray-700 rounded-md p-3 space-y-2">
+                            <p id="login-id-label" className="text-xs font-semibold text-gray-600 dark:text-gray-300">Usuario de acceso del lector</p>
+                            <div className="flex items-center gap-2">
+                                <code aria-labelledby="login-id-label" className="flex-1 select-all break-all font-mono text-base text-gray-900 dark:text-white">{loginId}</code>
+                                <button
+                                    type="button"
+                                    onClick={async () => { try { await navigator.clipboard.writeText(loginId); setCopied(true); } catch { setCopied(false); } }}
+                                    className="px-3 py-2 text-sm font-medium border border-indigo-600 text-indigo-700 dark:text-indigo-300 rounded-md hover:bg-indigo-50 dark:hover:bg-gray-700"
+                                >
+                                    Copiar usuario
+                                </button>
+                            </div>
+                            <p role="status" aria-live="polite" className="text-xs text-gray-600 dark:text-gray-300">
+                                {copied ? 'Usuario copiado.' : 'Guárdalo: también aparece en el correo de bienvenida de la compra.'}
+                            </p>
+                        </div>
+                    )}
                     <button
                         onClick={() => navigate('/auth')}
                         className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md transition-colors"
@@ -237,8 +268,16 @@ const ActivarCuenta: React.FC = () => {
 
                 {/* Error de servidor */}
                 {uiState === 'error' && errorInfo && (
-                    <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative text-sm">
+                    <div role="alert" className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative text-sm">
                         <p>{errorInfo.message}</p>
+                        {errorInfo.code === 'TOKEN_EXPIRED' && (
+                            <p className="mt-2">
+                                Si compraste la suscripción en la tienda, pide un enlace nuevo con el número de tu pedido y el correo de la compra:{' '}
+                                <a href={STORE_LINK_RECOVERY_URL} target="_blank" rel="noopener noreferrer" className="font-semibold underline hover:text-red-900">
+                                    recuperar el enlace de activación
+                                </a>.
+                            </p>
+                        )}
                         {(errorInfo.code === 'ALREADY_ACTIVE' || errorInfo.code === 'TOKEN_EXPIRED') && (
                             <Link
                                 to="/auth"

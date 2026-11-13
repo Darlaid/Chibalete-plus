@@ -4,6 +4,7 @@ export interface User {
   nombre_usuario: string; // Acts as display name or fallback
   nombre_completo: string;
   email: string;
+  loginId?: string; // V9 F3-D4: usuario de acceso de una cuenta representada (email vacío). Lo asigna el servidor; no editable.
   password?: string; // Added for authentication simulation
   fecha_nacimiento?: string; // Added for age validation (ISO 8601 format YYYY-MM-DD)
   colegio?: string;  // Added for bulk upload
