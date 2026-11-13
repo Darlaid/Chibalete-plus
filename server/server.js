@@ -5055,19 +5055,40 @@ async function issueSessionCookie(res, user) {
     }
 }
 
-const sanitizeUserForClient = (user) => {
+// V9 F3-D4S — identidad de las cuentas representadas en las respuestas al cliente.
+// `representedBy.email` (contacto del adulto responsable) se queda en el servidor: lo usan la
+// provisión B2C, el login (que nunca lo trata como identidad) y la administración de plataforma.
+// El usuario de acceso (`loginId`) solo viaja a la propia cuenta; como nombre público se usa el
+// nombre visible de la cuenta, nunca el usuario de acceso ni otro dato privado.
+const publicHandleOf = (user) => (typeof user?.nombre_completo === 'string' && user.nombre_completo.trim()) || 'Lector';
+const hasLoginIdAsHandle = (user) => typeof user?.loginId === 'string' && user.loginId !== '' && user.nombre_usuario === user.loginId;
+
+/** `platformAdmin: true` solo para el listado administrativo de plataforma (registro completo, sin credenciales). */
+const sanitizeUserForClient = (user, { platformAdmin = false } = {}) => {
     const { password, inviteToken, inviteExpiresAt, resetToken, resetExpiresAt, ...safeUser } = user;
+    if (platformAdmin) return safeUser;
+    delete safeUser.representedBy;
+    if (hasLoginIdAsHandle(safeUser)) safeUser.nombre_usuario = publicHandleOf(safeUser);
     return safeUser;
+};
+/** Registro de OTRA cuenta dentro del ámbito de quien lista: sin su usuario de acceso. */
+const withoutAccessIdentity = (user) => {
+    if (typeof user?.loginId !== 'string') return user;
+    const { loginId, ...rest } = user;
+    return hasLoginIdAsHandle(user) ? { ...rest, nombre_usuario: publicHandleOf(user) } : rest;
 };
 
 // Campos de perfil público que un lector puede ver de otro usuario de su tenant.
 const PUBLIC_USER_PROFILE_FIELDS = ['id', 'nombre_completo', 'nombre_usuario', 'avatar_url', 'bio_corta', 'roles',
     'mediatorKind', 'colegio', 'groupIds', 'libros_leidos', 'seguidores', 'seguidos', 'nivel_lectura'];
-const publicUserProfile = (user) => Object.fromEntries(
-    PUBLIC_USER_PROFILE_FIELDS.filter(f => user?.[f] !== undefined).map(f => [f, user[f]]));
+const publicUserProfile = (user) => {
+    const profile = Object.fromEntries(PUBLIC_USER_PROFILE_FIELDS.filter(f => user?.[f] !== undefined).map(f => [f, user[f]]));
+    if (hasLoginIdAsHandle(user)) profile.nombre_usuario = publicHandleOf(user); // F3-D4S: nunca el usuario de acceso
+    return profile;
+};
 
-const sanitizeUsersForClient = (users) => {
-    return users.map(sanitizeUserForClient);
+const sanitizeUsersForClient = (users, opts) => {
+    return users.map((u) => sanitizeUserForClient(u, opts));
 };
 
 const normalizeEmail = (email) => {
@@ -5696,9 +5717,12 @@ app.get('/api/users', requireAuth, async (req, res) => {
             // va completo; correo, último acceso, estado y tenant ajenos no salen.
             if (!pedagogyRolesOf(scope.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r))) {
                 normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
+            } else {
+                // V9 F3-D4S: el usuario de acceso de otra cuenta tampoco sale hacia mediadores.
+                normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : withoutAccessIdentity(u)));
             }
         }
-        res.json(sanitizeUsersForClient(normalizedUsers));
+        res.json(sanitizeUsersForClient(normalizedUsers, { platformAdmin: scope.global === true }));
     } catch (e) {
         res.status(500).json({ error: 'Internal Server Error' });
     }
