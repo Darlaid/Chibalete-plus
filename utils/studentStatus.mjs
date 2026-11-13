@@ -91,7 +91,8 @@ function resolveDisplayName(user) {
     if (!user || typeof user !== 'object') return 'Estudiante';
     return (
         (typeof user.nombre_completo === 'string' && user.nombre_completo.trim()) ||
-        (typeof user.nombre_usuario  === 'string' && user.nombre_usuario.trim())  ||
+        // V9 F3-D5: el usuario de acceso (`loginId`) de una cuenta representada no es un nombre visible.
+        (typeof user.nombre_usuario  === 'string' && user.nombre_usuario !== user.loginId && user.nombre_usuario.trim())  ||
         (typeof user.email           === 'string' && user.email.trim())           ||
         'Estudiante'
     );

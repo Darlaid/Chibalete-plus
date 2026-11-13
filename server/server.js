@@ -5068,9 +5068,15 @@ const sanitizeUserForClient = (user, { platformAdmin = false } = {}) => {
     const { password, inviteToken, inviteExpiresAt, resetToken, resetExpiresAt, ...safeUser } = user;
     if (platformAdmin) return safeUser;
     delete safeUser.representedBy;
+    delete safeUser.b2cOrigin; // F3-D5: clave interna del pedido (idempotencia); el lector no la necesita
     if (hasLoginIdAsHandle(safeUser)) safeUser.nombre_usuario = publicHandleOf(safeUser);
     return safeUser;
 };
+/**
+ * V9 F3-D5 — cuenta B2C personal (comprada en la tienda, sin institución). Ningún mediador tiene
+ * relación con ella: su progreso solo lo leen la propia cuenta y la administración.
+ */
+const isPersonalB2cAccount = (user) => !!user && user.b2c === true && !institutionalContextIdOf(normalizeUser(user));
 /** Registro de OTRA cuenta dentro del ámbito de quien lista: sin su usuario de acceso. */
 const withoutAccessIdentity = (user) => {
     if (typeof user?.loginId !== 'string') return user;
@@ -5337,7 +5343,8 @@ app.get('/api/progress/user/:userId', async (req, res) => {
         const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
+        // V9 F3-D5: el rol de mediador no alcanza a los lectores B2C personales.
+        const isMediator = requester && isMediatorRole(requester) && !isPersonalB2cAccount(users.find(u => u?.id === userId));
         if (!isOwner && !isAdmin && !isMediator) {
             log(`GET progress/user denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
@@ -5365,7 +5372,8 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
         const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
+        // V9 F3-D5: el rol de mediador no alcanza a los lectores B2C personales.
+        const isMediator = requester && isMediatorRole(requester) && (isOwner || !isPersonalB2cAccount(users.find(u => u?.id === userId)));
         if (!isOwner && !isAdmin && !isMediator) {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
@@ -7611,7 +7619,7 @@ app.get('/api/groups/:groupId/candidates', requireAuth, async (req, res) => {
 
             candidates.push({
                 userId:        u.id,
-                name:          u.nombre_completo || u.nombre_usuario || u.email || u.id,
+                name:          u.nombre_completo || (hasLoginIdAsHandle(u) ? publicHandleOf(u) : u.nombre_usuario) || u.email || u.id, // F3-D5: nunca el usuario de acceso
                 email:         u.email || null,
                 colegio:       u.colegio || null,
                 currentGroups: groupsByUser.get(u.id) || [],
@@ -7693,7 +7701,7 @@ app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
 
             members.push({
                 userId:        u.id,
-                name:          u.nombre_completo || u.nombre_usuario || u.email || u.id,
+                name:          u.nombre_completo || (hasLoginIdAsHandle(u) ? publicHandleOf(u) : u.nombre_usuario) || u.email || u.id, // F3-D5: nunca el usuario de acceso
                 email:         u.email || null,
                 colegio:       u.colegio || null,
                 currentGroups: userGroupsAll.map(x => x.id),
