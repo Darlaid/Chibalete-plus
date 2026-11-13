@@ -360,15 +360,24 @@ try {
     const writerCode = `const M=await import(${JSON.stringify(fileUrl('server/leoMemoryService.js'))});const E=await import(${JSON.stringify(fileUrl('server/leoEvidenceService.js'))});
         const fs=await import('node:fs');M.setLeoSubjectGuard((id)=>JSON.parse(fs.readFileSync(process.env.USERS_DB,'utf8')).some(u=>u.id===id));
         const end=Date.now()+Number(process.env.LEO_MS);let k1=0,err=0;
-        while(Date.now()<end){for(const uid of ['lsup','k1']){try{M.recordInteraction({userId:uid,contentId:'c9',surface:'reader',interactionType:'chat'});E.persistLeoEvidence({id:'e'+Math.random(),userId:uid,contentId:'c9',evidenceType:'x',timestamp:Date.now()});M.updateLeoLearnerProfile(uid,{note:'n'});if(uid==='k1')k1++;}catch{err++;}}}
+        while(Date.now()<end){for(const uid of ['lsup','k1']){try{M.recordInteraction({userId:uid,contentId:'c9',surface:'reader',interactionType:'chat'});E.persistLeoEvidence({id:'e'+Math.random(),userId:uid,contentId:'c9',evidenceType:'x',timestamp:Date.now(),...(uid==='k1'?{sequenceId:process.env.WTAG,sequenceStep:k1+1}:{})});M.updateLeoLearnerProfile(uid,{note:'n'});if(uid==='k1')k1++;}catch{err++;}}}
         console.log(JSON.stringify({k1,err}));`;
-    const runWriter = () => new Promise((resolve) => { const c = spawn(process.execPath, ['--input-type=module', '-e', writerCode], { env: { ...envFor(LIVE, 0), LEO_MS: '5000' } }); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.stderr.on('data', (d) => { o += d; }); c.on('exit', (rc) => {
+    // V9 F4-A1: cada escritor numera sus escrituras de k1 (sequenceId = su etiqueta, sequenceStep = 1..n) y la
+    // prueba cuenta los recortes que anuncia el servicio. CHP_TEST_LEO_MS alarga la carrera para ejercitar el tope.
+    const runWriter = (tag) => new Promise((resolve) => { const c = spawn(process.execPath, ['--input-type=module', '-e', writerCode], { env: { ...envFor(LIVE, 0), LEO_MS: process.env.CHP_TEST_LEO_MS || '5000', WTAG: tag } }); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.stderr.on('data', (d) => { o += d; }); c.on('exit', (rc) => {
         const fsErrors = o.match(/(Error writing|Locked write failed|persistLeoEvidence failed)[^\n]{0,120}/g) || [];
-        try { resolve({ rc, writeErrors: fsErrors.length, detail: [...new Set(fsErrors)].slice(0, 3), ...JSON.parse(o.trim().split('\n').pop()) }); } catch { resolve({ rc, writeErrors: fsErrors.length, raw: o.slice(-500) }); }
+        const trims = (o.match(/Evidence DB trimmed to \d+ entries/g) || []).length;
+        try { resolve({ rc, tag, trims, writeErrors: fsErrors.length, detail: [...new Set(fsErrors)].slice(0, 3), ...JSON.parse(o.trim().split('\n').pop()) }); } catch { resolve({ rc, writeErrors: fsErrors.length, raw: o.slice(-500) }); }
     }); });
     const k1Mem0 = J(LIVE.leoMemory).memoryMap['k1__c9']?.interactionCount ?? 0;
-    const k1Ev0 = J(LIVE.leoEvidence).entries.filter((e) => e.userId === 'k1' && e.contentId === 'c9').length;
-    const writers = [runWriter(), runWriter()];
+    // Política de retención del servicio (no se toca): al superar MAX se conservan las TRIM_TO más recientes.
+    const evSrc = fs.readFileSync(path.join(REPO, 'server', 'leoEvidenceService.js'), 'utf8');
+    const EV_MAX = Number(evSrc.match(/const _MAX_ENTRIES\s*=\s*(\d+);/)?.[1]), EV_TRIM_TO = Number(evSrc.match(/const _TRIM_TO\s*=\s*(\d+);/)?.[1]);
+    const PER_TRIM = EV_MAX + 1 - EV_TRIM_TO; // entradas (las más antiguas) que elimina cada recorte
+    const applyRetention = (list) => (list.length > EV_MAX ? list.slice(list.length - EV_TRIM_TO) : list);
+    const evToken = (e) => (e.sequenceId ? `${e.sequenceId}:${e.sequenceStep}` : JSON.stringify(e));
+    const ev0 = J(LIVE.leoEvidence).entries.map(evToken); // todo lo anterior a la carrera (más antiguo que cualquier escritura suya)
+    const writers = [runWriter('w1'), runWriter('w2')];
     await sleep(1500);
     ok('…escribiendo para la persona antes de la baja', J(LIVE.leoMemory).memoryMap['lsup__c9']?.interactionCount > 0);
     ok('…baja con la operación existente', (await req(api2, 'DELETE', '/api/users/lsup', 'adm')).status === 200);
@@ -380,7 +389,45 @@ try {
     const leoText = ['leoMemory', 'leoProfile', 'leoInteractions', 'leoEvidence'].map((k) => fs.readFileSync(LIVE[k], 'utf8')).join('');
     ok('ninguna escritura posterior reintroduce a la persona (memoria, perfil, evidencia)', !leoText.includes('"lsup') && !leoText.includes('lsup__') && !leoText.includes(TOKEN('lsup')));
     ok('sin escrituras perdidas: el contador de k1 suma exactamente las de los dos procesos', (J(LIVE.leoMemory).memoryMap['k1__c9']?.interactionCount ?? 0) - k1Mem0 === w1.k1 + w2.k1, JSON.stringify([J(LIVE.leoMemory).memoryMap['k1__c9'], w1.k1, w2.k1]));
-    ok('…y la evidencia de k1 también', J(LIVE.leoEvidence).entries.filter((e) => e.userId === 'k1' && e.contentId === 'c9').length - k1Ev0 === w1.k1 + w2.k1);
+    { // bloque propio: nombres locales de la comprobación de retención
+    // V9 F4-A1 — evidencia de k1 con el tope de retención. El almacén es de solo-anexado y, al superar EV_MAX,
+    // conserva las EV_TRIM_TO más recientes: lo que falte tiene que ser lo MÁS ANTIGUO y caber en lo que eliminaron
+    // los recortes anunciados. Sin recortes, la cuenta es exacta, como antes.
+    if (['middle', 'last', 'oldest'].includes(process.env.CHP_TEST_INJECT_EVIDENCE_LOSS)) { // prueba negativa controlada: simula una escritura perdida
+        const db = J(LIVE.leoEvidence); const mine = db.entries.map((e, i) => (e.sequenceId === 'w1' ? i : -1)).filter((i) => i >= 0);
+        const at = { middle: mine[Math.floor(mine.length / 2)], last: mine[mine.length - 1], oldest: mine[0] }[process.env.CHP_TEST_INJECT_EVIDENCE_LOSS];
+        db.entries.splice(at, 1); W(LIVE.leoEvidence, db); console.log(`      [autoprueba] se retiró una entrada de w1 (${process.env.CHP_TEST_INJECT_EVIDENCE_LOSS})`);
+    }
+    const evNow = J(LIVE.leoEvidence).entries;
+    const trims = w1.trims + w2.trims, written = w1.k1 + w2.k1;
+    const keptOf = (w) => evNow.filter((e) => e.userId === 'k1' && e.contentId === 'c9' && e.sequenceId === w.tag).map((e) => e.sequenceStep);
+    const kept = [keptOf(w1), keptOf(w2)];
+    const lost = written - kept[0].length - kept[1].length;
+    const nowTokens = new Set(evNow.map(evToken)); const baseLost = ev0.filter((t) => !nowTokens.has(t)).length;
+    console.log(`      (evidencia de k1: ${written} escritas, ${written - lost} conservadas, ${trims} recorte(s); previas perdidas: ${baseLost} de ${ev0.length})`);
+    ok('política de retención leída del servicio y tope respetado', Number.isInteger(EV_MAX) && Number.isInteger(EV_TRIM_TO) && EV_TRIM_TO < EV_MAX && evNow.length <= EV_MAX, `${EV_MAX}/${EV_TRIM_TO} len=${evNow.length}`);
+    ok('…y la evidencia de k1 también: sin recortes, exactamente todas las escrituras (y nada previo perdido)', trims > 0 || (lost === 0 && baseLost === 0), JSON.stringify({ written, lost, baseLost, trims }));
+    ok('…lo conservado de cada proceso es un tramo contiguo que termina en su ÚLTIMA escritura (sin huecos ni duplicados)', [w1, w2].every((w, i) => {
+        const steps = kept[i]; if (steps.length === 0) return trims > 0 && w.k1 <= lost; // solo si todo lo suyo era lo más antiguo
+        return steps[steps.length - 1] === w.k1 && steps.every((n, j) => j === 0 || n === steps[j - 1] + 1);
+    }), JSON.stringify(kept.map((k, i) => [k[0], k[k.length - 1], k.length, [w1, w2][i].k1])));
+    ok('…lo que falta cabe EXACTAMENTE en lo eliminado por los recortes y es lo más antiguo', lost >= 0 && lost + baseLost <= trims * PER_TRIM && (lost === 0 || baseLost === ev0.length), JSON.stringify({ lost, baseLost, budget: trims * PER_TRIM, previas: ev0.length }));
+
+    // Retención determinista, sin concurrencia: un proceso anexa un número conocido de entradas que cruza el tope,
+    // se queda por debajo y lo vuelve a cruzar; el almacén debe coincidir entrada por entrada con la política.
+    const before = J(LIVE.leoEvidence).entries.map(evToken);
+    const N_RET = (EV_MAX + 1 - Math.min(before.length, EV_MAX)) + 150 + (EV_MAX + 1 - EV_TRIM_TO - 150);
+    let sim = before.slice(), simTrims = 0;
+    for (let n = 1; n <= N_RET; n++) { sim.push(`ret:${n}`); const t = applyRetention(sim); if (t !== sim) { simTrims++; sim = t; } }
+    const retCode = `const E=await import(${JSON.stringify(fileUrl('server/leoEvidenceService.js'))});
+        for(let n=1;n<=Number(process.env.N_RET);n++)E.persistLeoEvidence({userId:'k1',contentId:'c9',evidenceType:'x',timestamp:n,sequenceId:'ret',sequenceStep:n});console.log('fin');`;
+    const ret = await new Promise((resolve) => { const c = spawn(process.execPath, ['--input-type=module', '-e', retCode], { env: { ...envFor(LIVE, 0), N_RET: String(N_RET) } }); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.stderr.on('data', (d) => { o += d; });
+        c.on('exit', (rc) => resolve({ rc, trims: (o.match(/Evidence DB trimmed to \d+ entries/g) || []).length, errors: (o.match(/Error writing|Locked write failed|persistLeoEvidence failed/g) || []).length })); });
+    if (process.env.CHP_TEST_INJECT_EVIDENCE_LOSS === 'retention') { const db = J(LIVE.leoEvidence); db.entries.splice(Math.floor(db.entries.length / 2), 1); W(LIVE.leoEvidence, db); console.log('      [autoprueba] se retiró una entrada tras la fase de retención'); }
+    const after = J(LIVE.leoEvidence).entries.map(evToken);
+    ok(`retención determinista: ${N_RET} entradas más cruzan el tope dos veces y entre medias se quedan por debajo`, ret.rc === 0 && ret.errors === 0 && simTrims === 2 && ret.trims === simTrims, JSON.stringify({ ret, simTrims, N_RET, antes: before.length }));
+    ok('…y el almacén coincide entrada por entrada con la política (ni una de más, ni una de menos, en orden)', after.length === sim.length && after.every((t, i) => t === sim[i]), JSON.stringify({ almacén: after.length, política: sim.length, primeraDiferencia: after.findIndex((t, i) => t !== sim[i]) }));
+    }
     await stop(api1); await stop(api2); api1 = api2 = null;
 
     section('[2] restauración en CUARENTENA');
