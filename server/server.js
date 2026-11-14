@@ -11271,12 +11271,6 @@ async function sessionRequesterOf(req, users) {
     return users.find(u => u.id === ident.userId) ?? null;
 }
 
-function resolveRequester(req, users) {
-    const id = reqUserId(req);
-    if (!id) return null;
-    return users.find(u => u.id === id) ?? null;
-}
-
 /**
  * V9 F5-A — ¿puede este mediador leer el progreso INDIVIDUAL de ese lector?
  * El rol por sí solo ya no basta. Se reutiliza el criterio de las demás rutas de mediación
@@ -11822,7 +11816,7 @@ app.get('/api/metrics/schools', mountLegacyMetricsRoute('metrics.schools', legac
 const legacyMetricsStudentHandler = async (req, res) => {
     const { userId }        = req.params;
     const { users }         = loadAndInitMetrics();
-    const requester         = resolveRequester(req, users);
+    const requester         = await sessionRequesterOf(req, users);
     const selfAccess        = requester?.id === userId;
 
     if (!(await isAdminRequest(req)) && !selfAccess) {
@@ -11924,7 +11918,7 @@ function collectSchoolUserIds(schoolName, groups) {
 const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
-    const requester         = resolveRequester(req, users);
+    const requester         = await sessionRequesterOf(req, users);
     // V9 F5-C2: mediador ⇒ solo lectores de un curso que media, con A2 y C005 vigentes (desglose Y agregados).
     const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId);
     if (!metricsOptions) return;
@@ -12334,7 +12328,7 @@ function safeJsonParse(raw) {
 app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
-    const requester         = resolveRequester(req, users);
+    const requester         = await sessionRequesterOf(req, users);
     // V9 F5-C2: mismo alcance que /api/metrics/course (lectores elegibles; agregados solo sobre ellos).
     const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId);
     if (!metricsOptions) return;
@@ -13000,7 +12994,7 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const users = readJSON(USERS_DB);
-        const requester  = resolveRequester(req, users);
+        const requester  = await sessionRequesterOf(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         // V9 F5-A: mismo criterio que /api/progress/user|item (antes bastaba el rol de mediador).
@@ -13040,7 +13034,7 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const users = readJSON(USERS_DB);
-        const requester  = resolveRequester(req, users);
+        const requester  = await sessionRequesterOf(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         // V9 F5-A: mismo criterio que /api/progress/user|item (antes bastaba el rol de mediador).
