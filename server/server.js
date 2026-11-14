@@ -10875,12 +10875,6 @@ async function sessionRequesterOf(req, users) {
     return users.find(u => u.id === ident.userId) ?? null;
 }
 
-function resolveRequester(req, users) {
-    const id = reqUserId(req);
-    if (!id) return null;
-    return users.find(u => u.id === id) ?? null;
-}
-
 /**
  * True if user has the mediador role.
  * DT-05: 'profesor' eliminado del modelo. Safety net: también acepta 'profesor'
@@ -11321,7 +11315,7 @@ function mountLegacyMetricsRoute(routeKind, legacyHandler) {
 
 const legacyMetricsSchoolsHandler = async (req, res) => {
     const { groups, users } = loadAndInitMetrics();
-    const requester = resolveRequester(req, users);
+    const requester = await sessionRequesterOf(req, users);
     const adminAccess = await isAdminRequest(req);
 
     if (!adminAccess && !requester) {
@@ -11356,7 +11350,7 @@ app.get('/api/metrics/schools', mountLegacyMetricsRoute('metrics.schools', legac
 const legacyMetricsStudentHandler = async (req, res) => {
     const { userId }        = req.params;
     const { users }         = loadAndInitMetrics();
-    const requester         = resolveRequester(req, users);
+    const requester         = await sessionRequesterOf(req, users);
     const selfAccess        = requester?.id === userId;
 
     if (!(await isAdminRequest(req)) && !selfAccess) {
@@ -11458,7 +11452,7 @@ function collectSchoolUserIds(schoolName, groups) {
 const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
-    const requester         = resolveRequester(req, users);
+    const requester         = await sessionRequesterOf(req, users);
     const adminAccess       = await isAdminRequest(req);
     const mediatorAccess    = requester && isMediatorRole(requester) &&
                               isMediatorOfCourse(requester, courseId, groups);
@@ -11557,7 +11551,7 @@ app.get('/api/metrics/school/:schoolId', mountLegacyMetricsRoute('metrics.school
 app.get('/api/metrics/backbone', async (req, res) => {
     if (!(await isAdminRequest(req))) {
         const { users } = loadAndInitMetrics();
-        const requester = resolveRequester(req, users);
+        const requester = await sessionRequesterOf(req, users);
         if (!requester || !isMediatorRole(requester)) {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -11616,7 +11610,7 @@ app.get('/api/metrics/backbone', async (req, res) => {
 app.get('/api/metrics/funnels', async (req, res) => {
     if (!(await isAdminRequest(req))) {
         const { users } = loadAndInitMetrics();
-        const requester = resolveRequester(req, users);
+        const requester = await sessionRequesterOf(req, users);
         if (!requester || !isMediatorRole(requester)) {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -11660,7 +11654,7 @@ app.get('/api/metrics/funnels', async (req, res) => {
 app.get('/api/metrics/insights', async (req, res) => {
     if (!(await isAdminRequest(req))) {
         const { users } = loadAndInitMetrics();
-        const requester = resolveRequester(req, users);
+        const requester = await sessionRequesterOf(req, users);
         if (!requester || !isMediatorRole(requester)) {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -11723,7 +11717,7 @@ app.get('/api/metrics/insights', async (req, res) => {
 async function requireAdminOrMediator(req, res) {
     if (await isAdminRequest(req)) return true;
     const { users } = loadAndInitMetrics();
-    const requester = resolveRequester(req, users);
+    const requester = await sessionRequesterOf(req, users);
     if (!requester || !isMediatorRole(requester)) {
         res.status(403).json({ error: 'Acceso denegado' });
         return false;
@@ -11889,7 +11883,7 @@ function safeJsonParse(raw) {
 app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
-    const requester         = resolveRequester(req, users);
+    const requester         = await sessionRequesterOf(req, users);
     const adminAccess       = await isAdminRequest(req);
     const mediatorAccess    = requester && isMediatorRole(requester) &&
                               isMediatorOfCourse(requester, courseId, groups);
@@ -12481,7 +12475,7 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const users = readJSON(USERS_DB);
-        const requester  = resolveRequester(req, users);
+        const requester  = await sessionRequesterOf(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
@@ -12519,7 +12513,7 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
     try {
         const { userId, contentId } = req.params;
         const users = readJSON(USERS_DB);
-        const requester  = resolveRequester(req, users);
+        const requester  = await sessionRequesterOf(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
