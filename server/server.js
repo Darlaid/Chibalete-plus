@@ -10521,7 +10521,13 @@ app.post('/api/leo/recap', requireUserAuth, b2cEntitlementGuard, requireLeoAutho
 async function requireLeoMediatorScope(req, res, studentId, { allowSelf = false } = {}) {
     if (await isAdminRequest(req)) return true;
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
-    const d = evaluateScopeAccess(callerId, 'user', String(studentId));
+    // V9 F5-C2: por mediación se exige además A2 vigente del lector y C005 vigente del mediador
+    // (`individualAccess`, el criterio de status/exportaciones/progreso); un B2C personal, nunca.
+    // Sin ellos, el MISMO 403 que fuera de alcance; registro no verificable ⇒ 503 (fallo cerrado).
+    let d = individualAccess(callerId, String(studentId));
+    if (d.decision === 'allow' && d.via !== 'self' && !String(d.via).startsWith('policy:platform_admin') && isPersonalB2cAccount((readJSON(USERS_DB) || []).find(u => u?.id === String(studentId)))) {
+        d = { decision: 'forbidden' };
+    }
     if (d.decision === 'allow') {
         if (d.via === 'self' && !allowSelf) {
             res.status(403).json({ success: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(studentId) });
@@ -11227,6 +11233,48 @@ function isMediatorOfCourse(user, courseId, groups) {
     );
 }
 
+/**
+ * V9 F5-C2 — lectores de un curso cuyos datos puede ver ese mediador en métricas y reportes de curso.
+ * Antes bastaba estar asignado al curso: el desglose traía a TODOS los miembros, sin A2 ni C005.
+ * Mismos controles que el resto de la mediación, sin motor nuevo:
+ *  - curso: uno que el CIS reconoce como mediado por esa persona (`mediatedGroupRosters`);
+ *  - lector: miembro HOY de ese curso + `individualAccessChecker` (A2 del lector y C005 del mediador); un B2C personal, nunca.
+ * Devuelve { decision: 'deny' } | { decision: 'unavailable' } | { decision: 'allow', eligible: Set }.
+ * Identidad o registro de decisiones no verificables ⇒ 'unavailable' (fallo cerrado). No decide sobre la administración.
+ */
+function mediatorCourseReaders(requester, courseId) {
+    if (!requester || !isMediatorRole(requester)) return { decision: 'deny' };
+    let roster;
+    try { roster = mediatedGroupRosters(requester.id).get(String(courseId ?? '')); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] course metrics scope unavailable: ${e.causeTag}`, 'ERROR');
+        return { decision: 'unavailable' };
+    }
+    if (!roster) return { decision: 'deny' };
+    const check = individualAccessChecker(requester.id);
+    const users = readJSON(USERS_DB) || [];
+    const eligible = new Set();
+    for (const sid of roster) {
+        if (isPersonalB2cAccount(users.find(u => u?.id === sid))) continue;
+        const d = check(sid);
+        if (d.decision === 'unavailable') return { decision: 'unavailable' };
+        if (d.decision === 'allow' && d.via !== 'self') eligible.add(sid);
+    }
+    return { decision: 'allow', eligible };
+}
+/**
+ * Autorización común de métricas y reporte de curso. Devuelve las opciones para `computeCourseMetrics`
+ * (administración: sin filtro; mediador: solo sus lectores elegibles) o null si ya respondió (403/503, sin datos).
+ */
+async function courseMetricsOptions(req, res, requester, courseId) {
+    if (await isAdminRequest(req)) return {};
+    const scope = mediatorCourseReaders(requester, courseId);
+    if (scope.decision === 'unavailable') { res.status(503).json({ error: 'individual_access_unavailable' }); return null; }
+    if (scope.decision !== 'allow') { res.status(403).json({ error: 'Acceso denegado' }); return null; }
+    return { includeStudent: (id) => scope.eligible.has(id) };
+}
+
 // ---------------------------------------------------------------------------
 // SCHOOL IDENTIFIER HELPERS
 // ---------------------------------------------------------------------------
@@ -11782,16 +11830,12 @@ const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
-    const adminAccess       = await isAdminRequest(req);
-    const mediatorAccess    = requester && isMediatorRole(requester) &&
-                              isMediatorOfCourse(requester, courseId, groups);
-
-    if (!adminAccess && !mediatorAccess) {
-        return res.status(403).json({ error: 'Acceso denegado' });
-    }
+    // V9 F5-C2: mediador ⇒ solo lectores de un curso que media, con A2 y C005 vigentes (desglose Y agregados).
+    const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId);
+    if (!metricsOptions) return;
 
     try {
-        const raw      = computeCourseMetrics(courseId);
+        const raw      = computeCourseMetrics(courseId, metricsOptions);
         const response = formatCourseResponse(raw, users);
 
         // Augment each student with their pedagogical profile (computed from session timelines)
@@ -11813,10 +11857,15 @@ const legacyMetricsCourseHandler = async (req, res) => {
         const courseUserIds = response.studentBreakdown
             .map(s => s.userId)
             .filter(id => typeof id === 'string');
-        response.backboneMetrics = safeLoadBackboneMetrics({
-            userIds:    courseUserIds,
-            windowDays: 30,
-        });
+        // V9 F5-C2: sin lectores (curso vacío o ninguno elegible) NO se consulta el backbone: una lista
+        // vacía equivale allí a «sin filtro» y devolvería el agregado global de la plataforma.
+        if (courseUserIds.length > 0) {
+            response.backboneMetrics = safeLoadBackboneMetrics({ userIds: courseUserIds, windowDays: 30 });
+        } else {
+            response.backboneMetrics = emptyBackboneMetrics({ windowDays: 30 });
+            response.backboneMetrics.funnels  = emptyBackboneFunnels({ windowDays: 30 });
+            response.backboneMetrics.insights = emptyBackboneInsights({ windowDays: 30 });
+        }
 
         res.json(response);
     } catch (e) {
@@ -12213,16 +12262,12 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = resolveRequester(req, users);
-    const adminAccess       = await isAdminRequest(req);
-    const mediatorAccess    = requester && isMediatorRole(requester) &&
-                              isMediatorOfCourse(requester, courseId, groups);
-
-    if (!adminAccess && !mediatorAccess) {
-        return res.status(403).json({ error: 'Acceso denegado' });
-    }
+    // V9 F5-C2: mismo alcance que /api/metrics/course (lectores elegibles; agregados solo sobre ellos).
+    const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId);
+    if (!metricsOptions) return;
 
     try {
-        const raw      = computeCourseMetrics(courseId);
+        const raw      = computeCourseMetrics(courseId, metricsOptions);
         const group    = groups.find(g => g.id === courseId);
         const response = formatCourseResponse(raw, users);
 

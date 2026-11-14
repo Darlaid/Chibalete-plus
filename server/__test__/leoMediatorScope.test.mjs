@@ -16,6 +16,7 @@
  *   node server/__test__/leoMediatorScope.test.mjs
  */
 import './helpers/testMode.mjs';
+import { grantA2, grantC005 } from './helpers/testA2.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,6 +31,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
 
+// V9 F5-C2: por mediación se exige además A2 del lector y C005 del mediador (casos propios en metricsLeoScopeHttp).
+grantA2(['P1', 'P2']); grantC005(['MED1', 'MED2', 'MED3']);
 // ── fixtures sintéticos (cero PII real) ──────────────────────────────────────
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chp_leo_scope_'));
 const P = {
@@ -164,13 +167,13 @@ try {
 
     console.log('\n[H] estructural: las tres rutas invocan el guard CIS y conservan requireAuth');
     const src = fs.readFileSync(path.join(REPO, 'server', 'server.js'), 'utf8');
-    ok('import de evaluateScopeAccess desde scopeAccess.mjs', /import \{ evaluateScopeAccess \} from '\.\/aulaViva\/scopeAccess\.mjs';/.test(src));
+    ok('import del control de alcance desde scopeAccess.mjs', /import \{ evaluateScopeAccess, [^}]*individualAccess[^}]*\} from '\.\/aulaViva\/scopeAccess\.mjs';/.test(src));
     ok('guard definido una vez', (src.match(/async function requireLeoMediatorScope\(/g) || []).length === 1);
     for (const [route, self] of [["app.get('/api/leo/mediator/student/:userId', requireAuth", false], ["app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth", false], ["app.get('/api/leo/activation/:userId', requireAuth", true]]) {
         const i = src.indexOf(route); const block = src.slice(i, i + 900);
         ok(`${route.slice(8, 50)}… llama al guard${self ? ' con allowSelf' : ''}`, i > 0 && (self ? /requireLeoMediatorScope\(req, res, userId, \{ allowSelf: true \}\)/.test(block) : /requireLeoMediatorScope\(req, res, userId\)/.test(block)));
     }
-    ok('el guard reutiliza la autoridad de máquina existente (isAdminRequest) y el CIS', /if \(await isAdminRequest\(req\)\) return true;/.test(src) && /evaluateScopeAccess\(callerId, 'user', String\(studentId\)\)/.test(src));
+    ok('el guard reutiliza la autoridad de máquina existente (isAdminRequest) y el CIS', /if \(await isAdminRequest\(req\)\) return true;/.test(src) && /individualAccess\(callerId, String\(studentId\)\)/.test(src));
     ok('fixtures sin correos reales ni texto de menores', USERS.every(x => x.email.endsWith('@fixture.invalid')));
 } finally {
     try { api.kill(); } catch {}

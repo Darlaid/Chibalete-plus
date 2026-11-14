@@ -21,6 +21,7 @@
  * se re-verifica con el mismo fixture de dos organizaciones.
  */
 import './helpers/testMode.mjs';
+import { grantA2, grantC005 } from './helpers/testA2.mjs';
 import { freePorts } from './helpers/freePort.mjs';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -33,6 +34,8 @@ let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
 const section = (t) => console.log(`\n${t}`);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// V9 F5-C2: registro de decisiones sintético (lo heredan los servidores por `...process.env`).
+grantA2(['lec-a1']); grantC005(['med-a']);
 
 // ────────────────────────────────────────────────────────────────────────────
 // FIXTURES — dos organizaciones completas + administrador. Ningún id real.
@@ -312,6 +315,9 @@ async function main() {
 
     section('[6] /api/leo/activation/:userId — sigue acotado por CIS');
     {
+        // V9 F5-C2: por mediación, además del CIS, A2 del lector y C005 del mediador. Sin ellos, el mismo 403.
+        const sinA2 = await GET('med-a', '/api/leo/activation/lec-a2');
+        ok('med-a → alumno de su grupo SIN A2 → 403', sinA2.status === 403, String(sinA2.status));
         const self = await GET('lec-a1', '/api/leo/activation/lec-a1');
         ok('lec-a1 → su propia activación → 200', self.status === 200, String(self.status));
         const ajeno = await GET('lec-a1', '/api/leo/activation/lec-b1');
