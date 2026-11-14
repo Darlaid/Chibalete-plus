@@ -13,7 +13,6 @@ import BackboneFunnelsSection, { type BackboneFunnels } from '../components/Back
 // Sprint Data Backbone — Fase 6B: insights y alertas (aditivo).
 import BackboneInsightsSection, { type BackboneInsights } from '../components/BackboneInsightsSection';
 // Sprint Data Backbone — Fase 6C: alertas persistidas con histórico.
-import BackbonePersistentAlertsSection from '../components/BackbonePersistentAlertsSection';
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -1982,13 +1981,8 @@ const DashboardMediador: React.FC = () => {
                 }
             />
 
-            {/* ── DATA BACKBONE: ALERTAS PERSISTIDAS (Sprint 6C) ── */}
-            {/* Solo se monta si insights.db está disponible (lo decide el backend). */}
-            <BackbonePersistentAlertsSection
-                available={true}
-                userId={user?.id}
-                scopeLevel="global"
-            />
+            {/* V9 F5-C3: las alertas persistidas son GLOBALES de la plataforma y solo las lee la administración
+                (DashboardAdminLectura); el servidor ya no las entrega a mediadores. */}
 
             {/* ── FOOTER ── */}
             <p className="text-center text-xs text-gray-300 dark:text-gray-600">

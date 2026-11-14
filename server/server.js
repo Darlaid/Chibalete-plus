@@ -705,6 +705,35 @@ async function resolveListingScope(req, res) {
 }
 
 /**
+ * V9 F5-C3 — ¿quien llama tiene autoridad administrativa? Autoridad de máquina (admin-secret file-only) o
+ * administrador de plataforma según el CIS (la misma política que `resolveListingScope`). El rol de mediador no lo es.
+ * @throws {IdentityUnavailableError}
+ */
+async function isPlatformAdminCaller(req, callerId) {
+    if (await isAdminRequest(req)) return true;
+    return getPrincipal(typeof callerId === 'string' ? callerId : '')?.platformAdmin === true;
+}
+/**
+ * V9 F5-C3 — métricas GLOBALES de la plataforma (backbone, embudos, insights, alertas persistidas): solo
+ * administración. Antes bastaba el rol de mediador de cualquier institución. La identidad sale de la sesión
+ * (`authenticatedUserIdOf`), no de una cabecera. Rechazo sin datos; identidad no verificable ⇒ 503.
+ */
+async function requireGlobalMetricsAdmin(req, res) {
+    try {
+        if (await isAdminRequest(req)) return true;
+        const ident = await authenticatedUserIdOf(req);
+        if (ident.ok && ident.userId && await isPlatformAdminCaller(req, ident.userId)) return true;
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] global metrics scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return false;
+    }
+    res.status(403).json({ error: 'Acceso denegado' });
+    return false;
+}
+
+/**
  * requireAdminRead — fase 2: superficies GET estrictamente administrativas u
  * operativas (métricas del proceso, consumo TTS, gobernanza de membresías).
  * Se monta DESPUÉS de `requireAdminAccess` (que ya exigió sesión o secreto) y
@@ -1522,8 +1551,22 @@ app.get('/api/access/by-user/:userId', requireAuth, async (req, res) => {
     // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: el entitlement de una persona solo lo
     // ve ella misma, quien la media o la autoridad de administración.
     if (!(await requireSubjectScope(req, res, 'user', userId))) return;
-    const result = resolveUserContentAccess(userId);
-    res.json(result);
+    // V9 F5-C3: la propia cuenta y la administración ven su resolución completa. Quien llega por mediación consulta
+    // solo la asignación operativa: nunca una cuenta B2C personal, y sin las reglas de compra (dato comercial:
+    // su identificador deriva del pedido y sus títulos delatan lo comprado).
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    let full;
+    try { full = callerId === userId || await isPlatformAdminCaller(req, callerId); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        return res.status(503).json({ error: 'identity_unavailable' });
+    }
+    if (full) return res.json(resolveUserContentAccess(userId));
+    if (isPersonalB2cAccount((readJSON(USERS_DB) || []).find(u => u?.id === userId))) {
+        return res.status(403).json({ error: 'scope_access_denied', scope_type: 'user', scope_id: String(userId) });
+    }
+    const withoutPurchases = (file) => (file === ACCESS_DB ? (readJSON(file) || []).filter(r => !r?.b2c) : readJSON(file));
+    res.json(resolveUserContentAccess(userId, { readStore: withoutPurchases }));
 });
 
 // --- ROBUST UPLOAD HELPERS ---
@@ -5730,8 +5773,17 @@ app.get('/api/users', requireAuth, async (req, res) => {
             if (!pedagogyRolesOf(scope.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r))) {
                 normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
             } else {
+                // V9 F5-C3: el mediador recibe el registro (con correo) SOLO de los lectores de grupos que media (CIS);
+                // del resto de su institución, el mismo perfil público que recibe un lector. Una cuenta B2C personal, nunca.
                 // V9 F3-D4S: el usuario de acceso de otra cuenta tampoco sale hacia mediadores.
-                normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : withoutAccessIdentity(u)));
+                const own = new Set();
+                try { for (const roster of mediatedGroupRosters(scope.callerId).values()) for (const id of roster) own.add(id); }
+                catch (e) {
+                    if (!(e instanceof IdentityUnavailableError)) throw e;
+                    return res.status(503).json({ error: 'identity_unavailable', cause: e.causeTag });
+                }
+                normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u
+                    : (own.has(u?.id) && !isPersonalB2cAccount(u) ? withoutAccessIdentity(u) : publicUserProfile(u))));
             }
         }
         res.json(sanitizeUsersForClient(normalizedUsers, { platformAdmin: scope.global === true }));
@@ -7602,6 +7654,26 @@ const _readFallbackOverride = (req) => {
 //  utils/membershipGovernance.mjs como detectGroupMaterializationState.
 //  Cualquier referencia futura debe importarlo, no reimplementarlo.)
 
+/**
+ * V9 F5-C3 — qué se revela en nómina y candidatos de un grupo (funciones de gestión: no exigen A2, sí permiso real
+ * sobre el grupo, que ya decidió `requireSubjectScope`). La administración recibe lo de siempre. Un mediador del
+ * grupo recibe lo mínimo para gestionar: identificador, nombre y colegio; SIN correo, y de los demás grupos de cada
+ * persona solo los que él mismo media. Devuelve null si ya respondió (identidad no verificable ⇒ 503).
+ */
+async function rosterDisclosure(req, res) {
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    try {
+        if (await isPlatformAdminCaller(req, callerId)) return { email: (u) => u.email || null, group: () => true, groups: (ids) => ids };
+        const mediated = mediatedGroupRosters(callerId);
+        return { email: () => null, group: (id) => mediated.has(id), groups: (ids) => ids.filter(id => mediated.has(id)) };
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] roster disclosure unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return null;
+    }
+}
+
 // GET /api/groups/:groupId/candidates
 // Lista usuarios que pueden ser asignados al grupo. Disponible para mediadores
 // y admins (requireAuth). Filtra por misma institución y excluye a los que
@@ -7612,6 +7684,8 @@ app.get('/api/groups/:groupId/candidates', requireAuth, async (req, res) => {
         // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: los candidatos son personas del
         // tenant del grupo; mismo alcance que su nómina.
         if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
+        const roster = await rosterDisclosure(req, res);
+        if (!roster) return;
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -7649,10 +7723,10 @@ app.get('/api/groups/:groupId/candidates', requireAuth, async (req, res) => {
 
             candidates.push({
                 userId:        u.id,
-                name:          u.nombre_completo || (hasLoginIdAsHandle(u) ? publicHandleOf(u) : u.nombre_usuario) || u.email || u.id, // F3-D5: nunca el usuario de acceso
-                email:         u.email || null,
+                name:          u.nombre_completo || (hasLoginIdAsHandle(u) ? publicHandleOf(u) : u.nombre_usuario) || roster.email(u) || u.id, // F3-D5: nunca el usuario de acceso
+                email:         roster.email(u),
                 colegio:       u.colegio || null,
-                currentGroups: groupsByUser.get(u.id) || [],
+                currentGroups: roster.groups(groupsByUser.get(u.id) || []),
             });
         }
 
@@ -7687,6 +7761,8 @@ app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
         // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: la nómina de un grupo es del
         // tenant del grupo; `allowSelf:false` — un grupo no es un sujeto propio.
         if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
+        const roster = await rosterDisclosure(req, res);
+        if (!roster) return;
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -7727,12 +7803,12 @@ app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
             else if (inStudent || inMember || inUserGroupIds) healthState = 'incomplete';
             else                                              healthState = 'inconsistent';
 
-            const userGroupsAll = groupsByUser.get(u.id) || [];
+            const userGroupsAll = (groupsByUser.get(u.id) || []).filter(x => roster.group(x.id));
 
             members.push({
                 userId:        u.id,
-                name:          u.nombre_completo || (hasLoginIdAsHandle(u) ? publicHandleOf(u) : u.nombre_usuario) || u.email || u.id, // F3-D5: nunca el usuario de acceso
-                email:         u.email || null,
+                name:          u.nombre_completo || (hasLoginIdAsHandle(u) ? publicHandleOf(u) : u.nombre_usuario) || roster.email(u) || u.id, // F3-D5: nunca el usuario de acceso
+                email:         roster.email(u),
                 colegio:       u.colegio || null,
                 currentGroups: userGroupsAll.map(x => x.id),
                 currentGroupsByType: {
@@ -11691,17 +11767,25 @@ function mountLegacyMetricsRoute(routeKind, legacyHandler) {
 }
 
 const legacyMetricsSchoolsHandler = async (req, res) => {
-    const { groups, users } = loadAndInitMetrics();
-    const requester = resolveRequester(req, users);
-    const adminAccess = await isAdminRequest(req);
-
-    if (!adminAccess && !requester) {
-        return res.status(401).json({ error: 'Auth requerida' });
-    }
-
+    const { groups } = loadAndInitMetrics();
+    // V9 F5-C3: el directorio de instituciones es de la administración. Antes lo recibía completo cualquier sesión
+    // (también un lector o una cuenta B2C). Un mediador ve solo las instituciones de los grupos que media (CIS).
     let relevantGroups = groups;
-    if (!adminAccess && requester && isMediatorRole(requester)) {
-        relevantGroups = groups.filter(g => isMediatorOfCourse(requester, g.id, groups));
+    try {
+        if (!(await isAdminRequest(req))) {
+            const ident = await authenticatedUserIdOf(req);
+            const callerId = ident.ok ? ident.userId : null;
+            if (!callerId || !getPrincipal(callerId)) return res.status(401).json({ error: 'Auth requerida' });
+            if (!(await isPlatformAdminCaller(req, callerId))) {
+                const mediated = mediatedGroupRosters(callerId);
+                if (mediated.size === 0) return res.status(403).json({ error: 'Acceso denegado' });
+                relevantGroups = groups.filter(g => mediated.has(g.id));
+            }
+        }
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] metrics schools scope unavailable: ${e.causeTag}`, 'ERROR');
+        return res.status(503).json({ error: 'identity_unavailable' });
     }
 
     // Deduplicate by canonical name, return { schoolId (slug), schoolName } pairs
@@ -11927,13 +12011,7 @@ app.get('/api/metrics/school/:schoolId', mountLegacyMetricsRoute('metrics.school
 // Si events.db no existe o falla, responde con shape vacío + 200 (no 500).
 //
 app.get('/api/metrics/backbone', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        const { users } = loadAndInitMetrics();
-        const requester = resolveRequester(req, users);
-        if (!requester || !isMediatorRole(requester)) {
-            return res.status(403).json({ error: 'Acceso denegado' });
-        }
-    }
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3: solo administración
 
     const windowDays = (() => {
         const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
@@ -11986,13 +12064,7 @@ app.get('/api/metrics/backbone', async (req, res) => {
 // Acceso: admin OR mediador autenticado (mismo gating que /api/metrics/backbone).
 //
 app.get('/api/metrics/funnels', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        const { users } = loadAndInitMetrics();
-        const requester = resolveRequester(req, users);
-        if (!requester || !isMediatorRole(requester)) {
-            return res.status(403).json({ error: 'Acceso denegado' });
-        }
-    }
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3: solo administración
 
     const windowDays = (() => {
         const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
@@ -12030,13 +12102,7 @@ app.get('/api/metrics/funnels', async (req, res) => {
 // Nunca 500. Si el pipeline falla, responde con shape vacío.
 //
 app.get('/api/metrics/insights', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        const { users } = loadAndInitMetrics();
-        const requester = resolveRequester(req, users);
-        if (!requester || !isMediatorRole(requester)) {
-            return res.status(403).json({ error: 'Acceso denegado' });
-        }
-    }
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3: solo administración
 
     const windowDays = (() => {
         const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
@@ -12140,7 +12206,7 @@ app.post('/api/metrics/insights/snapshot', async (req, res) => {
 });
 
 app.get('/api/metrics/insights/states', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3: solo administración
     try {
         ensureInsightsDbOpen();
         const filters = {
@@ -12221,7 +12287,7 @@ app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
 });
 
 app.get('/api/metrics/insights/notifications', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3: solo administración
     try {
         ensureInsightsDbOpen();
         const status = typeof req.query.status === 'string' ? req.query.status : 'pending';
