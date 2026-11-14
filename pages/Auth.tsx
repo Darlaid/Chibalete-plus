@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import { AtSign, Lock, User as UserIcon, Eye, EyeOff, ChevronLeft } from 'lucide-react';
+import { STORE_PASSWORD_RECOVERY_URL } from '../utils/passwordRecovery';
 
 const Auth: React.FC = () => {
   const [isLogin, setIsLogin] = useState(true);
@@ -165,7 +166,8 @@ const Auth: React.FC = () => {
                   Recordarme
                 </label>
               </div>
-              <a href="#" className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">¿Olvidaste tu contraseña?</a>
+              {/* V9 F4-B2: la recuperación se pide en la página pública de la tienda (un solo formulario, allá). */}
+              <a href={STORE_PASSWORD_RECOVERY_URL} rel="noopener noreferrer" referrerPolicy="no-referrer" className="text-sm text-indigo-600 underline hover:text-indigo-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded dark:text-indigo-400">¿Olvidaste tu contraseña?</a>
             </div>
 
             <button type="submit" className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md transition-colors">Ingresar</button>
