@@ -1,5 +1,5 @@
 /**
- * globalAlertWritesAdminHttp.test.mjs — CHP V9 F5-C3S.
+ * globalAlertWritesAdminHttp.test.mjs — CHP V9 F5-C3S / F5-C3T.
  *
  * Las tres ESCRITURAS de alertas globales de la plataforma solo las hace la administración. Antes las admitía el rol
  * de mediador de cualquier institución: generaba instantáneas, confirmaba y descartaba alertas de toda la plataforma.
@@ -12,6 +12,9 @@
  * compartida), más una tercera con la identidad no verificable. SESSION_AUTH_MODE=off.
  *   [1] administración: las tres operaciones   [3] identidad no verificable   [5] revocación y usos legítimos
  *   [2] rechazos SIN efectos                   [4] autoridad de máquina       [6] estructura
+ * F5-C3T: cada escritura se atribuye a quien autenticó el servidor (sesión) o a la identidad técnica `admin-secret`
+ * (autoridad de máquina); un `actorId` del cuerpo o una cabecera no atribuyen nada. La autoridad de máquina VÁLIDA
+ * solo se ejercita donde la ruta canónica del secreto es escribible (laboratorio desechable; ver [4]).
  * Nunca escribe en data/ ni data-critical/.
  *
  *   node server/__test__/globalAlertWritesAdminHttp.test.mjs
@@ -87,7 +90,7 @@ const WRITES = (key) => [['/api/metrics/insights/snapshot', { windowDays: 30 }],
 const GLOBAL_GETS = ['/api/metrics/backbone', '/api/metrics/funnels', '/api/metrics/insights', '/api/metrics/insights/states', '/api/metrics/insights/notifications'];
 
 const S1 = start(ports[0], 1), S2 = start(ports[1], 2), SX = start(ports[2], 3, { USERS_DB: P.usersX });
-let staged = false;
+let staged = false, machineProven = false;
 try {
     await ready(S1); await ready(S2); await ready(SX);
 
@@ -108,10 +111,12 @@ try {
         states = rows('insight_states');
     }
     const KEY = states[0].insight_key;
-    const ack = await call(S2, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/ack`, 'adm');
+    const ack = await call(S2, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/ack`, 'adm', { body: { actorId: 'adm2', userId: 'adm2' } });
     ok('administrador → confirma una alerta (200 {ok:true}) y queda registrada', ack.status === 200 && ack.json?.ok === true && rows('insight_states').find((r) => r.insight_key === KEY)?.acknowledged_at > 0, `${ack.status} ${ack.text}`);
     const dis = await call(S1, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/dismiss`, 'adm2', { body: { days: 3 } });
     ok('otro administrador → la descarta (200 {ok, dismissedUntil}) y queda registrada', dis.status === 200 && dis.json?.ok === true && dis.json.dismissedUntil > Date.now() && rows('insight_states').find((r) => r.insight_key === KEY)?.dismissed_until === dis.json.dismissedUntil, `${dis.status} ${dis.text}`);
+    ok('…atribuida a quien inició sesión, NO al `actorId` que declaró el cuerpo', rows('insight_states').find((r) => r.insight_key === KEY)?.acknowledged_by === 'adm', String(rows('insight_states').find((r) => r.insight_key === KEY)?.acknowledged_by));
+    ok('…y el registro del servidor nombra al actor real de cada escritura', /\[INSIGHTS_SNAPSHOT\] actor=adm /.test(S1.out) && /\[INSIGHTS_ACK\] actor=adm\b/.test(S2.out) && /\[INSIGHTS_DISMISS\] actor=adm2\b/.test(S1.out));
     ok('alerta inexistente → 404, como antes', (await call(S1, 'POST', '/api/metrics/insights/no-existe/ack', 'adm')).status === 404 && (await call(S2, 'POST', '/api/metrics/insights/no-existe/dismiss', 'adm')).status === 404);
 
     console.log('[2] rechazos sin efectos');
@@ -141,22 +146,42 @@ try {
     ok('…y el almacén sigue idéntico', dump() === before);
 
     console.log('[4] autoridad de máquina');
-    // El secreto de máquina es file-only en su ruta canónica (no inyectable). Solo se ejercita donde esa ruta es escribible.
+    // El secreto de máquina es file-only en su ruta canónica (no inyectable). Solo se ejercita donde esa ruta es
+    // escribible: un laboratorio desechable (contenedor con /app/secrets propio). El secreto es sintético.
     let machine = null;
     if (process.platform !== 'win32' && !fs.existsSync(ADMIN_SECRET_PATH)) {
         try {
             fs.mkdirSync(path.dirname(ADMIN_SECRET_PATH), { recursive: true });
-            machine = 'F5C3S-maquina-sintetica-0123456789abcdefghij';
+            machine = 'F5C3T-maquina-sintetica-0123456789abcdefghij';
             fs.writeFileSync(ADMIN_SECRET_PATH, machine); fs.chmodSync(ADMIN_SECRET_PATH, 0o400); staged = true;
         } catch { machine = null; }
     }
-    if (machine) {
-        const ms = await call(S1, 'POST', '/api/metrics/insights/snapshot', null, { headers: { 'x-admin-secret': machine }, body: { windowDays: 30 } });
-        if (ms.status === 200) {
-            ok('autoridad de máquina válida → permitida en las tres escrituras', ms.json?.ok === true && (await call(S2, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/ack`, null, { headers: { 'x-admin-secret': machine } })).status === 200 && (await call(S1, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/dismiss`, null, { headers: { 'x-admin-secret': machine } })).status === 200);
-            ok('…y la misma ruta con otra credencial sigue rechazada', (await call(S1, 'POST', '/api/metrics/insights/snapshot', null, { headers: { 'x-admin-secret': `${machine}x` } })).status === 403);
-        } else console.log('  - SKIP autoridad de máquina válida: el secreto canónico no cumple los requisitos del lector en este entorno');
-    } else console.log(`  - SKIP autoridad de máquina válida: ${ADMIN_SECRET_PATH} no es escribible aquí (la cubren las suites adminSecret* en POSIX)`);
+    const M = (secret, extra = {}) => ({ headers: { 'x-admin-secret': secret, ...extra } });
+    if (machine && (await call(S1, 'GET', '/api/metrics/insights/states', null, M(machine))).status === 200) {
+        machineProven = true;
+        const o1 = S1.out.length, o2 = S2.out.length;
+        const ms = await call(S1, 'POST', '/api/metrics/insights/snapshot', null, { ...M(machine), body: { windowDays: 30 } });
+        // Con la credencial válida, una identidad y un actor falsificados que la acompañen no atribuyen nada.
+        const mk = await call(S2, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/ack`, 'adm2', { ...M(machine, { 'x-role': 'administrador' }), body: { actorId: 'med-a', userId: 'adm' } });
+        const md = await call(S1, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/dismiss`, 'med-a', { ...M(machine), body: { days: 2, actorId: 'adm' } });
+        ok('credencial de máquina válida → las tres escrituras, con su contrato', ms.status === 200 && ms.json?.ok === true && !!ms.json.snapshotId && mk.status === 200 && mk.json?.ok === true && md.status === 200 && md.json?.dismissedUntil > Date.now(), `${ms.status} ${mk.status} ${md.status}`);
+        ok('…la confirmación queda a nombre de la identidad técnica `admin-secret`, no del `x-user-id` ni del `actorId` falsificados', rows('insight_states').find((r) => r.insight_key === KEY)?.acknowledged_by === 'admin-secret', String(rows('insight_states').find((r) => r.insight_key === KEY)?.acknowledged_by));
+        // La salida de las réplicas llega por tubería: se espera a que aparezcan las tres líneas.
+        let logs = '';
+        for (let i = 0; i < 40; i++) { logs = S1.out.slice(o1) + S2.out.slice(o2); if (/INSIGHTS_SNAPSHOT/.test(logs) && /INSIGHTS_ACK/.test(logs) && /INSIGHTS_DISMISS/.test(logs)) break; await sleep(100); }
+        ok('…y el registro atribuye las tres a `admin-secret`', /\[INSIGHTS_SNAPSHOT\] actor=admin-secret /.test(logs) && /\[INSIGHTS_ACK\] actor=admin-secret\b/.test(logs) && /\[INSIGHTS_DISMISS\] actor=admin-secret\b/.test(logs) && !/actor=(adm2|med-a|adm)\b/.test(logs));
+        const mg = [];
+        for (const p of [...GLOBAL_GETS, '/api/metrics/schools']) mg.push(await call(S1, 'GET', p, null, M(machine)), await call(S2, 'GET', p, null, M(machine)));
+        ok('credencial válida → los cinco GET globales y el directorio de instituciones (completo), en las dos réplicas', mg.every((r) => r.status === 200) && mg.slice(-2).every((r) => r.json?.schools?.length === 2), mg.map((r) => r.status).join(' '));
+        const bad = [], none = [];
+        for (const [p, body] of WRITES(KEY)) { bad.push(await call(S1, 'POST', p, null, { ...M(`${machine}x`), body }), await call(S2, 'POST', p, 'med-a', { ...M(machine.slice(0, -1)), body })); none.push(await call(S1, 'POST', p, null, { body })); }
+        for (const p of [...GLOBAL_GETS, '/api/metrics/schools']) { bad.push(await call(S1, 'GET', p, null, M(`x${machine}`))); none.push(await call(S2, 'GET', p, null)); }
+        ok('credencial inválida (casi idéntica) → rechazada en escrituras y lecturas', bad.every((r) => [401, 403].includes(r.status) && !r.json?.ok && !r.json?.schools), bad.map((r) => r.status).join(' '));
+        ok('sin credencial y sin otra autoridad → rechazada', none.every((r) => [401, 403].includes(r.status) && !r.json?.ok && !r.json?.schools), none.map((r) => r.status).join(' '));
+        ok('una credencial inválida no desplaza a la sesión legítima: el administrador sigue actuando a su nombre', (await call(S1, 'POST', `/api/metrics/insights/${encodeURIComponent(KEY)}/ack`, 'adm', M('no-es-el-secreto'))).status === 200 && rows('insight_states').find((r) => r.insight_key === KEY)?.acknowledged_by === 'adm');
+        ok('el secreto no aparece en ninguna respuesta ni en los registros del servidor', ![ms, mk, md, ...mg, ...bad, ...none].some((r) => r.text.includes(machine)) && !(S1.out + S2.out + SX.out).includes(machine) && !dump().includes(machine));
+    } else console.log(`  - SKIP autoridad de máquina válida: ${ADMIN_SECRET_PATH} no es escribible aquí (se ejercita en el laboratorio desechable)`);
+    if (process.env.CHP_REQUIRE_MACHINE_AUTHORITY === '1') ok('laboratorio: la autoridad de máquina válida SE EJERCITÓ por HTTP', machineProven);
     ok('credencial de máquina inválida → rechazada, con o sin sesión de mediador', denied.slice(-12).every((r) => r.status === 403));
 
     console.log('[5] revocación y usos legítimos');
@@ -185,6 +210,10 @@ try {
         const i = src.indexOf(route), blockSrc = src.slice(i, i + 1500);
         const g = blockSrc.indexOf('requireGlobalMetricsAdmin(req, res)');
         ok(`${route.slice(10)} resuelve la autorización antes de abrir el almacén`, i > 0 && g > 0 && g < blockSrc.indexOf('ensureInsightsDbOpen()'));
+    }
+    for (const route of ["app.post('/api/metrics/insights/snapshot'", "app.post('/api/metrics/insights/:insightKey/ack'", "app.post('/api/metrics/insights/:insightKey/dismiss'"]) {
+        const i = src.indexOf(route), blockSrc = src.slice(i, src.indexOf('\n});', i));
+        ok(`${route.slice(10)} no toma el actor del cuerpo ni de una cabecera`, i > 0 && /const actorId = await requireGlobalMetricsAdmin\(req, res\)/.test(blockSrc) && !/body\.actorId|x-user-id/.test(blockSrc));
     }
     ok('el control antiguo que admitía mediadores ya no existe', !/requireAdminOrMediator\(/.test(src));
     const guard = src.slice(src.indexOf('async function requireGlobalMetricsAdmin'), src.indexOf('async function requireGlobalMetricsAdmin') + 900);

@@ -42,10 +42,12 @@ fs.writeFileSync(P.users, JSON.stringify([
     med('med-a', A), med('med-a2', A), med('med-noc', A), med('med-libre', A), med('med-b', B),
     reader('ra-yes', A), reader('ra-yes2', A), reader('ra-no', A), reader('ra-otro', A), reader('rb-yes', B),
     reader('b2c', {}, { b2c: true, createdVia: 'b2c-provision' }),
+    // V9 F5-C3T: cuentas desactivadas que conservan rol y, el mediador, su asignación al grupo.
+    { id: 'adm-off', email: 'adm-off@fixture.invalid', roles: ['administrador'], accountStatus: 'disabled' }, { ...med('med-off', A), accountStatus: 'disabled' },
 ]));
 const G_A = ['ra-yes', 'ra-yes2', 'ra-no'];
 const GROUPS = [
-    { id: 'g-a', name: 'Quinto A', type: 'course', ...A, school: 'Colegio Alfa', mediatorIds: ['med-a', 'med-noc'], memberIds: G_A, studentIds: G_A },
+    { id: 'g-a', name: 'Quinto A', type: 'course', ...A, school: 'Colegio Alfa', mediatorIds: ['med-a', 'med-noc', 'med-off'], memberIds: G_A, studentIds: G_A },
     { id: 'g-a2', name: 'Quinto B', type: 'course', ...A, school: 'Colegio Alfa', mediatorIds: ['med-a2'], memberIds: ['ra-otro'], studentIds: ['ra-otro'] },
     { id: 'g-club', name: 'Club Poe', type: 'club', ...A, school: 'Colegio Alfa', mediatorIds: ['med-a2'], memberIds: ['ra-yes', 'ra-otro'], studentIds: ['ra-yes', 'ra-otro'] },
     { id: 'g-b', name: 'Sexto', type: 'course', ...B, school: 'Colegio Beta', mediatorIds: ['med-b'], memberIds: ['rb-yes'], studentIds: ['rb-yes'] },
@@ -114,6 +116,10 @@ try {
         const r = await both('/api/metrics/schools', who);
         ok(`${label} → 403, sin ningún nombre de institución`, r.every((x) => x.status === 403 && x.text === DENIED), r.map((x) => `${x.status}:${x.text.slice(0, 50)}`).join(' '));
     }
+    for (const [who, label] of [['adm-off', 'administrador desactivado'], ['med-off', 'mediador desactivado (aún asignado a un grupo)']]) {
+        const r = await both('/api/metrics/schools', who);
+        ok(`${label} → 403, sin ningún nombre de institución`, r.every((x) => x.status === 403 && x.text === DENIED), r.map((x) => `${x.status}:${x.text.slice(0, 50)}`).join(' '));
+    }
     const anon = [await req(S1, '/api/metrics/schools', null), await req(S1, '/api/metrics/schools', 'no-existe')];
     ok('sin identidad o identidad desconocida → 401, sin datos', anon.every((r) => r.status === 401 && !/Colegio/.test(r.text)), anon.map((r) => r.status).join(' '));
 
@@ -131,7 +137,7 @@ try {
     const ul = await req(S2, '/api/users', 'ra-yes');
     ok('lector → sin regresión: su registro completo y perfiles públicos de su institución, sin correos', ul.status === 200 && row(ul, 'ra-yes')?.email === 'ra-yes@fixture.invalid' && (ul.text.match(/@fixture\.invalid/g) || []).length === 1 && !!row(ul, 'ra-yes2') && !row(ul, 'rb-yes'));
     const uadm = await req(S1, '/api/users', 'adm');
-    ok('administración → padrón completo con correos, como antes', uadm.status === 200 && uadm.json.length === 12 && ['ra-otro', 'rb-yes', 'b2c', 'med-b'].every((u) => row(uadm, u)?.email === `${u}@fixture.invalid`), String(uadm.json?.length));
+    ok('administración → padrón completo con correos, como antes', uadm.status === 200 && uadm.json.length === 14 && ['ra-otro', 'rb-yes', 'b2c', 'med-b'].every((u) => row(uadm, u)?.email === `${u}@fixture.invalid`), String(uadm.json?.length));
 
     console.log('[4] nómina y candidatos (gestión)');
     const m = await both('/api/groups/g-a/members', 'med-a');

@@ -718,13 +718,20 @@ async function isPlatformAdminCaller(req, callerId) {
  * administración. Antes bastaba el rol de mediador de cualquier institución. La identidad sale de la sesión
  * (`authenticatedUserIdOf`), no de una cabecera. Rechazo sin datos; identidad no verificable ⇒ 503.
  */
+/**
+ * V9 F5-C3T — devuelve además QUIÉN actúa, para atribuir las escrituras: el id de la sesión autenticada o, con
+ * autoridad de máquina, la identidad técnica `admin-secret` (la misma de `publisherActorOf`). Nunca un `actorId`
+ * del cuerpo ni una cabecera: la autoridad de máquina prevalece sobre cualquier `x-user-id` que la acompañe.
+ * @returns {Promise<string|false>} actor, o false si ya respondió.
+ */
+const MACHINE_ACTOR = 'admin-secret';
 async function requireGlobalMetricsAdmin(req, res) {
     try {
-        if (await isAdminRequest(req)) return true;
+        if (await isAdminRequest(req)) return MACHINE_ACTOR;
         const ident = await authenticatedUserIdOf(req);
         // V9 F5-C3S: además, la cuenta debe seguir ACTIVA (un administrador desactivado no conserva autoridad).
         if (ident.ok && ident.userId && await isPlatformAdminCaller(req, ident.userId)
-            && isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === ident.userId))) return true;
+            && isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === ident.userId))) return String(ident.userId);
     } catch (e) {
         if (!(e instanceof IdentityUnavailableError)) throw e;
         log(`[AUTHZ] global metrics scope unavailable: ${e.causeTag}`, 'ERROR');
@@ -11778,8 +11785,10 @@ const legacyMetricsSchoolsHandler = async (req, res) => {
             const ident = await authenticatedUserIdOf(req);
             const callerId = ident.ok ? ident.userId : null;
             if (!callerId || !getPrincipal(callerId)) return res.status(401).json({ error: 'Auth requerida' });
-            if (!(await isPlatformAdminCaller(req, callerId))) {
-                const mediated = mediatedGroupRosters(callerId);
+            // V9 F5-C3T: una cuenta desactivada no conserva autoridad administrativa ni de mediación sobre el directorio.
+            const active = isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === callerId));
+            if (!active || !(await isPlatformAdminCaller(req, callerId))) {
+                const mediated = active ? mediatedGroupRosters(callerId) : new Map();
                 if (mediated.size === 0) return res.status(403).json({ error: 'Acceso denegado' });
                 relevantGroups = groups.filter(g => mediated.has(g.id));
             }
@@ -12166,7 +12175,8 @@ app.get('/api/metrics/insights', async (req, res) => {
 // resuelto ANTES de abrir insights.db o de cualquier efecto.
 
 app.post('/api/metrics/insights/snapshot', async (req, res) => {
-    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3S: solo administración, antes de escribir
+    const actorId = await requireGlobalMetricsAdmin(req, res); // V9 F5-C3S: solo administración, antes de escribir
+    if (!actorId) return;                                      // V9 F5-C3T: el actor es el que autenticó el servidor
     const body = req.body ?? {};
     const windowDays = (() => {
         const raw = typeof body.windowDays === 'number' ? body.windowDays : 30;
@@ -12177,7 +12187,6 @@ app.post('/api/metrics/insights/snapshot', async (req, res) => {
         level: typeof body.scope?.level === 'string' ? body.scope.level : 'global',
         id:    typeof body.scope?.id === 'string'    ? body.scope.id    : null,
     };
-    const actorId = typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'] : null;
 
     try {
         ensureInsightsDbOpen();
@@ -12187,7 +12196,7 @@ app.post('/api/metrics/insights/snapshot', async (req, res) => {
         const funnels  = computeBackboneFunnels(result.events, meta);
         const insights = computeBackboneInsights({ metrics, funnels, windowDays });
         const r = processInsightsSnapshot({ insights, scope, windowDays, actorId });
-        log(`[INSIGHTS_SNAPSHOT] scope=${scope.level} new=${r.statesNew} updated=${r.statesUpdated} resolved=${r.statesResolved} notif=${r.notificationsCreated}`, 'INFO');
+        log(`[INSIGHTS_SNAPSHOT] actor=${actorId} scope=${scope.level} new=${r.statesNew} updated=${r.statesUpdated} resolved=${r.statesResolved} notif=${r.notificationsCreated}`, 'INFO');
         res.json({
             ok: true,
             snapshotId:           r.snapshotId,
@@ -12242,17 +12251,17 @@ app.get('/api/metrics/insights/states', async (req, res) => {
 });
 
 app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
-    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3S: solo administración, antes de escribir
+    // V9 F5-C3T: la confirmación se atribuye a quien autenticó el servidor; un actor declarado en el cuerpo o en una cabecera se ignora.
+    const actorId = await requireGlobalMetricsAdmin(req, res); // V9 F5-C3S: solo administración, antes de escribir
+    if (!actorId) return;
     const insightKey = String(req.params.insightKey ?? '');
-    const actorId = (req.body && typeof req.body.actorId === 'string')
-        ? req.body.actorId
-        : (typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'] : 'unknown');
     if (!insightKey) return res.status(400).json({ error: 'insightKey required' });
 
     try {
         ensureInsightsDbOpen();
         const ok = ackInsightState(insightKey, actorId, Date.now());
         if (!ok) return res.status(404).json({ ok: false, error: 'state not found' });
+        log(`[INSIGHTS_ACK] actor=${actorId}`, 'INFO');
         res.json({ ok: true });
     } catch (e) {
         log(`[INSIGHTS_ACK] error: ${e.message}`, 'WARN');
@@ -12261,7 +12270,8 @@ app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
 });
 
 app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
-    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3S: solo administración, antes de escribir
+    const actorId = await requireGlobalMetricsAdmin(req, res); // V9 F5-C3S: solo administración, antes de escribir
+    if (!actorId) return;
     const insightKey = String(req.params.insightKey ?? '');
     const days = (() => {
         const raw = (req.body && typeof req.body.days === 'number') ? req.body.days : 7;
@@ -12275,6 +12285,7 @@ app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
         const dismissedUntil = Date.now() + days * 86_400_000;
         const ok = dismissInsightState(insightKey, dismissedUntil, Date.now());
         if (!ok) return res.status(404).json({ ok: false, error: 'state not found' });
+        log(`[INSIGHTS_DISMISS] actor=${actorId}`, 'INFO'); // V9 F5-C3T: el almacén no guarda quién descarta; queda en el registro
         res.json({ ok: true, dismissedUntil });
     } catch (e) {
         log(`[INSIGHTS_DISMISS] error: ${e.message}`, 'WARN');
