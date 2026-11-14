@@ -722,7 +722,9 @@ async function requireGlobalMetricsAdmin(req, res) {
     try {
         if (await isAdminRequest(req)) return true;
         const ident = await authenticatedUserIdOf(req);
-        if (ident.ok && ident.userId && await isPlatformAdminCaller(req, ident.userId)) return true;
+        // V9 F5-C3S: además, la cuenta debe seguir ACTIVA (un administrador desactivado no conserva autoridad).
+        if (ident.ok && ident.userId && await isPlatformAdminCaller(req, ident.userId)
+            && isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === ident.userId))) return true;
     } catch (e) {
         if (!(e instanceof IdentityUnavailableError)) throw e;
         log(`[AUTHZ] global metrics scope unavailable: ${e.causeTag}`, 'ERROR');
@@ -12158,19 +12160,13 @@ app.get('/api/metrics/insights', async (req, res) => {
 // telemetría base sigue funcionando. Si insights.db falla, devolvemos
 // vacíos y log WARN.
 
-async function requireAdminOrMediator(req, res) {
-    if (await isAdminRequest(req)) return true;
-    const { users } = loadAndInitMetrics();
-    const requester = resolveRequester(req, users);
-    if (!requester || !isMediatorRole(requester)) {
-        res.status(403).json({ error: 'Acceso denegado' });
-        return false;
-    }
-    return true;
-}
+// V9 F5-C3S: las tres ESCRITURAS (snapshot, ack, dismiss) modifican alertas globales de la plataforma. Antes las
+// admitía el rol de mediador de cualquier institución (`requireAdminOrMediator`, retirado). Ahora usan el mismo
+// control que los GET (`requireGlobalMetricsAdmin`: autoridad de máquina o administrador de plataforma según el CIS),
+// resuelto ANTES de abrir insights.db o de cualquier efecto.
 
 app.post('/api/metrics/insights/snapshot', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3S: solo administración, antes de escribir
     const body = req.body ?? {};
     const windowDays = (() => {
         const raw = typeof body.windowDays === 'number' ? body.windowDays : 30;
@@ -12246,7 +12242,7 @@ app.get('/api/metrics/insights/states', async (req, res) => {
 });
 
 app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3S: solo administración, antes de escribir
     const insightKey = String(req.params.insightKey ?? '');
     const actorId = (req.body && typeof req.body.actorId === 'string')
         ? req.body.actorId
@@ -12265,7 +12261,7 @@ app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
 });
 
 app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // V9 F5-C3S: solo administración, antes de escribir
     const insightKey = String(req.params.insightKey ?? '');
     const days = (() => {
         const raw = (req.body && typeof req.body.days === 'number') ? req.body.days : 7;
