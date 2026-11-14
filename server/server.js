@@ -285,7 +285,7 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 // scope de módulo al registrar las rutas.
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 // CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
-import { evaluateScopeAccess, requireScopeAccess } from './aulaViva/scopeAccess.mjs';
+import { evaluateScopeAccess, requireScopeAccess, individualAccess } from './aulaViva/scopeAccess.mjs';
 import { getPrincipal, getMemberships, IdentityUnavailableError, mediatedGroupRosters } from './identity/cis.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
@@ -5333,7 +5333,7 @@ const ensureLeoMemoryDbShape = (db) => {
 // * Auth temporal: Se omite requireAuth en desarrollo frontend, pero debe blindarse en producción Fase 4
 
 // 1. GET ALL PROGRESS POR USUARIO (Útil para Admin/Dashboard)
-// Auth: owner (mismo userId) OR admin secret OR rol administrador/mediador
+// Auth: owner (mismo userId) OR admin secret OR rol administrador OR mediador del lector (V9 F5-A: grupo + A2 + C005)
 app.get('/api/progress/user/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -5344,9 +5344,10 @@ app.get('/api/progress/user/:userId', async (req, res) => {
         const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        // V9 F3-D5: el rol de mediador no alcanza a los lectores B2C personales.
-        const isMediator = requester && isMediatorRole(requester) && !isPersonalB2cAccount(users.find(u => u?.id === userId));
-        if (!isOwner && !isAdmin && !isMediator) {
+        // V9 F5-A: un mediador solo lee a los lectores de sus grupos, con A2 y C005 vigentes (y nunca a un B2C personal).
+        const mediatorAccess = (!isOwner && !isAdmin) ? mediatorProgressAccess(requester, users, userId) : 'deny';
+        if (mediatorAccess === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
+        if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
             log(`GET progress/user denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -5363,7 +5364,7 @@ app.get('/api/progress/user/:userId', async (req, res) => {
 });
 
 // 2. GET SINGLE PROGRESS (Resolviendo colisión de rutas previa)
-// Auth: owner OR admin secret OR rol administrador/mediador
+// Auth: owner OR admin secret OR rol administrador OR mediador del lector (V9 F5-A: grupo + A2 + C005)
 app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
     try {
         const { userId, contentId } = req.params;
@@ -5373,9 +5374,11 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
         const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        // V9 F3-D5: el rol de mediador no alcanza a los lectores B2C personales.
-        const isMediator = requester && isMediatorRole(requester) && (isOwner || !isPersonalB2cAccount(users.find(u => u?.id === userId)));
-        if (!isOwner && !isAdmin && !isMediator) {
+        const isMediator = requester && isMediatorRole(requester); // rol: solo cuenta para el progreso propio (más abajo)
+        // V9 F5-A: un mediador solo lee a los lectores de sus grupos, con A2 y C005 vigentes (y nunca a un B2C personal).
+        const mediatorAccess = (!isOwner && !isAdmin) ? mediatorProgressAccess(requester, users, userId) : 'deny';
+        if (mediatorAccess === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
+        if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -11184,6 +11187,24 @@ function resolveRequester(req, users) {
 }
 
 /**
+ * V9 F5-A — ¿puede este mediador leer el progreso INDIVIDUAL de ese lector?
+ * El rol por sí solo ya no basta. Se reutiliza el criterio de las demás rutas de mediación
+ * (`individualAccess`, el de `requireSubjectScope({ a2: true })`): el CIS exige que el lector sea
+ * miembro de un grupo que ese mediador media en su institución y, además, A2 vigente del lector y
+ * C005 vigente del mediador. Un lector B2C personal sigue fuera de alcance (V9 F3-D5).
+ * Devuelve 'allow' | 'deny' | 'unavailable' (registro o identidad no verificables ⇒ fallo cerrado).
+ * No decide sobre el progreso propio ni sobre la administración: eso lo resuelve quien llama.
+ */
+function mediatorProgressAccess(requester, users, userId) {
+    if (!requester || !isMediatorRole(requester)) return 'deny';
+    if (isPersonalB2cAccount(users.find(u => u?.id === userId))) return 'deny';
+    let d;
+    try { d = individualAccess(requester.id, userId); } catch { return 'unavailable'; }
+    if (d.decision === 'unavailable') return 'unavailable';
+    return d.decision === 'allow' && d.via !== 'self' ? 'allow' : 'deny';
+}
+
+/**
  * True if user has the mediador role.
  * DT-05: 'profesor' eliminado del modelo. Safety net: también acepta 'profesor'
  * para datos legacy que no hayan pasado por la migración DT-04.
@@ -12781,7 +12802,7 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
 
 // GET /api/reading-progress/:userId
 // Returns computed ReadingProgress for every content this user has touched.
-// Auth: owner OR admin OR mediador
+// Auth: owner OR admin OR mediador del lector (V9 F5-A: grupo + A2 + C005)
 app.get('/api/reading-progress/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -12789,8 +12810,10 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
         const requester  = resolveRequester(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
-        if (!isOwner && !isAdmin && !isMediator) {
+        // V9 F5-A: mismo criterio que /api/progress/user|item (antes bastaba el rol de mediador).
+        const mediatorAccess = (!isOwner && !isAdmin) ? mediatorProgressAccess(requester, users, userId) : 'deny';
+        if (mediatorAccess === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
+        if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         if (!users.find(u => u.id === userId)) {
@@ -12827,8 +12850,10 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
         const requester  = resolveRequester(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
-        if (!isOwner && !isAdmin && !isMediator) {
+        // V9 F5-A: mismo criterio que /api/progress/user|item (antes bastaba el rol de mediador).
+        const mediatorAccess = (!isOwner && !isAdmin) ? mediatorProgressAccess(requester, users, userId) : 'deny';
+        if (mediatorAccess === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
+        if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         const key = makeProgressKey(userId, contentId);

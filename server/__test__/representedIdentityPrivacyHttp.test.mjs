@@ -198,7 +198,8 @@ try {
     ok('un mediador no consulta el estado de un lector B2C', stK1.status === 403 && !ANY_LOGIN.test(stK1.text), String(stK1.status));
     const prK1 = await get('/api/progress/user/K1', med.cookie), itK1 = await get('/api/progress/item/K1/obra-1', med.cookie);
     ok('…ni su progreso (listado y por título), tampoco el de una adulta B2C', prK1.status === 403 && itK1.status === 403 && (await get('/api/progress/user/B2C', med.cookie)).status === 403, `${prK1.status} ${itK1.status}`);
-    ok('…el mediador conserva la lectura de progreso de los lectores de su institución', (await get('/api/progress/user/LEC', med.cookie)).status === 200 && (await get('/api/progress/user/K4', med.cookie)).status === 200);
+    // V9 F5-A: además de mediar el grupo del lector, hacen falta la A2 del lector y el C005 del mediador (LEC la tiene; K4 no).
+    ok('…el mediador conserva la lectura de progreso de SUS lectores con A2 vigente; sin A2 del lector, no', (await get('/api/progress/user/LEC', med.cookie)).status === 200 && (await get('/api/progress/user/K4', med.cookie)).status === 403);
     ok('el propio lector y la administración siguen leyendo ese progreso', (await get('/api/progress/user/K1', k1.cookie)).status === 200 && (await get('/api/progress/user/K1', adm.cookie)).status === 200 && (await get('/api/progress/item/K1/obra-1', k1.cookie)).status === 200);
     ok('un lector no lee el progreso ni el acceso de otro', (await get('/api/progress/user/K1', k2.cookie)).status === 403 && (await get('/api/progress/user/K1', lec.cookie)).status === 403 && (await access(lec.cookie, 'K1')) !== true);
     ok('el mediador conserva el estado de sus propios lectores', (await get('/api/students/LEC/status', med.cookie)).status === 200);
