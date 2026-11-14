@@ -285,7 +285,7 @@ import { getOrGenerateImmersiveAudio } from './immersiveTtsService.js';
 // scope de módulo al registrar las rutas.
 import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 // CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
-import { evaluateScopeAccess, requireScopeAccess, individualAccess } from './aulaViva/scopeAccess.mjs';
+import { evaluateScopeAccess, requireScopeAccess, individualAccess, individualAccessChecker } from './aulaViva/scopeAccess.mjs';
 import { getPrincipal, getMemberships, IdentityUnavailableError, mediatedGroupRosters } from './identity/cis.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
@@ -12622,6 +12622,54 @@ function writeInterventionsDb(data) {
  * Body: { studentId, courseId, type, note, contentId?, patternsAtIntervention[], readingTimeMsAtIntervention }
  * Auth: mediador or administrador
  */
+/**
+ * V9 F5-C1 — alcance de quien consulta o registra intervenciones. Antes bastaba el ROL de mediador.
+ * Se reutilizan los controles de la mediación, sin motor nuevo:
+ *  - grupos: los que el CIS reconoce como mediados por esa persona (`mediatedGroupRosters`, los mismos de las exportaciones);
+ *  - lector: `individualAccessChecker` (miembro de un grupo que media + A2 del lector + C005 del mediador); un B2C personal, nunca.
+ * La administración conserva el acceso que ya tenía. Devuelve null si ya respondió (403 sin rol, 503 si la identidad no es verificable).
+ * `reader(courseId, studentId)` → 'allow' | 'deny' | 'unavailable': exige que el curso sea uno que media, que el lector
+ * pertenezca HOY a ese curso y que el acceso individual esté concedido. Sin datos del lector en ninguna respuesta de rechazo.
+ */
+const INTERVENTION_DENIED = { error: 'Acceso denegado' };
+function interventionScope(req, res) {
+    const requester = req.user;
+    if ((requester.roles ?? []).includes('administrador')) return { admin: true, mediates: () => true, reader: () => 'allow' };
+    if (!isMediatorRole(requester)) { res.status(403).json(INTERVENTION_DENIED); return null; }
+    let rosters;
+    try { rosters = mediatedGroupRosters(requester.id); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] intervention scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return null;
+    }
+    const check = individualAccessChecker(requester.id);
+    const users = readJSON(USERS_DB) || [];
+    const reader = (courseId, studentId) => {
+        const sid = String(studentId ?? '');
+        if (!rosters.get(String(courseId ?? ''))?.has(sid)) return 'deny';
+        if (isPersonalB2cAccount(users.find(u => u?.id === sid))) return 'deny';
+        const d = check(sid);
+        if (d.decision === 'unavailable') return 'unavailable';
+        return d.decision === 'allow' && d.via !== 'self' ? 'allow' : 'deny';
+    };
+    return { admin: false, mediates: (courseId) => rosters.has(String(courseId ?? '')), reader, courses: [...rosters.keys()] };
+}
+/** Filtra intervenciones a las que ese alcance puede ver. Devuelve null si el registro no es verificable (ya respondió 503). */
+function visibleInterventions(scope, interventions, res) {
+    if (scope.admin) return interventions;
+    const memo = new Map(), out = [];
+    for (const iv of interventions) {
+        const k = `${iv.courseId}\u0000${iv.studentId}`;
+        if (!memo.has(k)) memo.set(k, scope.reader(iv.courseId, iv.studentId));
+        const d = memo.get(k);
+        if (d === 'unavailable') { res.status(503).json({ error: 'individual_access_unavailable' }); return null; }
+        if (d === 'allow') out.push(iv);
+    }
+    return out;
+}
+
 app.post('/api/interventions', requireUserAuth, async (req, res) => {
     try {
         const requester = req.user;
@@ -12631,6 +12679,14 @@ app.post('/api/interventions', requireUserAuth, async (req, res) => {
         const { studentId, courseId, type, note, contentId, patternsAtIntervention, readingTimeMsAtIntervention } = req.body;
         if (!studentId || !courseId || !type) {
             return res.status(400).json({ error: 'Faltan campos: studentId, courseId, type' });
+        }
+        // V9 F5-C1: solo sobre un lector de un grupo que media, con A2 y C005 vigentes. Se decide ANTES de escribir.
+        const scope = interventionScope(req, res);
+        if (!scope) return;
+        if (!scope.admin) {
+            const d = scope.reader(courseId, studentId);
+            if (d === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
+            if (d !== 'allow') return res.status(403).json(INTERVENTION_DENIED);
         }
         const intervention = {
             id:                          crypto.randomUUID(),
@@ -12668,9 +12724,14 @@ app.get('/api/interventions/course/:courseId', requireUserAuth, (req, res) => {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         const { courseId } = req.params;
+        // V9 F5-C1: solo un grupo que media; de él, solo las intervenciones de lectores con A2 (y con su C005 vigente).
+        const scope = interventionScope(req, res);
+        if (!scope) return;
+        if (!scope.mediates(courseId)) return res.status(403).json(INTERVENTION_DENIED);
         const db = readInterventionsDb();
-        const interventions = db.interventions
-            .filter(i => i.courseId === courseId)
+        const visible = visibleInterventions(scope, db.interventions.filter(i => i.courseId === courseId), res);
+        if (!visible) return;
+        const interventions = visible
             .sort((a, b) => b.createdAt.localeCompare(a.createdAt)); // most recent first
         res.json({ success: true, courseId, interventions });
     } catch (e) {
@@ -12691,11 +12752,18 @@ app.get('/api/interventions/student/:studentId', requireUserAuth, (req, res) => 
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         const { studentId } = req.params;
+        // V9 F5-C1: el historial de un lector solo lo ve quien lo media, con A2 y C005 vigentes, y solo las intervenciones
+        // de los grupos que media. Lector ajeno, B2C o inexistente: el mismo rechazo.
+        const scope = interventionScope(req, res);
+        if (!scope) return;
         const iDb      = readInterventionsDb();
+        const visible  = visibleInterventions(scope, iDb.interventions.filter(i => i.studentId === studentId), res);
+        if (!visible) return;
+        if (!scope.admin && !scope.courses.some(c => scope.reader(c, studentId) === 'allow')) return res.status(403).json(INTERVENTION_DENIED);
         const pDb      = getAllProgressAsMap();
         const timeMap  = buildStudentReadingTimeMap(pDb);
         const timelines = buildStudentSessionTimelines(pDb);
-        const history  = buildStudentInterventionHistory(iDb.interventions, studentId, timeMap, timelines);
+        const history  = buildStudentInterventionHistory(visible, studentId, timeMap, timelines);
         res.json({ success: true, studentId, history });
     } catch (e) {
         log(`GET /api/interventions/student error: ${e.message}`, 'ERROR');
@@ -12716,6 +12784,11 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         const { courseId } = req.query;
+        // V9 F5-C1: un mediador ya no recibe el agregado global. Con courseId, debe mediar ese grupo; sin él, el agregado
+        // es el de SUS grupos. En ambos casos solo cuentan los lectores con A2 (y su C005): los excluidos no se suman.
+        const scope = interventionScope(req, res);
+        if (!scope) return;
+        if (courseId && !scope.mediates(courseId)) return res.status(403).json(INTERVENTION_DENIED);
         const iDb = readInterventionsDb();
         const pDb = getAllProgressAsMap();
 
@@ -12723,6 +12796,8 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
         if (courseId) {
             interventions = interventions.filter(iv => iv.courseId === courseId);
         }
+        interventions = visibleInterventions(scope, interventions, res);
+        if (!interventions) return;
 
         const timeMap      = buildStudentReadingTimeMap(pDb);
         const timelines    = buildStudentSessionTimelines(pDb);
