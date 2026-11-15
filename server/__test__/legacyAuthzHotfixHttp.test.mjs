@@ -8,8 +8,9 @@
  *      miembro explícito. `user.groupIds`, `teacherId` y las cabeceras no sustituyen esa relación. B2C personal: nunca.
  *   2. Métricas y alertas globales (5 GET + 3 POST): autoridad de máquina o administrador de plataforma; el mediador no.
  *      Se autoriza antes de escribir.
- *   3. Métricas e informe de curso: solo el curso que el CIS reconoce como mediado, y solo sobre su nómina explícita
- *      (desglose Y agregados). Sin lectores, el backbone es la forma vacía, no el agregado de la plataforma.
+ *   3. Métricas e informe de curso (04U): seguimiento detallado SUSPENDIDO para mediadores — 403 con un mensaje claro,
+ *      idéntico medie o no el curso; mediar un grupo no acredita el seguimiento individual. Solo autoridad de máquina.
+ *      Sin lectores, el backbone es la forma vacía, no el agregado de la plataforma.
  *
  * Dos réplicas de server.js REAL, enforce, dos instituciones, cookies reales del login. POSIX-only (secretos de
  * sesión): en win32 se OMITE (no cuenta como aprobada) y en CI una omisión es un fallo. La autoridad de máquina se
@@ -122,6 +123,8 @@ const name = (r) => `${r[0]} ${r[1]}`;
 // Un rechazo no dice nada de nadie.
 const PRIVATE = /studentBreakdown|productMetrics|readingProgress|progressList|backboneMetrics|summary|insights|states|notifications|Cuenta |fixture\.invalid|Colegio|ra-1|ra-2|rb-1|b2c-/;
 const denied = (r) => [401, 403].includes(r.status) && !PRIVATE.test(r.text);
+// La restricción temporal: 403, el contrato `{ error }` de siempre con un texto que la explica, y ni un dato.
+const restricted = (r) => r.status === 403 && r.json?.code === 'course_detail_restricted' && /temporalmente restringido/.test(r.json?.error ?? '') && Object.keys(r.json).sort().join() === 'code,error' && !PRIVATE.test(r.text);
 const forbidden = (r) => r.status === 403 && !PRIVATE.test(r.text);
 const both = async (route, opts) => [await call(S1, route, opts), await call(S2, route, opts)];
 const all = async (routes, opts) => { const out = []; for (const r of routes) out.push(...await both(r, opts)); return out; };
@@ -223,22 +226,31 @@ try {
         ok('secreto de máquina incorrecto → rechazado', mBad.every(denied), st(mBad));
     } else skip('autoridad de máquina (admin-secret file-only): /app/secrets no es escribible por este proceso');
 
-    console.log('[9] curso propio');
+    console.log('[9] curso propio: seguimiento detallado suspendido');
     const mc = await both(MC('g-a'), { cookie: C['med-a'] }), rc = await both(RC('g-a'), { cookie: C['med-a'] });
-    ok('mediador → métricas e informe de SU curso → 200', [...mc, ...rc].every((x) => x.status === 200), `${st(mc)} ${st(rc)}`);
-    ok('…el desglose trae solo su nómina verificable (sin la cuenta B2C añadida al curso)', [...mc, ...rc].every((x) => ids(x) === 'med-none,ra-1,ra-2'), ids(mc[0]));
-    ok('…y los agregados cuentan a esas mismas personas (no hay cifras de nadie más)', [...mc, ...rc].every((x) => x.json?.summary?.studentCount === 3 && x.json.summary.activeStudentCount === 2), JSON.stringify(mc[0].json?.summary));
-    ok('…sin nombres ni ids de terceros en ninguna parte de la respuesta', [...mc, ...rc].every((x) => !/b2c-|rb-1|ra-out|med-b/.test(x.text)));
-    ok('…conserva la forma de siempre (perfil pedagógico, backbone, reportMeta)', mc.every((x) => 'backboneMetrics' in x.json && x.json.studentBreakdown.every((s) => 'pedagogicalProfile' in s)) && rc.every((x) => x.json.reportMeta?.entityId === 'g-a'));
-    const empty = await both(MC('g-vacio'), { cookie: C['med-a'] });
-    ok('curso sin lectores verificables → 200 con cero personas…', empty.every((x) => x.status === 200 && x.json?.summary?.studentCount === 0 && x.json.studentBreakdown.length === 0), `${st(empty)} ${JSON.stringify(empty[0].json?.summary)}`);
-    ok('…y backbone vacío, no el agregado de toda la plataforma', empty.every((x) => x.json.backboneMetrics?.totalEvents === 0 && x.json.backboneMetrics.totalSessions === 0 && 'funnels' in x.json.backboneMetrics && 'insights' in x.json.backboneMetrics), JSON.stringify(empty[0].json?.backboneMetrics).slice(0, 200));
+    ok('mediador → métricas e informe de SU curso → 403 con el mensaje de restricción, en las dos réplicas', [...mc, ...rc].every(restricted), `${st(mc)} ${st(rc)} ${mc[0].text.slice(0, 160)}`);
+    ok('…sin desglose, nombres, avances ni perfiles: el cuerpo es solo { error, code }', [...mc, ...rc].every((x) => !/studentBreakdown|pedagogicalProfile|topPerformers|needsAttention|nombre|composite/i.test(x.text)));
+    const emptyMed = await both(MC('g-vacio'), { cookie: C['med-a'] });
+    ok('…también en un curso suyo sin lectores', emptyMed.every(restricted), st(emptyMed));
+    const sameHdr = await all([MC('g-a'), RC('g-a')], { cookie: C['med-a'], headers: { 'x-user-id': 'med-a', 'x-role': 'administrador', 'x-admin-secret': 'no-es-el-secreto' } });
+    ok('…y ninguna cabecera (rol, secreto inventado) lo levanta', sameHdr.every(restricted), st(sameHdr));
+    if (machine) {
+        const H = { headers: { 'x-admin-secret': MACHINE } };
+        const mFull = await all([MC('g-a'), RC('g-a')], H), mEmpty = await both(MC('g-vacio'), H);
+        ok('autoridad de máquina → conserva la respuesta completa con la forma de siempre', mFull.every((x) => x.status === 200 && 'summary' in x.json && Array.isArray(x.json.studentBreakdown)) && mFull.slice(0, 2).every((x) => 'backboneMetrics' in x.json && x.json.studentBreakdown.every((s) => 'pedagogicalProfile' in s)) && mFull.slice(2).every((x) => x.json.reportMeta?.entityId === 'g-a'), st(mFull));
+        const noReaders = await both(MC('g-inexistente'), H);
+        ok('autoridad de máquina → curso inexistente → 404 (sin cambio)', noReaders.every((x) => x.status === 404), st(noReaders));
+        ok('autoridad de máquina → el backbone del curso se filtra por sus miembros (no es el agregado global)', mEmpty.every((x) => x.status === 200 && x.json.backboneMetrics && 'funnels' in x.json.backboneMetrics && 'insights' in x.json.backboneMetrics), st(mEmpty));
+    } else skip('autoridad de máquina sobre las rutas de curso: /app/secrets no es escribible por este proceso');
 
     console.log('[10] curso ajeno');
     const foreign = await all([MC('g-b'), RC('g-b'), MC('g-inexistente'), RC('g-inexistente')], { cookie: C['med-a'] });
     ok('mediador → curso de otra institución o inexistente → 403, sin datos', foreign.every(forbidden), st(foreign));
-    const rdCourse = await all([MC('g-a'), RC('g-a')], { cookie: C['ra-1'] });
-    ok('lector → métricas e informe de su propio curso → 403', rdCourse.every(forbidden), st(rdCourse));
+    ok('…con la MISMA respuesta que en su propio curso (no revela si lo media ni si existe)', foreign.every((x) => x.text === mc[0].text), foreign[0].text.slice(0, 120));
+    const noneC = await all([MC('g-a'), RC('g-a')], { cookie: C['med-none'] }), otherC = await all([MC('g-a'), RC('g-a')], { cookie: C['med-b'] });
+    ok('mediador sin grupos y mediador de otra institución → la misma restricción', [...noneC, ...otherC].every(restricted), `${st(noneC)} ${st(otherC)}`);
+    const rdCourse = await all([MC('g-a'), RC('g-a')], { cookie: C['ra-1'] }), admC = await all([MC('g-a'), RC('g-a')], { cookie: C.adm });
+    ok('lector y administrador con sesión → 403 «Acceso denegado» (sin cambio; no reciben el aviso de mediador)', [...rdCourse, ...admC].every((x) => forbidden(x) && x.json?.error === 'Acceso denegado'), `${st(rdCourse)} ${st(admC)}`);
 
     console.log('[11] cookies ausentes, vencidas o contradictorias');
     const PROTECTED = [...progressOf('ra-1'), MC('g-a'), RC('g-a'), ...GLOBAL_GET, ...WRITES];
@@ -254,14 +266,14 @@ try {
     const contra2 = await all(progressOf('ra-1'), { cookie: C['med-b'], headers: { 'x-user-id': 'med-a' } });
     ok('cookie de un mediador ajeno + cabecera del mediador del curso → rechazado', contra2.every(denied), st(contra2));
     const tmpMed = await login(S1, 'med-a'), tmpAdm = await login(S2, 'adm');
-    ok('sesiones nuevas → 200 (control)', (await call(S2, MC('g-a'), { cookie: tmpMed })).status === 200 && (await call(S1, GLOBAL_GET[0], { cookie: tmpAdm })).status === 200);
+    ok('sesiones nuevas → 200 (control)', (await call(S2, G('/api/progress/user/ra-1'), { cookie: tmpMed })).status === 200 && (await call(S1, GLOBAL_GET[0], { cookie: tmpAdm })).status === 200);
     { const db = new Database(P.sessions); try { db.prepare("UPDATE sessions SET expires_at = '2000-01-01T00:00:00.000Z' WHERE user_id = 'adm' AND id NOT IN (SELECT id FROM sessions WHERE user_id = 'adm' ORDER BY created_at ASC LIMIT 1)").run(); } catch { db.prepare("UPDATE sessions SET expires_at = '2000-01-01T00:00:00.000Z' WHERE user_id = 'adm'").run(); C.adm = null; } finally { db.close(); } }
     const expired = await all([...GLOBAL_GET, ...WRITES], { cookie: tmpAdm });
     ok('sesión de administrador vencida → rechazada en métricas y alertas globales', expired.every(denied), st(expired));
     const out = await fetch(`${S1.base}/api/auth/logout`, { method: 'POST', headers: { cookie: tmpMed, 'sec-fetch-site': 'same-origin' } });
     const revoked = await all([...progressOf('ra-1'), MC('g-a'), RC('g-a')], { cookie: tmpMed });
     ok('sesión de mediador cerrada → su cookie queda rechazada en las dos réplicas', out.status < 400 && revoked.every(denied), `${out.status} ${st(revoked)}`);
-    ok('…sin afectar a su otra sesión', (await call(S2, MC('g-a'), { cookie: C['med-a'] })).status === 200);
+    ok('…sin afectar a su otra sesión', (await call(S2, G('/api/progress/user/ra-1'), { cookie: C['med-a'] })).status === 200);
     ok('…y nada de esto escribió alertas', alertRows() === rows1 && writeLogs() === logs1);
 
     console.log('[12] sin regresiones en lo vecino');

@@ -5,7 +5,8 @@
  * (SESSION_AUTH_MODE=enforce). Efecto doble: sin cookie, la cabecera con el id de una cuenta bastaba; con cookie y sin
  * cabecera —el navegador— la cuenta legítima recibía 401/403. Los diez usan ahora `sessionRequesterOf` (la identidad
  * autenticada que ya existía). Aquí se prueba solo de dónde sale la identidad. Las REGLAS de permiso heredadas las
- * acota SEC-SESSION-IDENTITY-04 (`legacyAuthzHotfixHttp.test.mjs`): métricas y alertas globales son de administración.
+ * acota SEC-SESSION-IDENTITY-04 (`legacyAuthzHotfixHttp.test.mjs`): métricas y alertas globales son de administración,
+ * y el seguimiento detallado de curso queda suspendido para mediadores (04U; solo autoridad de máquina).
  *
  * Catorce rutas (diez usos; uno, `requireAdminOrMediator`, protege cinco):
  *   GET  /api/metrics/schools            GET  /api/metrics/backbone|funnels|insights
@@ -148,7 +149,7 @@ try {
     ok('…sin escrituras de alertas', alertRows() === rows0 && !wrote());
 
     console.log('[3] cookie válida sin cabecera: el acceso legítimo de esta versión');
-    for (const [route, owner] of ALL.filter(([r]) => r[0] === 'GET')) {
+    for (const [route, owner] of ALL.filter(([r]) => r[0] === 'GET' && r !== MC && r !== RC)) {
         const r = await both(route, { cookie: C[owner] });
         ok(`${name(route)} · cookie de ${owner} → 200 en las dos réplicas`, r.every((x) => x.status === 200), st(r));
     }
@@ -166,7 +167,7 @@ try {
 
     console.log('[5] mediador: sus funciones');
     const mc = await both(MC, { cookie: C['med-a'] }), rc = await both(RC, { cookie: C['med-a'] });
-    ok('mediador → métricas e informe de SU curso → 200 con su desglose', [...mc, ...rc].every((x) => x.status === 200 && Array.isArray(x.json?.studentBreakdown)), `${st(mc)} ${st(rc)}`);
+    ok('mediador → métricas e informe de SU curso → 403 con el aviso de restricción temporal, sin datos (SEC-04U)', [...mc, ...rc].every((x) => x.status === 403 && x.json?.code === 'course_detail_restricted' && denied(x)), `${st(mc)} ${st(rc)}`);
     const mOther = await all([G('/api/metrics/course/g-b'), G('/api/reports/course/g-b'), G('/api/metrics/course/g-inexistente')], { cookie: C['med-a'] });
     ok('mediador → curso que no media (otra institución, inexistente) → 403', mOther.every((x) => x.status === 403 && denied(x)), st(mOther));
     const mSch = await call(S1, SCHOOLS, { cookie: C['med-a'] });
@@ -202,12 +203,12 @@ try {
     const vHdr = await all(vPaths, { cookie: venc, headers: { 'x-user-id': 'ra-venc' } });
     ok('…y la cabecera no la rescata', vHdr.every(denied), st(vHdr));
     const tmpMed = await login(S1, 'med-a');
-    ok('segunda sesión del mediador → 200 (control)', (await call(S2, MC, { cookie: tmpMed })).status === 200);
+    ok('segunda sesión del mediador → 200 (control)', (await call(S2, SCHOOLS, { cookie: tmpMed })).status === 200);
     const out = await fetch(`${S1.base}/api/auth/logout`, { method: 'POST', headers: { cookie: tmpMed, 'sec-fetch-site': 'same-origin' } });
     const before = alertRows();
     const revoked = await all(ALL.filter(([, o]) => o === 'med-a').map(([r]) => r), { cookie: tmpMed });
     ok('tras cerrar esa sesión, su cookie queda revocada → rechazada en sus rutas y las dos réplicas', out.status < 400 && revoked.every(denied) && alertRows() === before, `${out.status} ${st(revoked)}`);
-    ok('…sin afectar a la otra sesión del mismo mediador', (await call(S2, MC, { cookie: C['med-a'] })).status === 200);
+    ok('…sin afectar a la otra sesión del mismo mediador', (await call(S2, SCHOOLS, { cookie: C['med-a'] })).status === 200);
 
     ok('ningún registro del servidor contiene cookies ni contraseñas', ![S1.out, S2.out].some((o) => o.includes(PW) || Object.values(C).some((c) => o.includes(c.split('=')[1]))));
 } catch (e) { ok('arnés', false, e.stack || e.message); }

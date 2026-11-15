@@ -828,7 +828,7 @@ export function computeCourseMetrics(courseId, options = {}) {
 
   const { ctx, owned } = contextForTopLevel(options);
   try {
-    return courseMetricsFrom(group, courseId, ctx, options.includeStudent);
+    return courseMetricsFrom(group, courseId, ctx);
   } finally {
     // El contexto solo se libera si lo creó ESTA llamada. Si vino del caller,
     // el caller decide su vida.
@@ -836,11 +836,8 @@ export function computeCourseMetrics(courseId, options = {}) {
   }
 }
 
-// SEC-SESSION-IDENTITY-04: `includeStudent` (opcional) restringe el curso a los lectores que quien
-// consulta puede ver. Los excluidos no entran en el desglose NI en promedios, distribuciones o conteos.
-function courseMetricsFrom(group, courseId, ctx, includeStudent) {
-  const memberIds      = resolveGroupMemberIds(group);
-  const studentIds     = typeof includeStudent === 'function' ? memberIds.filter(id => includeStudent(id)) : memberIds;
+function courseMetricsFrom(group, courseId, ctx) {
+  const studentIds     = resolveGroupMemberIds(group);
   const allStudents    = studentIds.map(id => computeStudentMetrics(id, { context: ctx }));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
   const { top, bottom } = topBottomByComposite(activeStudents, 0.20);

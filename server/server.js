@@ -10951,29 +10951,24 @@ async function requireGlobalMetricsAdmin(req, res) {
 }
 
 /**
- * Métricas e informe de curso. Administración (autoridad de máquina): sin filtro,
- * como siempre. Mediador: solo un curso que el CIS reconoce como mediado por esa
- * persona (ACTIVE_REAL; `teacherId` y `user.groupIds` no cuentan), y solo sobre su
- * nómina explícita actual, sin cuentas personales B2C. Los demás no entran en el
- * desglose NI en los agregados.
- * @returns {Promise<null | object>} opciones para computeCourseMetrics; null = ya respondió.
+ * SEC-SESSION-IDENTITY-04U — métricas e informe de curso: seguimiento detallado SUSPENDIDO para mediadores.
+ * Las dos rutas entregan nombres, avance y perfil pedagógico de cada lector, y esta versión no tiene
+ * un registro que acredite la autorización de ese seguimiento individual (mediar el grupo no lo es).
+ * Hasta que exista, solo responde la autoridad de máquina (admin-secret file-only), como siempre.
+ * Primero se resuelve la identidad: sin sesión válida la respuesta es la de siempre; a un mediador
+ * con sesión —medie o no el curso, para no revelar esa relación— se le explica la restricción.
+ * El cuerpo conserva el contrato `{ error }` que las pantallas ya muestran.
+ * @returns {Promise<boolean>} true = continuar; false = ya respondió (403, sin datos).
  */
-async function courseMetricsOptions(req, res, requester, courseId, users) {
-    if (await isAdminRequest(req)) return {};
-    if (!requester || !isMediatorRole(requester)) { res.status(403).json({ error: 'Acceso denegado' }); return null; }
-    let roster;
-    try {
-        roster = mediatedGroupRosters(requester.id).get(String(courseId ?? ''));
-    } catch (e) {
-        if (!(e instanceof IdentityUnavailableError)) throw e;
-        log(`[AUTHZ] course metrics scope unavailable: ${e.causeTag}`, 'ERROR');
-        res.status(503).json({ error: 'identity_unavailable' });
-        return null;
+const COURSE_DETAIL_RESTRICTED = 'El seguimiento detallado por estudiante está temporalmente restringido. Los datos generales del grupo siguen disponibles en Aula Viva.';
+async function requireCourseMetricsAuthority(req, res, requester) {
+    if (await isAdminRequest(req)) return true;
+    if (requester && isMediatorRole(requester)) {
+        res.status(403).json({ error: COURSE_DETAIL_RESTRICTED, code: 'course_detail_restricted' });
+        return false;
     }
-    if (!roster) { res.status(403).json({ error: 'Acceso denegado' }); return null; }
-    const eligible = new Set([...roster].filter(id => id !== requester.id
-        && !isPersonalB2cAccount((users || []).find(u => u?.id === id))));
-    return { includeStudent: (id) => eligible.has(id) };
+    res.status(403).json({ error: 'Acceso denegado' });
+    return false;
 }
 
 /** Una lista vacía de usuarios equivale en el backbone a «sin filtro»: nunca se consulta así. */
@@ -11540,12 +11535,11 @@ const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = await sessionRequesterOf(req, users);
-    // SEC-SESSION-IDENTITY-04: curso mediado según el CIS y solo su nómina explícita.
-    const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId, users);
-    if (!metricsOptions) return;
+    // SEC-SESSION-IDENTITY-04U: identidad primero; solo autoridad de máquina. Mediadores: restricción temporal.
+    if (!(await requireCourseMetricsAuthority(req, res, requester))) return;
 
     try {
-        const raw      = computeCourseMetrics(courseId, metricsOptions);
+        const raw      = computeCourseMetrics(courseId);
         const response = formatCourseResponse(raw, users);
 
         // Augment each student with their pedagogical profile (computed from session timelines)
@@ -11939,12 +11933,11 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = await sessionRequesterOf(req, users);
-    // SEC-SESSION-IDENTITY-04: curso mediado según el CIS y solo su nómina explícita.
-    const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId, users);
-    if (!metricsOptions) return;
+    // SEC-SESSION-IDENTITY-04U: identidad primero; solo autoridad de máquina. Mediadores: restricción temporal.
+    if (!(await requireCourseMetricsAuthority(req, res, requester))) return;
 
     try {
-        const raw      = computeCourseMetrics(courseId, metricsOptions);
+        const raw      = computeCourseMetrics(courseId);
         const group    = groups.find(g => g.id === courseId);
         const response = formatCourseResponse(raw, users);
 
