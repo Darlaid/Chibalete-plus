@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+// V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
+import { dataService } from '../services/dataService';
+import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage } from '../utils/institutionalErrors';
 import {
     ArrowLeft, AlertTriangle, Info, AlertCircle,
     Users, Clock, Zap, CheckCircle, BookOpen,
@@ -1575,7 +1578,10 @@ const DashboardMediador: React.FC = () => {
                 ]);
                 if (!metricsRes.ok) {
                     const body = await metricsRes.json().catch(() => ({}));
-                    throw new Error(body.error ?? `Error ${metricsRes.status}`);
+                    // V9 F5-E2: un 503 (`individual_access_unavailable`) se explica como indisponibilidad
+                    // temporal; nunca se muestra el código ni se conserva lo cargado antes.
+                    setData(null);
+                    throw new Error(describeInstitutionalError('course', metricsRes.status, body.error));
                 }
                 setData(await metricsRes.json());
                 if (interventionsRes.ok) {
@@ -1624,6 +1630,30 @@ const DashboardMediador: React.FC = () => {
     }
 
     const { summary, productMetrics: pm, readingLevels: rl, icdli, alerts, studentBreakdown } = data;
+
+    // V9 F5-E2 — nómina del curso frente a lectores con seguimiento habilitado. El servidor calcula
+    // todo solo sobre los habilitados; con cero, sus ceros y alertas («Nivel inferencial bajo», «poca
+    // actividad») no son resultados pedagógicos y no se pintan.
+    const rosterCount = courseId && dataService.getAllGroups().some(g => g.id === courseId)
+        ? dataService.getGroupStudents(courseId).length : null;
+    if (summary.studentCount === 0) {
+        const none = describeNoEligibleReaders(rosterCount);
+        return (
+            <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6" role="status">
+                <Info size={36} className="text-gray-400 mb-3" aria-hidden="true" />
+                <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-1">{data.courseName}</h1>
+                <p className="text-base font-semibold text-gray-700 dark:text-gray-300 mb-2">{none.title}</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{none.roster}</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4 max-w-xl leading-relaxed">{none.body}</p>
+                <button
+                    onClick={() => navigate(-1)}
+                    className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                    Volver
+                </button>
+            </div>
+        );
+    }
     const interpretation = buildSummaryInterpretation(summary, alerts);
 
     // ── Render ───────────────────────────────────────────────────────────────
@@ -1655,7 +1685,7 @@ const DashboardMediador: React.FC = () => {
                             {data.courseName}
                         </h1>
                         <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
-                            {summary.studentCount} estudiantes &bull; {summary.activeStudentCount} activos &bull; {pct(summary.engagementRate)} participación
+                            {describeReaderCoverage(summary.studentCount, rosterCount)} &bull; {summary.activeStudentCount} activos &bull; {pct(summary.engagementRate)} participación
                         </p>
                         {/* Interpretive sentence */}
                         <p className="text-sm text-gray-600 dark:text-gray-400 mt-2 max-w-xl leading-relaxed">

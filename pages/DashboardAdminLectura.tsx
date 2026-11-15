@@ -496,6 +496,9 @@ const DashboardAdminLectura: React.FC = () => {
     const [schoolMetrics, setSchoolMetrics] = useState<Record<string, SchoolMetrics>>({});
     const [loading,       setLoading]       = useState(true);
     const [error,         setError]         = useState<string | null>(null);
+    // V9 F5-E2 — colegios cuya consulta de métricas no respondió (403/503/red). Antes se descartaban
+    // en silencio y el panel parecía completo.
+    const [unavailable,   setUnavailable]   = useState<Array<{ schoolId: string; schoolName: string; status: number }>>([]);
 
     const [selectedSchool, setSelectedSchool] = useState<string | null>(null);
     const [courseFilter,   setCourseFilter]   = useState<CourseFilter>('all');
@@ -519,17 +522,22 @@ const DashboardAdminLectura: React.FC = () => {
                 const results = await Promise.allSettled(
                     schoolList.map(s =>
                         fetch(`/api/metrics/school/${encodeURIComponent(s.schoolId)}`, { headers })
-                            .then(r => r.json() as Promise<SchoolMetrics & { error?: string }>)
+                            .then(async r => ({ status: r.status, ok: r.ok, body: await r.json().catch(() => null) as (SchoolMetrics & { error?: string }) | null }))
                     )
                 );
 
                 const metricsMap: Record<string, SchoolMetrics> = {};
+                const missing: Array<{ schoolId: string; schoolName: string; status: number }> = [];
                 results.forEach((result, i) => {
-                    if (result.status === 'fulfilled' && !result.value.error) {
-                        metricsMap[schoolList[i].schoolId] = result.value;
+                    if (result.status === 'fulfilled' && result.value.ok && result.value.body && !result.value.body.error) {
+                        metricsMap[schoolList[i].schoolId] = result.value.body;
+                    } else {
+                        // Se conserva lo que sí respondió y se deja constancia de lo que falta.
+                        missing.push({ ...schoolList[i], status: result.status === 'fulfilled' ? result.value.status : 0 });
                     }
                 });
                 setSchoolMetrics(metricsMap);
+                setUnavailable(missing);
             } catch (e: unknown) {
                 setError(e instanceof Error ? e.message : 'Error al cargar datos');
             } finally {
@@ -707,6 +715,29 @@ const DashboardAdminLectura: React.FC = () => {
                 <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                     Vista consolidada de actividad lectora · {schools.length} {schools.length === 1 ? 'colegio' : 'colegios'}
                 </p>
+                {/* V9 F5-E2 — panel parcial o sin métricas: se dice, y no se presenta como completo. */}
+                {unavailable.length > 0 && (
+                    <div role="status" className="mt-4 px-4 py-3 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-800 dark:bg-amber-900/20 dark:border-amber-800 dark:text-amber-200">
+                        <p className="font-semibold">
+                            {unavailable.length === schools.length
+                                ? 'Las métricas por colegio no están disponibles para esta sesión.'
+                                : `Panel incompleto: faltan las métricas de ${unavailable.length} de ${schools.length} colegios.`}
+                        </p>
+                        <p className="mt-1">
+                            {unavailable.every(u => u.status === 403)
+                                ? 'El servidor no autorizó la consulta de métricas por colegio. '
+                                : unavailable.every(u => u.status === 503)
+                                ? 'El servicio de métricas no respondió (indisponibilidad temporal). '
+                                : 'Algunas consultas no respondieron. '}
+                            {unavailable.length === schools.length
+                                ? 'No se muestran totales ni comparativas: no es que no haya actividad lectora.'
+                                : 'Los totales y comparativas de abajo solo incluyen los colegios que sí respondieron.'}
+                        </p>
+                        {unavailable.length < schools.length && (
+                            <p className="mt-1">Sin métricas: {unavailable.map(u => u.schoolName).join(', ')}.</p>
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* ── GLOBAL SUMMARY + INTERPRETATION ── */}

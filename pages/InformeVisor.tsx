@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+// V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
+import { dataService } from '../services/dataService';
+import { describeInstitutionalError, describeNoEligibleReaders } from '../utils/institutionalErrors';
 import {
     ArrowLeft, AlertCircle, AlertTriangle, Info, Lightbulb,
 } from 'lucide-react';
@@ -287,7 +290,13 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
 
         fetch(url, { headers })
             .then(r => {
-                if (!r.ok) return r.json().then(b => Promise.reject(new Error(b.error ?? `Error ${r.status}`)));
+                // V9 F5-E2: el código del servidor (p. ej. `individual_access_unavailable` en un 503) se
+                // explica; nunca se muestra crudo ni se conserva el informe cargado antes.
+                if (!r.ok) {
+                    setData(null);
+                    return r.json().catch(() => ({})).then((b: { error?: string }) => Promise.reject(new Error(
+                        type === 'course' ? describeInstitutionalError('course', r.status, b.error) : (b.error ?? `Error ${r.status}`))));
+                }
                 return r.json();
             })
             .then((d: CourseReport | SchoolReport) => { setData(d); setLoading(false); })
@@ -343,6 +352,29 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     // ── Narrow types ─────────────────────────────────────────────────────────
     const isCourse   = type === 'course';
     const cd         = isCourse ? (data as CourseReport) : null;
+
+    // V9 F5-E2 — informe de un curso sin lectores con seguimiento habilitado: sus ceros, alertas y
+    // recomendaciones no son resultados pedagógicos. Se distingue la nómina del curso de los lectores
+    // habilitados y se dice que no hay información consultable.
+    if (cd && cd.summary.studentCount === 0) {
+        const rosterCount = id && dataService.getAllGroups().some(g => g.id === id) ? dataService.getGroupStudents(id).length : null;
+        const none = describeNoEligibleReaders(rosterCount);
+        return (
+            <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6" role="status">
+                <Info size={36} className="text-gray-400 mb-3" aria-hidden="true" />
+                <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-1">{cd.courseName}</h1>
+                <p className="text-base font-semibold text-gray-700 dark:text-gray-300 mb-2">{none.title}</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{none.roster}</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4 max-w-xl leading-relaxed">{none.body}</p>
+                <button
+                    onClick={() => navigate(-1)}
+                    className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                    Volver
+                </button>
+            </div>
+        );
+    }
     const sd         = !isCourse ? (data as SchoolReport) : null;
     const entityName = cd?.courseName ?? sd!.schoolName;
     const { productMetrics: pm, readingLevels: rl, icdli, alerts } = data;
@@ -419,7 +451,7 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                                         <StatBlock
                                             label="Estudiantes activos"
                                             value={`${cd!.summary.activeStudentCount}`}
-                                            sub={`de ${cd!.summary.studentCount} total`}
+                                            sub={`de ${cd!.summary.studentCount} con seguimiento habilitado`}
                                         />
                                         <StatBlock
                                             label="Participación"

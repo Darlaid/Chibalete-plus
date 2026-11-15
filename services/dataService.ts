@@ -100,6 +100,8 @@ import {
 import type { GroupDiagnosis } from '../utils/groupDiagnosis';
 // Sprint Panel del estudiante — shape de GET /api/students/:id/status.
 import type { StudentStatus } from '../utils/studentStatus';
+// V9 F5-E2 — un código del servidor nunca es el texto que ve la persona.
+import { describeInstitutionalError } from '../utils/institutionalErrors';
 
 // Fase F: Entry in the persistent failed-sync queue.
 interface FailedSyncEntry {
@@ -3184,7 +3186,9 @@ class DataService {
             // Mantener el cuerpo del backend (ya viene con healthStatus + summary)
             // para que el caller pueda mostrarlo si lo necesita.
             const body = await r.json().catch(() => ({}));
-            const err  = new Error(body?.summary?.headline || body?.error || `diagnosis fetch failed: ${r.status}`);
+            // V9 F5-E2: sin grupo reconocido (403) o identidad no verificable (503) el cuerpo trae un
+            // código (`scope_access_denied`…), no un diagnóstico: se explica, no se muestra crudo.
+            const err  = new Error(body?.summary?.headline || describeInstitutionalError('group', r.status, body?.error));
             (err as any).status = r.status;
             (err as any).body   = body;
             throw err;
@@ -3209,6 +3213,14 @@ class DataService {
         const body = await r.json().catch(() => null);
         if (!body) {
             const err = new Error(`student status fetch failed: ${r.status}`);
+            (err as any).status = r.status;
+            throw err;
+        }
+        // V9 F5-E2: un 403 (seguimiento no habilitado) o un 503 (registro no verificable) traen
+        // `{ error }`, no un StudentStatus. Entregarlo como estado hacía caer toda la aplicación al
+        // pintarlo. Se lanza con un texto para la persona; el panel ya tiene su estado de error.
+        if (typeof body.state !== 'string' || typeof body.tone !== 'string') {
+            const err = new Error(describeInstitutionalError('reader', r.status, body.error));
             (err as any).status = r.status;
             throw err;
         }

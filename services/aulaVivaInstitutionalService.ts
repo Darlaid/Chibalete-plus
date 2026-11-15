@@ -21,29 +21,35 @@ function readCache<T>(path: string): { value: T; stale: boolean; age_ms: number 
     try {
         const raw = localStorage.getItem(cacheKey(path));
         if (!raw) return null;
-        const { value, at } = JSON.parse(raw);
+        // V9 F5-E2 — la copia local es de quien la guardó: sin dueño o de otra cuenta, no se usa
+        // (equipo compartido: la siguiente persona no ve las cifras de la anterior).
+        const { value, at, owner } = JSON.parse(raw);
+        const me = getUserId();
+        if (!me || owner !== me) { localStorage.removeItem(cacheKey(path)); return null; }
         return { value, stale: Date.now() - at > CACHE_TTL_MS, age_ms: Date.now() - at };
     } catch { return null; }
 }
 function writeCache<T>(path: string, value: T): void {
     if (!isBrowser) return;
-    try { localStorage.setItem(cacheKey(path), JSON.stringify({ value, at: Date.now() })); }
+    const owner = getUserId();
+    if (!owner) return;
+    try { localStorage.setItem(cacheKey(path), JSON.stringify({ value, at: Date.now(), owner })); }
     catch { /* lleno → ignore */ }
 }
 function getUserId(): string | null {
     if (!isBrowser) return null;
     try {
-        const u = localStorage.getItem('chibalete:auth:user');
-        if (!u) return null;
-        const p = JSON.parse(u);
-        return p.id || p.userId || null;
+        // La sesión es la cookie; este id local (AuthContext lo guarda en sessionStorage o, con
+        // «Recordarme», en localStorage) solo etiqueta de quién es la copia guardada.
+        const id = sessionStorage.getItem('chibalete_user_id') || localStorage.getItem('chibalete_user_id');
+        return id && id.trim() ? id : null;
     } catch { return null; }
 }
 
 async function get<T>(path: string, fallback: T): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    const userId = getUserId();
+    let httpStatus = 0;
     try {
         const res = await fetch(BASE + path, {
             method: 'GET',
@@ -53,13 +59,17 @@ async function get<T>(path: string, fallback: T): Promise<T> {
         if (!res.ok) {
             // 403 (scope_access_denied) lo dejamos pasar como fallback — la UI
             // muestra empty state "sin permisos" sin romper la pantalla.
-            if (res.status === 403) return fallback;
+            if (res.status === 403) { try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ } return fallback; }
+            httpStatus = res.status;
             throw new Error(`HTTP ${res.status}`);
         }
         const body = await res.json();
         writeCache(path, body);
         return body as T;
     } catch (e) {
+        // V9 F5-E2 — si el servidor respondió que ahora no puede (503, 5xx), una copia anterior no
+        // lo desmiente. La copia solo sirve cuando no hubo respuesta (sin conexión).
+        if (httpStatus) return fallback;
         const cached = readCache<T>(path);
         if (cached) return cached.value;
         return fallback;

@@ -21,54 +21,85 @@ const isBrowser = typeof window !== 'undefined' && typeof localStorage !== 'unde
 
 function cacheKey(path: string): string { return `chibalete:aulaviva:${path}`; }
 
+// V9 F5-E2 — la copia local es de QUIEN la guardó. Antes no llevaba dueño ni se borraba al cerrar
+// sesión: en un equipo compartido, la siguiente persona (de otro grupo o institución) podía ver las
+// cifras de la anterior cuando una consulta fallaba. Una copia sin dueño, o de otra cuenta, no se usa.
 function readCache<T>(path: string): { value: T; stale: boolean; age_ms: number } | null {
     if (!isBrowser) return null;
     try {
         const raw = localStorage.getItem(cacheKey(path));
         if (!raw) return null;
-        const { value, at } = JSON.parse(raw);
+        const { value, at, owner } = JSON.parse(raw);
+        const me = getUserId();
+        if (!me || owner !== me) { localStorage.removeItem(cacheKey(path)); return null; }
         const age = Date.now() - at;
         return { value, stale: age > CACHE_TTL_MS, age_ms: age };
     } catch { return null; }
 }
 function writeCache<T>(path: string, value: T): void {
     if (!isBrowser) return;
-    try { localStorage.setItem(cacheKey(path), JSON.stringify({ value, at: Date.now() })); }
+    const owner = getUserId();
+    if (!owner) return;
+    try { localStorage.setItem(cacheKey(path), JSON.stringify({ value, at: Date.now(), owner })); }
     catch { /* localStorage full / blocked → ignore */ }
+}
+function dropCache(path: string): void {
+    if (!isBrowser) return;
+    try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ }
 }
 
 function getUserId(): string | null {
     if (!isBrowser) return null;
     try {
-        const u = localStorage.getItem('chibalete:auth:user');
-        if (!u) return null;
-        const parsed = JSON.parse(u);
-        return parsed.id || parsed.userId || null;
+        // La sesión es la cookie; este id local (AuthContext lo guarda en sessionStorage o, con
+        // «Recordarme», en localStorage) solo etiqueta de quién es la copia guardada.
+        const id = sessionStorage.getItem('chibalete_user_id') || localStorage.getItem('chibalete_user_id');
+        return id && id.trim() ? id : null;
     } catch { return null; }
 }
 
-async function get<T>(path: string, fallback: T): Promise<T & { _meta?: { cached?: boolean; age_ms?: number; stale?: boolean } }> {
+/**
+ * V9 F5-E2 — cómo llegó un resultado. `failed`: la consulta no respondió y lo devuelto es la forma
+ * vacía de relleno (NO «no hay nada»). `cached`: copia guardada por esta misma cuenta, usada solo
+ * cuando no hubo respuesta del servidor (sin conexión).
+ */
+export interface FetchMeta { cached?: boolean; stale?: boolean; age_ms?: number; failed?: boolean; status?: number }
+export function fetchMetaOf(value: unknown): FetchMeta {
+    return (value && typeof value === 'object' && (value as { _meta?: FetchMeta })._meta) || {};
+}
+/** Adjunta `_meta` conservando la forma: una lista sigue siendo una lista. */
+function withMeta<T>(value: T, meta: FetchMeta): T & { _meta: FetchMeta } {
+    const out = Array.isArray(value) ? [...value] : { ...(value as object) };
+    Object.defineProperty(out, '_meta', { value: meta, enumerable: false });
+    return out as T & { _meta: FetchMeta };
+}
+
+async function get<T>(path: string, fallback: T): Promise<T & { _meta?: FetchMeta }> {
     const url = BASE + path;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    const userId = getUserId();
+    let httpStatus = 0;
     try {
         const res = await fetch(url, {
             method: 'GET',
             headers:{},
             signal: ctrl.signal,
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) { httpStatus = res.status; throw new Error(`HTTP ${res.status}`); }
         const body = await res.json();
         writeCache(path, body);
         return body as T;
     } catch (e) {
-        const cached = readCache<T>(path);
-        if (cached) {
-            return { ...(cached.value as object),
-                     _meta: { cached: true, stale: cached.stale, age_ms: cached.age_ms } } as T & {_meta: object};
+        // V9 F5-E2 — el servidor RESPONDIÓ que no (403) o que ahora no puede (503, 5xx): una copia
+        // anterior no lo desmiente y no se muestra. Con 401/403 además se descarta.
+        if (httpStatus) {
+            if (httpStatus === 401 || httpStatus === 403) dropCache(path);
+            return withMeta(fallback, { failed: true, status: httpStatus });
         }
-        return fallback;
+        // Sin respuesta (sin conexión, tiempo agotado): la copia de ESTA cuenta, marcada como tal.
+        const cached = readCache<T>(path);
+        if (cached) return withMeta(cached.value, { cached: true, stale: cached.stale, age_ms: cached.age_ms });
+        return withMeta(fallback, { failed: true, status: 0 });
     } finally { clearTimeout(timer); }
 }
 
@@ -76,7 +107,6 @@ async function post<T>(path: string, body: unknown): Promise<T | { ok: false; er
     const url = BASE + path;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    const userId = getUserId();
     try {
         const res = await fetch(url, {
             method: 'POST',
@@ -98,7 +128,6 @@ async function patch<T>(path: string, body: unknown): Promise<T | { ok: false; e
     const url = BASE + path;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    const userId = getUserId();
     try {
         const res = await fetch(url, {
             method: 'PATCH',

@@ -18,7 +18,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Users, AlertCircle, Sparkles, TrendingUp, Activity, ChevronRight } from 'lucide-react';
 import {
-    aulaVivaOperationalService,
+    aulaVivaOperationalService, fetchMetaOf,
     type AttentionItem, type OperationalStatus, type CohortComparison,
     type Recommendation, type ProfileTimeline,
 } from '../services/aulaVivaOperationalService';
@@ -61,6 +61,8 @@ const AulaVivaOperacional: React.FC = () => {
     const [timelineLoading, setTimelineLoading] = useState(false);
     // PASO 7 — tab switcher operativo/institucional.
     const [activeTab, setActiveTab] = useState<ActiveTab>('operativo');
+    // V9 F5-E2 — qué cohorte corresponde a quien mira: sin grupos mediados no hay nada que afirmar.
+    const [scopeKind, setScopeKind] = useState<'admin' | 'group' | 'none'>('none');
 
     const { user } = useAuth();
 
@@ -83,6 +85,7 @@ const AulaVivaOperacional: React.FC = () => {
         setStatus(s);
         setAttention(q);
         setCohort(c);
+        setScopeKind(isAdmin(user) ? 'admin' : (mediated.length ? 'group' : 'none'));
         setLoading(false);
     }, [user]);
 
@@ -163,6 +166,18 @@ const AulaVivaOperacional: React.FC = () => {
     const recsSummary = status?.recommendations_summary ?? { critical: 0, high: 0, moderate: 0, info: 0 };
     const totalActive = recsSummary.critical + recsSummary.high + recsSummary.moderate + recsSummary.info;
 
+    // V9 F5-E2 — una consulta que NO respondió no es «no hay nada». Antes la lista vacía de relleno
+    // se pintaba como «0 · sin lectores en riesgo» y «los patrones se mantienen estables».
+    const statusMeta = fetchMetaOf(status), attentionMeta = fetchMetaOf(attention), cohortMeta = fetchMetaOf(cohort), recsMeta = fetchMetaOf(recs);
+    const cachedMetas = [statusMeta, attentionMeta, cohortMeta].filter(m => m.cached);
+    const cachedAgeMin = Math.max(0, ...cachedMetas.map(m => Math.round((m.age_ms ?? 0) / 60000)));
+    const failureText = (m: { status?: number }) =>
+        m.status === 503 ? 'El servicio no está disponible en este momento (interrupción temporal). Inténtalo de nuevo con «Actualizar».'
+        : m.status === 403 ? 'Esta consulta no está habilitada para tu cuenta.'
+        : m.status === 401 ? 'Tu sesión terminó. Vuelve a iniciar sesión.'
+        : 'No hubo respuesta del servidor. Revisa la conexión e inténtalo de nuevo con «Actualizar».';
+    const materializerReady = !!status?.materializer_ready?.ready && !statusMeta.failed;
+
     // Sparkline de active_users (proxy de continuidad institucional)
     const activeUsersDaily = (cohort?.metrics?.find(m => m.metric_key === 'active_users')?.metric_value);
     const cohortMetricsToShow = cohort?.metrics?.filter(m =>
@@ -214,16 +229,22 @@ const AulaVivaOperacional: React.FC = () => {
 
                 {activeTab === 'institucional' ? <InstitutionalTab/> : (<>
 
+                {cachedMetas.length > 0 && (
+                    <p role="status" className="mb-4 px-3 py-2 rounded-md border border-amber-200 bg-amber-50 text-sm text-amber-900">
+                        Sin respuesta del servidor: se muestran los datos que esta cuenta consultó hace {cachedAgeMin} min. Pueden no estar al día.
+                    </p>
+                )}
+
                 {/* ── Summary KPI cards ────────────────────────────────────────── */}
                 <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
                     <KpiCard
-                        icon={Users} label="Estudiantes en atención" value={attention.length}
-                        sublabel={attention.length === 0 ? 'sin lectores en riesgo activo' : 'priorizado por severidad'}
+                        icon={Users} label="Estudiantes en atención" value={attentionMeta.failed ? '—' : attention.length}
+                        sublabel={attentionMeta.failed ? 'no se pudo consultar' : attention.length === 0 ? 'ninguno priorizado ahora' : 'priorizado por severidad'}
                     />
                     <KpiCard
-                        icon={AlertCircle} label="Recomendaciones activas" value={totalActive}
-                        sublabel={`crít ${recsSummary.critical} · alt ${recsSummary.high} · mod ${recsSummary.moderate} · info ${recsSummary.info}`}
-                        accent={recsSummary.critical > 0 ? 'critical' : recsSummary.high > 0 ? 'high' : null}
+                        icon={AlertCircle} label="Recomendaciones activas" value={statusMeta.failed ? '—' : totalActive}
+                        sublabel={statusMeta.failed ? 'no se pudo consultar' : `crít ${recsSummary.critical} · alt ${recsSummary.high} · mod ${recsSummary.moderate} · info ${recsSummary.info}`}
+                        accent={statusMeta.failed ? null : recsSummary.critical > 0 ? 'critical' : recsSummary.high > 0 ? 'high' : null}
                     />
                     <KpiCard
                         icon={TrendingUp} label="Continuidad promedio"
@@ -245,7 +266,22 @@ const AulaVivaOperacional: React.FC = () => {
                             <Users className="w-5 h-5 text-gray-500"/>
                             Estudiantes que necesitan atención hoy
                         </h2>
-                        {attention.length === 0 ? (
+                        {attentionMeta.failed ? (
+                            <EmptyState kind="custom" where="attention_queue_failed"
+                                title="No pudimos consultar esta lista"
+                                body={`${failureText(attentionMeta)} Esto no significa que no haya lectores que necesiten atención.`}
+                            />
+                        ) : attention.length === 0 && scopeKind === 'none' ? (
+                            <EmptyState kind="custom" where="attention_queue_no_groups"
+                                title="No tienes grupos asignados como mediador"
+                                body="Esta lista se arma con los lectores de los grupos que medias. Si deberías tener un grupo, pide a la administración de tu institución que revise la asignación."
+                            />
+                        ) : attention.length === 0 && !materializerReady ? (
+                            <EmptyState kind="snapshots_pending" where="attention_queue_pending"
+                                title="Aún no hay información procesada"
+                                body="Todavía no hay señales procesadas para priorizar lectores. Esto no describe cómo van: vuelve a consultar más tarde."
+                            />
+                        ) : attention.length === 0 ? (
                             <EmptyState kind="no_recommendations" where="attention_queue"
                                 title="Sin lectores priorizados ahora"
                                 body="No hay estudiantes con riesgo activo o recomendaciones críticas. Los patrones lectores se mantienen estables."
@@ -296,6 +332,11 @@ const AulaVivaOperacional: React.FC = () => {
                                 title="Selecciona un lector"
                                 body="Elige un estudiante de la lista para ver sus recomendaciones, señales usadas y opciones de intervención."
                             />
+                        ) : recsMeta.failed ? (
+                            <EmptyState kind="custom" where="recommendations_failed"
+                                title="No pudimos consultar las recomendaciones"
+                                body={`${failureText(recsMeta)} Esto no significa que este lector no tenga recomendaciones.`}
+                            />
                         ) : recs.length === 0 ? (
                             <EmptyState kind="no_recommendations" where="recommendations_for_student"/>
                         ) : (
@@ -336,7 +377,17 @@ const AulaVivaOperacional: React.FC = () => {
                         <TrendingUp className="w-5 h-5 text-gray-500"/>
                         Cohort institucional (ventana 28d)
                     </h2>
-                    {cohortMetricsToShow.length === 0 ? (
+                    {cohortMeta.failed ? (
+                        <EmptyState kind="custom" where="cohort_failed"
+                            title="No pudimos consultar el agregado"
+                            body={failureText(cohortMeta)}
+                        />
+                    ) : scopeKind === 'none' ? (
+                        <EmptyState kind="custom" where="cohort_no_groups"
+                            title="Sin grupo asignado"
+                            body="El agregado se muestra para los grupos que medias."
+                        />
+                    ) : cohortMetricsToShow.length === 0 ? (
                         <EmptyState kind="snapshots_pending" where="cohort_global"/>
                     ) : (
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -366,7 +417,9 @@ const AulaVivaOperacional: React.FC = () => {
                 {/* ── System health footnote ────────────────────────────────── */}
                 <footer className="mt-6 text-xs text-gray-600 text-center">
                     Estado del sistema:&nbsp;
-                    {status?.materializer_ready?.ready
+                    {statusMeta.failed
+                        ? <span className="text-amber-600">no se pudo consultar</span>
+                        : status?.materializer_ready?.ready
                         ? <span className="text-emerald-700">operacional</span>
                         : <span className="text-amber-600">{status?.materializer_ready?.reason || 'pendiente'}</span>}
                     &nbsp;· última actualización {status?.ts ? new Date(status.ts).toLocaleTimeString() : '—'}

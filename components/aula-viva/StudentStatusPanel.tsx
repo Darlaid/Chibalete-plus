@@ -90,14 +90,25 @@ function LoadingState() {
     );
 }
 
-function ErrorState({ message }: { message: string }) {
+// V9 F5-E2: el estado de error explica lo ocurrido y ofrece el regreso al listado (el mismo
+// `onClose` del panel), para que un 403 o un 503 no dejen a la persona sin salida.
+function ErrorState({ message, onClose }: { message: string; onClose?: () => void }) {
     return (
         <section role="alert" className="bg-white border-l-4 border-rose-700 rounded-r-md p-6">
             <header className="flex items-start gap-3">
                 <AlertCircle size={28} aria-hidden="true" className="flex-shrink-0 mt-0.5 text-rose-700" />
                 <div>
-                    <h2 className="text-lg font-bold text-gray-900 mb-1">No se pudo obtener el estado del estudiante</h2>
+                    <h2 className="text-lg font-bold text-gray-900 mb-1">No se pudo mostrar el estado del estudiante</h2>
                     <p className="text-base text-gray-900">{message}</p>
+                    {onClose && (
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="mt-4 inline-flex items-center min-h-[44px] px-4 py-2 rounded-md border border-gray-300 text-sm font-semibold text-gray-900 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+                        >
+                            Volver al listado
+                        </button>
+                    )}
                 </div>
             </header>
         </section>
@@ -132,9 +143,14 @@ export interface StudentStatusPanelProps {
 export function StudentStatusPanel({ status, loading, error, onClose }: StudentStatusPanelProps) {
     const { activo } = useModoAccesible();
     if (loading)  return <LoadingState />;
-    if (error)    return <ErrorState message={error} />;
+    if (error)    return <ErrorState message={error} onClose={onClose} />;
     if (!status)  return null;
 
+    // V9 F5-E2: un cuerpo sin tono reconocible no es un estado que se pueda pintar; antes hacía
+    // caer toda la aplicación. Se trata como error, sin inventar un diagnóstico.
+    if (!TONE_STYLES[status.tone]) {
+        return <ErrorState message="No se pudo consultar el estado del lector. Inténtalo de nuevo." onClose={onClose} />;
+    }
     const tone   = status.tone;
     const styles = TONE_STYLES[tone];
     const Icon   = ICON_BY_TONE[tone];
