@@ -84,8 +84,18 @@ try {
     ok('tablero: el error del servidor pasa por describeInstitutionalError (no `body.error` crudo)', /describeInstitutionalError\('course', metricsRes\.status, body\.error\)/.test(dash) && !/throw new Error\(body\.error \?\? `Error \$\{metricsRes\.status\}`\)/.test(dash));
     ok('informe: ídem para el curso', /describeInstitutionalError\('course', r\.status, b\.error\)/.test(inf));
     ok('tablero e informe descartan lo cargado antes al fallar (no quedan datos anteriores)', /setData\(null\);\s*throw new Error\(describeInstitutionalError/.test(dash) && /setData\(null\);\s*return r\.json\(\)/.test(inf));
-    ok('tablero: con cero habilitados se devuelve el estado propio ANTES de interpretar o pintar alertas', dash.indexOf('summary.studentCount === 0') > 0 && dash.indexOf('summary.studentCount === 0') < dash.indexOf('buildSummaryInterpretation(summary, alerts)') && /describeNoEligibleReaders\(rosterCount\)/.test(dash));
-    ok('informe: ídem', /cd && cd\.summary\.studentCount === 0/.test(inf) && /describeNoEligibleReaders\(rosterCount\)/.test(inf));
+    ok('tablero: con cero habilitados se devuelve el estado propio ANTES de interpretar o pintar alertas', dash.indexOf('summary.studentCount === 0') > 0 && dash.indexOf('summary.studentCount === 0') < dash.indexOf('buildSummaryInterpretation(summary, alerts)') && /describeNoEligibleReaders\(data\.aggregateOnly \? 0 : rosterCount\)/.test(dash));
+    ok('informe: ídem', /cd && cd\.summary\.studentCount === 0/.test(inf) && /describeNoEligibleReaders\(cd\.aggregateOnly \? 0 : rosterCount\)/.test(inf));
+
+    section('[F5-E4] vista agregada de administración: sin desglose, y se dice');
+    ok('texto de la vista agregada: totales y promedios, sin desglose; sin códigos', /sin desglose por estudiante/.test(E.AGGREGATE_VIEW_NOTE) && !CODE.test(E.AGGREGATE_VIEW_NOTE));
+    ok('nómina: «1 estudiante en la nómina» / «7 estudiantes en la nómina»', E.describeRosterCount(1) === '1 estudiante en la nómina' && E.describeRosterCount(7) === '7 estudiantes en la nómina');
+    ok('tablero: `studentBreakdown` es opcional y sin él se pinta la nota, no las listas', /studentBreakdown\?: StudentRow\[\];/.test(dash) && /!Array\.isArray\(studentBreakdown\) \? \(/.test(dash) && dash.indexOf('!Array.isArray(studentBreakdown) ? (') < dash.indexOf('students={studentBreakdown}') && /\{AGGREGATE_VIEW_NOTE\}/.test(dash));
+    ok('tablero: en la vista agregada la cabecera habla de la nómina, no de lectores habilitados', /data\.aggregateOnly \? describeRosterCount\(summary\.studentCount\) : describeReaderCoverage\(summary\.studentCount, rosterCount\)/.test(dash));
+    ok('informe: sin desglose se pinta la nota; con desglose, la tabla de siempre', /isCourse && !Array\.isArray\(cd!\.studentBreakdown\) && \(/.test(inf) && /isCourse && Array\.isArray\(cd!\.studentBreakdown\) && cd!\.studentBreakdown\.length > 0 && \(/.test(inf) && /\{AGGREGATE_VIEW_NOTE\}/.test(inf));
+    ok('informe: ninguna lectura de `studentBreakdown` sin comprobar que existe', !/cd!\.studentBreakdown\.length > 0 && \(\s*<div/.test(inf.replace(/Array\.isArray\(cd!\.studentBreakdown\) && cd!\.studentBreakdown\.length > 0/g, '')));
+    ok('informe: un informe solo se pinta si es el de la ruta actual (curso ↔ colegio comparten pantalla)', /const viewKey = `\$\{type\}:\$\{id \?\? ''\}`;/.test(inf) && /if \(loading \|\| \(data !== null && dataKey !== viewKey\)\)/.test(inf) && /setDataKey\(viewKey\)/.test(inf) && /return \(\) => \{ cancelled = true; \};/.test(inf));
+    ok('el panel administrativo no usa ningún campo por estudiante', !/studentBreakdown|topPerformers|needsAttention|nombre_completo/.test(code('pages/DashboardAdminLectura.tsx')));
     ok('la cabecera ya no llama «estudiantes» a los lectores habilitados', /describeReaderCoverage\(summary\.studentCount, rosterCount\)/.test(dash) && !/\{summary\.studentCount\} estudiantes/.test(dash));
     ok('diagnóstico de grupo: 403/503 explicados (el `headline` del servidor se respeta)', /body\?\.summary\?\.headline \|\| describeInstitutionalError\('group', r\.status, body\?\.error\)/.test(ds));
 

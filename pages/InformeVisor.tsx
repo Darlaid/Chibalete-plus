@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
 import {
     ArrowLeft, AlertCircle, AlertTriangle, Info, Lightbulb,
 } from 'lucide-react';
@@ -104,7 +104,9 @@ interface CourseReport {
     readingLevels: ReadingLevels;
     icdli: ICDLIScores;
     alerts: Alert[];
-    studentBreakdown: StudentRow[];
+    // V9 F5-E4: ausente en la vista agregada de administración (`aggregateOnly`).
+    studentBreakdown?: StudentRow[];
+    aggregateOnly?: boolean;
     reportMeta: CourseReportMeta;
 }
 
@@ -274,10 +276,16 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     const [data,    setData]    = useState<CourseReport | SchoolReport | null>(null);
     const [loading, setLoading] = useState(true);
     const [error,   setError]   = useState<string | null>(null);
+    // V9 F5-E4 — a qué informe pertenece `data`. Las rutas de curso y de colegio comparten esta pantalla: al pasar
+    // de una a otra, el informe anterior (con otra forma) se pintaba un instante con el formato nuevo y hacía caer
+    // la aplicación. Ahora un informe solo se pinta si es el de la ruta actual.
+    const viewKey = `${type}:${id ?? ''}`;
+    const [dataKey, setDataKey] = useState<string | null>(null);
 
     // ── Fetch ───────────────────────────────────────────────────────────────
     useEffect(() => {
         if (!user || !id) return;
+        let cancelled = false;
 
         const headers: Record<string, string> = {};
 
@@ -293,14 +301,16 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                 // V9 F5-E2: el código del servidor (p. ej. `individual_access_unavailable` en un 503) se
                 // explica; nunca se muestra crudo ni se conserva el informe cargado antes.
                 if (!r.ok) {
-                    setData(null);
+                    if (!cancelled) setData(null);
                     return r.json().catch(() => ({})).then((b: { error?: string }) => Promise.reject(new Error(
                         type === 'course' ? describeInstitutionalError('course', r.status, b.error) : (b.error ?? `Error ${r.status}`))));
                 }
                 return r.json();
             })
-            .then((d: CourseReport | SchoolReport) => { setData(d); setLoading(false); })
-            .catch((e: Error) => { setError(e.message); setLoading(false); });
+            .then((d: CourseReport | SchoolReport) => { if (cancelled) return; setData(d); setDataKey(viewKey); setLoading(false); })
+            .catch((e: Error) => { if (cancelled) return; setError(e.message); setLoading(false); });
+        // Una respuesta que llega después de cambiar de informe ya no corresponde a esta pantalla.
+        return () => { cancelled = true; };
     }, [user, id, type]);
 
     // ── Recommendations — derived from alerts in severity order ─────────────
@@ -322,7 +332,7 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     }, [data, type]);
 
     // ── Loading ──────────────────────────────────────────────────────────────
-    if (loading) {
+    if (loading || (data !== null && dataKey !== viewKey)) {
         return (
             <div className="flex items-center justify-center min-h-[60vh]">
                 <div className="text-center">
@@ -358,7 +368,9 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     // habilitados y se dice que no hay información consultable.
     if (cd && cd.summary.studentCount === 0) {
         const rosterCount = id && dataService.getAllGroups().some(g => g.id === id) ? dataService.getGroupStudents(id).length : null;
-        const none = describeNoEligibleReaders(rosterCount);
+        // V9 F5-E4: en la vista agregada el recuento ES la nómina (no depende de habilitaciones).
+        const none = describeNoEligibleReaders(cd.aggregateOnly ? 0 : rosterCount);
+        if (cd.aggregateOnly) none.title = 'Curso sin estudiantes en la nómina';
         return (
             <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6" role="status">
                 <Info size={36} className="text-gray-400 mb-3" aria-hidden="true" />
@@ -451,7 +463,7 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                                         <StatBlock
                                             label="Estudiantes activos"
                                             value={`${cd!.summary.activeStudentCount}`}
-                                            sub={`de ${cd!.summary.studentCount} con seguimiento habilitado`}
+                                            sub={cd!.aggregateOnly ? `de ${cd!.summary.studentCount} en la nómina` : `de ${cd!.summary.studentCount} con seguimiento habilitado`}
                                         />
                                         <StatBlock
                                             label="Participación"
@@ -599,7 +611,11 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                         )}
 
                         {/* ── DESGLOSE — Students (course) or Courses (school) ── */}
-                        {isCourse && cd!.studentBreakdown.length > 0 && (
+                        {/* V9 F5-E4: sin desglose (vista agregada de administración) se dice. */}
+                        {isCourse && !Array.isArray(cd!.studentBreakdown) && (
+                            <p role="note" className="text-sm text-gray-500 dark:text-gray-400 pb-8">{AGGREGATE_VIEW_NOTE}</p>
+                        )}
+                        {isCourse && Array.isArray(cd!.studentBreakdown) && cd!.studentBreakdown.length > 0 && (
                             <section className="py-8">
                                 <DocLabel>
                                     Desglose por estudiante ({cd!.studentBreakdown.length})

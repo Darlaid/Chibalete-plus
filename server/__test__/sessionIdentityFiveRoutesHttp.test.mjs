@@ -202,8 +202,14 @@ try {
     console.log('[7] administración: los mismos permisos que antes, ahora por sesión');
     const admRp = await all([RP, RPC], { cookie: C.adm });
     ok('administrador con su sesión → progreso de un lector → 200 (ya lo permitía la ruta)', admRp.every((x) => x.status === 200), st(admRp));
-    const admMachine = await all([MC, RC, MS], { cookie: C.adm });
-    ok('administrador con su sesión → métricas/informe de curso y métricas individuales → 403 (solo autoridad de máquina; no se amplía)', admMachine.every((x) => x.status === 403 && denied(x)), st(admMachine));
+    // V9 F5-E4: la sesión de administrador abre métricas e informe de curso SOLO en agregados (`aggregateOnly`, sin
+    // desglose ni listas con nombre; detalle en adminSchoolCourseMetricsHttp). Las métricas individuales de un lector
+    // siguen siendo de la autoridad de máquina o del propio lector.
+    const admCourse = await all([MC, RC], { cookie: C.adm });
+    ok('administrador con su sesión → métricas/informe de curso → 200 solo agregado, sin desglose ni listas con nombre', admCourse.every((x) => x.status === 200 && x.json?.aggregateOnly === true
+        && ['studentBreakdown', 'topPerformers', 'needsAttention'].every((k) => !(k in x.json)) && !/"userId"|fixture\.invalid/.test(x.text)), st(admCourse));
+    const admMachine = await all([MS], { cookie: C.adm });
+    ok('administrador con su sesión → métricas individuales de un lector → 403 (solo autoridad de máquina; no se amplía)', admMachine.every((x) => x.status === 403 && denied(x)), st(admMachine));
 
     console.log('[8] cookie vencida o revocada');
     const venc = await login(S1, 'ra-venc');

@@ -216,8 +216,12 @@ try {
         ok(`${route.slice(10)} no toma el actor del cuerpo ni de una cabecera`, i > 0 && /const actorId = await requireGlobalMetricsAdmin\(req, res\)/.test(blockSrc) && !/body\.actorId|x-user-id/.test(blockSrc));
     }
     ok('el control antiguo que admitía mediadores ya no existe', !/requireAdminOrMediator\(/.test(src));
-    const guard = src.slice(src.indexOf('async function requireGlobalMetricsAdmin'), src.indexOf('async function requireGlobalMetricsAdmin') + 900);
-    ok('el control admite la autoridad de máquina (isAdminRequest) y al administrador de plataforma del CIS, y nada del cuerpo', /await isAdminRequest\(req\)/.test(guard) && /isPlatformAdminCaller\(req, ident\.userId\)/.test(guard) && !/req\.body|req\.query/.test(guard));
+    // V9 F5-E4: la comprobación vive ahora en `administrativeActorOf` (la comparten las métricas por colegio y curso);
+    // `requireGlobalMetricsAdmin` la invoca y solo añade la respuesta de rechazo.
+    const actorAt = src.indexOf('async function administrativeActorOf'), guardAt = src.indexOf('async function requireGlobalMetricsAdmin');
+    const actor = src.slice(actorAt, actorAt + 900), guard = src.slice(guardAt, guardAt + 600);
+    ok('el control admite la autoridad de máquina (isAdminRequest) y al administrador de plataforma del CIS, y nada del cuerpo', actorAt > 0 && /await isAdminRequest\(req\)/.test(actor) && /isPlatformAdminCaller\(req, ident\.userId\)/.test(actor) && /isUserActive\(/.test(actor)
+        && /const actor = await administrativeActorOf\(req\);/.test(guard) && !/req\.body|req\.query/.test(actor + guard));
 } catch (e) {
     fail++; console.error('ERROR', e?.message || e);
 } finally {

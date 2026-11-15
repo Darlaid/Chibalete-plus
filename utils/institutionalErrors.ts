@@ -69,6 +69,15 @@ export function describeNoEligibleReaders(rosterCount: number | null): { title: 
     };
 }
 
+/**
+ * V9 F5-E4 — vista AGREGADA del curso (sesión de administración): el servidor entrega el curso entero en
+ * totales y promedios, sin desglose por estudiante. Se dice; no se pinta una lista vacía.
+ */
+export const AGGREGATE_VIEW_NOTE = 'Vista agregada del curso: la sesión de administración muestra totales y promedios, sin desglose por estudiante.';
+export function describeRosterCount(n: number): string {
+    return `${n} ${n === 1 ? 'estudiante' : 'estudiantes'} en la nómina`;
+}
+
 /** «6 lectores con seguimiento habilitado · nómina del curso: 7», o solo el recuento si coinciden o no se conoce la nómina. */
 export function describeReaderCoverage(eligible: number, rosterCount: number | null): string {
     const base = `${eligible} ${eligible === 1 ? 'lector con seguimiento habilitado' : 'lectores con seguimiento habilitado'}`;

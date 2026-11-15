@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
 import {
     ArrowLeft, AlertTriangle, Info, AlertCircle,
     Users, Clock, Zap, CheckCircle, BookOpen,
@@ -113,7 +113,9 @@ interface CourseMetrics {
     readingLevels: ReadingLevels;
     icdli: ICDLIScores;
     alerts: Alert[];
-    studentBreakdown: StudentRow[];
+    // V9 F5-E4: ausente en la vista agregada de administración (`aggregateOnly`).
+    studentBreakdown?: StudentRow[];
+    aggregateOnly?: boolean;
 }
 
 interface SuccessPattern {
@@ -1637,7 +1639,9 @@ const DashboardMediador: React.FC = () => {
     const rosterCount = courseId && dataService.getAllGroups().some(g => g.id === courseId)
         ? dataService.getGroupStudents(courseId).length : null;
     if (summary.studentCount === 0) {
-        const none = describeNoEligibleReaders(rosterCount);
+        // V9 F5-E4: en la vista agregada el recuento ES la nómina (no depende de habilitaciones).
+        const none = describeNoEligibleReaders(data.aggregateOnly ? 0 : rosterCount);
+        if (data.aggregateOnly) none.title = 'Curso sin estudiantes en la nómina';
         return (
             <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6" role="status">
                 <Info size={36} className="text-gray-400 mb-3" aria-hidden="true" />
@@ -1685,7 +1689,7 @@ const DashboardMediador: React.FC = () => {
                             {data.courseName}
                         </h1>
                         <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
-                            {describeReaderCoverage(summary.studentCount, rosterCount)} &bull; {summary.activeStudentCount} activos &bull; {pct(summary.engagementRate)} participación
+                            {data.aggregateOnly ? describeRosterCount(summary.studentCount) : describeReaderCoverage(summary.studentCount, rosterCount)} &bull; {summary.activeStudentCount} activos &bull; {pct(summary.engagementRate)} participación
                         </p>
                         {/* Interpretive sentence */}
                         <p className="text-sm text-gray-600 dark:text-gray-400 mt-2 max-w-xl leading-relaxed">
@@ -1955,6 +1959,13 @@ const DashboardMediador: React.FC = () => {
             )}
 
             {/* ── STUDENTS — tabbed: profiles / table ── */}
+            {/* V9 F5-E4: sin desglose (vista agregada de administración) se dice, y no se pintan listas vacías. */}
+            {!Array.isArray(studentBreakdown) ? (
+                <p role="note" className="flex items-start gap-2 px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 text-sm text-gray-600 dark:text-gray-400">
+                    <Info size={15} className="shrink-0 mt-0.5" aria-hidden="true" />
+                    {AGGREGATE_VIEW_NOTE}
+                </p>
+            ) : (
             <div>
                 <div className="flex items-center gap-0 border-b border-gray-100 dark:border-gray-700 mb-5">
                     {(['profiles', 'table'] as const).map(v => (
@@ -1983,6 +1994,7 @@ const DashboardMediador: React.FC = () => {
                 }
 
             </div>
+            )}
 
             {/* ── ACTION BLOCK ── */}
             <ActionBlock alerts={alerts} />

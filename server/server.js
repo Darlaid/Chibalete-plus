@@ -725,13 +725,24 @@ async function isPlatformAdminCaller(req, callerId) {
  * @returns {Promise<string|false>} actor, o false si ya respondió.
  */
 const MACHINE_ACTOR = 'admin-secret';
+/**
+ * V9 F5-E4 — la autoridad administrativa de quien llama, sin responder: `admin-secret` (autoridad de máquina), el id de
+ * la sesión firmada de un administrador de plataforma ACTIVO (CIS), o null. Es la comprobación que ya hacía
+ * `requireGlobalMetricsAdmin`, extraída para que las métricas por colegio y curso usen exactamente la misma.
+ * @returns {Promise<string|null>}  @throws {IdentityUnavailableError}
+ */
+async function administrativeActorOf(req) {
+    if (await isAdminRequest(req)) return MACHINE_ACTOR;
+    const ident = await authenticatedUserIdOf(req);
+    // V9 F5-C3S: además, la cuenta debe seguir ACTIVA (un administrador desactivado no conserva autoridad).
+    if (ident.ok && ident.userId && await isPlatformAdminCaller(req, ident.userId)
+        && isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === ident.userId))) return String(ident.userId);
+    return null;
+}
 async function requireGlobalMetricsAdmin(req, res) {
     try {
-        if (await isAdminRequest(req)) return MACHINE_ACTOR;
-        const ident = await authenticatedUserIdOf(req);
-        // V9 F5-C3S: además, la cuenta debe seguir ACTIVA (un administrador desactivado no conserva autoridad).
-        if (ident.ok && ident.userId && await isPlatformAdminCaller(req, ident.userId)
-            && isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === ident.userId))) return String(ident.userId);
+        const actor = await administrativeActorOf(req);
+        if (actor) return actor;
     } catch (e) {
         if (!(e instanceof IdentityUnavailableError)) throw e;
         log(`[AUTHZ] global metrics scope unavailable: ${e.causeTag}`, 'ERROR');
@@ -11349,9 +11360,59 @@ function mediatorCourseReaders(requester, courseId) {
 async function courseMetricsOptions(req, res, requester, courseId) {
     if (await isAdminRequest(req)) return {};
     const scope = mediatorCourseReaders(requester, courseId);
+    if (scope.decision === 'allow') return { includeStudent: (id) => scope.eligible.has(id) };
+    // V9 F5-E4 — administrador de plataforma con sesión firmada y cuenta activa: el curso COMPLETO, pero solo en
+    // agregados (`aggregateOnly`). El rol no concede por sí mismo el desglose individual: ese sigue siendo de la
+    // autoridad de máquina y del mediador con A2 y C005. Va después del camino del mediador, que no cambia.
+    let admin = null;
+    try { admin = await administrativeActorOf(req); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] course metrics admin scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return null;
+    }
+    if (admin) return { aggregateOnly: true };
     if (scope.decision === 'unavailable') { res.status(503).json({ error: 'individual_access_unavailable' }); return null; }
-    if (scope.decision !== 'allow') { res.status(403).json({ error: 'Acceso denegado' }); return null; }
-    return { includeStudent: (id) => scope.eligible.has(id) };
+    res.status(403).json({ error: 'Acceso denegado' });
+    return null;
+}
+/**
+ * V9 F5-E4 — proyección AGREGADA de métricas o informe de curso para la administración humana: se retiran el
+ * desglose por estudiante y las dos listas con nombre. Nada se sustituye por ceros ni por listas vacías: los campos
+ * no van, y `aggregateOnly` lo declara. Los demás (resumen, promedios, niveles, distribuciones, alertas, backbone,
+ * metadatos del informe) son del curso entero y no identifican a nadie.
+ */
+const COURSE_INDIVIDUAL_FIELDS = Object.freeze(['studentBreakdown', 'topPerformers', 'needsAttention']);
+function aggregateCourseProjection(response) {
+    const out = { ...response, aggregateOnly: true };
+    for (const k of COURSE_INDIVIDUAL_FIELDS) delete out[k];
+    return out;
+}
+/** Sin usuarios NO se consulta el backbone: una lista vacía equivale allí a «sin filtro» (agregado de la plataforma). */
+function scopedBackboneMetrics(userIds) {
+    if (userIds.length > 0) return safeLoadBackboneMetrics({ userIds, windowDays: 30 });
+    const empty = emptyBackboneMetrics({ windowDays: 30 });
+    empty.funnels  = emptyBackboneFunnels({ windowDays: 30 });
+    empty.insights = emptyBackboneInsights({ windowDays: 30 });
+    return empty;
+}
+/**
+ * V9 F5-E4 — métricas e informe por COLEGIO: autoridad de máquina o administrador de plataforma con sesión firmada
+ * y cuenta activa. La respuesta ya era solo agregada (totales, promedios y una fila por curso); no lleva estudiantes.
+ * @returns {Promise<boolean>} false = ya respondió.
+ */
+async function requireSchoolMetricsAdmin(req, res) {
+    try {
+        if (await administrativeActorOf(req)) return true;
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] school metrics scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return false;
+    }
+    res.status(403).json({ error: 'Acceso denegado: solo administradores' });
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -11927,6 +11988,15 @@ const legacyMetricsCourseHandler = async (req, res) => {
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         const response = formatCourseResponse(raw, users);
 
+        // V9 F5-E4: administración humana ⇒ solo agregados. Ni se calculan perfiles individuales ni se entrega
+        // el desglose; el backbone se acota a los miembros del curso (los ids no salen en la respuesta).
+        if (metricsOptions.aggregateOnly) {
+            const memberIds = raw.studentBreakdown.map(s => s.userId).filter(id => typeof id === 'string');
+            const aggregate = aggregateCourseProjection(response);
+            aggregate.backboneMetrics = scopedBackboneMetrics(memberIds);
+            return res.json(aggregate);
+        }
+
         // Augment each student with their pedagogical profile (computed from session timelines)
         const pDb       = getAllProgressAsMap();
         const leoRaw    = readJSON(LEO_INTERACTIONS_DB) || [];
@@ -11971,9 +12041,8 @@ app.get('/api/metrics/course/:courseId', mountLegacyMetricsRoute('metrics.course
 // Returns aggregated structured metrics for a school.
 // Requires: admin secret only.
 const legacyMetricsSchoolHandler = async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
-    }
+    // V9 F5-E4: máquina o administrador de plataforma con sesión firmada y cuenta activa.
+    if (!(await requireSchoolMetricsAdmin(req, res))) return;
     const { groups }     = loadAndInitMetrics();
     const input          = decodeURIComponent(req.params.schoolId);
     const schoolRecord   = resolveSchoolRecord(input, groups);
@@ -11989,10 +12058,8 @@ const legacyMetricsSchoolHandler = async (req, res) => {
         // Sprint Data Backbone Fase 3: backboneMetrics agregado para todos
         // los alumnos de la escuela. Aditivo.
         const schoolUserIds = collectSchoolUserIds(schoolRecord.schoolName, groups);
-        response.backboneMetrics = safeLoadBackboneMetrics({
-            userIds:    schoolUserIds,
-            windowDays: 30,
-        });
+        // V9 F5-E4: un colegio sin miembros no devuelve el agregado de toda la plataforma bajo su nombre.
+        response.backboneMetrics = scopedBackboneMetrics(schoolUserIds);
 
         res.json(response);
     } catch (e) {
@@ -12353,7 +12420,8 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
             dataWindow,
         };
 
-        res.json(response);
+        // V9 F5-E4: administración humana ⇒ solo agregados (sin desglose ni listas con nombre).
+        res.json(metricsOptions.aggregateOnly ? aggregateCourseProjection(response) : response);
     } catch (e) {
         log(`Report course error (${courseId}): ${e.message}`, 'ERROR');
         const status = e.message.includes('not found') ? 404 : 500;
@@ -12365,9 +12433,8 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
 // Report-ready version of school metrics. Accepts slug or name.
 // Requires: admin secret only.
 app.get('/api/reports/school/:schoolId', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        return res.status(403).json({ error: 'Acceso denegado: solo administradores' });
-    }
+    // V9 F5-E4: máquina o administrador de plataforma con sesión firmada y cuenta activa.
+    if (!(await requireSchoolMetricsAdmin(req, res))) return;
     const { groups }   = loadAndInitMetrics();
     const input        = decodeURIComponent(req.params.schoolId);
     const schoolRecord = resolveSchoolRecord(input, groups);
