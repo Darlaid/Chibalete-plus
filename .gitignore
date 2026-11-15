@@ -193,6 +193,10 @@ dummy_text.txt
 # Reusables vía stdin pipe (no requieren despliegue en el VPS). NO integrados
 # al pipeline de deploy ni a cron — se ejecutan manualmente cuando hace falta.
 !/scripts/audit-school-drift.mjs
+# SEC-SESSION-IDENTITY-04U — recuento de mediación heredada: solo lectura, solo recuentos.
+!/scripts/ops/
+/scripts/ops/*
+!/scripts/ops/count-legacy-mediation.mjs
 
 # Sprint hardening modo inmersivo (2026-05-11) — pre-build/pre-deploy gate.
 # Verifica INV 2/3/4/10/12 sobre el codebase frontend (auto-navegación, storage
