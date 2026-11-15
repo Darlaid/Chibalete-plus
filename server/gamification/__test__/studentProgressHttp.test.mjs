@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freePorts } from '../../__test__/helpers/freePort.mjs';
 
 let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
@@ -172,12 +173,19 @@ function spawnApi(port, { flags = ENV } = {}) {
     return child;
 }
 async function healthy(child) {
+    // CI-STABILITY-01: se conserva el último motivo de la comprobación. Antes se descartaba, y un rechazo del propio
+    // `fetch` (p. ej. `bad port`) con el servidor ya escuchando parecía un arranque que nunca terminaba.
+    let last = 'sin respuesta';
     for (let i = 0; i < 400; i++) {
         if (child.exitCode !== null) throw new Error(`server rc=${child.exitCode}\n${child.logs().slice(-1500)}`);
-        try { if ((await fetch(`${child.base}/api/health`)).ok) return; } catch { /* arrancando */ }
+        try {
+            const r = await fetch(`${child.base}/api/health`);
+            if (r.ok) return;
+            last = `HTTP ${r.status}`;
+        } catch (e) { last = e?.cause?.message || e?.cause?.code || e?.message || String(e); /* arrancando */ }
         await sleep(300);
     }
-    throw new Error(`nunca healthy\n${child.logs().slice(-1500)}`);
+    throw new Error(`nunca healthy (última comprobación: ${last}; ¿escuchando?: ${/Server running on port/.test(child.logs())})\n${child.logs().slice(-1500)}`);
 }
 const get = async (child, gid, sid, uid) => {
     const r = await fetch(`${child.base}/api/groups/${encodeURIComponent(gid)}/students/${encodeURIComponent(sid)}/progress`, uid ? { headers: { 'x-user-id': uid } } : {});
@@ -190,7 +198,10 @@ const summary = async (child, gid, uid) => {
     return { status: r.status, body: await r.json().catch(() => null) };
 };
 
-const PORT = 6400 + (process.pid % 100) * 3;
+// CI-STABILITY-01: puertos libres del sistema (rango efímero). Antes: `6400 + (process.pid % 100) * 3`, que con 5 de
+// cada 100 PID caía en un puerto que `fetch` rechaza por norma (`bad port`: 6566, 6665–6669, 6679, 6697). El servidor
+// arrancaba y escuchaba, pero la comprobación de salud de esta prueba no podía hablarle y agotaba la espera.
+const [PORT_ON, PORT_OFF, PORT_XP_OFF] = await freePorts(3);
 const servers = [];
 try {
     section('[0] siembra (escritor real, réplica viva)');
@@ -198,9 +209,9 @@ try {
     ok('otras personas con una obra reconocida: 30 XP', seededXp.a2 === 30 && seededXp.x1 === 30 && seededXp.b1 === 30, JSON.stringify(seededXp));
     ok('el escritor no escribió PM', ['gm_pm_movements', 'gm_pm_balances', 'gm_redemptions'].every((t) => writer.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n === 0));
 
-    const on = spawnApi(PORT);
-    const off = spawnApi(PORT + 1, { flags: { GAMIFICATION_ENABLED: '' } });
-    const xpOff = spawnApi(PORT + 2, { flags: { ...ENV, XP_EARNING_ENABLED: '' } });
+    const on = spawnApi(PORT_ON);
+    const off = spawnApi(PORT_OFF, { flags: { GAMIFICATION_ENABLED: '' } });
+    const xpOff = spawnApi(PORT_XP_OFF, { flags: { ...ENV, XP_EARNING_ENABLED: '' } });
     servers.push(on, off, xpOff);
     for (const s of servers) await healthy(s); // en serie: runners de CI lentos
     const mookBefore = fs.readFileSync(P.mook, 'utf8');
