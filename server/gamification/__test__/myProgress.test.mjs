@@ -27,6 +27,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// V9 F5-E3 — «motivos y decisiones internas» que la respuesta de «Mi progreso» nunca debe traer: razones y
+// estados internos del reconocimiento (en cualquier capitalización) y el marcador retirado de Puntos de Magia,
+// como CAMPO (`pm`, `PM`, `pmBalance`, `pm_total`…) o como VALOR exacto ("pm" / "PM"). Las letras «pm» dentro de
+// un identificador no son ese marcador.
+const INTERNAL_WORDS = /reason|rejected|excluded|withdrawn|predates|locked|disabled/i;
+const PM_MARKER = /"(?:pm|PM)(?:[A-Z_][A-Za-z0-9_]*)?"\s*:|[:\[,]\s*"(?:pm|PM)"\s*[,}\]]/;
+const internalMarkersIn = (json) => [INTERNAL_WORDS, PM_MARKER].map((re) => json.match(re)?.[0]).filter(Boolean);
+const hasInternalMarkers = (json) => internalMarkersIn(json).length > 0;
+
 let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
 const section = (t) => console.log(`\n${t}`);
@@ -333,7 +342,26 @@ try {
         ok('sin subject_ref, work_key, fact_id ni source_event_id', !/subject|work_key|workKey|fact|source_event|tombstone/i.test(all));
         ok('sin claves hex de 64', !/[0-9a-f]{64}/.test(all));
         ok('sin ids de evidencias, runs ni revisores', !/evid-|run-|u-med|reviewer/.test(all));
-        ok('sin motivos ni decisiones internas', !/reason|rejected|excluded|withdrawn|predates|locked|disabled|PM|pm"/i.test(all));
+        ok('sin motivos ni decisiones internas', !hasInternalMarkers(all), internalMarkersIn(all).join(','));
+        // V9 F5-E3: el patrón anterior (`…|PM|pm"/i`) no distinguía mayúsculas, así que «pm» dentro de un
+        // identificador aleatorio (p. ej. `exp-…-7xpmq2`) daba un falso positivo esporádico. Lo prohibido es
+        // el marcador de Puntos de Magia como CAMPO o VALOR de la respuesta, no esas dos letras en un id.
+        {
+            const J = (o) => JSON.stringify(o);
+            ok('marcador PM: campo `pm` / `PM` / `pmBalance` / `pm_total` / `pmFactors` → detectado', [{ pm: 0 }, { PM: 3 }, { pmBalance: 1 }, { pm_total: 2 }, { a: { b: [{ pmFactors: [] }] } }].every((o) => hasInternalMarkers(J(o))));
+            ok('marcador PM: valor "pm" / "PM" (unidad, tipo, elemento de lista) → detectado', [{ unit: 'pm' }, { scale: 'PM' }, { kinds: ['xp', 'pm'] }, { kinds: ['PM'] }].every((o) => hasInternalMarkers(J(o))));
+            ok('motivos y decisiones internas → detectados, en cualquier capitalización', ['reason', 'Rejected', 'EXCLUDED', 'withdrawn', 'predates', 'locked', 'disabled'].every((w) => hasInternalMarkers(J({ [w]: 1 })) && hasInternalMarkers(J({ x: `a ${w} b` }))));
+            const ids = ['exp-1793925477270-7xpmq2', 'run-pm0a', 'c-PMx9', 'apm', 'PMS-12', 'u-spam', 'opm-PM-zpm', 'pmpmpm', 'x_pm_y', 'Zpm"k', 'pm-1', 'PM_9', '4pm', 'pmx', 'PMx'];
+            ok('identificadores que contienen «pm» como valor → NO son marcador', ids.every((id) => !hasInternalMarkers(J({ id, items: [{ contentId: id, title: `Título ${id}` }], list: [id] }))), ids.filter((id) => hasInternalMarkers(J({ id, list: [id] }))).join(','));
+            ok('una respuesta limpia de «Mi progreso» → sin marcadores', !hasInternalMarkers(J({ xp: 120, level: { id: 'semilla' }, works: [{ id: 'exp-1-apmz', state: 'recognized' }], achievements: [] })));
+            let falsePositives = 0;
+            for (let i = 0; i < 20000; i++) {
+                const rnd = crypto.randomBytes(9).toString('base64url');
+                const id = `${i % 2 ? 'exp' : 'c'}-${Date.now()}-${rnd.slice(0, i % 7)}${['pm', 'PM', 'Pm', 'pM'][i % 4]}${rnd.slice(i % 7)}`;
+                if (hasInternalMarkers(J({ contentId: id, work: { id, title: id }, list: [id, `${id}-2`] }))) falsePositives++;
+            }
+            ok('20 000 identificadores aleatorios con «pm» incrustado → 0 falsos positivos', falsePositives === 0, String(falsePositives));
+        }
         const keys = new Set();
         const walk = (o) => { if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { keys.add(k); walk(v); } };
         Object.values(R).forEach(walk);
