@@ -68,10 +68,20 @@ export function fetchMetaOf(value: unknown): FetchMeta {
     return (value && typeof value === 'object' && (value as { _meta?: FetchMeta })._meta) || {};
 }
 /** Adjunta `_meta` conservando la forma: una lista sigue siendo una lista. */
-function withMeta<T>(value: T, meta: FetchMeta): T & { _meta: FetchMeta } {
+export function withMeta<T>(value: T, meta: FetchMeta): T & { _meta: FetchMeta } {
     const out = Array.isArray(value) ? [...value] : { ...(value as object) };
     Object.defineProperty(out, '_meta', { value: meta, enumerable: false });
     return out as T & { _meta: FetchMeta };
+}
+/**
+ * Frase para una consulta que no respondió. Distingue lo que el servidor negó (403) de lo que no
+ * pudo atender ahora (503/5xx) y de la falta de respuesta (sin conexión).
+ */
+export function describeFetchFailure(m: FetchMeta, retryLabel = 'Actualizar'): string {
+    return m.status === 403 ? 'Esta consulta no está habilitada para tu cuenta.'
+        : m.status === 401 ? 'Tu sesión terminó. Vuelve a iniciar sesión.'
+        : m.status && m.status >= 500 ? `El servicio no está disponible en este momento (interrupción temporal). Inténtalo de nuevo con «${retryLabel}».`
+        : `No hubo respuesta del servidor. Revisa la conexión e inténtalo de nuevo con «${retryLabel}».`;
 }
 
 async function get<T>(path: string, fallback: T): Promise<T & { _meta?: FetchMeta }> {

@@ -142,7 +142,7 @@ try {
     ok('sin cuenta local identificada no se guarda copia', globalThis.localStorage.getItem('chibalete:aulaviva:/students-needing-attention') === null);
 
     const inst = code('services/aulaVivaInstitutionalService.ts');
-    ok('pestaña institucional: misma regla de dueño y sin copia ante 5xx', /owner !== me/.test(inst) && /if \(httpStatus\) return fallback;/.test(inst) && /JSON\.stringify\(\{ value, at: Date\.now\(\), owner \}\)/.test(inst));
+    ok('pestaña institucional: misma regla de dueño y sin copia ante una respuesta de rechazo (detalle en InstitutionalTabF5E2S)', /owner !== me/.test(inst) && /if \(httpStatus\) return withMeta\(fallback, \{ failed: true, status: httpStatus \}\);/.test(inst) && /JSON\.stringify\(\{ value, at: Date\.now\(\), owner \}\)/.test(inst));
 
     const page = code('pages/AulaVivaOperacional.tsx');
     ok('la página consulta cómo llegó cada resultado', /fetchMetaOf\(status\)/.test(page) && /fetchMetaOf\(attention\)/.test(page) && /fetchMetaOf\(cohort\)/.test(page) && /fetchMetaOf\(recs\)/.test(page));

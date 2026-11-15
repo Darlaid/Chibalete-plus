@@ -17,6 +17,7 @@ import {
     type InstitutionalStatus, type InstitutionalLearning,
     type ComparativeStrategies, type CohortDefinition,
 } from '../../services/aulaVivaInstitutionalService';
+import { fetchMetaOf, describeFetchFailure, type FetchMeta } from '../../services/aulaVivaOperationalService';
 import { EmptyState } from './EmptyState';
 import { InstitutionalLearningCard } from './InstitutionalLearningCard';
 import { OutcomeDistributionBars } from './OutcomeDistributionBars';
@@ -52,6 +53,7 @@ export const InstitutionalTab: React.FC = () => {
     const [followup, setFollowup] = useState<Array<any>>([]);
     const [trajCohort, setTrajCohort] = useState<CohortDefinition | null>(null);
     const [trajSeries, setTrajSeries] = useState<Array<any>>([]);
+    const [trajMeta, setTrajMeta] = useState<FetchMeta>({});
     const [loading, setLoading] = useState(true);
 
     const refresh = useCallback(async () => {
@@ -71,6 +73,7 @@ export const InstitutionalTab: React.FC = () => {
         setTrajCohort(cohort);
         const r = await aulaVivaInstitutionalService.getCohortTrajectory(cohort.cohort_id);
         setTrajSeries(r.series || []);
+        setTrajMeta(fetchMetaOf(r));
     }, []);
 
     useEffect(() => { refresh(); }, [refresh]);
@@ -79,21 +82,54 @@ export const InstitutionalTab: React.FC = () => {
         return <div className="p-6 text-sm text-gray-500 animate-pulse">Cargando vista institucional…</div>;
     }
 
+    // V9 F5-E2S — una consulta que NO respondió no es «cero aprendizajes» ni «sin seguimiento
+    // pendiente». Cada bloque mira cómo llegó su dato antes de decidir qué decir.
+    const statusMeta = fetchMetaOf(status), learningsMeta = fetchMetaOf(learnings), comparativeMeta = fetchMetaOf(comparative),
+        cohortsMeta = fetchMetaOf(cohorts), followupMeta = fetchMetaOf(followup);
+    const cachedMetas = [statusMeta, learningsMeta, comparativeMeta, cohortsMeta, followupMeta].filter(m => m.cached);
+    const cachedAgeMin = Math.max(0, ...cachedMetas.map(m => Math.round((m.age_ms ?? 0) / 60000)));
+    const kpi = (v: number | undefined) => (statusMeta.failed ? '—' : v ?? 0);
+    const count = (m: FetchMeta, n: number, unit: string) => (m.failed ? 'no se pudo consultar' : `${n} ${unit}`);
+    const Failed: React.FC<{ meta: FetchMeta; where: string; what: string; note?: string }> = ({ meta, where, what, note }) => (
+        <div className="mt-3">
+            <EmptyState kind="custom" where={where} title={`No pudimos consultar ${what}`}
+                        body={`${describeFetchFailure(meta, 'Reintentar')}${note ? ` ${note}` : ''}`}>
+                <button type="button" onClick={refresh}
+                        className="text-sm text-blue-700 hover:bg-blue-50 px-3 py-1.5 rounded-md border border-blue-200">
+                    Reintentar
+                </button>
+            </EmptyState>
+        </div>
+    );
+
     return (
         <div className="max-w-5xl mx-auto">
+            {cachedMetas.length > 0 && (
+                <p role="status" className="mb-4 px-3 py-2 rounded-md border border-amber-200 bg-amber-50 text-sm text-amber-900">
+                    Sin respuesta del servidor: se muestran los datos que esta cuenta consultó hace {cachedAgeMin} min. Pueden no estar al día.
+                </p>
+            )}
             {/* KPIs institucionales mínimos */}
             <section className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-4">
-                <KpiBox label="Outcomes" value={status?.outcomes?.total ?? 0}/>
-                <KpiBox label="Cohortes activas" value={status?.cohorts?.total_active ?? 0}/>
-                <KpiBox label="Trayectorias" value={status?.trajectories?.total ?? 0}/>
-                <KpiBox label="Aprendizajes" value={status?.learnings?.total_active ?? 0}/>
-                <KpiBox label="Patrones" value={status?.patterns?.total_active ?? 0}/>
+                <KpiBox label="Outcomes" value={kpi(status?.outcomes?.total)}/>
+                <KpiBox label="Cohortes activas" value={kpi(status?.cohorts?.total_active)}/>
+                <KpiBox label="Trayectorias" value={kpi(status?.trajectories?.total)}/>
+                <KpiBox label="Aprendizajes" value={kpi(status?.learnings?.total_active)}/>
+                <KpiBox label="Patrones" value={kpi(status?.patterns?.total_active)}/>
             </section>
+            {statusMeta.failed && (
+                <p role="status" className="mb-4 -mt-2 text-xs text-amber-700">
+                    No se pudieron consultar los totales institucionales. {describeFetchFailure(statusMeta, 'Reintentar')}
+                </p>
+            )}
 
             {/* Aprendizajes institucionales (default expanded — lo más útil) */}
             <Section title="Aprendizajes institucionales" icon={Lightbulb} defaultExpanded
-                     subtitle={`${learnings.length} activos`}>
-                {learnings.length === 0 ? (
+                     subtitle={count(learningsMeta, learnings.length, 'activos')}>
+                {learningsMeta.failed ? (
+                    <Failed meta={learningsMeta} where="institutional_learnings_failed" what="los aprendizajes institucionales"
+                            note="Esto no significa que no haya aprendizajes registrados."/>
+                ) : learnings.length === 0 ? (
                     <EmptyState kind="no_recommendations" where="institutional_learnings"
                                 title="Sin aprendizajes registrados"
                                 body="Los aprendizajes aparecen cuando hay suficiente historia de intervenciones (mínimo 5 outcomes por estrategia)."/>
@@ -109,7 +145,9 @@ export const InstitutionalTab: React.FC = () => {
             {/* Comparative intelligence */}
             <Section title="Comparativa de estrategias observada" icon={Activity}
                      subtitle="sin causalidad, solo observación">
-                {!comparative || comparative.strategies.length === 0 ? (
+                {comparativeMeta.failed ? (
+                    <Failed meta={comparativeMeta} where="comparative_strategies_failed" what="la comparativa de estrategias"/>
+                ) : !comparative || comparative.strategies.length === 0 ? (
                     <EmptyState kind="no_recommendations" where="comparative_strategies"
                                 title="Sin comparativa disponible aún"
                                 body="La comparativa de estrategias requiere outcomes registrados."/>
@@ -151,8 +189,10 @@ export const InstitutionalTab: React.FC = () => {
 
             {/* Cohortes + trayectorias */}
             <Section title="Cohortes y trayectorias" icon={Users}
-                     subtitle={`${cohorts.length} cohortes activas`}>
-                {cohorts.length === 0 ? (
+                     subtitle={count(cohortsMeta, cohorts.length, 'cohortes activas')}>
+                {cohortsMeta.failed ? (
+                    <Failed meta={cohortsMeta} where="cohort_definitions_failed" what="las cohortes"/>
+                ) : cohorts.length === 0 ? (
                     <EmptyState kind="snapshots_pending" where="cohort_definitions"
                                 title="Sin cohortes construidas todavía"
                                 body="Activa AULA_VIVA_COHORT_BUILDER_ENABLED y espera al próximo ciclo del scheduler."/>
@@ -173,6 +213,10 @@ export const InstitutionalTab: React.FC = () => {
                                 <p className="text-xs text-gray-500 italic">
                                     Selecciona una cohorte para ver su trayectoria.
                                 </p>
+                            ) : trajMeta.failed ? (
+                                <EmptyState kind="custom" where="cohort_trajectory_failed"
+                                            title={`No pudimos consultar la trayectoria de ${trajCohort.cohort_key}`}
+                                            body={describeFetchFailure(trajMeta, 'Reintentar')}/>
                             ) : trajSeries.length === 0 ? (
                                 <EmptyState kind="snapshots_pending" where="cohort_trajectory_empty"
                                             title={`Sin serie temporal para ${trajCohort.cohort_key}`}
@@ -197,8 +241,11 @@ export const InstitutionalTab: React.FC = () => {
 
             {/* Seguimiento pendiente */}
             <Section title="Seguimiento de intervenciones pendiente" icon={Clock}
-                     subtitle={`${followup.length} con follow-up vencido`}>
-                {followup.length === 0 ? (
+                     subtitle={count(followupMeta, followup.length, 'con follow-up vencido')}>
+                {followupMeta.failed ? (
+                    <Failed meta={followupMeta} where="followup_queue_failed" what="el seguimiento pendiente"
+                            note="Esto no significa que no haya intervenciones por seguir."/>
+                ) : followup.length === 0 ? (
                     <EmptyState kind="no_recommendations" where="followup_queue"
                                 title="Sin seguimiento pendiente"
                                 body="Las intervenciones con ventana de follow-up cumplida ya tienen outcome calculado."/>

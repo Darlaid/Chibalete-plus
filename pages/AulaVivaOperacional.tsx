@@ -18,7 +18,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Users, AlertCircle, Sparkles, TrendingUp, Activity, ChevronRight } from 'lucide-react';
 import {
-    aulaVivaOperationalService, fetchMetaOf,
+    aulaVivaOperationalService, fetchMetaOf, describeFetchFailure,
     type AttentionItem, type OperationalStatus, type CohortComparison,
     type Recommendation, type ProfileTimeline,
 } from '../services/aulaVivaOperationalService';
@@ -171,11 +171,7 @@ const AulaVivaOperacional: React.FC = () => {
     const statusMeta = fetchMetaOf(status), attentionMeta = fetchMetaOf(attention), cohortMeta = fetchMetaOf(cohort), recsMeta = fetchMetaOf(recs);
     const cachedMetas = [statusMeta, attentionMeta, cohortMeta].filter(m => m.cached);
     const cachedAgeMin = Math.max(0, ...cachedMetas.map(m => Math.round((m.age_ms ?? 0) / 60000)));
-    const failureText = (m: { status?: number }) =>
-        m.status === 503 ? 'El servicio no está disponible en este momento (interrupción temporal). Inténtalo de nuevo con «Actualizar».'
-        : m.status === 403 ? 'Esta consulta no está habilitada para tu cuenta.'
-        : m.status === 401 ? 'Tu sesión terminó. Vuelve a iniciar sesión.'
-        : 'No hubo respuesta del servidor. Revisa la conexión e inténtalo de nuevo con «Actualizar».';
+    const failureText = (m: Parameters<typeof describeFetchFailure>[0]) => describeFetchFailure(m);
     const materializerReady = !!status?.materializer_ready?.ready && !statusMeta.failed;
 
     // Sparkline de active_users (proxy de continuidad institucional)

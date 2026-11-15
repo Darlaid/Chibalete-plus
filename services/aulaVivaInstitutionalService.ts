@@ -9,6 +9,10 @@
  * Cubre los 13 endpoints /api/aula-viva/institutional/* PASO 7.
  */
 
+// V9 F5-E2S — mismas marcas que el Centro operativo (sin otra capa): `failed` = la consulta no
+// respondió y lo devuelto es relleno, NO «no hay nada»; `cached` = copia de esta misma cuenta.
+import { withMeta, type FetchMeta } from './aulaVivaOperationalService';
+
 const BASE = '/api/aula-viva/institutional';
 const TIMEOUT_MS = 5_000;
 const CACHE_TTL_MS = 5 * 60_000;
@@ -46,7 +50,7 @@ function getUserId(): string | null {
     } catch { return null; }
 }
 
-async function get<T>(path: string, fallback: T): Promise<T> {
+async function get<T>(path: string, fallback: T): Promise<T & { _meta?: FetchMeta }> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     let httpStatus = 0;
@@ -57,9 +61,10 @@ async function get<T>(path: string, fallback: T): Promise<T> {
             signal: ctrl.signal,
         });
         if (!res.ok) {
-            // 403 (scope_access_denied) lo dejamos pasar como fallback — la UI
-            // muestra empty state "sin permisos" sin romper la pantalla.
-            if (res.status === 403) { try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ } return fallback; }
+            // V9 F5-E2S — un 403 se devolvía como relleno sin marca y la pantalla lo pintaba como
+            // «0 aprendizajes». Ahora llega marcado: la pantalla dice que la consulta no está
+            // habilitada. La copia local de esa ruta se descarta.
+            if (res.status === 401 || res.status === 403) { try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ } }
             httpStatus = res.status;
             throw new Error(`HTTP ${res.status}`);
         }
@@ -67,19 +72,18 @@ async function get<T>(path: string, fallback: T): Promise<T> {
         writeCache(path, body);
         return body as T;
     } catch (e) {
-        // V9 F5-E2 — si el servidor respondió que ahora no puede (503, 5xx), una copia anterior no
-        // lo desmiente. La copia solo sirve cuando no hubo respuesta (sin conexión).
-        if (httpStatus) return fallback;
+        // V9 F5-E2 — si el servidor respondió que no (403) o que ahora no puede (503, 5xx), una copia
+        // anterior no lo desmiente. La copia solo sirve cuando no hubo respuesta (sin conexión).
+        if (httpStatus) return withMeta(fallback, { failed: true, status: httpStatus });
         const cached = readCache<T>(path);
-        if (cached) return cached.value;
-        return fallback;
+        if (cached) return withMeta(cached.value, { cached: true, stale: cached.stale, age_ms: cached.age_ms });
+        return withMeta(fallback, { failed: true, status: 0 });
     } finally { clearTimeout(timer); }
 }
 
 async function post<T>(path: string, body: unknown): Promise<T | { ok: false; error: string }> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    const userId = getUserId();
     try {
         const res = await fetch(BASE + path, {
             method: 'POST',
