@@ -5224,8 +5224,10 @@ app.get('/api/progress/user/:userId', async (req, res) => {
         const requester = await sessionRequesterOf(req, users);
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
-        if (!isOwner && !isAdmin && !isMediator) {
+        // SEC-SESSION-IDENTITY-04: el rol de mediador ya no basta; debe mediar un grupo del lector (CIS).
+        const mediated = (isOwner || isAdmin) ? 'deny' : mediatedReaderAccess(requester, userId, users);
+        if (mediated === 'unavailable') return res.status(503).json({ error: 'identity_unavailable' });
+        if (!isOwner && !isAdmin && mediated !== 'allow') {
             log(`GET progress/user denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -5253,7 +5255,10 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
         const isOwner = requester && requester.id === userId;
         const isAdmin = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
         const isMediator = requester && isMediatorRole(requester);
-        if (!isOwner && !isAdmin && !isMediator) {
+        // SEC-SESSION-IDENTITY-04: el rol de mediador ya no basta; debe mediar un grupo del lector (CIS).
+        const mediated = (isOwner || isAdmin) ? 'deny' : mediatedReaderAccess(requester, userId, users);
+        if (mediated === 'unavailable') return res.status(503).json({ error: 'identity_unavailable' });
+        if (!isOwner && !isAdmin && mediated !== 'allow') {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
         }
@@ -10899,6 +10904,88 @@ function isMediatorOfCourse(user, courseId, groups) {
 }
 
 // ---------------------------------------------------------------------------
+// SEC-SESSION-IDENTITY-04 — permisos heredados, con los controles que ya existen
+// en esta versión (CIS). Sin registro de decisiones ni autorizaciones nuevas.
+// ---------------------------------------------------------------------------
+
+/** Cuenta personal B2C (creada por la tienda, sin institución): nunca se ve por mediación. */
+const isPersonalB2cAccount = (user) => !!user && user.b2c === true && !institutionalContextIdOf(user);
+
+/**
+ * ¿Puede `requester` leer el progreso de OTRA persona por mediación?
+ * Solo si el CIS reconoce que media un grupo ACTIVE_REAL del que el lector es
+ * miembro explícito (`mediator_of_member_group`). El rol, `user.groupIds` y las
+ * cabeceras no sustituyen esa relación. Lo propio y la administración se deciden fuera.
+ * @returns {'allow'|'deny'|'unavailable'}
+ */
+function mediatedReaderAccess(requester, userId, users) {
+    if (!requester || !isMediatorRole(requester)) return 'deny';
+    if (isPersonalB2cAccount((users || []).find(u => u?.id === userId))) return 'deny';
+    const d = evaluateScopeAccess(requester.id, 'user', String(userId ?? ''));
+    if (d.decision === 'unavailable') {
+        log(`[AUTHZ] mediated reader scope unavailable: ${d.cause}`, 'ERROR');
+        return 'unavailable';
+    }
+    return d.decision === 'allow' && d.via === 'mediator_of_member_group' ? 'allow' : 'deny';
+}
+
+/**
+ * Métricas y alertas GLOBALES de la plataforma: autoridad de máquina (admin-secret
+ * file-only) o administrador de plataforma según el CIS, con sesión firmada y
+ * cuenta activa. El rol de mediador no alcanza. Se resuelve antes de leer o escribir.
+ */
+async function requireGlobalMetricsAdmin(req, res) {
+    try {
+        if (await isAdminRequest(req)) return true;
+        const ident = await authenticatedUserIdOf(req);
+        if (ident.ok && ident.userId && getPrincipal(ident.userId)?.platformAdmin
+            && isUserActive((readJSON(USERS_DB) || []).find(u => u?.id === ident.userId))) return true;
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] global metrics scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return false;
+    }
+    res.status(403).json({ error: 'Acceso denegado' });
+    return false;
+}
+
+/**
+ * Métricas e informe de curso. Administración (autoridad de máquina): sin filtro,
+ * como siempre. Mediador: solo un curso que el CIS reconoce como mediado por esa
+ * persona (ACTIVE_REAL; `teacherId` y `user.groupIds` no cuentan), y solo sobre su
+ * nómina explícita actual, sin cuentas personales B2C. Los demás no entran en el
+ * desglose NI en los agregados.
+ * @returns {Promise<null | object>} opciones para computeCourseMetrics; null = ya respondió.
+ */
+async function courseMetricsOptions(req, res, requester, courseId, users) {
+    if (await isAdminRequest(req)) return {};
+    if (!requester || !isMediatorRole(requester)) { res.status(403).json({ error: 'Acceso denegado' }); return null; }
+    let roster;
+    try {
+        roster = mediatedGroupRosters(requester.id).get(String(courseId ?? ''));
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        log(`[AUTHZ] course metrics scope unavailable: ${e.causeTag}`, 'ERROR');
+        res.status(503).json({ error: 'identity_unavailable' });
+        return null;
+    }
+    if (!roster) { res.status(403).json({ error: 'Acceso denegado' }); return null; }
+    const eligible = new Set([...roster].filter(id => id !== requester.id
+        && !isPersonalB2cAccount((users || []).find(u => u?.id === id))));
+    return { includeStudent: (id) => eligible.has(id) };
+}
+
+/** Una lista vacía de usuarios equivale en el backbone a «sin filtro»: nunca se consulta así. */
+function courseBackboneMetrics(userIds) {
+    if (userIds.length > 0) return safeLoadBackboneMetrics({ userIds, windowDays: 30 });
+    const empty = emptyBackboneMetrics({ windowDays: 30 });
+    empty.funnels  = emptyBackboneFunnels({ windowDays: 30 });
+    empty.insights = emptyBackboneInsights({ windowDays: 30 });
+    return empty;
+}
+
+// ---------------------------------------------------------------------------
 // SCHOOL IDENTIFIER HELPERS
 // ---------------------------------------------------------------------------
 
@@ -11453,16 +11540,12 @@ const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = await sessionRequesterOf(req, users);
-    const adminAccess       = await isAdminRequest(req);
-    const mediatorAccess    = requester && isMediatorRole(requester) &&
-                              isMediatorOfCourse(requester, courseId, groups);
-
-    if (!adminAccess && !mediatorAccess) {
-        return res.status(403).json({ error: 'Acceso denegado' });
-    }
+    // SEC-SESSION-IDENTITY-04: curso mediado según el CIS y solo su nómina explícita.
+    const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId, users);
+    if (!metricsOptions) return;
 
     try {
-        const raw      = computeCourseMetrics(courseId);
+        const raw      = computeCourseMetrics(courseId, metricsOptions);
         const response = formatCourseResponse(raw, users);
 
         // Augment each student with their pedagogical profile (computed from session timelines)
@@ -11484,10 +11567,7 @@ const legacyMetricsCourseHandler = async (req, res) => {
         const courseUserIds = response.studentBreakdown
             .map(s => s.userId)
             .filter(id => typeof id === 'string');
-        response.backboneMetrics = safeLoadBackboneMetrics({
-            userIds:    courseUserIds,
-            windowDays: 30,
-        });
+        response.backboneMetrics = courseBackboneMetrics(courseUserIds);
 
         res.json(response);
     } catch (e) {
@@ -11549,13 +11629,7 @@ app.get('/api/metrics/school/:schoolId', mountLegacyMetricsRoute('metrics.school
 // Si events.db no existe o falla, responde con shape vacío + 200 (no 500).
 //
 app.get('/api/metrics/backbone', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        const { users } = loadAndInitMetrics();
-        const requester = await sessionRequesterOf(req, users);
-        if (!requester || !isMediatorRole(requester)) {
-            return res.status(403).json({ error: 'Acceso denegado' });
-        }
-    }
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // SEC-SESSION-IDENTITY-04: solo administración
 
     const windowDays = (() => {
         const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
@@ -11608,13 +11682,7 @@ app.get('/api/metrics/backbone', async (req, res) => {
 // Acceso: admin OR mediador autenticado (mismo gating que /api/metrics/backbone).
 //
 app.get('/api/metrics/funnels', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        const { users } = loadAndInitMetrics();
-        const requester = await sessionRequesterOf(req, users);
-        if (!requester || !isMediatorRole(requester)) {
-            return res.status(403).json({ error: 'Acceso denegado' });
-        }
-    }
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // SEC-SESSION-IDENTITY-04: solo administración
 
     const windowDays = (() => {
         const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
@@ -11652,13 +11720,7 @@ app.get('/api/metrics/funnels', async (req, res) => {
 // Nunca 500. Si el pipeline falla, responde con shape vacío.
 //
 app.get('/api/metrics/insights', async (req, res) => {
-    if (!(await isAdminRequest(req))) {
-        const { users } = loadAndInitMetrics();
-        const requester = await sessionRequesterOf(req, users);
-        if (!requester || !isMediatorRole(requester)) {
-            return res.status(403).json({ error: 'Acceso denegado' });
-        }
-    }
+    if (!(await requireGlobalMetricsAdmin(req, res))) return; // SEC-SESSION-IDENTITY-04: solo administración
 
     const windowDays = (() => {
         const raw = parseInt(String(req.query.windowDays ?? '30'), 10);
@@ -11714,19 +11776,12 @@ app.get('/api/metrics/insights', async (req, res) => {
 // telemetría base sigue funcionando. Si insights.db falla, devolvemos
 // vacíos y log WARN.
 
-async function requireAdminOrMediator(req, res) {
-    if (await isAdminRequest(req)) return true;
-    const { users } = loadAndInitMetrics();
-    const requester = await sessionRequesterOf(req, users);
-    if (!requester || !isMediatorRole(requester)) {
-        res.status(403).json({ error: 'Acceso denegado' });
-        return false;
-    }
-    return true;
-}
+// SEC-SESSION-IDENTITY-04: las cinco rutas son de alertas GLOBALES. Antes las admitía el rol de
+// mediador de cualquier institución (`requireAdminOrMediator`, retirado); ahora, solo administración
+// (`requireGlobalMetricsAdmin`), resuelta antes de abrir insights.db.
 
 app.post('/api/metrics/insights/snapshot', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return;
     const body = req.body ?? {};
     const windowDays = (() => {
         const raw = typeof body.windowDays === 'number' ? body.windowDays : 30;
@@ -11762,7 +11817,7 @@ app.post('/api/metrics/insights/snapshot', async (req, res) => {
 });
 
 app.get('/api/metrics/insights/states', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return;
     try {
         ensureInsightsDbOpen();
         const filters = {
@@ -11802,7 +11857,7 @@ app.get('/api/metrics/insights/states', async (req, res) => {
 });
 
 app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return;
     const insightKey = String(req.params.insightKey ?? '');
     const actorId = (req.body && typeof req.body.actorId === 'string')
         ? req.body.actorId
@@ -11821,7 +11876,7 @@ app.post('/api/metrics/insights/:insightKey/ack', async (req, res) => {
 });
 
 app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return;
     const insightKey = String(req.params.insightKey ?? '');
     const days = (() => {
         const raw = (req.body && typeof req.body.days === 'number') ? req.body.days : 7;
@@ -11843,7 +11898,7 @@ app.post('/api/metrics/insights/:insightKey/dismiss', async (req, res) => {
 });
 
 app.get('/api/metrics/insights/notifications', async (req, res) => {
-    if (!(await requireAdminOrMediator(req, res))) return;
+    if (!(await requireGlobalMetricsAdmin(req, res))) return;
     try {
         ensureInsightsDbOpen();
         const status = typeof req.query.status === 'string' ? req.query.status : 'pending';
@@ -11884,16 +11939,12 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
     const { groups, users } = loadAndInitMetrics();
     const requester         = await sessionRequesterOf(req, users);
-    const adminAccess       = await isAdminRequest(req);
-    const mediatorAccess    = requester && isMediatorRole(requester) &&
-                              isMediatorOfCourse(requester, courseId, groups);
-
-    if (!adminAccess && !mediatorAccess) {
-        return res.status(403).json({ error: 'Acceso denegado' });
-    }
+    // SEC-SESSION-IDENTITY-04: curso mediado según el CIS y solo su nómina explícita.
+    const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId, users);
+    if (!metricsOptions) return;
 
     try {
-        const raw      = computeCourseMetrics(courseId);
+        const raw      = computeCourseMetrics(courseId, metricsOptions);
         const group    = groups.find(g => g.id === courseId);
         const response = formatCourseResponse(raw, users);
 
@@ -12478,8 +12529,10 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
         const requester  = await sessionRequesterOf(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
-        if (!isOwner && !isAdmin && !isMediator) {
+        // SEC-SESSION-IDENTITY-04: el rol de mediador ya no basta; debe mediar un grupo del lector (CIS).
+        const mediated = (isOwner || isAdmin) ? 'deny' : mediatedReaderAccess(requester, userId, users);
+        if (mediated === 'unavailable') return res.status(503).json({ error: 'identity_unavailable' });
+        if (!isOwner && !isAdmin && mediated !== 'allow') {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         if (!users.find(u => u.id === userId)) {
@@ -12516,8 +12569,10 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
         const requester  = await sessionRequesterOf(req, users);
         const isOwner    = requester?.id === userId;
         const isAdmin    = (await isAdminRequest(req)) || (requester && (requester.roles ?? []).includes('administrador'));
-        const isMediator = requester && isMediatorRole(requester);
-        if (!isOwner && !isAdmin && !isMediator) {
+        // SEC-SESSION-IDENTITY-04: el rol de mediador ya no basta; debe mediar un grupo del lector (CIS).
+        const mediated = (isOwner || isAdmin) ? 'deny' : mediatedReaderAccess(requester, userId, users);
+        if (mediated === 'unavailable') return res.status(503).json({ error: 'identity_unavailable' });
+        if (!isOwner && !isAdmin && mediated !== 'allow') {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         const key = makeProgressKey(userId, contentId);

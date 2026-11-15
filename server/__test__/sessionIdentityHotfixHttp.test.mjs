@@ -4,7 +4,8 @@
  * Diez usos de `resolveRequester` tomaban la identidad de la cabecera `x-user-id` también con la sesión obligatoria
  * (SESSION_AUTH_MODE=enforce). Efecto doble: sin cookie, la cabecera con el id de una cuenta bastaba; con cookie y sin
  * cabecera —el navegador— la cuenta legítima recibía 401/403. Los diez usan ahora `sessionRequesterOf` (la identidad
- * autenticada que ya existía). Las REGLAS de permiso de esta versión no cambian: solo de dónde sale la identidad.
+ * autenticada que ya existía). Aquí se prueba solo de dónde sale la identidad. Las REGLAS de permiso heredadas las
+ * acota SEC-SESSION-IDENTITY-04 (`legacyAuthzHotfixHttp.test.mjs`): métricas y alertas globales son de administración.
  *
  * Catorce rutas (diez usos; uno, `requireAdminOrMediator`, protege cinco):
  *   GET  /api/metrics/schools            GET  /api/metrics/backbone|funnels|insights
@@ -103,7 +104,7 @@ const RP = G('/api/reading-progress/ra-1'), RPC = G('/api/reading-progress/ra-1/
 const GLOBAL_GET = [G('/api/metrics/backbone'), G('/api/metrics/funnels'), G('/api/metrics/insights'), G('/api/metrics/insights/states'), G('/api/metrics/insights/notifications')];
 const WRITES = [['POST', '/api/metrics/insights/snapshot'], ['POST', `/api/metrics/insights/${KEY}/ack`], ['POST', `/api/metrics/insights/${KEY}/dismiss`]];
 // Las catorce rutas, cada una con la cuenta que —según las reglas de ESTA versión— tiene derecho a ella.
-const ALL = [[SCHOOLS, 'med-a'], [MS, 'ra-1'], [MC, 'med-a'], [RC, 'med-a'], [RP, 'ra-1'], [RPC, 'ra-1'], ...GLOBAL_GET.map((r) => [r, 'med-a']), ...WRITES.map((r) => [r, 'med-a'])];
+const ALL = [[SCHOOLS, 'med-a'], [MS, 'ra-1'], [MC, 'med-a'], [RC, 'med-a'], [RP, 'ra-1'], [RPC, 'ra-1'], ...GLOBAL_GET.map((r) => [r, 'adm']), ...WRITES.map((r) => [r, 'adm'])];
 const name = (r) => `${r[0]} ${r[1]}`;
 // Un rechazo no dice nada de nadie: ni datos, ni nombres, ni correos, ni ids de cuentas.
 const PRIVATE = /studentBreakdown|productMetrics|readingProgress|backboneMetrics|summary|schoolName|insights|states|notifications|Cuenta |fixture\.invalid|Colegio|ra-1|ra-2|rb-1|med-a|med-b|"adm"/;
@@ -172,18 +173,21 @@ try {
     ok('mediador → colegios: solo el de sus cursos', mSch.status === 200 && JSON.stringify(mSch.json?.schools?.map((x) => x.schoolName)) === '["Colegio Alfa"]', mSch.text.slice(0, 120));
     const mMs = await both(MS, { cookie: C['med-a'] });
     ok('mediador → métricas individuales de un lector → 403 (ruta del propio lector; sin cambio)', mMs.every((x) => x.status === 403), st(mMs));
-    const snap = await both(WRITES[0], { cookie: C['med-a'] });
-    ok('mediador con su sesión → instantánea de alertas → 200 (regla de esta versión, sin cambio)', snap.every((x) => x.status === 200), `${st(snap)} ${snap[0].text.slice(0, 100)}`);
-    const ackDis = await all(WRITES.slice(1), { cookie: C['med-a'] });
-    ok('mediador con su sesión → confirmar/descartar: la petición pasa el control de identidad (no 401/403)', ackDis.every((x) => ![401, 403].includes(x.status)), st(ackDis));
+    const medGlobal = await all([...GLOBAL_GET, ...WRITES], { cookie: C['med-a'] });
+    ok('mediador con su sesión → métricas y alertas globales → 403 (SEC-04: solo administración)', medGlobal.every((x) => x.status === 403 && denied(x)), st(medGlobal));
+    ok('…sin escrituras de alertas', alertRows() === rows0 && !wrote());
 
     console.log('[6] administración: sin regresiones ni ampliación');
     const admRp = await all([RP, RPC], { cookie: C.adm });
     ok('administrador con su sesión → progreso de un lector → 200 (la ruta ya lo preveía)', admRp.every((x) => x.status === 200), st(admRp));
     const admSch = await call(S2, SCHOOLS, { cookie: C.adm });
     ok('administrador con su sesión → colegios → 200 con todos', admSch.status === 200 && admSch.json?.schools?.length === 2, admSch.text.slice(0, 120));
-    const admMachine = await all([MC, RC, MS, ...GLOBAL_GET, ...WRITES], { cookie: C.adm });
+    const admMachine = await all([MC, RC, MS], { cookie: C.adm });
     ok('administrador con su sesión → rutas de autoridad de máquina → 403 (igual que antes; no se amplía)', admMachine.every((x) => x.status === 403 && denied(x)), st(admMachine));
+    const snap = await both(WRITES[0], { cookie: C.adm });
+    ok('administrador con su sesión → instantánea de alertas → 200', snap.every((x) => x.status === 200), `${st(snap)} ${snap[0].text.slice(0, 100)}`);
+    const ackDis = await all(WRITES.slice(1), { cookie: C.adm });
+    ok('administrador con su sesión → confirmar/descartar: la petición pasa el control (no 401/403)', ackDis.every((x) => ![401, 403].includes(x.status)), st(ackDis));
     const users = await call(S1, G('/api/users'), { cookie: C.adm }), groups = await call(S2, G('/api/groups'), { cookie: C.adm }), me = await call(S1, G('/api/auth/me'), { cookie: C['ra-1'] });
     ok('rutas vecinas sin cambio: /api/users y /api/groups del administrador, /api/auth/me del lector → 200', users.status === 200 && groups.status === 200 && me.status === 200, `${users.status} ${groups.status} ${me.status}`);
 
@@ -202,7 +206,7 @@ try {
     const out = await fetch(`${S1.base}/api/auth/logout`, { method: 'POST', headers: { cookie: tmpMed, 'sec-fetch-site': 'same-origin' } });
     const before = alertRows();
     const revoked = await all(ALL.filter(([, o]) => o === 'med-a').map(([r]) => r), { cookie: tmpMed });
-    ok('tras cerrar esa sesión, su cookie queda revocada → rechazada en sus doce rutas y las dos réplicas', out.status < 400 && revoked.every(denied) && alertRows() === before, `${out.status} ${st(revoked)}`);
+    ok('tras cerrar esa sesión, su cookie queda revocada → rechazada en sus rutas y las dos réplicas', out.status < 400 && revoked.every(denied) && alertRows() === before, `${out.status} ${st(revoked)}`);
     ok('…sin afectar a la otra sesión del mismo mediador', (await call(S2, MC, { cookie: C['med-a'] })).status === 200);
 
     ok('ningún registro del servidor contiene cookies ni contraseñas', ![S1.out, S2.out].some((o) => o.includes(PW) || Object.values(C).some((c) => o.includes(c.split('=')[1]))));

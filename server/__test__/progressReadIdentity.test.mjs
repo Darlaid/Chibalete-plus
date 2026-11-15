@@ -111,7 +111,7 @@ const syncBody = { canonicalProgress: { percentage: 12, readerMode: 'text' }, up
         ok('D. dueño sin acceso al título → 403', (await req(S, `/api/progress/item/NOACC/${C1}`, as('NOACC'))).status === 403);
         ok('D. … el mismo dueño con su título permitido → 200', (await req(S, `/api/progress/item/NOACC/${C2}`, as('NOACC'))).status === 200);
         ok('E. admin lee el progreso de otro → 200', (await req(S, `/api/progress/item/OWN/${C1}`, as('ADM'))).status === 200);
-        ok('E. mediador lee el progreso de otro → 200 (sin regresión)', (await req(S, `/api/progress/item/OWN/${C1}`, as('MED'))).status === 200);
+        ok('E. mediador que NO media un grupo del lector → 403 (SEC-SESSION-IDENTITY-04: el rol no basta)', (await req(S, `/api/progress/item/OWN/${C1}`, as('MED'))).status === 403);
         ok('F. membresía de grupo vigente → 200', (await req(S, `/api/progress/item/MEM/${C1}`, as('MEM'))).status === 200);
         ok('G. grant vencido → 403', (await req(S, `/api/progress/item/EXP/${C1}`, as('EXP'))).status === 403);
         ok('sin identidad → 403', (await req(S, `/api/progress/item/OWN/${C1}`)).status === 403);
