@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { freePorts } from '../../__test__/helpers/freePort.mjs';
 
 let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
@@ -173,12 +174,19 @@ function spawnApi(port, { flags = ENV, harness = true } = {}) {
     return child;
 }
 async function healthy(child) {
+    // CI-STABILITY-02: se conserva el último motivo de la comprobación (p. ej. `bad port` de `fetch` con el
+    // servidor ya escuchando), que antes se descartaba y parecía un arranque que nunca terminaba.
+    let last = 'sin respuesta';
     for (let i = 0; i < 400; i++) {
         if (child.exitCode !== null) throw new Error(`server rc=${child.exitCode}\n${child.logs().slice(-1500)}`);
-        try { if ((await fetch(`${child.base}/api/health`)).ok) return; } catch { /* arrancando */ }
+        try {
+            const r = await fetch(`${child.base}/api/health`);
+            if (r.ok) return;
+            last = `HTTP ${r.status}`;
+        } catch (e) { last = e?.cause?.message || e?.cause?.code || e?.message || String(e); /* arrancando */ }
         await sleep(300);
     }
-    throw new Error(`nunca healthy\n${child.logs().slice(-1500)}`);
+    throw new Error(`nunca healthy (última comprobación: ${last}; ¿escuchando?: ${/Server running on port/.test(child.logs())})\n${child.logs().slice(-1500)}`);
 }
 const get = async (child, gid, uid) => {
     const r = await fetch(`${child.base}/api/groups/${gid}/analytics-summary`, uid ? { headers: { 'x-user-id': uid } } : {});
@@ -187,13 +195,16 @@ const get = async (child, gid, uid) => {
     return { status: r.status, body, text };
 };
 
-const PORT = 5880 + (process.pid % 100) * 4;
+// CI-STABILITY-02: puertos libres del sistema (rango efímero). Antes: `5880 + (process.pid % 100) * 4`, que con 1 de cada
+// 100 PID caía en el 6000, que `fetch` rechaza por norma (`bad port`): el servidor escuchaba, pero la comprobación
+// de salud no podía hablarle y agotaba la espera.
+const [PORT_ON, PORT_LOCKED, PORT_OFF, PORT_XP_OFF] = await freePorts(4);
 const servers = [];
 try {
-    const on = spawnApi(PORT);
-    const locked = spawnApi(PORT + 1, { harness: false });
-    const off = spawnApi(PORT + 2, { flags: { GAMIFICATION_ENABLED: '' } });
-    const xpOff = spawnApi(PORT + 3, { flags: { ...ENV, XP_EARNING_ENABLED: '' } });
+    const on = spawnApi(PORT_ON);
+    const locked = spawnApi(PORT_LOCKED, { harness: false });
+    const off = spawnApi(PORT_OFF, { flags: { GAMIFICATION_ENABLED: '' } });
+    const xpOff = spawnApi(PORT_XP_OFF, { flags: { ...ENV, XP_EARNING_ENABLED: '' } });
     servers.push(on, locked, off, xpOff);
     for (const s of servers) await healthy(s); // en serie: runners de CI lentos
     const gamBefore = hashDir(P.gamDir);

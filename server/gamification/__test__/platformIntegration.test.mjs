@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { freePorts } from '../../__test__/helpers/freePort.mjs';
 import bcrypt from 'bcryptjs';
 import { grantA2, grantC005 } from '../../__test__/helpers/testA2.mjs';
 
@@ -172,12 +173,19 @@ function spawnApi(port, { flags = ENV } = {}) {
     return child;
 }
 async function healthy(child) {
+    // CI-STABILITY-02: se conserva el último motivo de la comprobación (p. ej. `bad port` de `fetch` con el
+    // servidor ya escuchando), que antes se descartaba y parecía un arranque que nunca terminaba.
+    let last = 'sin respuesta';
     for (let i = 0; i < 200; i++) {
         if (child.exitCode !== null) throw new Error(`server rc=${child.exitCode}\n${child.logs().slice(-1500)}`);
-        try { if ((await fetch(`${child.base}/api/health`)).ok) return; } catch { /* arrancando */ }
+        try {
+            const r = await fetch(`${child.base}/api/health`);
+            if (r.ok) return;
+            last = `HTTP ${r.status}`;
+        } catch (e) { last = e?.cause?.message || e?.cause?.code || e?.message || String(e); /* arrancando */ }
         await sleep(300);
     }
-    throw new Error(`nunca healthy\n${child.logs().slice(-1500)}`);
+    throw new Error(`nunca healthy (última comprobación: ${last}; ¿escuchando?: ${/Server running on port/.test(child.logs())})\n${child.logs().slice(-1500)}`);
 }
 const call = async (srv, method, url, cookie, body) => {
     const headers = { origin: ORIGIN, ...(cookie ? { cookie: `chp_session=${cookie}` } : {}), ...(body ? { 'content-type': 'application/json' } : {}) };
@@ -228,10 +236,13 @@ const facts = () => db.prepare('SELECT COUNT(*) c FROM gm_source_facts').get().c
 const sumXp = () => db.prepare('SELECT COALESCE(SUM(xp),0) n FROM gm_xp_entries').get().n;
 const workOf = (b, id) => b?.works?.find((w) => w.contentId === id);
 
-const PORT = 5900 + (process.pid % 100) * 3;
+// CI-STABILITY-02: puertos libres del sistema (rango efímero). Antes: `5900 + (process.pid % 100) * 3`, que con 1 de cada
+// 100 PID caía en el 6000, que `fetch` rechaza por norma (`bad port`): el servidor escuchaba, pero la comprobación
+// de salud no podía hablarle y agotaba la espera.
+const [PORT_R1, PORT_R2, PORT_XP_OFF, PORT_GONE] = await freePorts(4);
 const servers = [];
 try {
-    let r1 = spawnApi(PORT), r2 = spawnApi(PORT + 1);
+    let r1 = spawnApi(PORT_R1), r2 = spawnApi(PORT_R2);
     servers.push(r1, r2);
     await Promise.all([healthy(r1), healthy(r2)]);
 
@@ -373,8 +384,8 @@ try {
 
     section('[10] réplica con XP apagado');
     {
-        const off = spawnApi(PORT + 2, { flags: { ...ENV, XP_EARNING_ENABLED: '' } });
-        const gone = spawnApi(PORT + 3, { flags: { GAMIFICATION_ENABLED: '' } });
+        const off = spawnApi(PORT_XP_OFF, { flags: { ...ENV, XP_EARNING_ENABLED: '' } });
+        const gone = spawnApi(PORT_GONE, { flags: { GAMIFICATION_ENABLED: '' } });
         servers.push(off, gone);
         await Promise.all([healthy(off), healthy(gone)]);
         ok('sin gamificación: /api/me/progress 404', (await progress(gone, 'a1')).status === 404);
@@ -413,7 +424,7 @@ try {
     {
         r1.kill('SIGKILL');
         await sleep(300);
-        r1 = spawnApi(PORT);
+        r1 = spawnApi(PORT_R1);
         servers.push(r1);
         await healthy(r1);
         const p = await progress(r1, 'a1');
