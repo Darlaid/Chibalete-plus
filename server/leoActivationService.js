@@ -390,16 +390,18 @@ function _productionPrompt(lastObj, hasWritingHistory) {
  * @param {string} userId
  * @returns {LeoActivationOutput[]}
  */
-export function getActivationOutputsForUser(userId) {
+// V9 F7-C2: `includeContent` (opcional) limita sesiones, evidencias y progreso activo a unas obras.
+export function getActivationOutputsForUser(userId, { includeContent = null } = {}) {
     if (!userId) return [];
 
     try {
+        const inScope        = (list) => (typeof includeContent === 'function' ? list.filter(x => includeContent(x?.contentId)) : list);
         const profile        = getLeoLearnerProfile(userId);
-        const sessions       = getAllSessionMemoriesForUser(userId);
-        const evidence       = getEvidenceEntriesForUser(userId, 30);
+        const sessions       = inScope(getAllSessionMemoriesForUser(userId));
+        const evidence       = inScope(getEvidenceEntriesForUser(userId, 30));
         const icdli          = getLeoICDLISnapshot(userId);
         const progressMap    = _readProgressDb(userId);
-        const activeProgress = _getActiveProgressRecords(userId, progressMap);
+        const activeProgress = inScope(_getActiveProgressRecords(userId, progressMap));
 
         const outputs = [];
 

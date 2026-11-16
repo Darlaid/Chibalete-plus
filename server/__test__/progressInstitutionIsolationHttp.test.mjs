@@ -52,7 +52,11 @@ const GROUPS = [
 fs.writeFileSync(P.users, JSON.stringify(USERS));
 fs.writeFileSync(P.groups, JSON.stringify(GROUPS));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: 'org-a', name: 'Colegio Alfa' }, { id: 'org-b', name: 'Colegio Beta' }]));
-fs.writeFileSync(P.access, JSON.stringify(READERS.map((u) => ({ id: `r-${u}`, scope: 'user', scopeId: u, titleIds: [C1], collectionIds: [], expiresAt: Date.now() + 86400000 }))));
+// V9 F7-C2: la obra del fixture está ASOCIADA a cada curso (regla de grupo): sin esa asociación, su mediador no ve actividad por obra.
+fs.writeFileSync(P.access, JSON.stringify([
+    ...READERS.map((u) => ({ id: `r-${u}`, scope: 'user', scopeId: u, titleIds: [C1], collectionIds: [], expiresAt: Date.now() + 86400000 })),
+    ...['g-a', 'g-a2', 'g-b'].map((g) => ({ id: `r-${g}`, scope: 'group', scopeId: g, titleIds: [C1], collectionIds: [] })),
+]));
 fs.writeFileSync(P.content, JSON.stringify([{ id: C1, titulo: 'Obra 1', tipo: 'libro' }]));
 
 // Registro de decisiones sintético: A2 de los lectores y C005 de los mediadores.

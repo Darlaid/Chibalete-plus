@@ -63,7 +63,8 @@ fs.writeFileSync(P.groups, JSON.stringify([
     { id: 'g-b', name: 'Sexto', type: 'course', ...B, school: 'Colegio Beta', mediatorIds: ['med-b'], memberIds: ['rb-yes'], studentIds: ['rb-yes'] },
 ]));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: 'org-a', name: 'Colegio Alfa' }, { id: 'org-b', name: 'Colegio Beta' }]));
-fs.writeFileSync(P.access, '[]'); fs.writeFileSync(P.content, '[]');
+// V9 F7-C2: la obra del fixture está ASOCIADA a cada curso (regla de grupo): sin esa asociación, su mediador no ve actividad por obra.
+fs.writeFileSync(P.access, JSON.stringify(['g-a', 'g-b'].map((g) => ({ id: `r-${g}`, scope: 'group', scopeId: g, titleIds: ['c1'], collectionIds: [] })))); fs.writeFileSync(P.content, '[]');
 // Una sesión de lectura por lector; la del lector sin A2 es enorme a propósito (si entrara en un promedio, se notaría).
 const T0 = Date.now() - 3 * 86400000;
 const DUR = { 'ra-yes': 60000, 'ra-yes2': 120000, 'ra-no': 9000000, 'rb-yes': 45000, b2c: 7000000 };

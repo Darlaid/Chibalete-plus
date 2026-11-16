@@ -106,7 +106,8 @@ fs.writeFileSync(P.users, JSON.stringify(USERS, null, 2));
 fs.writeFileSync(P.groups, JSON.stringify(GROUPS, null, 2));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: ORG_A, name: 'Colegio Alfa' }, { id: ORG_B, name: 'Colegio Beta' }], null, 2));
 fs.writeFileSync(P.usersCorrupt, '{ esto no es json');
-fs.writeFileSync(P.access, '[]');
+// V9 F7-C2: la obra del fixture está ASOCIADA a cada curso (regla de grupo): sin esa asociación, su mediador no ve actividad por obra.
+fs.writeFileSync(P.access, JSON.stringify(GROUPS.map((g) => ({ id: `r-${g.id}`, scope: 'group', scopeId: g.id, titleIds: ['c-1', 'c-2'], collectionIds: [] }))));
 fs.writeFileSync(P.content, JSON.stringify([{ id: 'c-1', titulo: 'Uno', autor: 'A', tipo: 'libro', status: 'disponible' }], null, 2));
 
 // ── Eventos: hot + archive, con los índices de producción ─────────────────────
@@ -497,7 +498,11 @@ async function main() {
         ok('J grupo inexistente → 403 (no oráculo de existencia)', (await GET('med-01', ROUTE('no-existe'))).status === 403);
         ok('K sin sesión → 401', (await GET(null, ROUTE('g-a1'))).status === 401);
         const q = await json(await GET('med-01', `${ROUTE('g-a1')}?userId=lec-b1&userIds=ext-001`));
-        ok('userIds por query se ignoran (mismo resumen)', q?.readerCount === 80 && q?.reading?.all?.totalEffectiveMs === expectedAllMs);
+        // V9 F7-C2: el resumen del mediador cuenta solo la actividad de las obras del grupo (una sesión sin obra no entra),
+        // así que se compara con SU resumen sin parámetros, que no puede superar el total de la cohorte.
+        const q0 = await json(await GET('med-01', ROUTE('g-a1')));
+        ok('userIds por query se ignoran (mismo resumen)', q?.readerCount === 80 && q0?.readerCount === 80 && q?.reading?.all?.totalEffectiveMs === q0?.reading?.all?.totalEffectiveMs
+            && q.reading.all.totalEffectiveMs > 0 && q.reading.all.totalEffectiveMs <= expectedAllMs, `${q?.reading?.all?.totalEffectiveMs} vs ${q0?.reading?.all?.totalEffectiveMs} (cohorte ${expectedAllMs})`);
         const src = fs.readFileSync(path.join(REPO, 'server', 'server.js'), 'utf8');
         const i = src.indexOf(`app.get('/api/groups/:id/analytics-summary'`);
         const handler = src.slice(i, src.indexOf('\n});', i));
@@ -536,7 +541,8 @@ async function main() {
         ok('log MISS: cache=miss ms computeMs readers rows', /\[GROUP_ANALYTICS\] group=g-a1 cache=miss ms=\d+ computeMs=\d+ readers=80 rows=\d+/.test(logs));
         ok('log HIT: cache=hit ms', /\[GROUP_ANALYTICS\] group=g-a1 cache=hit ms=\d+/.test(logs));
         const missesA1 = (logs.match(/group=g-a1 cache=miss/g) || []).length;
-        ok('g-a1: UN solo cálculo en todo el servidor (todas las demás peticiones fueron HIT)', missesA1 === 1, String(missesA1));
+        // V9 F7-C2: el resumen completo (administración) y el del mediador (solo las obras del grupo) se cachean aparte.
+        ok('g-a1: DOS cálculos en todo el servidor, el completo y el del mediador (todas las demás peticiones fueron HIT)', missesA1 === 2, String(missesA1));
         const gaLines = (logs.match(/\[GROUP_ANALYTICS\][^\n]*/g) || []).join('\n');
         ok('el log no lleva PII ni payload', gaLines.length > 0 && !/lec-0|nombre|email|readers\[/.test(gaLines));
     }

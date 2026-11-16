@@ -281,14 +281,17 @@ function _computeSuggestedAction({ profile, icdliSnapshot, evidence, sessions })
  * @param {string} userId
  * @returns {LeoMediatorStudentSummary}
  */
-export function getMediatorStudentSummary(userId) {
+// V9 F7-C2: `includeContent` (opcional) limita sesiones y evidencias a unas obras. El perfil del lector y la
+// instantánea ICDLI son indicadores de la persona, no de una obra, y no se recortan aquí.
+export function getMediatorStudentSummary(userId, { includeContent = null } = {}) {
     if (!userId) return { dataAvailable: false, userId: null };
 
     try {
         const profile       = getLeoLearnerProfile(userId);
         const icdliSnapshot = getLeoICDLISnapshot(userId);
-        const sessions      = getAllSessionMemoriesForUser(userId);
-        const evidence      = getEvidenceEntriesForUser(userId, SUMMARY_EVIDENCE_LIMIT);
+        const inScope       = (list) => (typeof includeContent === 'function' ? list.filter(x => includeContent(x?.contentId)) : list);
+        const sessions      = inScope(getAllSessionMemoriesForUser(userId));
+        const evidence      = inScope(getEvidenceEntriesForUser(userId, SUMMARY_EVIDENCE_LIMIT));
 
         const totalInteractions = _computeTotalInteractions(sessions);
         const lastInteractionAt = _computeLastInteractionAt(sessions);

@@ -373,10 +373,10 @@ function parseSessions(events) {
 // LEO MEMORY HELPERS
 // ---------------------------------------------------------------------------
 
-function getLeoEntriesForUser(userId) {
+function getLeoEntriesForUser(userId, includeContent = null) {
   const prefix = `${userId}__`;
   return Object.entries(_leoMemory.memoryMap)
-    .filter(([key]) => key.startsWith(prefix))
+    .filter(([key]) => key.startsWith(prefix) && (!includeContent || includeContent(key.slice(prefix.length))))
     .map(([, entry]) => entry);
 }
 
@@ -688,14 +688,15 @@ const ABANDONED_DAYS_METRICS = 30;
  * Compute per-content reading progress stats for a user from progress_db.
  * Mirrors the status rules in server.js computeReadingProgress() — kept in sync manually.
  */
-function computeContentStats(userId, ctx = null) {
+function computeContentStats(userId, ctx = null, includeContent = null) {
     // Con contexto, la rebanada del usuario sale de un índice construido una
     // sola vez; sin él, el escaneo completo de siempre. Ambos caminos producen
     // exactamente los mismos registros y en el mismo orden (verificado sobre
     // los 647 usuarios del padrón en `-01A`).
-    const entries = ctx
+    const all = ctx
         ? ctx.progressFor(userId)
         : Object.values(_progress.progressMap || {}).filter(p => p.userId === userId);
+    const entries = includeContent ? all.filter(p => includeContent(p.contentId)) : all;
     const contents = entries.map(raw => {
         const pct     = raw.canonicalProgress?.globalPercentage ?? 0;
         const history = Array.isArray(raw.history) ? raw.history : [];
@@ -724,8 +725,8 @@ function computeContentStats(userId, ctx = null) {
 }
 
 /** Compute Leo interaction metrics for a user from leo_interactions_db entries and analytics events. */
-function computeLeoMetrics(userId, userEvents = null) {
-  const userInteractions = _leoInteractions.filter(e => e.userId === userId);
+function computeLeoMetrics(userId, userEvents = null, includeContent = null) {
+  const userInteractions = _leoInteractions.filter(e => e.userId === userId && (!includeContent || includeContent(e.contentId)));
   const totalLeoInteractions = userInteractions.length;
 
   // Offline attempts come from analytics_db (LU Android: leo_interaction_attempted event)
@@ -760,11 +761,15 @@ function computeLeoMetrics(userId, userEvents = null) {
   return { totalLeoInteractions, totalLeoOfflineAttempts, byType, dominantType, byContent };
 }
 
-function computeStudentMetricsUncached(userId, ctx) {
-  const userEvents   = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
-  const sessions     = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
-  const leoEntries   = getLeoEntriesForUser(userId);
-  const leoMetrics   = computeLeoMetrics(userId, ctx ? userEvents : null);
+// V9 F7-C2: `includeContent` (opcional) limita el cálculo a la actividad de unas obras: eventos, sesiones, memoria e
+// interacciones de Leo y progreso de las demás obras no entran en NINGÚN indicador. Un evento sin obra se conserva.
+function computeStudentMetricsUncached(userId, ctx, includeContent = null) {
+  const allEvents    = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
+  const allSessions  = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
+  const userEvents   = includeContent ? allEvents.filter(e => e.contentId == null || includeContent(e.contentId)) : allEvents;
+  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId)) : allSessions;
+  const leoEntries   = getLeoEntriesForUser(userId, includeContent);
+  const leoMetrics   = computeLeoMetrics(userId, (ctx || includeContent) ? userEvents : null, includeContent);
 
   const behavioral    = computeBehavioral(sessions, userEvents);
   const readingLevels = computeReadingLevels(behavioral, sessions, leoEntries);
@@ -775,7 +780,7 @@ function computeStudentMetricsUncached(userId, ctx) {
     ? { from: Math.min(...timestamps), to: Math.max(...timestamps) }
     : null;
   const lastAccessAt  = timestamps.length > 0 ? Math.max(...timestamps) : null;
-  const contentStats  = computeContentStats(userId, ctx);
+  const contentStats  = computeContentStats(userId, ctx, includeContent);
 
   return { userId, behavioral, readingLevels, icdli, leoMetrics, contentStats, dataWindow, lastAccessAt, computedAt: Date.now() };
 }
@@ -798,6 +803,11 @@ export function computeStudentMetrics(userId, options = {}) {
   if (!_initialized) throw new Error('metricsService: call init() before computing metrics');
 
   const ctx = options?.context ?? null;
+  // V9 F7-C2: con filtro de obras no se memoiza (la clave del memo es solo `userId`).
+  if (typeof options?.includeContent === 'function') {
+    if (ctx) ctx.assertUsable();
+    return computeStudentMetricsUncached(userId, ctx, options.includeContent);
+  }
   if (!ctx) {
     metricsContextCounters.metrics_legacy_fallback_calls_total += 1;
     return computeStudentMetricsUncached(userId, null);
@@ -828,7 +838,7 @@ export function computeCourseMetrics(courseId, options = {}) {
 
   const { ctx, owned } = contextForTopLevel(options);
   try {
-    return courseMetricsFrom(group, courseId, ctx, options.includeStudent);
+    return courseMetricsFrom(group, courseId, ctx, options.includeStudent, options.includeContent);
   } finally {
     // El contexto solo se libera si lo creó ESTA llamada. Si vino del caller,
     // el caller decide su vida.
@@ -838,10 +848,10 @@ export function computeCourseMetrics(courseId, options = {}) {
 
 // V9 F5-C2: `includeStudent` (opcional) restringe el curso a los lectores que quien consulta puede ver
 // individualmente. Los excluidos no entran en el desglose NI en promedios, distribuciones o conteos.
-function courseMetricsFrom(group, courseId, ctx, includeStudent) {
+function courseMetricsFrom(group, courseId, ctx, includeStudent, includeContent = null) {
   const memberIds      = resolveGroupMemberIds(group);
   const studentIds     = typeof includeStudent === 'function' ? memberIds.filter(id => includeStudent(id)) : memberIds;
-  const allStudents    = studentIds.map(id => computeStudentMetrics(id, { context: ctx }));
+  const allStudents    = studentIds.map(id => computeStudentMetrics(id, typeof includeContent === 'function' ? { context: ctx, includeContent } : { context: ctx }));
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
   const { top, bottom } = topBottomByComposite(activeStudents, 0.20);
 

@@ -203,10 +203,18 @@ const aggregateProgress = (per) => ({
  */
 export function buildGroupAnalyticsSummary({
     group, users, allGroups, leoInteractions, getProgressByUser,
-    nowTs = Date.now(), eventsPath, archivePath,
+    nowTs = Date.now(), eventsPath, archivePath, includeContent = null,
 }) {
     const readerIds = resolveGroupLectorCohort(group, users, allGroups);
     const { byUser, rowsConsidered } = readCohortHistoricalRows(readerIds, { eventsPath, archivePath });
+    // V9 F7-C2: `includeContent` (opcional) limita el resumen a la actividad de unas obras: tiempo de lectura,
+    // interacciones de Leo y libros de las demás no entran ni en el detalle ni en los agregados.
+    if (typeof includeContent === 'function') {
+        for (const [id, rows] of byUser) byUser.set(id, rows.filter(r => includeContent(r.content_id)));
+        leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId));
+        const allProgress = getProgressByUser;
+        getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId));
+    }
     const reading = readingPerReader(byUser, readerIds, nowTs);
     const leo = leoPerReader(leoInteractions, readerIds);
     const progress = progressPerReader(getProgressByUser, readerIds);

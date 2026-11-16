@@ -5418,7 +5418,12 @@ app.get('/api/progress/user/:userId', async (req, res) => {
         if (!users.find(u => u.id === userId)) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
-        const userProgressList = getProgressByUser(userId);
+        let userProgressList = getProgressByUser(userId);
+        // V9 F7-C2: por mediación, solo la actividad de las obras asociadas a los grupos que comparte con el lector.
+        if (mediatorAccess === 'allow') {
+            const scope = mediatorContentScope(requester.id, userId);
+            userProgressList = (userProgressList || []).filter(p => scope.has(p?.contentId));
+        }
         res.json({ success: true, progressList: userProgressList });
     } catch (e) {
         log(`GET User Progress Error: ${e.message}`, 'ERROR');
@@ -5443,6 +5448,10 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
         if (mediatorAccess === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
         if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        // V9 F7-C2: por mediación, una obra ajena a los grupos compartidos responde igual que un lector fuera de alcance.
+        if (mediatorAccess === 'allow' && !mediatorContentScope(requester.id, userId).has(contentId)) {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         // 3E.5: el dueño (no privilegiado) solo lee el progreso de un título al que
@@ -9460,11 +9469,22 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         const group = groups.find(g => g?.id === id);
         if (!group) return res.status(404).json({ error: GROUP_MEMBERSHIP_ERR.GROUP_NOT_FOUND });
 
+        // V8.1-CLOSE-07B (G-07): si consulta un mediador, también su C005 vigente.
+        let viewerMediatorId = null;
+        if (!(await isAdminRequest(req))) {
+            const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+            try { if (evaluateScopeAccess(viewerId, 'group', id).via === 'mediator_of_group') viewerMediatorId = viewerId; } catch { viewerMediatorId = viewerId; }
+        }
+        // V9 F7-C2: para su mediador, el resumen cuenta solo la actividad de las obras asociadas a ESTE grupo. Se
+        // cachea aparte del resumen completo (el de la administración), que no cambia.
+        const works = viewerMediatorId ? groupsContentScope([id]) : null;
+
         const t0 = performance.now();
-        const r = await groupAnalyticsCache.get(id, () => buildGroupAnalyticsSummary({
+        const r = await groupAnalyticsCache.get(works ? `${id} obras` : id, () => buildGroupAnalyticsSummary({
             group, users, allGroups: groups,
             leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
             getProgressByUser,
+            ...(works ? { includeContent: works.has } : {}),
         }));
         const ms = Math.round(performance.now() - t0);
         log(r.cache === 'miss'
@@ -9478,12 +9498,6 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         // de la caché, para que una revocación rija de inmediato. Con pocos
         // retenidos, los agregados (y el reconocimiento) se limitan a los visibles.
         const cohortIds = (r.data.readers || []).map(x => x.userId);
-        // V8.1-CLOSE-07B (G-07): si consulta un mediador, también su C005 vigente.
-        let viewerMediatorId = null;
-        if (!(await isAdminRequest(req))) {
-            const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
-            try { if (evaluateScopeAccess(viewerId, 'group', id).via === 'mediator_of_group') viewerMediatorId = viewerId; } catch { viewerMediatorId = viewerId; }
-        }
         const a2 = individualDisclosure(cohortIds, { mediatorId: viewerMediatorId });
         const shown = a2.aggregateOver === 'allowed'
             ? restrictSummaryToReaders(r.data, a2.allowed)
@@ -9625,7 +9639,17 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
         }
 
         // ── progress: agregamos sobre las entries del user.
-        const progressList = getProgressByUser(id) || [];
+        // V9 F7-C2: quien consulta por mediación ve los totales de las obras de los grupos que comparte con el lector;
+        // el propio lector y la administración, los de toda su lectura.
+        const statusCallerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+        let statusScope = null;
+        try {
+            if (statusCallerId !== id && !(await isPlatformAdminCaller(req, statusCallerId))) statusScope = mediatorContentScope(statusCallerId, id);
+        } catch (e) {
+            if (!(e instanceof IdentityUnavailableError)) throw e;
+            return res.status(503).json({ error: 'identity_unavailable' });
+        }
+        const progressList = (getProgressByUser(id) || []).filter(p => !statusScope || statusScope.has(p?.contentId));
         const booksStarted   = progressList.length;
         const booksCompleted = progressList.filter(p =>
             (p?.canonicalProgress?.globalPercentage ?? p?.porcentaje ?? 0) >= 90 || p?.isCompleted === true
@@ -10637,12 +10661,26 @@ async function requireLeoMediatorScope(req, res, studentId, { allowSelf = false 
     return false;
 }
 
+/**
+ * V9 F7-C2 — ámbito de obras de quien consulta a un lector por MEDIACIÓN, o null si no aplica (el propio lector, la
+ * administración de plataforma o la autoridad de máquina). Se llama después de `requireLeoMediatorScope`.
+ */
+async function leoMediationScope(req, studentId) {
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    if (callerId === String(studentId)) return null;
+    try { if (await isPlatformAdminCaller(req, callerId)) return null; }
+    catch (e) { if (!(e instanceof IdentityUnavailableError)) throw e; return groupsContentScope([]); }
+    return mediatorContentScope(callerId, studentId);
+}
+
 app.get('/api/leo/mediator/student/:userId', requireAuth, async (req, res) => {
     try {
         const { userId } = req.params;
         if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
         if (!(await requireLeoMediatorScope(req, res, userId))) return;
-        const summary = getMediatorStudentSummary(userId);
+        // V9 F7-C2: por mediación, solo sesiones y evidencias de las obras de los grupos compartidos.
+        const works = await leoMediationScope(req, userId);
+        const summary = getMediatorStudentSummary(userId, works ? { includeContent: works.has } : {});
         res.json({ success: true, summary });
     } catch (e) {
         log(`Leo mediator summary error: ${e.message}`, 'ERROR');
@@ -10657,6 +10695,11 @@ app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, asy
             return res.status(400).json({ success: false, error: 'userId y contentId requeridos' });
         }
         if (!(await requireLeoMediatorScope(req, res, userId))) return;
+        // V9 F7-C2: una obra ajena a los grupos compartidos responde como un lector fuera de alcance.
+        const works = await leoMediationScope(req, userId);
+        if (works && !works.has(contentId)) {
+            return res.status(403).json({ success: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(userId) });
+        }
         const history = getMediatorContentHistory(userId, contentId);
         res.json({ success: true, history });
     } catch (e) {
@@ -10683,7 +10726,9 @@ app.get('/api/leo/activation/:userId', requireAuth, async (req, res) => {
         const { userId } = req.params;
         if (!userId) return res.status(400).json({ success: false, error: 'userId requerido' });
         if (!(await requireLeoMediatorScope(req, res, userId, { allowSelf: true }))) return;
-        const outputs = getActivationOutputsForUser(userId);
+        // V9 F7-C2: el propio lector ve lo suyo completo; su mediador, solo lo de las obras de los grupos compartidos.
+        const works = await leoMediationScope(req, userId);
+        const outputs = getActivationOutputsForUser(userId, works ? { includeContent: works.has } : {});
         res.json({ success: true, outputs });
     } catch (e) {
         log(`Leo activation error userId=${req.params.userId}: ${e.message}`, 'ERROR');
@@ -11301,6 +11346,57 @@ function mediatorProgressAccess(requester, users, userId) {
 }
 
 /**
+ * V9 F7-C2 — ámbito pedagógico: las obras ASOCIADAS a unos grupos. CIS + A2 + C005 deciden si un mediador puede
+ * acompañar a un lector; esto decide QUÉ actividad lectora entra en ese acompañamiento. La asociación es la que ya
+ * usa el motor de acceso, sin modelo nuevo:
+ *   - reglas de acceso vigentes de ámbito `group` de esos grupos (títulos y colecciones);
+ *   - en datos heredados, `availableContentIds` / `collectionIds` del grupo, dentro de su vigencia.
+ * Una regla de organización o de usuario (compra personal) no pertenece a ningún curso. Un grupo sin asociación
+ * registrada no aporta obras: no se infiere pertenencia por lo que el lector haya leído.
+ * @param {Iterable<string>} groupIds
+ * @returns {{ all: boolean, ids: string[], has: (contentId: unknown) => boolean }}
+ */
+function groupsContentScope(groupIds) {
+    const wanted = new Set([...groupIds].map(String));
+    const titles = new Set();
+    const collections = new Set();
+    let all = false;
+    if (wanted.size > 0) {
+        const now = Date.now();
+        for (const rule of readJSON(ACCESS_DB) || []) {
+            if (rule?.scope !== 'group' || !wanted.has(String(rule.scopeId))) continue;
+            if (typeof rule.expiresAt === 'number' && Number.isFinite(rule.expiresAt) && now > rule.expiresAt) continue;
+            if (Array.isArray(rule.titleIds)) rule.titleIds.forEach(id => titles.add(String(id)));
+            if (Array.isArray(rule.collectionIds)) rule.collectionIds.forEach(id => collections.add(String(id)));
+        }
+        const within = (start, end) => (!start || now >= new Date(start).getTime()) && (!end || now <= new Date(end).getTime());
+        for (const g of readJSON(GROUPS_DB) || []) {
+            if (!g || !wanted.has(String(g.id)) || !within(g.accessStartsAt, g.accessEndsAt)) continue;
+            if (g.availableContentIds === 'all') all = true;
+            else if (Array.isArray(g.availableContentIds)) g.availableContentIds.forEach(id => titles.add(String(id)));
+            if (Array.isArray(g.collectionIds)) g.collectionIds.forEach(id => collections.add(String(id)));
+        }
+        for (const id of resolveCollectionContentIds([...collections])) titles.add(String(id));
+    }
+    return { all, ids: [...titles], has: (contentId) => all || titles.has(String(contentId)) };
+}
+/**
+ * V9 F7-C2 — ámbito pedagógico de ESE mediador sobre ESE lector: los grupos que media (CIS) y de los que el
+ * lector es miembro hoy. No autoriza nada: se usa después de `mediatorProgressAccess` / `individualAccess`.
+ * @throws {IdentityUnavailableError}
+ */
+function mediatorContentScope(mediatorId, readerId) {
+    const shared = [];
+    try {
+        for (const [gid, roster] of mediatedGroupRosters(String(mediatorId ?? ''))) if (roster.has(String(readerId))) shared.push(gid);
+    } catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        return groupsContentScope([]);   // sin identidad verificable no hay ámbito: nada entra
+    }
+    return groupsContentScope(shared);
+}
+
+/**
  * True if user has the mediador role.
  * DT-05: 'profesor' eliminado del modelo. Safety net: también acepta 'profesor'
  * para datos legacy que no hayan pasado por la migración DT-04.
@@ -11360,7 +11456,11 @@ function mediatorCourseReaders(requester, courseId) {
 async function courseMetricsOptions(req, res, requester, courseId) {
     if (await isAdminRequest(req)) return {};
     const scope = mediatorCourseReaders(requester, courseId);
-    if (scope.decision === 'allow') return { includeStudent: (id) => scope.eligible.has(id) };
+    // V9 F7-C2: además, solo la actividad de las obras asociadas a ESE curso (ni otras obras institucionales ni compras).
+    if (scope.decision === 'allow') {
+        const works = groupsContentScope([String(courseId)]);
+        return { includeStudent: (id) => scope.eligible.has(id), includeContent: works.has, contentScope: works };
+    }
     // V9 F5-E4 — administrador de plataforma con sesión firmada y cuenta activa: el curso COMPLETO, pero solo en
     // agregados (`aggregateOnly`). El rol no concede por sí mismo el desglose individual: ese sigue siendo de la
     // autoridad de máquina y del mediador con A2 y C005. Va después del camino del mediador, que no cambia.
@@ -11998,8 +12098,12 @@ const legacyMetricsCourseHandler = async (req, res) => {
         }
 
         // Augment each student with their pedagogical profile (computed from session timelines)
-        const pDb       = getAllProgressAsMap();
-        const leoRaw    = readJSON(LEO_INTERACTIONS_DB) || [];
+        // V9 F7-C2: para el mediador, sobre el progreso y las interacciones de las obras del curso únicamente.
+        const works     = metricsOptions.contentScope ?? null;
+        const pAll      = getAllProgressAsMap();
+        const pDb       = works ? { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => works.has(e?.contentId))) } : pAll;
+        const leoAll    = readJSON(LEO_INTERACTIONS_DB) || [];
+        const leoRaw    = works ? leoAll.filter(e => works.has(e?.contentId)) : leoAll;
         const timelines = buildStudentSessionTimelines(pDb);
         const leoByUser = buildStudentLeoInteractionsMap(leoRaw);
 
@@ -12018,8 +12122,11 @@ const legacyMetricsCourseHandler = async (req, res) => {
             .filter(id => typeof id === 'string');
         // V9 F5-C2: sin lectores (curso vacío o ninguno elegible) NO se consulta el backbone: una lista
         // vacía equivale allí a «sin filtro» y devolvería el agregado global de la plataforma.
-        if (courseUserIds.length > 0) {
-            response.backboneMetrics = safeLoadBackboneMetrics({ userIds: courseUserIds, windowDays: 30 });
+        // V9 F7-C2: con ámbito de obras, el backbone se acota también a ellas; un ámbito sin obras no consulta nada
+        // (una lista vacía equivaldría a «sin filtro»).
+        const worksEmpty = works && !works.all && works.ids.length === 0;
+        if (courseUserIds.length > 0 && !worksEmpty) {
+            response.backboneMetrics = safeLoadBackboneMetrics({ userIds: courseUserIds, windowDays: 30, ...(works && !works.all ? { contentIds: works.ids } : {}) });
         } else {
             response.backboneMetrics = emptyBackboneMetrics({ windowDays: 30 });
             response.backboneMetrics.funnels  = emptyBackboneFunnels({ windowDays: 30 });
@@ -12833,7 +12940,19 @@ function interventionScope(req, res) {
         if (d.decision === 'unavailable') return 'unavailable';
         return d.decision === 'allow' && d.via !== 'self' ? 'allow' : 'deny';
     };
-    return { admin: false, mediates: (courseId) => rosters.has(String(courseId ?? '')), reader, courses: [...rosters.keys()] };
+    // V9 F7-C2: los indicadores que acompañan a una intervención (tiempo de lectura antes y después, perfil) se
+    // calculan solo con la actividad de las obras asociadas a los grupos que media.
+    return { admin: false, mediates: (courseId) => rosters.has(String(courseId ?? '')), reader, courses: [...rosters.keys()], works: groupsContentScope(rosters.keys()) };
+}
+/** V9 F7-C2 — progreso e interacciones de Leo que ese alcance puede usar en sus cálculos (la administración, todo). */
+function interventionActivity(scope) {
+    const pAll = getAllProgressAsMap();
+    const leoAll = readJSON(LEO_INTERACTIONS_DB) || [];
+    if (scope.admin || !scope.works) return { pDb: pAll, leoRaw: leoAll };
+    return {
+        pDb: { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => scope.works.has(e?.contentId))) },
+        leoRaw: leoAll.filter(e => scope.works.has(e?.contentId)),
+    };
 }
 /** Filtra intervenciones a las que ese alcance puede ver. Devuelve null si el registro no es verificable (ya respondió 503). */
 function visibleInterventions(scope, interventions, res) {
@@ -12939,7 +13058,7 @@ app.get('/api/interventions/student/:studentId', requireUserAuth, (req, res) => 
         const visible  = visibleInterventions(scope, iDb.interventions.filter(i => i.studentId === studentId), res);
         if (!visible) return;
         if (!scope.admin && !scope.courses.some(c => scope.reader(c, studentId) === 'allow')) return res.status(403).json(INTERVENTION_DENIED);
-        const pDb      = getAllProgressAsMap();
+        const { pDb }  = interventionActivity(scope);
         const timeMap  = buildStudentReadingTimeMap(pDb);
         const timelines = buildStudentSessionTimelines(pDb);
         const history  = buildStudentInterventionHistory(visible, studentId, timeMap, timelines);
@@ -12969,7 +13088,7 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
         if (!scope) return;
         if (courseId && !scope.mediates(courseId)) return res.status(403).json(INTERVENTION_DENIED);
         const iDb = readInterventionsDb();
-        const pDb = getAllProgressAsMap();
+        const { pDb, leoRaw } = interventionActivity(scope);
 
         let interventions = iDb.interventions;
         if (courseId) {
@@ -12980,7 +13099,6 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
 
         const timeMap      = buildStudentReadingTimeMap(pDb);
         const timelines    = buildStudentSessionTimelines(pDb);
-        const leoRaw       = readJSON(LEO_INTERACTIONS_DB) || [];
         const leoByUser    = buildStudentLeoInteractionsMap(leoRaw);
 
         // Pass timelines to get temporal + dimension breakdowns in per-type stats
@@ -13075,7 +13193,9 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
         }
         const db  = getAllProgressAsMap();
         const cMap = buildContentMap();
-        const entries = Object.values(db.progressMap).filter(p => p.userId === userId);
+        // V9 F7-C2: por mediación, solo las obras asociadas a los grupos compartidos (también el resumen).
+        const scope = mediatorAccess === 'allow' ? mediatorContentScope(requester.id, userId) : null;
+        const entries = Object.values(db.progressMap).filter(p => p.userId === userId && (!scope || scope.has(p.contentId)));
         const readingProgress = entries.map(raw => {
             const rp = computeReadingProgress(raw);
             rp.title = resolveContentTitle(rp.contentId, cMap);
@@ -13108,6 +13228,10 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
         const mediatorAccess = (!isOwner && !isAdmin) ? mediatorProgressAccess(requester, users, userId) : 'deny';
         if (mediatorAccess === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
         if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
+            return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        // V9 F7-C2: misma respuesta que fuera de alcance para una obra ajena a los grupos compartidos.
+        if (mediatorAccess === 'allow' && !mediatorContentScope(requester.id, userId).has(contentId)) {
             return res.status(403).json({ error: 'Acceso denegado' });
         }
         const key = makeProgressKey(userId, contentId);
