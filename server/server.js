@@ -10729,7 +10729,8 @@ app.get('/api/leo/activation/:userId', requireAuth, async (req, res) => {
         // V9 F7-C2: el propio lector ve lo suyo completo; su mediador, solo lo de las obras de los grupos compartidos.
         const works = await leoMediationScope(req, userId);
         const outputs = getActivationOutputsForUser(userId, works ? { includeContent: works.has } : {});
-        res.json({ success: true, outputs });
+        // V9 F7-C2S: por mediación, las salidas que dependen del perfil del lector no se calculan; se declara cuáles.
+        res.json(works ? { success: true, outputs, withheld: ['family', 'recommendation', 'production'] } : { success: true, outputs });
     } catch (e) {
         log(`Leo activation error userId=${req.params.userId}: ${e.message}`, 'ERROR');
         res.status(500).json({ success: false, error: 'Error al generar outputs de activación' });

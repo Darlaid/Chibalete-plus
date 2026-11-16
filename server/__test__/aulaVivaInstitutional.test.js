@@ -243,8 +243,9 @@ try {
             const allowed = await req(server, 'GET',
                 '/api/aula-viva/institutional/outcomes/scope/user/u_student',
                 { userId: 'u_mediator' });
-            ok('16) mediador → 200 scope user propio del grupo',
-                allowed.status === 200);
+            // V9 F7-C2S: concedido por el CIS, pero el impacto por lector no se entrega por mediación.
+            ok('16) mediador → scope user propio del grupo: 403 indicadores retenidos (no scope_access_denied)',
+                allowed.status === 403 && allowed.body?.error === 'individual_indicators_withheld');
 
             // Estudiante intenta ver group → 403
             const studentGroup = await req(server, 'GET',
@@ -257,11 +258,11 @@ try {
             const profileOk = await req(server, 'GET',
                 '/api/aula-viva/institutional/profile/u_student',
                 { userId: 'u_mediator' });
-            ok('18) profile/:userId 200 con timeline + feature_vector + impact_history',
-                profileOk.status === 200
-                && 'timeline' in profileOk.body
-                && 'feature_vector' in profileOk.body
-                && 'impact_history' in profileOk.body);
+            ok('18) profile/:userId por mediación: 403 indicadores retenidos, sin timeline, feature_vector ni impact_history',
+                profileOk.status === 403 && profileOk.body?.error === 'individual_indicators_withheld'
+                && !('timeline' in profileOk.body)
+                && !('feature_vector' in profileOk.body)
+                && !('impact_history' in profileOk.body));
 
             const profileDenied = await req(server, 'GET',
                 '/api/aula-viva/institutional/profile/u_stranger',

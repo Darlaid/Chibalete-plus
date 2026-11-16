@@ -58,7 +58,8 @@ const GROUPS = [
 fs.writeFileSync(P.users, JSON.stringify(USERS, null, 2));
 fs.writeFileSync(P.groups, JSON.stringify(GROUPS, null, 2));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: 'org-a', name: 'Colegio A' }, { id: 'org-b', name: 'Colegio B' }]));
-fs.writeFileSync(P.access, '[]'); fs.writeFileSync(P.content, '[]');
+// V9 F7-C2: el historial por obra exige que la obra esté asociada a un grupo que el mediador media.
+fs.writeFileSync(P.access, JSON.stringify([{ id: 'r-g1', scope: 'group', scopeId: 'G1', titleIds: ['c1'] }, { id: 'r-g3', scope: 'group', scopeId: 'G3', titleIds: ['c1'] }])); fs.writeFileSync(P.content, '[]');
 fs.writeFileSync(path.join(P.data, 'progress_db.json'), JSON.stringify({ progressMap: {} }));
 
 function spawnApi(port) {

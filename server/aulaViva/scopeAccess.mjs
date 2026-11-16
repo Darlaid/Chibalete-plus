@@ -101,6 +101,22 @@ export function respondScopeDecision(d, res, scope_type, scope_id) {
     return false;
 }
 
+/**
+ * V9 F7-C2S — indicadores INDIVIDUALES derivados (perfil, señales, riesgo, vector de rasgos, recomendaciones por
+ * lector, resultados de impacto). Se materializan con TODA la actividad del lector y no guardan de qué obra ni de qué
+ * curso salen, así que no pueden limitarse al contexto pedagógico de quien media. A quien llega por mediación no se
+ * le entregan: la respuesta lo dice con un código propio, nunca con ceros, un perfil «estable» ni una lista vacía.
+ * El cálculo y el almacenamiento no cambian; la administración de plataforma los sigue viendo.
+ */
+export const INDIVIDUAL_INDICATORS_WITHHELD = 'individual_indicators_withheld';
+/** true si el CIS concede ese sujeto por la relación de mediación (no por ser uno mismo ni por administración). */
+export const isMediatedSubject = (callerId, subjectId) =>
+    evaluateScopeAccess(callerId, 'user', String(subjectId ?? '')).via === 'mediator_of_member_group';
+export function withholdIndividualIndicators(res) {
+    res.status(403).json({ ok: false, error: INDIVIDUAL_INDICATORS_WITHHELD });
+    return false;
+}
+
 export function requireScopeAccess(scope_type, scope_id, req, res) {
     // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el principal es la identidad que
     // requireUserAuth ya estableció (sesión firmada → req.auth / req.user);

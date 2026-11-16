@@ -454,8 +454,10 @@ try {
 
             // 7) mediador ve a integrantes de su grupo con los mismos conteos
             const m = await req(server, 'GET', TL('u_student'), null, { 'x-user-id': 'u_mediator' });
-            ok('33) mediador → 200 sobre miembro de SU grupo, mismos conteos que admin',
-                m.status === 200 && JSON.stringify(m.body?.experience_insights) === JSON.stringify(ei));
+            // V9 F7-C2S: el timeline es el perfil derivado del lector; por mediación no se entrega.
+            ok('33) mediador → 403 indicadores retenidos sobre miembro de SU grupo, sin perfil ni experience_insights',
+                m.status === 403 && m.body?.error === 'individual_indicators_withheld'
+                && !('experience_insights' in (m.body || {})) && !('profile_current' in (m.body || {})));
 
             // 8) mediador ajeno no ve datos
             const mx = await req(server, 'GET', TL('u_stranger'), null, { 'x-user-id': 'u_mediator' });
@@ -567,7 +569,12 @@ try {
         const server = await listen(app);
         try {
             // Reutiliza la recomendación ya generada en el bloque [B].
-            const list = await req(server, 'GET', '/api/aula-viva/recommendations/scope/user/u_w');
+            // V9 F7-C2S: la mediadora ya no recibe la lista de un lector; los ids salen del almacén.
+            const listed = await req(server, 'GET', '/api/aula-viva/recommendations/scope/user/u_w');
+            ok('CANON-0a la lista de recomendaciones del lector no se entrega por mediación',
+                listed.status === 403 && listed.body?.error === 'individual_indicators_withheld');
+            const list = { body: readPed(`SELECT recommendation_id FROM pedagogical_recommendations
+                                          WHERE scope_type = 'user' AND scope_id = 'u_w' AND acknowledged = 0 ORDER BY created_at DESC`) };
             const recId = Array.isArray(list.body) && list.body.length ? list.body[0].recommendation_id : null;
             ok('CANON-0 hay una recomendación para ejercitar los sitios', !!recId);
 

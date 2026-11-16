@@ -115,7 +115,10 @@ const stop = async (c) => { if (c && c.exitCode === null && c.signalCode === nul
 const get = async (c, who, p) => { const r = await fetch(`${c.base}/api/aula-viva${p}`, { headers: { 'x-user-id': who, 'sec-fetch-site': 'same-origin' } }); const raw = await r.text(); let b = null; try { b = JSON.parse(raw); } catch { /* */ } return { s: r.status, b, raw }; };
 const INDIVIDUAL = (u) => [`/students/${u}/timeline`, `/students/${u}/signals/continuidad_semanal/timeline`, `/students/${u}/feature-vector`,
     `/students/${u}/risk-history`, `/institutional/profile/${u}`, `/recommendations/scope/user/${u}`];
-const statuses = async (c, who, u) => Promise.all(INDIVIDUAL(u).map(async (p) => (await get(c, who, p)).s));
+// V9 F7-C2S: con A2 y C005 en regla el acceso se concede, pero el perfil derivado no se entrega por mediación: 403 con
+// código propio. 'withheld' = concedido y retenido; 403 = denegado por alcance (A2, C005 o asignación).
+const WITHHELD = 'individual_indicators_withheld';
+const statuses = async (c, who, u) => Promise.all(INDIVIDUAL(u).map(async (p) => { const r = await get(c, who, p); return r.s === 403 && r.b?.error === WITHHELD ? 'withheld' : r.s; }));
 const allEq = (arr, v) => arr.every((x) => x === v);
 const ids = (rows, k) => (Array.isArray(rows) ? rows : []).map((r) => r?.[k]).filter(Boolean).sort().join(',');
 
@@ -124,7 +127,9 @@ try {
     a1 = await spawnApi(); a2 = await spawnApi();
 
     section('[1] individuales con un mediador asignado y C005 vigente');
-    ok('A2 Sí ⇒ las seis operaciones individuales 200', allEq(await statuses(a1, 'med-ok', 'r-yes'), 200), JSON.stringify(await statuses(a1, 'med-ok', 'r-yes')));
+    ok('A2 Sí ⇒ acceso concedido; las seis retienen el perfil derivado (V9 F7-C2S)', allEq(await statuses(a1, 'med-ok', 'r-yes'), 'withheld'), JSON.stringify(await statuses(a1, 'med-ok', 'r-yes')));
+    const held = await get(a1, 'med-ok', '/students/r-yes/timeline');
+    ok('…la retención no trae perfil, ceros ni listas vacías: solo el código', Object.keys(held.b ?? {}).sort().join() === 'error,ok' && !held.raw.includes('abandono') && !held.raw.includes('profile_current'), held.raw);
     for (const [u, label] of [['r-no', 'No'], ['r-pend', 'Pendiente'], ['r-rev', 'Revocada']]) {
         ok(`A2 ${label} ⇒ 403 en las seis`, allEq(await statuses(a1, 'med-ok', u), 403), JSON.stringify(await statuses(a1, 'med-ok', u)));
     }
@@ -139,28 +144,28 @@ try {
     ok('C005 revocado ⇒ 403', allEq(await statuses(a1, 'med-rev', 'r-yes'), 403));
     ok('sin C005 ⇒ 403', allEq(await statuses(a1, 'med-none', 'r-yes'), 403));
     ok('mediador NO asignado (med-b, C005 vigente) ⇒ 403 sobre r-yes', allEq(await statuses(a1, 'med-b', 'r-yes'), 403));
-    ok('…y su propio lector con A2 ⇒ 200 (sin cambios)', allEq(await statuses(a1, 'med-b', 'r-b'), 200));
+    ok('…y su propio lector con A2 ⇒ concedido (perfil derivado retenido)', allEq(await statuses(a1, 'med-b', 'r-b'), 'withheld'));
     ok('administración ⇒ 200 sobre cualquiera, sin A2 (no es consulta institucional)', allEq(await statuses(a1, 'adm', 'r-no'), 200));
     ok('lo propio: el lector sin A2 ve su perfil (200)', (await get(a1, 'r-no', '/institutional/profile/r-no')).s === 200);
 
     section('[3] listados mixtos');
     const att = await get(a1, 'med-ok', '/students-needing-attention');
-    ok('cola de atención: solo r-yes', att.s === 200 && ids(att.b, 'user_id') === 'r-yes', att.raw.slice(0, 300));
+    ok('cola de atención: no se entrega al mediador (ordena por riesgo derivado); ni lista vacía ni lectores', att.s === 403 && att.b?.error === WITHHELD && !att.raw.includes('r-yes'), att.raw.slice(0, 300));
     ok('…administración ve a todos', ids((await get(a1, 'adm', '/students-needing-attention')).b, 'user_id') === ALL.slice().sort().join(','));
     const fq = await get(a1, 'med-ok', '/institutional/outcomes/follow-up-queue');
     ok('cola de seguimiento: solo r-yes (ni r-no, r-pend, r-rev ni r-b de otro grupo)', fq.s === 200 && ids(fq.b, 'student_id') === 'r-yes', fq.raw.slice(0, 300));
     ok('…administración: los cinco', ids((await get(a1, 'adm', '/institutional/outcomes/follow-up-queue')).b, 'student_id') === ALL.slice().sort().join(','));
     const mem = await get(a1, 'med-ok', '/institutional/cohorts/coh-risk/members');
-    ok('miembros de cohorte: solo r-yes y el recuento no incluye a los excluidos', mem.s === 200 && ids(mem.b?.members, 'user_id') === 'r-yes' && mem.b.members_count === 1, mem.raw.slice(0, 300));
-    ok('…C005 vencido: ningún miembro', (await get(a1, 'med-exp', '/institutional/cohorts/coh-risk/members')).b?.members_count === 0);
+    ok('miembros de una cohorte de riesgo: no se entregan al mediador (pertenecer a ella es un indicador derivado)', mem.s === 403 && mem.b?.error === WITHHELD && !mem.raw.includes('r-yes') && !('members_count' in (mem.b ?? {})), mem.raw.slice(0, 300));
+    ok('…C005 vencido: tampoco', (await get(a1, 'med-exp', '/institutional/cohorts/coh-risk/members')).s === 403);
     ok('…administración: los cinco', (await get(a1, 'adm', '/institutional/cohorts/coh-risk/members')).b?.members_count === 5);
 
     section('[4] revocación entre réplicas, sin reiniciar');
-    ok('antes: r-yes visible en las dos réplicas', allEq(await statuses(a1, 'med-ok', 'r-yes'), 200) && allEq(await statuses(a2, 'med-ok', 'r-yes'), 200));
+    ok('antes: r-yes concedido en las dos réplicas', allEq(await statuses(a1, 'med-ok', 'r-yes'), 'withheld') && allEq(await statuses(a2, 'med-ok', 'r-yes'), 'withheld'));
     R.appendDecisions([{ subjectId: 'r-yes', kind: 'A2', status: 'revoked', actDay: R.dayOf(Date.now()), version: '004@1.0', medium: 'admin_record', capacity: 'legal_representative', verification: 'verified', requestRef: 'A2-SINT-REV-YES' }]);
     ok('A2 revocada ⇒ 403 inmediato en la réplica 2', allEq(await statuses(a2, 'med-ok', 'r-yes'), 403));
     ok('…y en la réplica 1', allEq(await statuses(a1, 'med-ok', 'r-yes'), 403));
-    ok('…y sale de los listados', ids((await get(a2, 'med-ok', '/students-needing-attention')).b, 'user_id') === '' && (await get(a1, 'med-ok', '/institutional/cohorts/coh-risk/members')).b?.members_count === 0);
+    ok('…y sale de los listados', ids((await get(a2, 'med-ok', '/institutional/outcomes/follow-up-queue')).b, 'student_id') === '' && ids((await get(a1, 'med-ok', '/institutional/outcomes/follow-up-queue')).b, 'student_id') === '');
     R.appendDecisions([{ subjectId: 'med-b', kind: 'C005', status: 'revoked', actDay: R.dayOf(Date.now()), version: '005@1.0', medium: 'paper', capacity: 'mediator', verification: 'verified', requestRef: 'C005-SINT-REV-B' }]);
     ok('C005 revocado ⇒ med-b deja de ver a su lector en las dos réplicas', allEq(await statuses(a1, 'med-b', 'r-b'), 403) && allEq(await statuses(a2, 'med-b', 'r-b'), 403));
 
@@ -171,7 +176,7 @@ try {
     fs.writeFileSync(reg, saved.replace('"a":"granted"', '"a":"denied"')); // línea alterada ⇒ MAC inválido
     // Sujeto que el CIS SÍ concede (g-a): fuera de alcance el CIS deniega antes de leer el registro.
     const broken = await get(a1, 'med-ok', '/students/r-no/timeline');
-    const brokenList = await get(a2, 'med-b', '/students-needing-attention');
+    const brokenList = await get(a2, 'med-b', '/institutional/outcomes/follow-up-queue');
     ok('registro alterado ⇒ 503 en un individual, sin datos', broken.s === 503 && broken.b?.error === 'individual_access_unavailable' && !broken.raw.includes('"who"'), broken.raw);
     ok('…y 503 en un listado (nunca una lista parcial)', brokenList.s === 503, brokenList.raw);
     ok('…la administración no depende del registro', (await get(a1, 'adm', '/students/r-b/timeline')).s === 200);

@@ -281,14 +281,19 @@ function _computeSuggestedAction({ profile, icdliSnapshot, evidence, sessions })
  * @param {string} userId
  * @returns {LeoMediatorStudentSummary}
  */
-// V9 F7-C2: `includeContent` (opcional) limita sesiones y evidencias a unas obras. El perfil del lector y la
-// instantánea ICDLI son indicadores de la persona, no de una obra, y no se recortan aquí.
+// V9 F7-C2: `includeContent` (opcional) limita sesiones y evidencias a unas obras.
+// V9 F7-C2S: con ese filtro (consulta por mediación) NO se leen ni se entregan el perfil del lector ni la instantánea
+// ICDLI: son indicadores de la persona, calculados con todas sus conversaciones. Tampoco las alertas ni la acción
+// sugerida, que los mezclan. Los campos no van (ni vacíos ni en cero) y `withheld` dice cuáles faltan.
+const PERSON_LEVEL_FIELDS = Object.freeze(['icdliHasData', 'icdliLevel', 'icdliComposite', 'icdliDominantAlerts', 'icdliDominantStrengths',
+    'dominantPedagogicalObjective', 'preferredSupportType', 'alerts', 'suggestedMediatorAction']);
 export function getMediatorStudentSummary(userId, { includeContent = null } = {}) {
     if (!userId) return { dataAvailable: false, userId: null };
 
     try {
-        const profile       = getLeoLearnerProfile(userId);
-        const icdliSnapshot = getLeoICDLISnapshot(userId);
+        const scoped        = typeof includeContent === 'function';
+        const profile       = scoped ? {} : getLeoLearnerProfile(userId);
+        const icdliSnapshot = scoped ? null : getLeoICDLISnapshot(userId);
         const inScope       = (list) => (typeof includeContent === 'function' ? list.filter(x => includeContent(x?.contentId)) : list);
         const sessions      = inScope(getAllSessionMemoriesForUser(userId));
         const evidence      = inScope(getEvidenceEntriesForUser(userId, SUMMARY_EVIDENCE_LIMIT));
@@ -316,6 +321,15 @@ export function getMediatorStudentSummary(userId, { includeContent = null } = {}
             .sort((a, b) => ((b.lastSequenceAt ?? '') > (a.lastSequenceAt ?? '') ? 1 : -1))
             .find(s => s.lastSequenceObjective)
             ?.lastSequenceObjective ?? null;
+
+        if (scoped) {
+            _log(`summary built (scoped) userId=${userId} interactions=${totalInteractions}`);
+            return {
+                dataAvailable: true, userId, generatedAt: _ts(),
+                totalInteractions, lastInteractionAt, recentEvidenceSignals, activeSequence, lastSequenceObjective,
+                withheld: [...PERSON_LEVEL_FIELDS],
+            };
+        }
 
         const alerts = _computeAlerts({ profile, evidence, icdliSnapshot, sessions });
         const suggestedMediatorAction = _computeSuggestedAction({

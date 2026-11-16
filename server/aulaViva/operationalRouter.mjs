@@ -42,7 +42,7 @@ import * as intervention from '../services/interventionEngine.mjs';
 import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 // CHP-AULA-VIVA-MOOK-INTEGRATION-01A — autorización de scope vigente (CIS).
-import { requireScopeAccess, evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision } from './scopeAccess.mjs';
+import { requireScopeAccess, evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
 // CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01 — rol del principal, del CIS.
 import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import {
@@ -240,6 +240,8 @@ function scopedRecommendationsSummary(callerId) {
     ).all();
     const summary = { critical: 0, high: 0, moderate: 0, info: 0 };
     for (const r of rows) {
+        // V9 F7-C2S: las recomendaciones de UN lector son indicadores individuales derivados: tampoco se cuentan.
+        if (String(r.scope_type) === 'user') continue;
         if (evaluateScopeAccess(callerId, r.scope_type, r.scope_id).decision !== 'allow') continue;
         if (r.severity in summary) summary[r.severity] += r.n;
     }
@@ -267,6 +269,8 @@ export function createOperationalRouter({ requireUserAuth }) {
         // mediador solo sobre miembros de sus grupos activos, lector solo sí
         // mismo. 401/403/503 según la taxonomía fail-closed existente.
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
+        // V9 F7-C2S: perfil, señales, riesgos y recomendaciones del lector no tienen procedencia por obra ni curso.
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);
         instrument('aulaViva.student_timeline', () => {
             const data = reader.getProfileTimeline(req.params.userId);
             try { studentTimelineRenderMs.observe(0); } catch {}
@@ -300,18 +304,21 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     router.get('/students/:userId/feature-vector', requireUserAuth, requireOperationalRole, (req, res) => {
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);   // V9 F7-C2S
         safeJson(res, () => reader.getLatestFeatureVector(req.params.userId)
             ?? { user_id: req.params.userId, features: null, stale: true });
     });
 
     router.get('/students/:userId/risk-history', requireUserAuth, requireOperationalRole, (req, res) => {
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);   // V9 F7-C2S
         const limit = Math.min(200, Number(req.query.limit) || 50);
         safeJson(res, () => reader.getRiskHistory(req.params.userId, { limit }), []);
     });
 
     router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, requireOperationalRole, (req, res) => {
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);   // V9 F7-C2S
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
         safeJson(res, () => reader.getSignalTimeline('user', req.params.userId,
             req.params.signalId, sinceTs), []);
@@ -330,6 +337,8 @@ export function createOperationalRouter({ requireUserAuth }) {
 
     router.get('/recommendations/scope/:type/:id', requireUserAuth, requireOperationalRole, (req, res) => {
         if (!requireTenantScope(req.params.type, req.params.id, req, res)) return;
+        // V9 F7-C2S: las recomendaciones de UN lector salen de su perfil derivado: no se entregan por mediación.
+        if (String(req.params.type) === 'user' && isMediatedSubject(callerIdOf(req), req.params.id)) return withholdIndividualIndicators(res);
         if (!cohortGate(req, req.params.type, req.params.id).allowed) return res.json([]); // misma forma, sin pistas
         safeJson(res, () => reader.getRecommendations(req.params.type, req.params.id,
             { includeAcknowledged: req.query.includeAcknowledged === '1',
@@ -482,6 +491,9 @@ export function createOperationalRouter({ requireUserAuth }) {
     // ── ATTENTION QUEUE (corazón del panel docente §7) ───────────────────
     router.get('/students-needing-attention', requireUserAuth, requireOperationalRole, (req, res) => {
         try { dashboardViewsTotal.labels('attention_queue').inc(); } catch {}
+        // V9 F7-C2S: la cola ordena lectores por su riesgo derivado (perfil calculado con toda su actividad): no se
+        // entrega a quien media. Una lista vacía se leería como «nadie necesita atención»; por eso responde 403 propio.
+        if (req.aulaVivaRole !== 'admin') return withholdIndividualIndicators(res);
         // Mediador: solo sujetos que el CIS le concede (miembros de sus grupos
         // activos). Administrador: la cola global de siempre. La deuda del
         // filtro por riesgo (ATTENTION_ENDPOINT_RISK_ZERO) NO se toca aquí.

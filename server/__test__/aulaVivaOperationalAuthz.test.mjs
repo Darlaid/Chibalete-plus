@@ -90,7 +90,7 @@ const rec = (id, type, sid, rule, sev = 'high') => pdb.prepare(`INSERT INTO peda
     VALUES (?, ?, ?, ?, 'lectura_guiada', ?, ?, ?, '{}', '[]')`).run(id, type, sid, rule, sev, NOW, NOW + 86_400_000);
 rec('rec-a', 'user', 'lec-a', 'r1'); rec('rec-a2', 'user', 'lec-a', 'r2', 'critical');
 rec('rec-b', 'user', 'lec-b', 'r1'); rec('rec-b2', 'user', 'lec-b', 'r2', 'critical');
-rec('rec-gb', 'group', 'g-b', 'r3');
+rec('rec-gb', 'group', 'g-b', 'r3'); rec('rec-ga', 'group', 'g-a', 'r3', 'moderate');
 pdb.prepare(`INSERT INTO pedagogical_interventions (intervention_id, teacher_id, student_id, intervention_type, created_at)
              VALUES ('int-b', 'med-b', 'lec-b', 'lectura_guiada', ?)`).run(NOW);
 pdb.prepare(`INSERT INTO pedagogical_interventions (intervention_id, teacher_id, student_id, intervention_type, created_at)
@@ -156,7 +156,13 @@ try {
     section('[A1/A3] MEDIADOR A → su propio tenant: permitido');
     for (const [m, p] of ROUTES(A)) {
         const r = await call('med-a', m, p);
-        ok(`med-a ${m} ${p} → 200`, r.s === 200, `${r.s} ${JSON.stringify(r.b).slice(0, 120)}`);
+        // V9 F7-C2S: lo individual derivado (perfil, señales, riesgo, vector, recomendaciones del lector) se concede
+        // pero no se entrega por mediación; los agregados de su grupo siguen igual.
+        if (/^\/students\/|^\/recommendations\/scope\/user\//.test(p)) {
+            ok(`med-a ${m} ${p} → 403 indicadores retenidos, sin datos`, r.s === 403 && r.b?.error === 'individual_indicators_withheld'
+                && Object.keys(r.b).sort().join() === 'error,ok', `${r.s} ${JSON.stringify(r.b).slice(0, 120)}`);
+            ok(`   …el administrador sí lo recibe (${p})`, (await call('adm', m, p)).s === 200);
+        } else ok(`med-a ${m} ${p} → 200`, r.s === 200, `${r.s} ${JSON.stringify(r.b).slice(0, 120)}`);
     }
 
     section('[A2/A4/A5] MEDIADOR A → tenant B: 403 en todas las rutas con objetivo');
@@ -215,23 +221,27 @@ try {
 
     section('[A7] COLA DE ATENCIÓN del mediador: sin sujetos ajenos ni cuentas globales');
     {
+        // V9 F7-C2S: la cola ordena por riesgo derivado; al mediador no se le entrega (ni vacía).
         const r = await call('med-a', 'GET', '/students-needing-attention');
-        const ids = (r.b || []).map(x => x.user_id);
-        ok('200', r.s === 200);
-        ok('contiene a su alumno', ids.includes('lec-a'), ids.join(','));
-        ok('FOREIGN_STUDENTS_IN_ATTENTION = 0', !ids.includes('lec-b'), ids.join(','));
-        ok('la cuenta administradora no aparece al mediador', !ids.includes('adm'), ids.join(','));
+        const raw = JSON.stringify(r.b);
+        ok('403 indicadores retenidos', r.s === 403 && r.b?.error === 'individual_indicators_withheld', `${r.s} ${raw}`);
+        ok('sin su alumno ni lista vacía', !Array.isArray(r.b) && !raw.includes('lec-a'), raw);
+        ok('FOREIGN_STUDENTS_IN_ATTENTION = 0', !raw.includes('lec-b'), raw);
+        ok('la cuenta administradora no aparece al mediador', !raw.includes('adm'), raw);
         const rb = await call('med-b', 'GET', '/students-needing-attention');
-        ok('simétrico: med-b solo ve a lec-b', JSON.stringify((rb.b || []).map(x => x.user_id)) === '["lec-b"]', JSON.stringify(rb.b));
+        ok('simétrico: med-b tampoco la recibe', rb.s === 403 && !JSON.stringify(rb.b).includes('lec-b'), JSON.stringify(rb.b));
+        const ra = await call('adm', 'GET', '/students-needing-attention');
+        ok('la administración conserva la cola', ra.s === 200 && Array.isArray(ra.b) && ra.b.some(x => x.user_id === 'lec-a'), JSON.stringify(ra.b).slice(0, 200));
     }
 
     section('[§10] ESTADO OPERACIONAL: el resumen se acota al scope del mediador');
     {
         const a = await call('med-a', 'GET', '/operational/status');
         ok('med-a → 200', a.s === 200);
-        // Tras el ack de rec-a, a med-a le queda rec-a2 (critical); rec-b/rec-b2/rec-gb son ajenas.
-        ok('med-a cuenta solo lo suyo (critical=1, high=0)', a.b?.recommendations_summary?.critical === 1
-            && a.b?.recommendations_summary?.high === 0, JSON.stringify(a.b?.recommendations_summary));
+        // V9 F7-C2S: las recomendaciones de un lector (rec-a2, critical) son indicadores individuales derivados y ya no
+        // se cuentan al mediador; sí la de su grupo (rec-ga, moderate). rec-b/rec-b2/rec-gb son ajenas.
+        ok('med-a cuenta solo las de su grupo (critical=0, high=0, moderate=1)', a.b?.recommendations_summary?.critical === 0
+            && a.b?.recommendations_summary?.high === 0 && a.b?.recommendations_summary?.moderate === 1, JSON.stringify(a.b?.recommendations_summary));
         const ad = await call('adm', 'GET', '/operational/status');
         ok('admin conserva el resumen global (critical=2, high=2)', ad.b?.recommendations_summary?.critical === 2
             && ad.b?.recommendations_summary?.high === 2, JSON.stringify(ad.b?.recommendations_summary));

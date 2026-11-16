@@ -37,7 +37,7 @@ import * as reader from '../services/insightReader.mjs';
 import { cohortDisclosure, suppressedAggregate, MIN_COHORT_READERS } from '../analytics/cohortDisclosure.mjs';
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
-import { evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision } from './scopeAccess.mjs';
+import { evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
 import {
     outcomesViewsTotal, cohortViewsTotal, trajectoryViewsTotal,
     learningViewsTotal, comparativeQueriesTotal, scopeSwitchTotal,
@@ -135,11 +135,23 @@ export function createInstitutionalRouter({ requireUserAuth }) {
 
     router.get('/institutional/outcomes/scope/:type/:id', requireUserAuth, (req, res) => {
         if (!requireScope(req, res, req.params.type, req.params.id)) return;
+        // V9 F7-C2S: el impacto por lector se etiqueta con señales calculadas sobre toda su actividad.
+        if (String(req.params.type) === 'user' && isMediatedSubject(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], req.params.id)) return withholdIndividualIndicators(res);
         try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
         const limit = parseLimit(req.query.limit);
         const gate = cohortGate(req, req.params.type, req.params.id);
         if (!gate.allowed) return res.json(suppressedAggregate({ scope: { type: req.params.type, id: req.params.id }, total_outcomes: 0, distribution: {}, outcomes: [] }, gate.reason));
         instrument('institutional.outcomes_scope', () => {
+            // V9 F7-C2S: cada fila es el resultado de UN lector (identificador, métricas antes/después). Quien media
+            // recibe solo la distribución, y solo si resume a 5 o más resultados; las filas no van.
+            if (!req.aulaVivaPlatformAdmin && String(req.params.type) !== 'user') {
+                const empty = { scope: { type: req.params.type, id: req.params.id }, total_outcomes: 0, distribution: {}, outcomes: [] };
+                let full = null;
+                try { full = impact.getImpactSummary(req.params.type, req.params.id, { limit }); } catch { full = null; }
+                if (!full) return res.json({ ...empty, stale: true, reason: 'engine_unavailable' });
+                if (Number(full.total_outcomes) < MIN_COHORT_READERS) return res.json(suppressedAggregate(empty, 'below_min_outcomes'));
+                return res.json({ scope: full.scope, total_outcomes: full.total_outcomes, distribution: full.distribution, outcomes: [], withheld: ['outcomes'] });
+            }
             safeJson(res, () => impact.getImpactSummary(req.params.type, req.params.id, { limit }),
                      { scope: { type: req.params.type, id: req.params.id },
                        total_outcomes: 0, distribution: {}, outcomes: [] });
@@ -205,6 +217,9 @@ export function createInstitutionalRouter({ requireUserAuth }) {
                 return res.status(404).json({ ok: false, error: 'cohort_not_found' });
             }
             if (!requireScope(req, res, cohort.scope_type, cohort.scope_id)) return;
+            // V9 F7-C2S: pertenecer a una cohorte que no es una nómina (p. ej. una de riesgo) ES un indicador
+            // individual derivado. Solo las nóminas (colegio, grupo, club) se listan para quien media.
+            if (!req.aulaVivaPlatformAdmin && !['school', 'group', 'club'].includes(String(cohort.cohort_type))) return withholdIndividualIndicators(res);
             try { cohortViewsTotal.labels('members').inc(); } catch {}
             instrument('institutional.cohort_members', () => {
                 let members = stmts.listMembersOfCohort.all(req.params.cohort_id);
@@ -357,6 +372,8 @@ export function createInstitutionalRouter({ requireUserAuth }) {
     // ── PROFILE ENRIQUECIDO (wrapper PASO 7) ─────────────────────────────
     router.get('/institutional/profile/:userId', requireUserAuth, (req, res) => {
         if (!requireScope(req, res, 'user', req.params.userId)) return;
+        // V9 F7-C2S: perfil, vector de rasgos e historial de impacto del lector: sin procedencia por obra ni curso.
+        if (isMediatedSubject(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], req.params.userId)) return withholdIndividualIndicators(res);
         try { outcomesViewsTotal.labels('profile').inc(); } catch {}
         instrument('institutional.profile', () => {
             safeJson(res, () => {

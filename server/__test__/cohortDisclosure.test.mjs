@@ -185,7 +185,7 @@ try {
 
     const adm = await call('adm', '/cohorts/group/g-small');
     ok('administrador: sin umbral (ve el agregado)', adm.b.metrics.some((m) => m.metric_value === SECRET_VALUE), adm.raw);
-    ok('detalle individual (ámbito user) del mediador: no cambia', (await call(MED, '/students/s-1/timeline')).s === 200);
+    { const d = await call(MED, '/students/s-1/timeline'); ok('detalle individual (ámbito user) del mediador: concedido por alcance; perfil derivado retenido (V9 F7-C2S)', d.s === 403 && d.b?.error === 'individual_indicators_withheld', d.raw); }
 
     writeSources(FIVE.slice(0, 4)); // baja de un lector del grupo de 5
     ok('revocación de pertenencia: el grupo baja a 4 ⇒ suprimido en la siguiente petición', (await call(MED, '/cohorts/group/g-five')).b.suppressed === true);

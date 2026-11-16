@@ -391,11 +391,22 @@ function _productionPrompt(lastObj, hasWritingHistory) {
  * @returns {LeoActivationOutput[]}
  */
 // V9 F7-C2: `includeContent` (opcional) limita sesiones, evidencias y progreso activo a unas obras.
+// V9 F7-C2S: con ese filtro (consulta por mediación) solo se calcula la continuidad, que sale de las sesiones y del
+// progreso de esas obras. El mensaje a la familia, la recomendación y la invitación a producir dependen del perfil
+// del lector o de su ICDLI (toda su actividad): no se calculan ni se entregan.
+export const PERSON_LEVEL_ACTIVATIONS = Object.freeze(['family', 'recommendation', 'production']);
 export function getActivationOutputsForUser(userId, { includeContent = null } = {}) {
     if (!userId) return [];
 
     try {
         const inScope        = (list) => (typeof includeContent === 'function' ? list.filter(x => includeContent(x?.contentId)) : list);
+        if (typeof includeContent === 'function') {
+            const scopedSessions = inScope(getAllSessionMemoriesForUser(userId));
+            const scopedProgress = inScope(_getActiveProgressRecords(userId, _readProgressDb(userId)));
+            const only = detectContinuity(userId, scopedSessions, scopedProgress);
+            _log(`userId=${userId} outputs(scoped)=[${only ? only.type : ''}]`);
+            return only ? [only] : [];
+        }
         const profile        = getLeoLearnerProfile(userId);
         const sessions       = inScope(getAllSessionMemoriesForUser(userId));
         const evidence       = inScope(getEvidenceEntriesForUser(userId, 30));
