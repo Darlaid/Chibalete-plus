@@ -38,7 +38,7 @@ import { cohortDisclosure, suppressedAggregate, MIN_COHORT_READERS } from '../an
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
 import { evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
-import { getPrincipal } from '../identity/cis.mjs';
+import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import { MIN_SUPPORT as LEARNING_MIN_SUPPORT, buildHint as learningHint, computeConfidence as learningConfidence } from '../services/institutionalLearning.mjs';
 // V9 F7-C2R-U2 — perfil del lector para quien lo media: contexto pedagógico (U1), nunca el perfil global.
 import { buildContextualView, timelineBody, featureVectorBody, contextualInterventions, contextualImpactRows, impactSummaryBody } from './contextualView.mjs';
@@ -110,6 +110,36 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     };
     const callerOf = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     /**
+     * V9 F7-C2R-U3A — a quién se dirige la proyección institucional (recuentos y filas de TODAS las instituciones).
+     *   'admin'     administración de plataforma: la vista global, como siempre;
+     *   'mediator'  quien media: solo lo de sus cursos (nunca la proyección global);
+     *   null        ya respondió: 401 sin identidad, 403 para cualquier otra sesión (un lector, institucional o B2C),
+     *               503 si la identidad no es verificable. El 403 no trae recuentos ni nombra a nadie.
+     * El rol sale del CIS, nunca del cliente.
+     */
+    function institutionalAudience(req, res) {
+        let p;
+        try { p = getPrincipal(String(callerOf(req) ?? '')); }
+        catch (e) {
+            if (!(e instanceof IdentityUnavailableError)) throw e;
+            res.status(503).json({ ok: false, error: 'identity_unavailable', cause: e.causeTag });
+            return null;
+        }
+        if (!p) { res.status(401).json({ ok: false, error: 'identity_not_established' }); return null; }
+        if (p.platformAdmin) return 'admin';
+        if (p.mediatorRole) return 'mediator';
+        res.status(403).json({ ok: false, error: 'scope_access_denied' });
+        return null;
+    }
+    /** Quien media sin el acceso al contexto inyectado no recibe la proyección global en su lugar. */
+    const contextUnavailable = (res) => res.status(503).json({ ok: false, error: 'context_unavailable' });
+    /** Definiciones de cohortes visibles para quien media: las nóminas de SUS cursos y colegios, y las tipadas (sin institución). */
+    const visibleCohortDefinitions = (req, rows) => rows.filter((c) => {
+        if (!['group', 'club', 'school'].includes(String(c.scope_type))) return true;
+        const d = evaluateScopeAccess(callerOf(req), c.scope_type, c.scope_id);
+        return d.decision === 'allow' && !String(d.via ?? '').startsWith('policy:');
+    });
+    /**
      * V9 F7-C2R-U3 — impacto de las intervenciones de los cursos que media quien llama, sobre sus lectores con seguimiento
      * habilitado. Es lo que alimenta su pestaña Institucional: los totales, aprendizajes y comparativas GUARDADOS salen de
      * todas las instituciones y de toda la actividad de cada lector, y no son de quien media. null si ya respondió.
@@ -142,7 +172,11 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
 
     // ── /institutional/status ────────────────────────────────────────────
     router.get('/institutional/status', requireUserAuth, async (req, res) => {
-        if (contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {   // V9 F7-C2R-U3: totales del contexto de quien media
+        // V9 F7-C2R-U3A: esta ruta no comprobaba alcance y devolvía los recuentos globales a cualquier sesión.
+        const audience = institutionalAudience(req, res);
+        if (!audience) return;
+        if (audience === 'mediator' && !contextAccess?.readers) return contextUnavailable(res);
+        if (audience === 'mediator') {   // V9 F7-C2R-U3: totales del contexto de quien media
             const m = await mediatorImpact(req, res);
             if (!m) return;
             const by_label = {};
@@ -175,9 +209,19 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     });
 
     // ── OUTCOMES ─────────────────────────────────────────────────────────
-    router.get('/institutional/outcomes/by-type/:type', requireUserAuth, (req, res) => {
+    router.get('/institutional/outcomes/by-type/:type', requireUserAuth, async (req, res) => {
         // Vista agregada → permitir mediador/admin.
         if (!requireScope(req, res, 'all', 'global')) return;
+        // V9 F7-C2R-U3A: la distribución guardada suma todas las instituciones. Quien media recibe la de sus cursos.
+        if (!req.aulaVivaPlatformAdmin) {
+            if (!contextAccess?.readers) return contextUnavailable(res);
+            const m = await mediatorImpact(req, res);
+            if (!m) return;
+            const e = m.byType.get(String(req.params.type));
+            const distribution = {};
+            for (const k of ['improved', 'stable', 'worsened', 'mixed', 'insufficient_data']) if (e?.[k]) distribution[k] = e[k];
+            return res.json({ intervention_type: req.params.type, total: e?.total ?? 0, distribution, context: true });
+        }
         try { outcomesViewsTotal.labels('by_type').inc(); } catch {}
         instrument('institutional.outcomes_by_type', () => {
             safeJson(res, () => impact.getImpactByInterventionType(req.params.type));
@@ -268,7 +312,8 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                     `SELECT * FROM cohort_definitions WHERE active = 1
                      ORDER BY cohort_type, scope_id LIMIT ?`
                 ).all(parseLimit(req.query.limit));
-                return rows;
+                // V9 F7-C2R-U3A: la lista nombraba cursos y colegios de otras instituciones a cualquier mediador.
+                return req.aulaVivaPlatformAdmin ? rows : visibleCohortDefinitions(req, rows);
             }, []);
         });
     });
@@ -279,7 +324,8 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         instrument('institutional.cohorts_by_type', () => {
             safeJson(res, () => {
                 const stmts = getOutcomesStatements();
-                return stmts.listCohortsByType.all(req.params.type);
+                const rows = stmts.listCohortsByType.all(req.params.type);
+                return req.aulaVivaPlatformAdmin ? rows : visibleCohortDefinitions(req, rows);   // V9 F7-C2R-U3A
             }, []);
         });
     });
@@ -383,7 +429,8 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
 
     router.get('/institutional/learnings/global', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
-        if (!req.aulaVivaPlatformAdmin && contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {   // V9 F7-C2R-U3
+        if (!req.aulaVivaPlatformAdmin) {   // V9 F7-C2R-U3 / U3A: quien media, solo lo de sus cursos
+            if (!contextAccess?.readers) return contextUnavailable(res);
             const m = await mediatorImpact(req, res);
             if (!m) return;
             return res.json(m.learnings);
@@ -403,6 +450,9 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     // ── PREDICTIVE PATTERNS (read-only agregado) ─────────────────────────
     router.get('/institutional/patterns/recent', requireUserAuth, (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
+        // V9 F7-C2R-U3A: los patrones guardados agregan todas las instituciones y no existe un cálculo por curso. No se
+        // entregan a quien media (tampoco una lista vacía, que se leería como «no hay patrones»).
+        if (!req.aulaVivaPlatformAdmin) return res.status(403).json({ ok: false, error: 'scope_access_denied' });
         const limit = parseLimit(req.query.limit);
         instrument('institutional.patterns_recent', () => {
             safeJson(res, () => {
@@ -422,7 +472,8 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     // ── COMPARATIVE INTELLIGENCE §8 ──────────────────────────────────────
     router.get('/institutional/comparative/strategies', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
-        if (!req.aulaVivaPlatformAdmin && contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {   // V9 F7-C2R-U3
+        if (!req.aulaVivaPlatformAdmin) {   // V9 F7-C2R-U3 / U3A: quien media, solo lo de sus cursos
+            if (!contextAccess?.readers) return contextUnavailable(res);
             const m = await mediatorImpact(req, res);
             if (!m) return;
             const strategies = [...m.byType.values()].map((s) => ({ ...s, improved_ratio: s.total ? +(s.improved / s.total).toFixed(3) : null, note: 'Observacional. NO implica causalidad.' }));

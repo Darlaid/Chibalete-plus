@@ -351,9 +351,22 @@ try {
                 !/\bcausal\b|\bcausó\b|\bgarantiza\b|\bdéficit\b|\btrastorno\b/i
                   .test(sample.recommendation_hint || ''));
 
-            const byType = await req(server, 'GET',
+            // V9 F7-C2R-U3A: la distribución guardada suma todas las instituciones: es de la administración. Quien media
+            // recibe la de sus cursos; este router no lleva el acceso al contexto, así que no se le sirve la global.
+            const byTypeMed = await req(server, 'GET',
                 '/api/aula-viva/institutional/outcomes/by-type/lectura_guiada',
                 { userId: 'u_mediator' });
+            ok('23a) outcomes/by-type: a quien media no se le entrega la distribución global',
+                byTypeMed.status === 503 && byTypeMed.body?.error === 'context_unavailable' && !('distribution' in (byTypeMed.body ?? {})));
+            const stMed = await req(server, 'GET', '/api/aula-viva/institutional/status', { userId: 'u_mediator' });
+            ok('23b) status: a quien media tampoco se le entregan los recuentos globales',
+                stMed.status === 503 && !('outcomes' in (stMed.body ?? {})));
+            const stReader = await req(server, 'GET', '/api/aula-viva/institutional/status', { userId: 'u_student' });
+            ok('23c) status: un lector recibe 403, sin recuentos',
+                stReader.status === 403 && stReader.body?.error === 'scope_access_denied' && !('outcomes' in (stReader.body ?? {})));
+            const byType = await req(server, 'GET',
+                '/api/aula-viva/institutional/outcomes/by-type/lectura_guiada',
+                { userId: 'u_admin' });
             ok('23) outcomes/by-type retorna distribution + total>=1',
                 byType.status === 200 && byType.body.total >= 1 && byType.body.distribution);
 
