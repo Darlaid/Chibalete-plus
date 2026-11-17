@@ -1565,6 +1565,9 @@ const AulaViva: React.FC = () => {
                     {/* KPIs del grupo — GET /api/groups/:id/analytics-summary (1B) */}
                     <GroupAnalyticsKpis state={groupAnalytics} />
 
+                    {/* G4-UX-U4: reconocimiento agregado (solo con gamificación y XP activos) */}
+                    <GroupRecognitionBlock state={groupAnalytics} onReview={() => setActiveTab('producciones')} />
+
                     {/* V9 F7-C2R-U3C — impacto agregado de las intervenciones del curso (solo para quien lo media). */}
                     {selectedGroup && canManageClassroom && !isAdmin && (
                         <details className="mb-8" data-testid="course-impact">
@@ -1577,9 +1580,6 @@ const AulaViva: React.FC = () => {
                             </div>
                         </details>
                     )}
-
-                    {/* G4-UX-U4: reconocimiento agregado (solo con gamificación y XP activos) */}
-                    <GroupRecognitionBlock state={groupAnalytics} onReview={() => setActiveTab('producciones')} />
 
                     {/* UX-3B — md:grid-cols-2 para tablet:
                           mobile  → 1 columna (analytics + panel apilados)
