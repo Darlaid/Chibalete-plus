@@ -169,10 +169,21 @@ const AulaVivaOperacional: React.FC = () => {
     // V9 F5-E2 — una consulta que NO respondió no es «no hay nada». Antes la lista vacía de relleno
     // se pintaba como «0 · sin lectores en riesgo» y «los patrones se mantienen estables».
     const statusMeta = fetchMetaOf(status), attentionMeta = fetchMetaOf(attention), cohortMeta = fetchMetaOf(cohort), recsMeta = fetchMetaOf(recs);
+    // V9 F7-C2R-U2 — un timeline que no respondió (p. ej. la autorización del lector dejó de estar vigente) no es «sin sesiones».
+    const timelineMeta = fetchMetaOf(timeline);
     const cachedMetas = [statusMeta, attentionMeta, cohortMeta].filter(m => m.cached);
     const cachedAgeMin = Math.max(0, ...cachedMetas.map(m => Math.round((m.age_ms ?? 0) / 60000)));
     const failureText = (m: Parameters<typeof describeFetchFailure>[0]) => describeFetchFailure(m);
     const materializerReady = !!status?.materializer_ready?.ready && !statusMeta.failed;
+    // V9 F7-C2R-U2 — la cola del mediador sale del contexto de sus cursos. Un lector sin indicadores no entra en ella, y
+    // eso no significa que «vaya bien»: se dice cuántos están en cada situación.
+    const overview = statusMeta.failed ? null : (status?.context_overview ?? null);
+    const overviewParts: string[] = overview ? [
+        overview.insufficient > 0 ? `${overview.insufficient} con información insuficiente por ahora` : '',
+        overview.no_activity > 0 ? `${overview.no_activity} sin actividad en las obras del curso en los últimos 28 días` : '',
+        overview.no_course_works > 0 ? `${overview.no_course_works} en cursos sin obras asociadas` : '',
+        overview.ok - overview.in_attention > 0 ? `${overview.ok - overview.in_attention} con muy poca lectura del curso para estimar un riesgo` : '',
+    ].filter(Boolean) : [];
 
     // Sparkline de active_users (proxy de continuidad institucional)
     const activeUsersDaily = (cohort?.metrics?.find(m => m.metric_key === 'active_users')?.metric_value);
@@ -272,6 +283,16 @@ const AulaVivaOperacional: React.FC = () => {
                                 title="No tienes grupos asignados como mediador"
                                 body="Esta lista se arma con los lectores de los grupos que medias. Si deberías tener un grupo, pide a la administración de tu institución que revise la asignación."
                             />
+                        ) : attention.length === 0 && overview && overview.readers === 0 ? (
+                            <EmptyState kind="custom" where="attention_queue_no_enabled_readers"
+                                title="Sin lectores habilitados para el seguimiento individual"
+                                body="El seguimiento individual requiere la autorización vigente de cada lector y tu compromiso de mediación vigente. Consulta con la administración de tu institución. Esto no describe cómo leen."
+                            />
+                        ) : attention.length === 0 && overview && overviewParts.length > 0 ? (
+                            <EmptyState kind="custom" where="attention_queue_context_states"
+                                title="Todavía no hay lectores con indicadores del curso"
+                                body={`${overview.readers === 1 ? 'Tu único lector habilitado' : `De tus ${overview.readers} lectores habilitados`}: ${overviewParts.join('; ')}. Esto no describe cómo leen.`}
+                            />
                         ) : attention.length === 0 && !materializerReady ? (
                             <EmptyState kind="snapshots_pending" where="attention_queue_pending"
                                 title="Aún no hay información procesada"
@@ -315,6 +336,11 @@ const AulaVivaOperacional: React.FC = () => {
                                 ))}
                             </ul>
                         )}
+                        {!attentionMeta.failed && attention.length > 0 && overviewParts.length > 0 && (
+                            <p className="mt-3 text-xs text-gray-600" data-testid="attention-context-states">
+                                Fuera de esta lista: {overviewParts.join('; ')}. Esto no describe cómo leen.
+                            </p>
+                        )}
                     </section>
 
                     {/* Recommendations for selected student */}
@@ -332,6 +358,11 @@ const AulaVivaOperacional: React.FC = () => {
                             <EmptyState kind="custom" where="recommendations_failed"
                                 title="No pudimos consultar las recomendaciones"
                                 body={`${failureText(recsMeta)} Esto no significa que este lector no tenga recomendaciones.`}
+                            />
+                        ) : recs.length === 0 && timeline?.data_state && timeline.data_state !== 'ok' ? (
+                            <EmptyState kind="custom" where="recommendations_no_indicators"
+                                title="Sin recomendaciones por ahora"
+                                body="No hay indicadores del curso para este lector en este momento (el timeline explica por qué). Esto no significa que su lectura sea estable."
                             />
                         ) : recs.length === 0 ? (
                             <EmptyState kind="no_recommendations" where="recommendations_for_student"/>
@@ -360,10 +391,17 @@ const AulaVivaOperacional: React.FC = () => {
                             <Activity className="w-5 h-5 text-gray-500"/>
                             Timeline longitudinal: {selectedStudent}
                         </h2>
+                        {timelineMeta.failed && !timelineLoading ? (
+                            <EmptyState kind="custom" where="timeline_failed"
+                                title="No pudimos consultar el timeline"
+                                body={`${failureText(timelineMeta)} Esto no describe cómo lee este estudiante.`}
+                            />
+                        ) : (
                         <LongitudinalStudentTimeline
                             data={timeline as any /* shape compatible — service ya incluye summaries */}
                             loading={timelineLoading}
                         />
+                        )}
                     </section>
                 )}
 

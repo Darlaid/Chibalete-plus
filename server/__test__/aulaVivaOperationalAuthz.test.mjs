@@ -211,8 +211,11 @@ try {
 
     section('[A1] ESCRITURAS propias del mediador A: permitidas');
     {
+        // V9 F7-C2R-U2: una recomendación GLOBAL de su lector (calculada con toda la actividad) no es del mediador: no
+        // se le entrega y tampoco puede marcarla aunque conozca el identificador.
+        const before = digest();
         const ack = await call('med-a', 'POST', '/recommendations/rec-a/ack', { applied: false });
-        ok('med-a ack de recomendación propia → 200', ack.s === 200, JSON.stringify(ack.b));
+        ok('med-a ack de una recomendación global de su lector → 403, sin cambios', ack.s === 403 && ack.b?.error === 'scope_access_denied' && digest() === before, JSON.stringify(ack.b));
         const intv = await call('med-a', 'POST', '/interventions', { studentId: 'lec-a', interventionType: 'lectura_guiada' });
         ok('med-a intervención sobre su alumno → 200', intv.s === 200 && intv.b?.ok === true, JSON.stringify(intv.b));
         const out = await call('med-a', 'PATCH', '/interventions/int-a/outcome', { outcome: 'improved' });
@@ -243,8 +246,8 @@ try {
         ok('med-a cuenta solo las de su grupo (critical=0, high=0, moderate=1)', a.b?.recommendations_summary?.critical === 0
             && a.b?.recommendations_summary?.high === 0 && a.b?.recommendations_summary?.moderate === 1, JSON.stringify(a.b?.recommendations_summary));
         const ad = await call('adm', 'GET', '/operational/status');
-        ok('admin conserva el resumen global (critical=2, high=2)', ad.b?.recommendations_summary?.critical === 2
-            && ad.b?.recommendations_summary?.high === 2, JSON.stringify(ad.b?.recommendations_summary));
+        ok('admin conserva el resumen global (critical=2, high=3)', ad.b?.recommendations_summary?.critical === 2
+            && ad.b?.recommendations_summary?.high === 3, JSON.stringify(ad.b?.recommendations_summary));
     }
 
     section('[AGGREGATE-SCOPE-02] el mediador no ve agregados interinstitucionales');

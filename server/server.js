@@ -1746,7 +1746,7 @@ registerRumRoute(app);
 // (inyectada). El scheduler queda OFF salvo AULA_VIVA_SCHEDULER_ENABLED=1.
 try {
     const { createOperationalRouter } = await import('./aulaViva/operationalRouter.mjs');
-    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth }));
+    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth, contextAccess: { reader: (c, r) => aulaVivaContextReader(c, r), overview: (c) => aulaVivaContextOverview(c) } }));
     log('[PASO5] /api/aula-viva router mounted', 'INFO');
 } catch (e) {
     log(`[PASO5] aula-viva router mount failed: ${e.message}`, 'WARN');
@@ -1755,7 +1755,7 @@ try {
 // /institutional/* no solapan con PASO 5).
 try {
     const { createInstitutionalRouter } = await import('./aulaViva/institutionalRouter.mjs');
-    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth }));
+    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r) => aulaVivaContextReader(c, r) } }));
     log('[PASO7] /api/aula-viva/institutional/* router mounted', 'INFO');
 } catch (e) {
     log(`[PASO7] institutional router mount failed: ${e.message}`, 'WARN');
@@ -11472,6 +11472,74 @@ async function contextualIndicatorsFor(requester, users, readerId) {
     const nowTs = Date.now();
     const { result } = computeContextualIndicators({ context, nowTs, events: readOwnEventHistory(readerId, nowTs - CONTEXT_WINDOW_DAYS * 86_400_000) });
     return { status: 200, body: { ok: true, ...result } };
+}
+/**
+ * V9 F7-C2R-U2 — acceso al contexto para las rutas de Aula Viva (se inyecta en sus routers).
+ * `reader`: contexto y eventos fechados de UN lector para quien lo acompaña por mediación (mismos controles que el
+ * resto de la mediación: rol, nunca un B2C personal, CIS + A2 + C005). `{ ok:false, status, body }` si no procede.
+ */
+async function aulaVivaContextReader(callerId, readerId) {
+    const users = readJSON(USERS_DB) || [];
+    const requester = users.find(u => u?.id === String(callerId ?? ''));
+    const access = mediatorProgressAccess(requester, users, readerId);
+    if (access === 'unavailable') return { ok: false, status: 503, body: { ok: false, error: 'individual_access_unavailable' } };
+    if (access !== 'allow') return { ok: false, status: 403, body: { ok: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(readerId) } };
+    let context;
+    try { context = await mediatorPedagogicalContext(requester.id, readerId); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        return { ok: false, status: 503, body: { ok: false, error: 'identity_unavailable' } };
+    }
+    const { HISTORY_DAYS } = await import('./aulaViva/contextualView.mjs');
+    const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
+    const nowTs = Date.now();
+    return { ok: true, context, nowTs, events: readOwnEventHistory(readerId, nowTs - HISTORY_DAYS * 86_400_000) };
+}
+/**
+ * `overview`: todos los lectores que ese mediador puede acompañar HOY (miembros de los grupos que media, con A2 vigente
+ * y C005 del mediador; nunca un B2C personal), cada uno con su contexto. Registro de decisiones o identidad no
+ * verificables ⇒ 503 (fallo cerrado). Las asociaciones se observan una sola vez por petición.
+ */
+async function aulaVivaContextOverview(callerId) {
+    const users = readJSON(USERS_DB) || [];
+    const requester = users.find(u => u?.id === String(callerId ?? ''));
+    if (!requester || !isMediatorRole(requester)) return { ok: false, status: 403, body: { ok: false, error: 'scope_access_denied' } };
+    let rosters;
+    try { rosters = mediatedGroupRosters(requester.id); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        return { ok: false, status: 503, body: { ok: false, error: 'identity_unavailable' } };
+    }
+    const check = individualAccessChecker(requester.id);
+    const shared = new Map();      // lector → grupos compartidos; null = no elegible
+    for (const [gid, roster] of rosters) {
+        for (const sid of roster) {
+            if (!shared.has(sid)) {
+                let eligible = !isPersonalB2cAccount(users.find(u => u?.id === sid));
+                if (eligible) {
+                    const d = check(sid);
+                    if (d.decision === 'unavailable') return { ok: false, status: 503, body: { ok: false, error: d.cause === 'individual_access_unavailable' ? 'individual_access_unavailable' : 'identity_unavailable' } };
+                    eligible = d.decision === 'allow' && d.via === 'mediator_of_member_group';
+                }
+                shared.set(sid, eligible ? [] : null);
+            }
+            shared.get(sid)?.push(gid);
+        }
+    }
+    observePedagogicalContext();
+    const { buildPedagogicalContext, CONTEXT_WINDOW_DAYS } = await import('./aulaViva/pedagogicalContext.mjs');
+    const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
+    const works = new Map([...rosters.keys()].map(gid => [gid, groupsContentScope([gid])]));
+    const intervals = contextIntervals(rosters.keys());
+    const nowTs = Date.now();
+    const readers = [];
+    for (const [readerId, gids] of shared) {
+        if (!gids) continue;
+        readers.push({ readerId,
+            context: buildPedagogicalContext({ readerId, groups: gids.map(gid => ({ groupId: gid, works: works.get(gid) })), intervals }),
+            events: readOwnEventHistory(readerId, nowTs - CONTEXT_WINDOW_DAYS * 86_400_000) });
+    }
+    return { ok: true, nowTs, readers };
 }
 // Ruta de VERIFICACIÓN del motor (laboratorio): apagada salvo AULA_VIVA_CONTEXT_PREVIEW_ENABLED=1. No reabre ninguna
 // pantalla; las rutas de Aula Viva y Leo siguen reteniendo los indicadores individuales (F7-C2S) hasta U2 y U3.

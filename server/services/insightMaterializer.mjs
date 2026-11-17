@@ -94,7 +94,13 @@ function subjectHistory(userId, sinceTs) {
  * ventana, mismo orden), sin las revisiones que firmó como revisor: esas filas son de otro sujeto. Solo lectura.
  */
 export function readOwnEventHistory(userId, sinceTs) {
-    getRawEventsDb();
+    if (!_stmtUserHistory) {
+        // Un servidor que todavía no recibió ningún evento no tiene creada la tabla: se crea vacía (es el mismo
+        // almacén que este proceso escribe) en vez de fallar. Un intento anterior a medias se descarta.
+        try { eventsService.getEventsDb(); } catch { /* si no se puede abrir, la lectura de abajo lo dirá */ }
+        closeMaterializerEventsDb();
+        getRawEventsDb();
+    }
     return _stmtUserHistory.all(String(userId), sinceTs, 20_000);
 }
 import { computeUserSignals, computeUserProfile } from './signalCompute.mjs';

@@ -127,9 +127,10 @@ try {
     a1 = await spawnApi(); a2 = await spawnApi();
 
     section('[1] individuales con un mediador asignado y C005 vigente');
-    ok('A2 Sí ⇒ acceso concedido; las seis retienen el perfil derivado (V9 F7-C2S)', allEq(await statuses(a1, 'med-ok', 'r-yes'), 'withheld'), JSON.stringify(await statuses(a1, 'med-ok', 'r-yes')));
+    ok('A2 Sí ⇒ acceso concedido; las seis responden desde el contexto del curso (V9 F7-C2R-U2)', allEq(await statuses(a1, 'med-ok', 'r-yes'), 200), JSON.stringify(await statuses(a1, 'med-ok', 'r-yes')));
     const held = await get(a1, 'med-ok', '/students/r-yes/timeline');
-    ok('…la retención no trae perfil, ceros ni listas vacías: solo el código', Object.keys(held.b ?? {}).sort().join() === 'error,ok' && !held.raw.includes('abandono') && !held.raw.includes('profile_current'), held.raw);
+    ok('…sin el perfil global: lleva su estado, y sin evidencia atribuible no hay diagnóstico ni ceros', typeof held.b?.data_state === 'string' && held.b.data_state !== 'ok' && held.b.profile_current === null
+        && held.b.risks.length === 0 && !held.raw.includes('"who"'), held.raw.slice(0, 300));
     for (const [u, label] of [['r-no', 'No'], ['r-pend', 'Pendiente'], ['r-rev', 'Revocada']]) {
         ok(`A2 ${label} ⇒ 403 en las seis`, allEq(await statuses(a1, 'med-ok', u), 403), JSON.stringify(await statuses(a1, 'med-ok', u)));
     }
@@ -144,13 +145,13 @@ try {
     ok('C005 revocado ⇒ 403', allEq(await statuses(a1, 'med-rev', 'r-yes'), 403));
     ok('sin C005 ⇒ 403', allEq(await statuses(a1, 'med-none', 'r-yes'), 403));
     ok('mediador NO asignado (med-b, C005 vigente) ⇒ 403 sobre r-yes', allEq(await statuses(a1, 'med-b', 'r-yes'), 403));
-    ok('…y su propio lector con A2 ⇒ concedido (perfil derivado retenido)', allEq(await statuses(a1, 'med-b', 'r-b'), 'withheld'));
+    ok('…y su propio lector con A2 ⇒ concedido (contextual)', allEq(await statuses(a1, 'med-b', 'r-b'), 200));
     ok('administración ⇒ 200 sobre cualquiera, sin A2 (no es consulta institucional)', allEq(await statuses(a1, 'adm', 'r-no'), 200));
     ok('lo propio: el lector sin A2 ve su perfil (200)', (await get(a1, 'r-no', '/institutional/profile/r-no')).s === 200);
 
     section('[3] listados mixtos');
     const att = await get(a1, 'med-ok', '/students-needing-attention');
-    ok('cola de atención: no se entrega al mediador (ordena por riesgo derivado); ni lista vacía ni lectores', att.s === 403 && att.b?.error === WITHHELD && !att.raw.includes('r-yes'), att.raw.slice(0, 300));
+    ok('cola de atención del mediador: sin lectores sin A2 ni de otro grupo, y sin el riesgo global', att.s === 200 && Array.isArray(att.b) && !['r-no', 'r-pend', 'r-rev', 'r-b'].some((u) => att.raw.includes(u)) && !att.raw.includes('"who"'), att.raw.slice(0, 300));
     ok('…administración ve a todos', ids((await get(a1, 'adm', '/students-needing-attention')).b, 'user_id') === ALL.slice().sort().join(','));
     const fq = await get(a1, 'med-ok', '/institutional/outcomes/follow-up-queue');
     ok('cola de seguimiento: solo r-yes (ni r-no, r-pend, r-rev ni r-b de otro grupo)', fq.s === 200 && ids(fq.b, 'student_id') === 'r-yes', fq.raw.slice(0, 300));
@@ -161,7 +162,7 @@ try {
     ok('…administración: los cinco', (await get(a1, 'adm', '/institutional/cohorts/coh-risk/members')).b?.members_count === 5);
 
     section('[4] revocación entre réplicas, sin reiniciar');
-    ok('antes: r-yes concedido en las dos réplicas', allEq(await statuses(a1, 'med-ok', 'r-yes'), 'withheld') && allEq(await statuses(a2, 'med-ok', 'r-yes'), 'withheld'));
+    ok('antes: r-yes concedido en las dos réplicas', allEq(await statuses(a1, 'med-ok', 'r-yes'), 200) && allEq(await statuses(a2, 'med-ok', 'r-yes'), 200));
     R.appendDecisions([{ subjectId: 'r-yes', kind: 'A2', status: 'revoked', actDay: R.dayOf(Date.now()), version: '004@1.0', medium: 'admin_record', capacity: 'legal_representative', verification: 'verified', requestRef: 'A2-SINT-REV-YES' }]);
     ok('A2 revocada ⇒ 403 inmediato en la réplica 2', allEq(await statuses(a2, 'med-ok', 'r-yes'), 403));
     ok('…y en la réplica 1', allEq(await statuses(a1, 'med-ok', 'r-yes'), 403));

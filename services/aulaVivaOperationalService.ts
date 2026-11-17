@@ -203,6 +203,9 @@ export interface OperationalStatus {
                           started_at: number; completed_at?: number;
                           progress_n?: number; progress_total?: number }>;
     degraded: boolean;
+    // V9 F7-C2R-U2 — solo para quien media: cuántos de sus lectores están en cada situación (recuentos, sin nombres).
+    // `in_attention` = con un riesgo calculable (los que entran en la cola).
+    context_overview?: { readers: number; ok: number; no_activity: number; insufficient: number; no_course_works: number; in_attention: number };
 }
 
 export interface CohortComparison {
@@ -244,7 +247,9 @@ export interface ProfileTimeline {
         sources: string[];
     }>;
     stale?: boolean;
-    reason?: string;
+    reason?: string | null;
+    // V9 F7-C2R-U2 — por mediación: estado del cálculo en el contexto del curso.
+    data_state?: 'ok' | 'no_activity' | 'insufficient' | 'no_course_works';
 }
 
 // ── API ───────────────────────────────────────────────────────────────────

@@ -573,8 +573,25 @@ try {
             const listed = await req(server, 'GET', '/api/aula-viva/recommendations/scope/user/u_w');
             ok('CANON-0a la lista de recomendaciones del lector no se entrega por mediación',
                 listed.status === 403 && listed.body?.error === 'individual_indicators_withheld');
+            // V9 F7-C2R-U2: una recomendación GLOBAL del lector tampoco puede marcarla quien lo media. El principal
+            // canónico de ack/dismiss se ejercita con recomendaciones del GRUPO que la mediadora media.
+            const globalId = readPed(`SELECT recommendation_id FROM pedagogical_recommendations
+                                      WHERE scope_type = 'user' AND scope_id = 'u_w' AND acknowledged = 0 ORDER BY created_at DESC`)[0]?.recommendation_id;
+            if (globalId) {
+                const g = await req(server, 'POST', `/api/aula-viva/recommendations/${encodeURIComponent(globalId)}/ack`, { applied: false });
+                const still = readPed('SELECT acknowledged FROM pedagogical_recommendations WHERE recommendation_id = @id', { id: globalId });
+                ok('CANON-0b la mediadora no puede marcar una recomendación global de su lector (403, sin cambios)', g.status === 403 && still[0]?.acknowledged === 0, `status=${g.status}`);
+            }
+            {
+                const w = new Database(process.env.INSIGHTS_SQLITE_PATH);
+                try {
+                    for (const [id, rule] of [['rec_canon_g1', 'canon_r1'], ['rec_canon_g2', 'canon_r2']]) w.prepare(`INSERT OR IGNORE INTO pedagogical_recommendations
+                        (recommendation_id, scope_type, scope_id, rule_id, recommendation_type, severity, created_at, expires_at, explanation_json, rule_ids_json)
+                        VALUES (?, 'group', 'g_w', ?, 'lectura_guiada', 'moderate', ?, ?, '{}', '[]')`).run(id, rule, Date.now(), Date.now() + 86_400_000);
+                } finally { w.close(); }
+            }
             const list = { body: readPed(`SELECT recommendation_id FROM pedagogical_recommendations
-                                          WHERE scope_type = 'user' AND scope_id = 'u_w' AND acknowledged = 0 ORDER BY created_at DESC`) };
+                                          WHERE scope_type = 'group' AND scope_id = 'g_w' AND acknowledged = 0 ORDER BY recommendation_id`) };
             const recId = Array.isArray(list.body) && list.body.length ? list.body[0].recommendation_id : null;
             ok('CANON-0 hay una recomendación para ejercitar los sitios', !!recId);
 

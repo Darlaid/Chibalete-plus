@@ -76,8 +76,10 @@ read('r2', 'c1', 21); read('r2', 'c1', 14); read('r2', 'c1', 9); abandon('r2', '
 // r3: entra al curso el día 10; había leído c1 por su cuenta el día 15.
 read('r3', 'c1', 15); read('r3', 'c1', 4);
 // r4: abandono alto DENTRO del curso (la recomendación debe salir con su señal).
-for (const d of [9, 9.2, 8, 8.2]) abandon('r4', 'c1', d);
-ev('r4', 'c1', 'reading_started', at(8.4));
+// Mediodía UTC: los abandonos de un día caen en la MISMA fecha sea cual sea la hora a la que corra la suite.
+{ const noon = (d) => Math.floor(at(d) / DAY) * DAY + DAY / 2;
+  for (const d of [9, 8]) for (const k of [0, 1]) { const t = noon(d) + k * 600_000; ev('r4', 'c1', 'reading_started', t); ev('r4', 'c1', 'reading_abandoned', t + 30_000, { payload: { percentage: 3 } }); }
+  ev('r4', 'c1', 'reading_started', noon(8) + 3_600_000); }
 // r5: una sola fila del curso, sin inicio de lectura (poca evidencia: riesgo no calculable).
 ev('r5', 'c1', 'session_started', at(3));
 // r6: sin actividad.

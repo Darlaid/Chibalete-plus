@@ -43,6 +43,9 @@ import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 // CHP-AULA-VIVA-MOOK-INTEGRATION-01A — autorización de scope vigente (CIS).
 import { requireScopeAccess, evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
+// V9 F7-C2R-U2 — seguimiento individual por mediación: indicadores del contexto pedagógico (U1), nunca el perfil global.
+import { buildContextualView, timelineBody, featureVectorBody, riskHistoryBody, signalSeriesBody, recommendationsBody,
+    attentionItem, sortAttention, overviewOf, acknowledgeContextual, isContextualRecommendationId, parseRecommendationId } from './contextualView.mjs';
 // CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01 — rol del principal, del CIS.
 import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import {
@@ -252,8 +255,37 @@ function scopedRecommendationsSummary(callerId) {
  * Crea el router. Se reciben los middleware de auth por inyección desde
  * server.js para evitar acoplamiento del módulo a los closures internos.
  */
-export function createOperationalRouter({ requireUserAuth }) {
+export function createOperationalRouter({ requireUserAuth, contextAccess = null }) {
     const router = express.Router();
+
+    // V9 F7-C2R-U2 — vista contextual de un lector para quien lo acompaña por mediación. `contextAccess` lo inyecta
+    // server.js (CIS + A2 + C005, ámbito de obras y procedencia temporal). Sin él, se conserva la retención F7-C2S.
+    // Devuelve null si ya respondió.
+    async function contextualViewFor(req, res, readerId, { withSeries = false } = {}) {
+        if (!contextAccess) { withholdIndividualIndicators(res); return null; }
+        try {
+            const a = await contextAccess.reader(callerIdOf(req), String(readerId));
+            if (!a.ok) { res.status(a.status).json(a.body); return null; }
+            return buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs, withSeries });
+        } catch (e) {
+            console.error(`[AULA_VIVA] context_indicators_failed: ${String(e?.code || e?.name || 'Error')}: ${String(e?.message || '').slice(0, 160)}`);
+            res.status(500).json({ ok: false, error: 'context_indicators_failed' });
+            return null;
+        }
+    }
+    /** Vistas de todos los lectores que ese mediador puede acompañar; null si ya respondió. */
+    async function contextualViewsOfCaller(req, res) {
+        if (!contextAccess) { withholdIndividualIndicators(res); return null; }
+        try {
+            const o = await contextAccess.overview(callerIdOf(req));
+            if (!o.ok) { res.status(o.status).json(o.body); return null; }
+            return o.readers.map((r) => buildContextualView({ context: r.context, events: r.events, nowTs: o.nowTs }));
+        } catch (e) {
+            console.error(`[AULA_VIVA] context_indicators_failed: ${String(e?.code || e?.name || 'Error')}: ${String(e?.message || '').slice(0, 160)}`);
+            res.status(500).json({ ok: false, error: 'context_indicators_failed' });
+            return null;
+        }
+    }
 
     // CHP-AULA-VIVA-CANONICAL-PRINCIPAL-01A: en los 5 sitios de este router el
     // principal sale de la identidad que requireUserAuth ya estableció
@@ -263,14 +295,23 @@ export function createOperationalRouter({ requireUserAuth }) {
     // alcance. Misma precedencia que scopeAccess.requireScopeAccess y reqUserId.
 
     // ── STUDENT scope ────────────────────────────────────────────────────
-    router.get('/students/:userId/timeline', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/students/:userId/timeline', requireUserAuth, requireOperationalRole, async (req, res) => {
         // CHP-AULA-VIVA-MOOK-INTEGRATION-01A: el servidor decide los sujetos
         // visibles con la autorización vigente de Aula Viva (CIS): admin global,
         // mediador solo sobre miembros de sus grupos activos, lector solo sí
         // mismo. 401/403/503 según la taxonomía fail-closed existente.
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
-        // V9 F7-C2S: perfil, señales, riesgos y recomendaciones del lector no tienen procedencia por obra ni curso.
-        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);
+        // V9 F7-C2S / F7-C2R-U2: el perfil global no tiene procedencia por obra ni curso y no se entrega por mediación.
+        // Quien media recibe la misma forma, calculada solo con la actividad fechada del contexto del curso.
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) {
+            const view = await contextualViewFor(req, res, req.params.userId, { withSeries: true });
+            if (!view) return;
+            const payload = timelineBody(view);
+            payload.experience_insights = projectExperienceInsights(payload.signals_current);
+            try { dashboardViewsTotal.labels('student_timeline').inc(); } catch {}
+            try { emitTeacherViewedStudent({ callerId: callerIdOf(req), studentId: req.params.userId }); } catch { /* nunca bloquea */ }
+            return res.json(payload);
+        }
         instrument('aulaViva.student_timeline', () => {
             const data = reader.getProfileTimeline(req.params.userId);
             try { studentTimelineRenderMs.observe(0); } catch {}
@@ -302,24 +343,33 @@ export function createOperationalRouter({ requireUserAuth }) {
         });
     });
 
-    router.get('/students/:userId/feature-vector', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/students/:userId/feature-vector', requireUserAuth, requireOperationalRole, async (req, res) => {
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
-        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);   // V9 F7-C2S
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) {   // V9 F7-C2R-U2: vector del contexto
+            const view = await contextualViewFor(req, res, req.params.userId);
+            return view ? res.json(featureVectorBody(view)) : undefined;
+        }
         safeJson(res, () => reader.getLatestFeatureVector(req.params.userId)
             ?? { user_id: req.params.userId, features: null, stale: true });
     });
 
-    router.get('/students/:userId/risk-history', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/students/:userId/risk-history', requireUserAuth, requireOperationalRole, async (req, res) => {
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
-        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);   // V9 F7-C2S
         const limit = Math.min(200, Number(req.query.limit) || 50);
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) {   // V9 F7-C2R-U2: episodios de riesgo del contexto
+            const view = await contextualViewFor(req, res, req.params.userId, { withSeries: true });
+            return view ? res.json(riskHistoryBody(view, limit)) : undefined;
+        }
         safeJson(res, () => reader.getRiskHistory(req.params.userId, { limit }), []);
     });
 
-    router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/students/:userId/signals/:signalId/timeline', requireUserAuth, requireOperationalRole, async (req, res) => {
         if (!requireScopeAccess('user', req.params.userId, req, res)) return;
-        if (isMediatedSubject(callerIdOf(req), req.params.userId)) return withholdIndividualIndicators(res);   // V9 F7-C2S
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);
+        if (isMediatedSubject(callerIdOf(req), req.params.userId)) {   // V9 F7-C2R-U2: serie semanal del contexto
+            const view = await contextualViewFor(req, res, req.params.userId, { withSeries: true });
+            return view ? res.json(signalSeriesBody(view, req.params.signalId, sinceTs)) : undefined;
+        }
         safeJson(res, () => reader.getSignalTimeline('user', req.params.userId,
             req.params.signalId, sinceTs), []);
     });
@@ -335,20 +385,57 @@ export function createOperationalRouter({ requireUserAuth }) {
         }, { summary: { critical: 0, high: 0, moderate: 0, info: 0 }, total: 0 });
     });
 
-    router.get('/recommendations/scope/:type/:id', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/recommendations/scope/:type/:id', requireUserAuth, requireOperationalRole, async (req, res) => {
         if (!requireTenantScope(req.params.type, req.params.id, req, res)) return;
-        // V9 F7-C2S: las recomendaciones de UN lector salen de su perfil derivado: no se entregan por mediación.
-        if (String(req.params.type) === 'user' && isMediatedSubject(callerIdOf(req), req.params.id)) return withholdIndividualIndicators(res);
+        // V9 F7-C2S / F7-C2R-U2: las recomendaciones globales de UN lector salen de su perfil derivado y no se entregan
+        // por mediación; quien media recibe las del contexto del curso.
+        if (String(req.params.type) === 'user' && isMediatedSubject(callerIdOf(req), req.params.id)) {
+            const view = await contextualViewFor(req, res, req.params.id);
+            return view ? res.json(recommendationsBody(view, { includeAcknowledged: req.query.includeAcknowledged === '1',
+                limit: Math.min(200, Number(req.query.limit) || 50) })) : undefined;
+        }
         if (!cohortGate(req, req.params.type, req.params.id).allowed) return res.json([]); // misma forma, sin pistas
         safeJson(res, () => reader.getRecommendations(req.params.type, req.params.id,
             { includeAcknowledged: req.query.includeAcknowledged === '1',
               limit: Math.min(200, Number(req.query.limit) || 50) }), []);
     });
 
-    router.post('/recommendations/:recId/ack', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
+    // V9 F7-C2R-U2 — una recomendación GLOBAL de un lector (calculada con toda su actividad) no es de quien lo media:
+    // ni se le entrega ni puede marcarla aunque conozca su identificador. Misma respuesta que un id ajeno.
+    function allowGlobalRecommendation(req, res) {
+        const target = recommendationScopeOf(req.params.recId);
+        if (target && String(target.scope_type) === 'user' && isMediatedSubject(callerIdOf(req), target.scope_id)) {
+            res.status(403).json({ ok: false, error: 'scope_access_denied' });
+            return false;
+        }
+        return allowDerivedScope(req, res, target);
+    }
+    // Recomendación CONTEXTUAL: el identificador solo dice de quién sería. Se vuelve a comprobar todo (mediación, A2,
+    // C005, que el contexto sea el de quien llama y que la regla siga activa en él) antes de anotar el acto.
+    // Cualquier fallo responde igual que un id ajeno, sin revelar a quién pertenece.
+    async function attendContextual(req, res, { applied, accepted }) {
+        const parsed = parseRecommendationId(req.params.recId);
+        const deny = () => res.status(403).json({ ok: false, error: 'scope_access_denied' });
+        if (!parsed || !contextAccess) return deny();
+        const d = individualAccess(callerIdOf(req), parsed.readerId);
+        if (d.decision === 'unavailable') return res.status(503).json(d.cause === 'individual_access_unavailable'
+            ? { ok: false, error: 'individual_access_unavailable' } : { ok: false, error: 'identity_unavailable', cause: d.cause });
+        if (d.decision !== 'allow' || d.via !== 'mediator_of_member_group') return deny();
+        const a = await contextAccess.reader(callerIdOf(req), parsed.readerId);
+        if (!a.ok) return a.status === 503 ? res.status(503).json(a.body) : deny();
+        const view = buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs });
+        const r = acknowledgeContextual(view, req.params.recId, { by: callerIdOf(req), applied, nowTs: a.nowTs });
+        if (!r) return deny();
+        if (r.acknowledged) { try { (accepted ? recommendationAcceptTotal : recommendationDismissTotal).inc(); } catch {} }
+        try { emitTeacherReviewedRecommendation({ callerId: callerIdOf(req), recommendationId: req.params.recId, accepted }); } catch { /* nunca bloquea */ }
+        return res.json(r);
+    }
+
+    router.post('/recommendations/:recId/ack', requireUserAuth, requireOperationalRole, express.json(), async (req, res) => {
         try {
+            if (isContextualRecommendationId(req.params.recId)) return await attendContextual(req, res, { applied: !!req.body?.applied, accepted: true });
             // El scope es el de la recomendación en el store, decidido ANTES de mutar.
-            if (!allowDerivedScope(req, res, recommendationScopeOf(req.params.recId))) return;
+            if (!allowGlobalRecommendation(req, res)) return;
             const userId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const r = intervention.acknowledgeRecommendation({
                 recommendationId: req.params.recId,
@@ -371,9 +458,10 @@ export function createOperationalRouter({ requireUserAuth }) {
         }
     });
 
-    router.post('/recommendations/:recId/dismiss', requireUserAuth, requireOperationalRole, express.json(), (req, res) => {
+    router.post('/recommendations/:recId/dismiss', requireUserAuth, requireOperationalRole, express.json(), async (req, res) => {
         try {
-            if (!allowDerivedScope(req, res, recommendationScopeOf(req.params.recId))) return;
+            if (isContextualRecommendationId(req.params.recId)) return await attendContextual(req, res, { applied: false, accepted: false });
+            if (!allowGlobalRecommendation(req, res)) return;
             const userId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             const r = intervention.acknowledgeRecommendation({
                 recommendationId: req.params.recId,
@@ -489,11 +577,16 @@ export function createOperationalRouter({ requireUserAuth }) {
     });
 
     // ── ATTENTION QUEUE (corazón del panel docente §7) ───────────────────
-    router.get('/students-needing-attention', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/students-needing-attention', requireUserAuth, requireOperationalRole, async (req, res) => {
         try { dashboardViewsTotal.labels('attention_queue').inc(); } catch {}
-        // V9 F7-C2S: la cola ordena lectores por su riesgo derivado (perfil calculado con toda su actividad): no se
-        // entrega a quien media. Una lista vacía se leería como «nadie necesita atención»; por eso responde 403 propio.
-        if (req.aulaVivaRole !== 'admin') return withholdIndividualIndicators(res);
+        // V9 F7-C2S / F7-C2R-U2: la cola global ordena por un riesgo calculado con toda la actividad del lector y no se
+        // entrega a quien media. El mediador recibe la suya: sus lectores (CIS + A2 + C005) ordenados por el riesgo
+        // del contexto del curso. Quien no tiene un riesgo calculable no entra (sus recuentos van en /operational/status).
+        if (req.aulaVivaRole !== 'admin') {
+            const views = await contextualViewsOfCaller(req, res);
+            if (!views) return;
+            return res.json(sortAttention(views.map((v) => attentionItem(v)).filter(Boolean)).slice(0, 50));
+        }
         // Mediador: solo sujetos que el CIS le concede (miembros de sus grupos
         // activos). Administrador: la cola global de siempre. La deuda del
         // filtro por riesgo (ATTENTION_ENDPOINT_RISK_ZERO) NO se toca aquí.
@@ -562,19 +655,33 @@ export function createOperationalRouter({ requireUserAuth }) {
         safeJson(res, () => reader.getJobLedger({ limit }), []);
     });
 
-    router.get('/operational/status', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/operational/status', requireUserAuth, requireOperationalRole, async (req, res) => {
         try { dashboardViewsTotal.labels('operational_status').inc(); } catch {}
+        // V9 F7-C2R-U2 — mediador: recomendaciones contextuales pendientes de sus lectores y cuántos están en cada
+        // estado (con indicadores, sin actividad del curso, información insuficiente, curso sin obras). Solo recuentos.
+        let contextual = null;
+        if (req.aulaVivaRole !== 'admin' && contextAccess) {
+            try {
+                const o = await contextAccess.overview(callerIdOf(req));
+                if (o.ok) {
+                    const views = o.readers.map((r) => buildContextualView({ context: r.context, events: r.events, nowTs: o.nowTs }));
+                    contextual = { overview: overviewOf(views), pending: views.flatMap((v) => v.recommendations.filter((r) => !r.acknowledged)) };
+                }
+            } catch { contextual = null; }
+        }
         safeJson(res, () => {
             // El resumen de recomendaciones abarca TODAS las instituciones: al
             // mediador solo se le cuentan las de scopes que el CIS le concede.
             const recsSummary = req.aulaVivaRole === 'admin'
                 ? reader.getActiveRecommendationsSummary()
                 : scopedRecommendationsSummary(callerIdOf(req));
+            if (contextual) for (const r of contextual.pending) if (r.severity in recsSummary) recsSummary[r.severity] += 1;
             const isMatReady = reader.isReady();
             const ledger = reader.getJobLedger({ limit: 5 });
             return {
                 ts: Date.now(),
                 recommendations_summary: recsSummary,
+                ...(contextual ? { context_overview: contextual.overview } : {}),
                 materializer_ready: isMatReady,
                 recent_jobs: ledger,
                 degraded: !isMatReady?.ready || ledger.some(j => j.status === 'failed' || j.status === 'stalled'),

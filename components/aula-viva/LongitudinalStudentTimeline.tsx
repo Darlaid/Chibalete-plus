@@ -258,6 +258,10 @@ export const LongitudinalStudentTimeline: React.FC<{
     const unresolvedRisks = (Array.isArray(data.risks) ? data.risks : [])
         .filter(r => r && r.resolved_at === null)
         .slice(0, 5);
+    // V9 F7-C2R-U2 — episodios ya resueltos: la evolución del riesgo, con sus dos fechas.
+    const resolvedRisks = (Array.isArray(data.risks) ? data.risks : [])
+        .filter(r => r && typeof r.resolved_at === 'number')
+        .slice(0, 5);
     const recentRecs = (Array.isArray(data.recommendations) ? data.recommendations : [])
         .slice()
         .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
@@ -291,6 +295,24 @@ export const LongitudinalStudentTimeline: React.FC<{
                     </h3>
                     {unresolvedRisks.map(r => (
                         <RiskCard key={r.risk_id ?? `${r.risk_type}_${r.detected_at}`} risk={r} />
+                    ))}
+                </section>
+            )}
+
+            {resolvedRisks.length > 0 && (
+                <section aria-label="Riesgos resueltos" className="space-y-2">
+                    <h3 className="text-xs sm:text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                        Riesgos resueltos
+                    </h3>
+                    {resolvedRisks.map(r => (
+                        <article key={r.risk_id ?? `${r.risk_type}_${r.detected_at}`}
+                                 className="rounded-lg border border-gray-200 bg-gray-50 p-3 sm:p-4"
+                                 aria-label={`Riesgo resuelto: ${r.risk_type}`}>
+                            <span className="text-sm font-medium text-gray-900 capitalize">{r.risk_type.replace(/_/g, ' ')}</span>
+                            <p className="mt-1 text-xs text-gray-700">
+                                Detectado {relativeDays(r.detected_at)}; dejó de observarse {relativeDays(r.resolved_at)}.
+                            </p>
+                        </article>
                     ))}
                 </section>
             )}

@@ -38,6 +38,8 @@ import { cohortDisclosure, suppressedAggregate, MIN_COHORT_READERS } from '../an
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
 import { evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
+// V9 F7-C2R-U2 — perfil del lector para quien lo media: contexto pedagógico (U1), nunca el perfil global.
+import { buildContextualView, timelineBody, featureVectorBody } from './contextualView.mjs';
 import {
     outcomesViewsTotal, cohortViewsTotal, trajectoryViewsTotal,
     learningViewsTotal, comparativeQueriesTotal, scopeSwitchTotal,
@@ -96,7 +98,7 @@ function requireScope(req, res, scope_type, scope_id) {
 
 // ── Router ─────────────────────────────────────────────────────────────────
 
-export function createInstitutionalRouter({ requireUserAuth }) {
+export function createInstitutionalRouter({ requireUserAuth, contextAccess = null }) {
     const router = express.Router();
 
     // ── /institutional/status ────────────────────────────────────────────
@@ -370,10 +372,21 @@ export function createInstitutionalRouter({ requireUserAuth }) {
     });
 
     // ── PROFILE ENRIQUECIDO (wrapper PASO 7) ─────────────────────────────
-    router.get('/institutional/profile/:userId', requireUserAuth, (req, res) => {
+    router.get('/institutional/profile/:userId', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'user', req.params.userId)) return;
-        // V9 F7-C2S: perfil, vector de rasgos e historial de impacto del lector: sin procedencia por obra ni curso.
-        if (isMediatedSubject(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], req.params.userId)) return withholdIndividualIndicators(res);
+        // V9 F7-C2S / F7-C2R-U2: el perfil global no tiene procedencia por obra ni curso. Quien media recibe el timeline y
+        // el vector del contexto del curso; el historial de impacto sigue retenido (se declara en `withheld`).
+        const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+        if (isMediatedSubject(callerId, req.params.userId)) {
+            if (!contextAccess) return withholdIndividualIndicators(res);
+            try {
+                const a = await contextAccess.reader(callerId, String(req.params.userId));
+                if (!a.ok) return res.status(a.status).json(a.body);
+                const view = buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs, withSeries: true });
+                return res.json({ user_id: req.params.userId, timeline: timelineBody(view), feature_vector: featureVectorBody(view),
+                    impact_history: null, withheld: ['impact_history'] });
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
         try { outcomesViewsTotal.labels('profile').inc(); } catch {}
         instrument('institutional.profile', () => {
             safeJson(res, () => {

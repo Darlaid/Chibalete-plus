@@ -279,9 +279,10 @@ try {
 
     section('[8] lector, B2C, administración y retención F7-C2S');
     {
-        const WITHHELD = (r) => r.status === 403 && r.json?.error === 'individual_indicators_withheld';
-        ok('F7-C2S intacto: timeline, vector y recomendaciones por lector siguen retenidos al mediador',
-            [...await both('/api/aula-viva/students/ra-1/timeline', C['med-a']), ...await both('/api/aula-viva/students/ra-1/feature-vector', C['med-a']), ...await both('/api/aula-viva/recommendations/scope/user/ra-1', C['med-a'])].every(WITHHELD));
+        // V9 F7-C2R-U2: las rutas de Aula Viva ya responden por mediación, con el MISMO cálculo que la ruta de verificación.
+        const tl = await both('/api/aula-viva/students/ra-1/timeline', C['med-a']), pv = await both(CTX('ra-1'), C['med-a']);
+        ok('el timeline de Aula Viva usa las mismas entradas que el motor (misma huella)', tl.every((r, i) => r.status === 200 && r.json.provenance.digest === pv[i].json.provenance.digest && r.json.data_state === pv[i].json.data_state));
+        ok('el impacto por lector sigue retenido', (await both('/api/aula-viva/institutional/outcomes/scope/user/ra-1', C['med-a'])).every((r) => r.status === 403 && r.json?.error === 'individual_indicators_withheld'));
         const CP = (pct) => ({ canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, contentAnchor: null, contentFingerprint: null, lastInteractedMode: 'text', anchor: { type: 'text', value: pct }, viewportHint: pct }, updatedAt: new Date().toISOString() });
         const saved = [];
         for (const [u, c, pct] of [['ra-1', 'c1', 40], ['ra-1', 'c3', 70], ['b2c-1', 'c3', 80]]) saved.push((await post(S1, `/api/progress/${u}/${c}/sync`, C[u], CP(pct))).status);
