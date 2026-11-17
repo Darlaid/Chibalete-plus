@@ -108,3 +108,28 @@ ignoreUntil = 2026-09-30
 id = "GHSA-mrhx-c7xc-m3w5"
 reason = "Mitigated: no external input reaches a zod array schema (auth/offline/rum schemas have no collections; the 4 event-registry arrays are fed only by server code that clamps them to 50 short strings, or have no emitter) and every JSON body is capped at 100 kB after decompression. Worst case on reachable routes: <=2 issues. The only fix (zod 4.6.6) is v4-only; no patched 3.x exists. Guarded by server/__test__/zodAdvisoryExposure.test.mjs. Owner: Chibalete+ technical security. Review early if the advisory, schemas, emitters, body limit or public zod routes change."
 ignoreUntil = 2026-11-23
+
+# ── GHSA-fc5q-39xc-vjpf / CVE-2026-112366 — picomatch: ReDoS con extglobs repetidos (HIGH 8.7) ─
+# V9 F7-C2R-U2C (2026-11-17). picomatch 4.0.4, SOLO de desarrollo: única entrada en el lock
+# (`node_modules/picomatch`, dev=true), traída por vite 6.4.5 y sus transitivas tinyglobby 0.2.15 y
+# fdir 6.5.0. El aviso se amplió el 2026-11-17 a todas las versiones (<= 4.0.7, la última publicada):
+# NO existe versión corregida (GitHub Advisory: first_patched_version = null), así que actualizar no
+# lo resuelve. Explotarlo exige que el atacante aporte el PATRÓN glob (p. ej. `+(*a)`).
+# NO ALCANZABLE en producción (verificado sobre las imágenes desplegadas y candidatas):
+#   - API: Dockerfile.api instala con `npm ci --omit=dev`; `npm ls picomatch --omit=dev` → vacío; en
+#     la imagen no existen picomatch, vite, tinyglobby ni fdir y `require.resolve` falla para los cuatro.
+#   - Frontend: la imagen final es nginx con `dist/`; no contiene node ni node_modules, y ningún
+#     archivo servido incluye código de picomatch.
+#   - Ningún módulo de server/, utils/, engines/ ni del frontend importa picomatch o vite; el único
+#     uso es `vite.config.ts`. No hay `import.meta.glob` ni patrones tomados del entorno.
+#   - Vite solo corre al construir (Dockerfile.front, CI) y en el servidor de desarrollo local, con
+#     patrones del propio repositorio. Ningún patrón llega de HTTP, cargas, usuarios ni contenido.
+# RETIRAR en cuanto exista una versión corregida de picomatch (actualizando vite o con un override)
+# y, en todo caso, revisar el 2026-11-24: ese día la excepción caduca sola y el CI vuelve a fallar.
+# Revisión ANTICIPADA si picomatch o vite pasan a dependencias de producción, si aparece
+# `import.meta.glob` con patrones no literales o si algún proceso de servidor empieza a usar globs.
+# Responsable: seguridad técnica de Chibalete+.
+[[IgnoredVulns]]
+id = "GHSA-fc5q-39xc-vjpf"
+reason = "Build-only and not reachable in production: picomatch 4.0.4 is a dev dependency pulled in by vite 6.4.5 (also via tinyglobby and fdir). The API image installs with npm ci --omit=dev and contains no picomatch or vite; the frontend image is nginx serving dist with no node or node_modules. Exploitation needs an attacker-supplied glob pattern; the only patterns come from this repository at build time. No patched picomatch exists (advisory covers <= 4.0.7, the latest). Remove as soon as a fixed release is available. Owner: Chibalete+ technical security."
+ignoreUntil = 2026-11-24
