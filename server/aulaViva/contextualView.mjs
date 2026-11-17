@@ -310,6 +310,7 @@ export function contextualImpactRows({ context, events, nowTs = Date.now(), inte
 
 /** Cuerpo con la forma de `getImpactSummary`. La distribución solo cuenta comparaciones que el clasificador pudo hacer. */
 export function impactSummaryBody(scope, rows, extra = {}) {
+    const STRATEGY_MIN_SUPPORT = Number(process.env.AULA_VIVA_LEARNING_MIN_SUPPORT || 5);   // mismo umbral que los aprendizajes
     const distribution = { improved: 0, stable: 0, worsened: 0, mixed: 0, insufficient_data: 0 };
     let pending = 0, notComparable = 0;
     for (const r of rows) {
@@ -317,7 +318,19 @@ export function impactSummaryBody(scope, rows, extra = {}) {
         else if (r.outcome_label && r.outcome_label in distribution) distribution[r.outcome_label]++;
         else notComparable++;
     }
-    return { scope, total_outcomes: rows.length - pending, distribution, pending, not_comparable: notComparable, outcomes: rows, ...extra };
+    // V9 F7-C2R-U3C — resultados por estrategia. `evaluated` = intervenciones con resultado calculado (ni pendientes ni
+    // insuficientes); con menos de `min_support` evaluadas no se afirma nada de la estrategia (`sufficient: false`).
+    const byType = new Map();
+    for (const r of rows) {
+        const e = byType.get(r.intervention_type) ?? { intervention_type: r.intervention_type, total: 0, pending: 0, insufficient: 0, evaluated: 0, improved: 0, stable: 0, worsened: 0, mixed: 0 };
+        e.total++;
+        if (r.data_state === 'pending') e.pending++;
+        else if (['improved', 'stable', 'worsened', 'mixed'].includes(r.outcome_label)) { e[r.outcome_label]++; e.evaluated++; }
+        else e.insufficient++;
+        byType.set(r.intervention_type, e);
+    }
+    const by_type = [...byType.values()].map((e) => ({ ...e, sufficient: e.evaluated >= STRATEGY_MIN_SUPPORT })).sort((x, y) => y.total - x.total);
+    return { scope, total_outcomes: rows.length - pending, distribution, pending, not_comparable: notComparable, outcomes: rows, by_type, min_support: STRATEGY_MIN_SUPPORT, ...extra };
 }
 
 const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;

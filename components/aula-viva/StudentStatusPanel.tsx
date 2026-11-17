@@ -11,6 +11,7 @@
  *     shape StudentStatus (state TECH_ISSUE), y este componente lo muestra.
  *   - Base visual compatible con Modo accesible (alto contraste, semántica HTML).
  */
+import { studentStateLabel } from '../../utils/pedagogicalStates';
 import React from 'react';
 import { CheckCircle2, AlertTriangle, AlertCircle, Calendar, BookOpen, X } from 'lucide-react';
 import type { StudentStatus, StudentStatusTone } from '../../utils/studentStatus';
@@ -194,7 +195,7 @@ export function StudentStatusPanel({ status, loading, error, onClose }: StudentS
                                     </span>
                                 )}
                             <span className="text-sm font-medium text-gray-500">
-                                {status.state.replace(/_/g, ' ').toLowerCase()}
+                                {studentStateLabel(status.state)}
                             </span>
                         </div>
                         <h2

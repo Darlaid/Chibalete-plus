@@ -19,6 +19,9 @@ import { ProduccionesTab } from '../components/review/ProduccionesTab';
 import { GroupRecognitionBlock } from '../components/aula-viva/GroupRecognitionBlock';
 import type { GroupDiagnosis } from '../utils/groupDiagnosis';
 import { StudentStatusPanel } from '../components/aula-viva/StudentStatusPanel';
+// V9 F7-C2R-U3C — Leo del mediador e impacto de intervenciones (cálculo del servidor con el contexto del curso).
+import { LeoMediatorPanel } from '../components/aula-viva/LeoMediatorPanel';
+import { InterventionImpactPanel } from '../components/aula-viva/InterventionImpactPanel';
 import { StudentProgressBlock } from '../components/aula-viva/StudentProgressBlock';
 import type { StudentStatus } from '../utils/studentStatus';
 import ClubFormModal from '../components/ClubFormModal';
@@ -1562,6 +1565,19 @@ const AulaViva: React.FC = () => {
                     {/* KPIs del grupo — GET /api/groups/:id/analytics-summary (1B) */}
                     <GroupAnalyticsKpis state={groupAnalytics} />
 
+                    {/* V9 F7-C2R-U3C — impacto agregado de las intervenciones del curso (solo para quien lo media). */}
+                    {selectedGroup && canManageClassroom && !isAdmin && (
+                        <details className="mb-8" data-testid="course-impact">
+                            <summary className="cursor-pointer text-sm font-semibold text-indigo-700 dark:text-indigo-300 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded">
+                                Impacto de las intervenciones del curso
+                            </summary>
+                            <div className="mt-2" key={selectedGroup}>
+                                <InterventionImpactPanel scope={{ type: 'group', id: selectedGroup }}
+                                    nameOf={(id) => dataService.getAllUsuarios().find(u => u.id === id)?.nombre_completo} />
+                            </div>
+                        </details>
+                    )}
+
                     {/* G4-UX-U4: reconocimiento agregado (solo con gamificación y XP activos) */}
                     <GroupRecognitionBlock state={groupAnalytics} onReview={() => setActiveTab('producciones')} />
 
@@ -1712,6 +1728,15 @@ const AulaViva: React.FC = () => {
                                         error={studentStatusError}
                                         onClose={() => setSelectedStudent(null)}
                                     />
+                                </div>
+                            )}
+                            {/* V9 F7-C2R-U3C — Leo e impacto de ESTE lector, para quien lo media (no para la sesión de
+                                administración, cuya vista es agregada). El servidor decide alcance y estados. */}
+                            {selectedStudent && canManageClassroom && !isAdmin && (
+                                <div className="mb-6 space-y-6" key={selectedStudent.id}>
+                                    <LeoMediatorPanel studentId={selectedStudent.id} studentName={selectedStudent.nombre_completo}
+                                        titleOf={(id) => dataService.getContenidoById(id)?.titulo} />
+                                    <InterventionImpactPanel scope={{ type: 'user', id: selectedStudent.id }} />
                                 </div>
                             )}
                             {/* V8-UNIFIED-XP-01: progreso individual (XP, nivel, logros). Solo si el

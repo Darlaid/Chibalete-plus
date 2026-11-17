@@ -140,6 +140,15 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         return d.decision === 'allow' && !String(d.via ?? '').startsWith('policy:');
     });
     /**
+     * V9 F7-C2R-U3C — intervenciones de un lector registradas por quienes median sus cursos: las de Aula Viva
+     * (`pedagogical_interventions`) y las anotadas desde el tablero del curso. Más recientes primero.
+     */
+    const interventionsOf = (readerId, mediatorIds, limit = 50) => {
+        let dashboard = [];
+        try { dashboard = contextAccess?.dashboardInterventions ? contextAccess.dashboardInterventions(readerId, mediatorIds) : []; } catch { dashboard = []; }
+        return [...contextualInterventions(readerId, mediatorIds, limit), ...dashboard].sort((x, y) => y.created_at - x.created_at).slice(0, limit);
+    };
+    /**
      * V9 F7-C2R-U3 — impacto de las intervenciones de los cursos que media quien llama, sobre sus lectores con seguimiento
      * habilitado. Es lo que alimenta su pestaña Institucional: los totales, aprendizajes y comparativas GUARDADOS salen de
      * todas las instituciones y de toda la actividad de cada lector, y no son de quien media. null si ya respondió.
@@ -149,7 +158,7 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
             const o = await contextAccess.readers(callerOf(req), { historyDays: IMPACT_HISTORY_DAYS });
             if (!o.ok) { res.status(o.status).json(o.body); return null; }
             const rows = o.readers.flatMap((r) => contextualImpactRows({ context: r.context, events: r.events, nowTs: o.nowTs,
-                interventions: contextualInterventions(r.readerId, o.mediatorIds) }));
+                interventions: interventionsOf(r.readerId, o.mediatorIds) }));
             const byType = new Map();
             for (const r of rows) {
                 if (!r.outcome_label) continue;
@@ -241,7 +250,7 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                 const a = await contextAccess.reader(callerId, String(req.params.id), { historyDays: IMPACT_HISTORY_DAYS });
                 if (!a.ok) return res.status(a.status).json(a.body);
                 const rows = contextualImpactRows({ context: a.context, events: a.events, nowTs: a.nowTs,
-                    interventions: contextualInterventions(req.params.id, a.mediatorIds, limit) });
+                    interventions: interventionsOf(req.params.id, a.mediatorIds, limit) });
                 try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
                 return res.json(impactSummaryBody({ type: 'user', id: req.params.id }, rows, { context: a.context.describe() }));
             } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
@@ -253,7 +262,7 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                 const g = await contextAccess.group(callerId, String(req.params.id), { historyDays: IMPACT_HISTORY_DAYS });
                 if (!g.ok) return res.status(g.status).json(g.body);
                 const rows = g.readers.flatMap((r) => contextualImpactRows({ context: r.context, events: r.events, nowTs: g.nowTs,
-                    interventions: contextualInterventions(r.readerId, g.mediatorIds, limit) }));
+                    interventions: interventionsOf(r.readerId, g.mediatorIds, limit) }));
                 try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
                 return res.json(impactSummaryBody({ type: 'group', id: req.params.id }, rows, { population: { roster: g.roster, eligible: g.readers.length } }));
             } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
@@ -537,7 +546,7 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                 const wide = await contextAccess.reader(callerId, String(req.params.userId), { historyDays: IMPACT_HISTORY_DAYS });
                 if (!wide.ok) return res.status(wide.status).json(wide.body);
                 const rows = contextualImpactRows({ context: wide.context, events: wide.events, nowTs: wide.nowTs,
-                    interventions: contextualInterventions(req.params.userId, wide.mediatorIds) });
+                    interventions: interventionsOf(req.params.userId, wide.mediatorIds) });
                 return res.json({ user_id: req.params.userId, timeline: timelineBody(view), feature_vector: featureVectorBody(view),
                     impact_history: impactSummaryBody({ type: 'user', id: req.params.userId }, rows) });
             } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }

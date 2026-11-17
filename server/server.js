@@ -1755,7 +1755,8 @@ try {
 // /institutional/* no solapan con PASO 5).
 try {
     const { createInstitutionalRouter } = await import('./aulaViva/institutionalRouter.mjs');
-    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o), readers: (c, o) => aulaVivaContextReaders(c, o) } }));
+    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o), readers: (c, o) => aulaVivaContextReaders(c, o),
+        dashboardInterventions: (readerId, mediatorIds) => dashboardInterventionsOf(readerId, mediatorIds) } }));
     log('[PASO7] /api/aula-viva/institutional/* router mounted', 'INFO');
 } catch (e) {
     log(`[PASO7] institutional router mount failed: ${e.message}`, 'WARN');
@@ -9525,7 +9526,9 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
             const dated = new Set((r.data.readers || []).filter(x => x.historicalActivity === true).map(x => x.userId));
             // También cuenta quien tiene LECTURA fechada de obras del curso que no cae en un periodo acreditado.
             totals.readers_with_unverifiable_history = population.filter(id => (byReader[id]?.unverifiable_history ?? 0) > 0 || dated.has(id)).length;
-            const readers = (data.readers || []).map(x => ({ ...x, courseAttribution: byReader[x.userId] ?? { verified_context: 0, unverifiable_history: 0 } }));
+            // V9 F7-C2R-U3C: la marca de lectura fechada no atribuible viaja también en la fila del lector (la fila no dice «0 min»).
+            const readers = (data.readers || []).map(x => ({ ...x, courseAttribution: byReader[x.userId] ?? { verified_context: 0, unverifiable_history: 0 },
+                ...(dated.has(x.userId) ? { historicalActivity: true } : {}) }));
             data = { ...data, courseAttribution: totals, readers };
         }
         const recognition = await groupRecognitionBlock(a2.aggregateOver === 'allowed' ? [...a2.allowed] : cohortIds);
@@ -13288,6 +13291,20 @@ function readInterventionsDb() {
         const data = readJSON(INTERVENTIONS_DB);
         return Array.isArray(data?.interventions) ? data : { interventions: [] };
     } catch { return { interventions: [] }; }
+}
+
+/**
+ * V9 F7-C2R-U3C — intervenciones anotadas desde el tablero del curso (`interventions_db.json`) sobre un lector, por los
+ * mediadores indicados, con la forma de `pedagogical_interventions`. Solo lectura: no se migran ni se copian. Sirve para
+ * que la evaluación de impacto contextual cubra TODAS las intervenciones registradas en la interfaz, no solo las que
+ * nacen de una recomendación de Aula Viva.
+ */
+function dashboardInterventionsOf(readerId, mediatorIds) {
+    const who = new Set([...mediatorIds].map(String));
+    return readInterventionsDb().interventions
+        .filter(i => i && String(i.studentId) === String(readerId) && who.has(String(i.mediatorId)) && Number.isFinite(Date.parse(i.createdAt)))
+        .map(i => ({ intervention_id: `dash_${i.id}`, teacher_id: String(i.mediatorId), student_id: String(i.studentId), intervention_type: String(i.type),
+            created_at: Date.parse(i.createdAt), recommendation_origin: null, outcome: null, outcome_at: null, origin: 'dashboard' }));
 }
 
 function writeInterventionsDb(data) {

@@ -271,6 +271,8 @@ try {
         const r1 = sum[0].json.readers.find((x) => x.userId === 'ra-1'), r3 = sum[0].json.readers.find((x) => x.userId === 'ra-3');
         ok('resumen del grupo 200 con el recuento de atribución, global y por lector', all200(sum) && sum[0].json.courseAttribution.readers_with_unverifiable_history === 4 && r1.courseAttribution.verified_context === 2
             && r3.courseAttribution.unverifiable_history === 1 && r3.courseAttribution.verified_context === 0, JSON.stringify(sum[0].json.courseAttribution));
+        ok('resumen: la fila de quien tiene lectura fechada no atribuible lo dice (no queda como un «0 min» mudo)', r3.historicalActivity === true && r1.historicalActivity === true
+            && !sum[0].json.readers.find((x) => x.userId === 'ra-5').historicalActivity, JSON.stringify(r3));
         ok('resumen: el tiempo de lectura de ra-1 no incluye la sesión de c2 anterior a la asignación ni la personal', r1.reading.allEffectiveMs === 20 * 60_000, JSON.stringify(r1.reading));
         const iv = await both('/api/interventions/student/ra-1', C['med-a']), ef = await both('/api/interventions/effectiveness', C['med-a']);
         ok('indicadores de intervenciones del tablero: siguen respondiendo', all200(iv) && all200(ef), st(iv));
