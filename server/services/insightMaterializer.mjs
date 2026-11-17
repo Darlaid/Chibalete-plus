@@ -89,6 +89,14 @@ function subjectHistory(userId, sinceTs) {
     const seen = new Set(own.map(r => r.id));
     return own.concat(reviewed.filter(r => !seen.has(r.id))).sort((a, b) => a.server_ts - b.server_ts);
 }
+/**
+ * V9 F7-C2R-U1 — las filas PROPIAS del lector que este materializador usa para sus señales (misma consulta, misma
+ * ventana, mismo orden), sin las revisiones que firmó como revisor: esas filas son de otro sujeto. Solo lectura.
+ */
+export function readOwnEventHistory(userId, sinceTs) {
+    getRawEventsDb();
+    return _stmtUserHistory.all(String(userId), sinceTs, 20_000);
+}
 import { computeUserSignals, computeUserProfile } from './signalCompute.mjs';
 import { SIGNAL_IDS } from '../analytics/signals.js';
 import * as insightsStore from '../insightsStore.js';

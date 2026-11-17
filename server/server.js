@@ -287,6 +287,8 @@ import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 // CHP-LEO-MEDIATOR-CIS-SCOPE-01A — alcance canónico (CIS) para las rutas de mediación de Leo.
 import { evaluateScopeAccess, requireScopeAccess, individualAccess, individualAccessChecker } from './aulaViva/scopeAccess.mjs';
 import { getPrincipal, getMemberships, IdentityUnavailableError, mediatedGroupRosters } from './identity/cis.mjs';
+// V9 F7-C2R-U1 — procedencia temporal del contexto pedagógico (apagada salvo AULA_VIVA_CONTEXT_LEDGER_ENABLED=1).
+import { observeContext, contextIntervals, ENABLED as contextLedgerEnabled, ALL_WORKS } from './aulaViva/contextLedger.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — tiempo efectivo propio (desbloqueo
@@ -1341,6 +1343,8 @@ const writeJSON = (file, data) => {
             throw e;
         }
         _jsonCache.delete(file); // invalidate cache immediately after write
+        // V9 F7-C2R-U1 — un cambio de nómina o de asociación se anota en cuanto ocurre (diferido; jamás rompe el write).
+        if (file === GROUPS_DB || file === ACCESS_DB || file === USERS_DB) { try { queueContextObservation(); } catch { /* aditivo */ } }
         // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
         try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSON' })(file, data); } catch { /* shadow nunca rompe el write */ }
     } catch (e) {
@@ -1362,6 +1366,7 @@ const writeJSONAsync = async (file, data) => {
         throw e;
     }
     _jsonCache.delete(file);
+    if (file === GROUPS_DB || file === ACCESS_DB || file === USERS_DB) { try { queueContextObservation(); } catch { /* aditivo */ } }
     // P3-E — shadow dual-write (gated; no-bloqueante; jamás lanza).
     try { makeIdentityWriteHook({ usersDb: USERS_DB, groupsDb: GROUPS_DB, accessDb: ACCESS_DB, schoolsDb: SCHOOLS_DB, log, writerId: 'server.writeJSONAsync' })(file, data); } catch { /* shadow nunca rompe el write */ }
 };
@@ -11396,6 +11401,93 @@ function mediatorContentScope(mediatorId, readerId) {
     }
     return groupsContentScope(shared);
 }
+
+/**
+ * V9 F7-C2R-U1 — contexto pedagógico para indicadores derivados.
+ *
+ * F7-C2 decide qué obras pertenecen HOY a un curso. Para un indicador derivado hace falta además saber si la lectura
+ * ocurrió mientras la obra estaba asociada y el lector era miembro: ni las reglas de acceso ni las membresías guardan
+ * desde cuándo valen. El servidor lo anota hacia adelante (`aulaViva/contextLedger.mjs`): al arrancar, cada minuto y
+ * tras cada escritura de grupos, accesos o usuarios. No reconstruye historia ni modifica esos almacenes.
+ */
+function pedagogicalContextSnapshot() {
+    const groups = readJSON(GROUPS_DB), users = readJSON(USERS_DB);
+    // Un padrón vacío es un fallo de lectura, no un colegio sin lectores: no se observa (cerraría membresías reales).
+    if (!Array.isArray(groups) || !Array.isArray(users) || users.length === 0) throw new Error('context_sources_unreadable');
+    return groups.filter(g => g && typeof g.id === 'string' && g.id).map(g => {
+        const scope = groupsContentScope([g.id]);
+        return {
+            groupId: g.id,
+            works: scope.all ? [ALL_WORKS, ...scope.ids] : scope.ids,
+            members: getGroupMembers(g, users, { allGroups: groups, useLegacyColegioFallback: false, warnFn: () => {} }),
+        };
+    });
+}
+function observePedagogicalContext() {
+    if (!observePedagogicalContext.ready || !contextLedgerEnabled()) return;
+    try {
+        const r = observeContext(pedagogicalContextSnapshot());
+        if (r.opened || r.closed) log(`[CONTEXT] asociaciones observadas: ${r.opened} abiertas, ${r.closed} cerradas${r.baseline ? ' (línea base)' : ''}`, 'INFO');
+        else if (r.skipped && r.skipped !== 'disabled') log(`[CONTEXT] observación omitida: ${r.skipped}`, 'WARN');
+    } catch (e) { log(`[CONTEXT] observación fallida: ${e.message}`, 'WARN'); }
+}
+function queueContextObservation() {
+    if (queueContextObservation.queued || !observePedagogicalContext.ready || !contextLedgerEnabled()) return;
+    queueContextObservation.queued = true;
+    setImmediate(() => { queueContextObservation.queued = false; observePedagogicalContext(); });
+}
+observePedagogicalContext.ready = true;
+if (contextLedgerEnabled()) {
+    setImmediate(observePedagogicalContext);
+    setInterval(observePedagogicalContext, Number(process.env.AULA_VIVA_CONTEXT_OBSERVE_INTERVAL_MS) || 60_000).unref();
+}
+/**
+ * Contexto de ESE mediador sobre ESE lector: los grupos que media y de los que el lector es miembro hoy, con las obras
+ * de cada uno y su procedencia temporal. No autoriza: se llama después de `mediatorProgressAccess`.
+ * @throws {IdentityUnavailableError}
+ */
+async function mediatorPedagogicalContext(mediatorId, readerId) {
+    const shared = [];
+    for (const [gid, roster] of mediatedGroupRosters(String(mediatorId ?? ''))) if (roster.has(String(readerId))) shared.push(gid);
+    observePedagogicalContext();   // el registro se pone al día antes de leerlo
+    const { buildPedagogicalContext } = await import('./aulaViva/pedagogicalContext.mjs');
+    return buildPedagogicalContext({ readerId, groups: shared.map(gid => ({ groupId: gid, works: groupsContentScope([gid]) })), intervals: contextIntervals(shared) });
+}
+/**
+ * Indicadores contextuales de un lector para quien lo acompaña por mediación (CIS + A2 + C005, nunca un B2C personal).
+ * Es la entrada que U2 y U3 usarán desde las rutas de Aula Viva y Leo. `{ status, body }`; no escribe la respuesta.
+ */
+async function contextualIndicatorsFor(requester, users, readerId) {
+    const access = mediatorProgressAccess(requester, users, readerId);
+    if (access === 'unavailable') return { status: 503, body: { ok: false, error: 'individual_access_unavailable' } };
+    if (access !== 'allow') return { status: 403, body: { ok: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(readerId) } };
+    let context;
+    try { context = await mediatorPedagogicalContext(requester.id, readerId); }
+    catch (e) {
+        if (!(e instanceof IdentityUnavailableError)) throw e;
+        return { status: 503, body: { ok: false, error: 'identity_unavailable' } };
+    }
+    const { computeContextualIndicators, CONTEXT_WINDOW_DAYS } = await import('./aulaViva/pedagogicalContext.mjs');
+    const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
+    const nowTs = Date.now();
+    const { result } = computeContextualIndicators({ context, nowTs, events: readOwnEventHistory(readerId, nowTs - CONTEXT_WINDOW_DAYS * 86_400_000) });
+    return { status: 200, body: { ok: true, ...result } };
+}
+// Ruta de VERIFICACIÓN del motor (laboratorio): apagada salvo AULA_VIVA_CONTEXT_PREVIEW_ENABLED=1. No reabre ninguna
+// pantalla; las rutas de Aula Viva y Leo siguen reteniendo los indicadores individuales (F7-C2S) hasta U2 y U3.
+app.get('/api/aula-viva/context/students/:userId/indicators', requireUserAuth, async (req, res) => {
+    if (process.env.AULA_VIVA_CONTEXT_PREVIEW_ENABLED !== '1') return res.status(404).json({ ok: false, error: 'not_found' });
+    try {
+        const users = readJSON(USERS_DB) || [];
+        const requester = await sessionRequesterOf(req, users);
+        const out = await contextualIndicatorsFor(requester, users, String(req.params.userId || ''));
+        res.set('Cache-Control', 'no-store');
+        res.status(out.status).json(out.body);
+    } catch (e) {
+        log(`[CONTEXT] indicadores contextuales: ${e.message}`, 'ERROR');
+        res.status(500).json({ ok: false, error: 'context_indicators_failed' });
+    }
+});
 
 /**
  * True if user has the mediador role.

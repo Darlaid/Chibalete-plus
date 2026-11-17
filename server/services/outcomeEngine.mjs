@@ -35,8 +35,8 @@ const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
     || path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
 
 const DAY_MS = 86_400_000;
-const BASELINE_DAYS = Number(process.env.OUTCOME_BASELINE_DAYS || 14);
-const FOLLOWUP_DAYS = Number(process.env.OUTCOME_FOLLOWUP_DAYS || 14);
+export const BASELINE_DAYS = Number(process.env.OUTCOME_BASELINE_DAYS || 14);
+export const FOLLOWUP_DAYS = Number(process.env.OUTCOME_FOLLOWUP_DAYS || 14);
 
 let _eventsRaw = null;
 function getEventsRaw() {
@@ -65,7 +65,14 @@ function computeWindowMetrics(userId, from, to) {
          WHERE user_id = ? AND server_ts >= ? AND server_ts < ?
          ORDER BY server_ts ASC`
     ).all(String(userId), from, to);
+    return windowMetricsFromEvents(events);
+}
 
+/**
+ * El mismo cálculo sobre una lista de filas ya leída (event, server_ts, elapsed_ms, content_id, payload_json).
+ * V9 F7-C2R-U1: permite aplicarlo a los eventos de un contexto pedagógico sin duplicar la fórmula.
+ */
+export function windowMetricsFromEvents(events) {
     const days = new Set();
     let elapsedMs = 0, started = 0, completed = 0, abandoned = 0, earlyAbandons = 0;
     const contents = new Set();
