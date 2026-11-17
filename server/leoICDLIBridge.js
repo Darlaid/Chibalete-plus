@@ -251,3 +251,40 @@ export function resolveLeoPedagogicalAdjustment(snapshot, sessionMemory, profile
 
     return { difficultyLevel, preferredSupportType };
 }
+
+/**
+ * V9 F7-C2R-U3 — instantánea ICDLI de un CONTEXTO pedagógico: la misma fórmula, sobre las sesiones de lectura y las
+ * sesiones de Leo que `includeContent(obra, fecha)` atribuye al curso. Sin caché (depende de quién consulta) y sin la
+ * memoria acumulada de Leo. Sin sesiones atribuibles no hay nivel: `hasData: false` y `levelLabel: null`, nunca
+ * «Inicial» por defecto.
+ *
+ * @param {string} userId
+ * @param {{includeContent:(contentId:unknown, ts?:number)=>boolean, leoEntries?:object[]}} opts
+ */
+export function getContextualICDLISnapshot(userId, { includeContent, leoEntries = [] } = {}) {
+    if (!userId || typeof includeContent !== 'function') return null;
+    try {
+        const analytics = process.env.CHP_DATA_DIR ? path.join(process.env.CHP_DATA_DIR, 'analytics_db.json') : _ANALYTICS_DB;
+        initMetrics({
+            events:    _readSafe(analytics,   []),
+            leoMemory: { memoryMap: {} },
+            progress:  getAllProgressAsMap(),
+            groups:    _readSafe(_GROUPS_DB,  []),
+            users:     _readSafe(_USERS_DB,   []),
+        });
+        const raw = computeStudentMetrics(userId, { includeContent, leoEntries });
+        const readingSessions = raw.behavioral?.totalSessions ?? 0;
+        if (readingSessions === 0) {
+            return { hasData: false, levelLabel: null, composite: null, icdli: null, dominantStrengths: [], dominantAlerts: [],
+                readingSessions: 0, computedAt: raw.computedAt };
+        }
+        const composite  = Math.round(raw.readingLevels.composite);
+        const levelLabel = _compositeToLabel(composite);
+        const { dominantStrengths, dominantAlerts } = _buildStrengthsAlerts(raw.icdli);
+        return { hasData: true, levelLabel, composite, icdli: raw.icdli, recommendedDifficultyLevel: _labelToDifficulty(levelLabel),
+            dominantStrengths, dominantAlerts, recommendedDose: _labelToDose(levelLabel), readingSessions, computedAt: raw.computedAt };
+    } catch (e) {
+        _log(`getContextualICDLISnapshot failed userId=${userId}: ${e.message}`, 'WARN');
+        return null;
+    }
+}

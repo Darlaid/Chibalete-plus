@@ -157,8 +157,8 @@ try {
     ok('cola de seguimiento: solo r-yes (ni r-no, r-pend, r-rev ni r-b de otro grupo)', fq.s === 200 && ids(fq.b, 'student_id') === 'r-yes', fq.raw.slice(0, 300));
     ok('…administración: los cinco', ids((await get(a1, 'adm', '/institutional/outcomes/follow-up-queue')).b, 'student_id') === ALL.slice().sort().join(','));
     const mem = await get(a1, 'med-ok', '/institutional/cohorts/coh-risk/members');
-    ok('miembros de una cohorte de riesgo: no se entregan al mediador (pertenecer a ella es un indicador derivado)', mem.s === 403 && mem.b?.error === WITHHELD && !mem.raw.includes('r-yes') && !('members_count' in (mem.b ?? {})), mem.raw.slice(0, 300));
-    ok('…C005 vencido: tampoco', (await get(a1, 'med-exp', '/institutional/cohorts/coh-risk/members')).s === 403);
+    ok('miembros de una cohorte de riesgo: los del riesgo contextual de sus lectores con A2, nunca los del almacén global', mem.s === 200 && mem.b?.context === true && !['r-no', 'r-pend', 'r-rev', 'r-b'].some((u) => mem.raw.includes(u)), mem.raw.slice(0, 300));
+    ok('…C005 vencido: ningún miembro', (await get(a1, 'med-exp', '/institutional/cohorts/coh-risk/members')).b?.members_count === 0);
     ok('…administración: los cinco', (await get(a1, 'adm', '/institutional/cohorts/coh-risk/members')).b?.members_count === 5);
 
     section('[4] revocación entre réplicas, sin reiniciar');

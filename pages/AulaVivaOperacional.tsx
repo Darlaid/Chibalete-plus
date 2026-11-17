@@ -411,6 +411,11 @@ const AulaVivaOperacional: React.FC = () => {
                         <TrendingUp className="w-5 h-5 text-gray-500"/>
                         Cohort institucional (ventana 28d)
                     </h2>
+                    {!cohortMeta.failed && cohort?.population && !cohort.suppressed && (
+                        <p className="mb-3 text-xs text-gray-600" data-testid="cohort-population">
+                            Calculado con {cohort.population.eligible} de los {cohort.population.roster} lectores de la nómina (los que tienen seguimiento habilitado) y solo con la lectura de las obras del curso.
+                        </p>
+                    )}
                     {cohortMeta.failed ? (
                         <EmptyState kind="custom" where="cohort_failed"
                             title="No pudimos consultar el agregado"
@@ -420,6 +425,11 @@ const AulaVivaOperacional: React.FC = () => {
                         <EmptyState kind="custom" where="cohort_no_groups"
                             title="Sin grupo asignado"
                             body="El agregado se muestra para los grupos que medias."
+                        />
+                    ) : cohort?.suppressed ? (
+                        <EmptyState kind="custom" where="cohort_suppressed"
+                            title="Agregado no disponible para este curso"
+                            body={`El agregado se calcula con los lectores que tienen seguimiento habilitado y solo se muestra con ${cohort.minCohort ?? 5} o más${cohort.population ? ` (hoy: ${cohort.population.eligible} de ${cohort.population.roster} en la nómina)` : ''}. Esto no describe cómo leen.`}
                         />
                     ) : cohortMetricsToShow.length === 0 ? (
                         <EmptyState kind="snapshots_pending" where="cohort_global"/>

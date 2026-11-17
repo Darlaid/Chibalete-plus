@@ -22,7 +22,7 @@ import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs
 import { institutionalLearningsTotal } from '../observability/metrics.js';
 
 export const ENABLED = () => process.env.AULA_VIVA_LEARNING_ENABLED === '1';
-const MIN_SUPPORT = Number(process.env.AULA_VIVA_LEARNING_MIN_SUPPORT || 5);
+export const MIN_SUPPORT = Number(process.env.AULA_VIVA_LEARNING_MIN_SUPPORT || 5);
 
 const HUMAN_LABELS = {
     improved: 'mejora observada',
@@ -32,7 +32,8 @@ const HUMAN_LABELS = {
     insufficient_data: 'datos insuficientes',
 };
 
-function buildHint(scopeType, scopeId, interventionType, distribution, total) {
+// V9 F7-C2R-U3: exportadas para aplicar el mismo texto y la misma confianza al impacto de un contexto pedagógico.
+export function buildHint(scopeType, scopeId, interventionType, distribution, total) {
     // Determinar la categoría dominante (excluyendo insufficient_data).
     const candidates = ['improved', 'stable', 'worsened', 'mixed']
         .map(l => ({ l, n: distribution[l] || 0 }))
@@ -47,7 +48,7 @@ function buildHint(scopeType, scopeId, interventionType, distribution, total) {
     return `En el scope ${scopeType}:${scopeId}, después de la intervención "${interventionType}" se observó ${HUMAN_LABELS[dom.l]} en ${dom.n} de ${total} casos (${pct}%). NO implica causalidad — refleja patrones observados.`;
 }
 
-function computeConfidence(total) {
+export function computeConfidence(total) {
     // Confianza basada en tamaño de muestra:
     // 5 casos → 0.4, 15 → 0.6, 40 → 0.8, 100+ → 0.9 (max)
     if (total < 5) return 0.2;

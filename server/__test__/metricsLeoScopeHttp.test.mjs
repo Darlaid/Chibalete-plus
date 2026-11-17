@@ -134,7 +134,10 @@ try {
     console.log('[3] Leo del mediador');
     const l = await leo3(S1, 'med-a', 'ra-yes'), l2 = await leo3(S2, 'med-a', 'ra-yes');
     ok('mediador → lector de su grupo con A2 y C005 → resumen, historial y activaciones (dos réplicas)', [...l, ...l2].every((r) => r.status === 200 && r.json?.success === true) && 'summary' in l[0].json && 'history' in l[1].json && 'outputs' in l[2].json, l.map((r) => r.status).join(' '));
-    ok('…con la evidencia de ese lector', hint(l[0], 'ra-yes') && hint(l[1], 'ra-yes'), l[0].text.slice(0, 200));
+    // V9 F7-C2R-U3: el contenido de Leo sale del contexto pedagógico con procedencia temporal (lo cubre pedagogicalRecoveryHttp).
+    // Aquí el registro de procedencia está apagado: el mediador autorizado recibe el estado, no un diagnóstico, y nada de otros lectores.
+    ok('…desde el contexto del curso: sin procedencia registrada dice «insufficient», sin evidencia de otros lectores', l[0].json.summary.data_state === 'insufficient' && l[0].json.summary.reason === 'provenance_not_recorded'
+        && !/pista-privada-(ra-no|ra-otro|rb-yes|b2c)"/.test(l[0].text + l[1].text), l[0].text.slice(0, 200));
     for (const [who, u, label] of [['med-b', 'ra-yes', 'otra institución'], ['med-a2', 'ra-yes', 'misma institución, grupo que no media'], ['med-noc', 'ra-yes', 'mediador sin C005'], ['med-a', 'ra-no', 'lector sin A2'], ['med-a', 'b2c', 'lector B2C (aun en la nómina y con A2)'], ['med-b', 'b2c', 'lector B2C, otro mediador'], ['med-a', 'no-existe', 'lector inexistente'], ['ra-yes2', 'ra-yes', 'otro lector']]) {
         const r = [...await leo3(S1, who, u), ...await leo3(S2, who, u)];
         ok(`${label} → 403 en las tres rutas y las dos réplicas, sin resumen, historial ni activaciones`, r.every((x) => x.status === 403 && x.json?.error === 'scope_access_denied' && !/pista-privada|summary|history|outputs/.test(x.text)), r.map((x) => x.status).join(' '));
@@ -175,7 +178,7 @@ try {
     ok('administración: Leo de cualquier lector, como antes', admLeo.every((r) => r.status === 200), admLeo.map((r) => r.status).join(' '));
     ok('el lector conserva sus propias métricas', (await req(S1, '/api/metrics/student/ra-yes2', 'ra-yes2')).status === 200);
     const legit = [await req(S2, '/api/metrics/course/g-a', 'med-a'), await req(S1, '/api/reports/course/g-a', 'med-a'), ...await leo3(S2, 'med-a', 'ra-yes2')];
-    ok('mediador con todo en regla: métricas, reporte y Leo de su lector siguen funcionando', legit.every((r) => r.status === 200) && ids(legit[0]) === 'ra-yes2' && legit[0].json.studentBreakdown[0].pedagogicalProfile !== undefined && legit[1].json.reportMeta?.entityId === 'g-a' && hint(legit[2], 'ra-yes2'));
+    ok('mediador con todo en regla: métricas, reporte y Leo de su lector siguen funcionando', legit.every((r) => r.status === 200) && ids(legit[0]) === 'ra-yes2' && legit[0].json.studentBreakdown[0].pedagogicalProfile !== undefined && legit[1].json.reportMeta?.entityId === 'g-a' && legit[2].json.summary.data_state === 'insufficient');
     ok('otro mediador de la misma institución ve SU curso, no el ajeno', ids(await req(S1, '/api/metrics/course/g-a2', 'med-a2')) === 'ra-otro');
     ok('los registros del servidor no contienen evidencia de Leo ni nombres de lectores', !/pista-privada|Lector ra-|Lector b2c/.test(S1.out + S2.out));
 } catch (e) {

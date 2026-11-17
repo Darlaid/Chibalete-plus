@@ -696,7 +696,12 @@ function computeContentStats(userId, ctx = null, includeContent = null) {
     const all = ctx
         ? ctx.progressFor(userId)
         : Object.values(_progress.progressMap || {}).filter(p => p.userId === userId);
-    const entries = includeContent ? all.filter(p => includeContent(p.contentId)) : all;
+    // La fecha de un progreso es la de su PRIMERA sesión registrada: el avance acumula desde ahí.
+    const firstSessionTs = (p) => {
+        const ts = (Array.isArray(p.history) ? p.history : []).map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
+        return ts.length ? Math.min(...ts) : undefined;
+    };
+    const entries = includeContent ? all.filter(p => includeContent(p.contentId, firstSessionTs(p))) : all;
     const contents = entries.map(raw => {
         const pct     = raw.canonicalProgress?.globalPercentage ?? 0;
         const history = Array.isArray(raw.history) ? raw.history : [];
@@ -726,7 +731,7 @@ function computeContentStats(userId, ctx = null, includeContent = null) {
 
 /** Compute Leo interaction metrics for a user from leo_interactions_db entries and analytics events. */
 function computeLeoMetrics(userId, userEvents = null, includeContent = null) {
-  const userInteractions = _leoInteractions.filter(e => e.userId === userId && (!includeContent || includeContent(e.contentId)));
+  const userInteractions = _leoInteractions.filter(e => e.userId === userId && (!includeContent || includeContent(e.contentId, e.timestamp)));
   const totalLeoInteractions = userInteractions.length;
 
   // Offline attempts come from analytics_db (LU Android: leo_interaction_attempted event)
@@ -763,12 +768,16 @@ function computeLeoMetrics(userId, userEvents = null, includeContent = null) {
 
 // V9 F7-C2: `includeContent` (opcional) limita el cálculo a la actividad de unas obras: eventos, sesiones, memoria e
 // interacciones de Leo y progreso de las demás obras no entran en NINGÚN indicador. Un evento sin obra se conserva.
-function computeStudentMetricsUncached(userId, ctx, includeContent = null) {
+// V9 F7-C2R-U3: el predicado recibe además la FECHA de cada dato (evento, inicio de sesión, primera sesión del
+// progreso), para quien necesite comprobar pertenencia temporal; un predicado de un solo argumento la ignora y se
+// comporta como antes. `includeContent.strict`: una fila sin obra no se atribuye. `extra.leoEntries`: sesiones de Leo
+// ya delimitadas por quien llama, en lugar de la memoria acumulada.
+function computeStudentMetricsUncached(userId, ctx, includeContent = null, extra = null) {
   const allEvents    = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
   const allSessions  = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
-  const userEvents   = includeContent ? allEvents.filter(e => e.contentId == null || includeContent(e.contentId)) : allEvents;
-  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId)) : allSessions;
-  const leoEntries   = getLeoEntriesForUser(userId, includeContent);
+  const userEvents   = includeContent ? allEvents.filter(e => (e.contentId == null ? includeContent.strict !== true : includeContent(e.contentId, e.timestamp))) : allEvents;
+  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId, s.startTimestamp)) : allSessions;
+  const leoEntries   = Array.isArray(extra?.leoEntries) ? extra.leoEntries : getLeoEntriesForUser(userId, includeContent);
   const leoMetrics   = computeLeoMetrics(userId, (ctx || includeContent) ? userEvents : null, includeContent);
 
   const behavioral    = computeBehavioral(sessions, userEvents);
@@ -806,7 +815,7 @@ export function computeStudentMetrics(userId, options = {}) {
   // V9 F7-C2: con filtro de obras no se memoiza (la clave del memo es solo `userId`).
   if (typeof options?.includeContent === 'function') {
     if (ctx) ctx.assertUsable();
-    return computeStudentMetricsUncached(userId, ctx, options.includeContent);
+    return computeStudentMetricsUncached(userId, ctx, options.includeContent, Array.isArray(options.leoEntries) ? { leoEntries: options.leoEntries } : null);
   }
   if (!ctx) {
     metricsContextCounters.metrics_legacy_fallback_calls_total += 1;

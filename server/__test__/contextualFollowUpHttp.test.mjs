@@ -391,9 +391,9 @@ try {
     section('[8b] perfil institucional del lector');
     {
         const rs = await both(`${AV}/institutional/profile/ra-2`, C['med-a']);
-        ok('timeline y vector del contexto; el historial de impacto sigue retenido y declarado', all200(rs) && clean(rs) && rs[0].json.timeline.data_state === 'ok' && rs[0].json.timeline.profile_current.abandono_risk > 0.7
-            && rs[0].json.feature_vector.features.abandono === 1 && rs[0].json.impact_history === null && rs[0].json.withheld.join() === 'impact_history', st(rs));
-        ok('impacto por lector: sigue retenido (pendiente)', (await both(`${AV}/institutional/outcomes/scope/user/ra-2`, C['med-a'])).every((r) => r.status === 403 && r.json?.error === 'individual_indicators_withheld'));
+        ok('timeline, vector e historial de impacto del contexto', all200(rs) && clean(rs) && rs[0].json.timeline.data_state === 'ok' && rs[0].json.timeline.profile_current.abandono_risk > 0.7
+            && rs[0].json.feature_vector.features.abandono === 1 && Array.isArray(rs[0].json.impact_history?.outcomes) && !('withheld' in rs[0].json), st(rs));
+        ok('impacto por lector: el del contexto (U3), nunca el global', (await both(`${AV}/institutional/outcomes/scope/user/ra-2`, C['med-a'])).every((r) => r.status === 200 && Array.isArray(r.json.outcomes) && !LEAK.test(r.text)));
     }
 
     section('[9] revocación inmediata de A2 / C005 · otros accesos');

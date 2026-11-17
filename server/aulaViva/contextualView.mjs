@@ -15,7 +15,8 @@
  *    El identificador es determinista (lector, contexto, regla, periodo de vigencia): marcar dos veces no duplica.
  */
 import crypto from 'node:crypto';
-import { computeContextualIndicators, DATA_STATE, CONTEXT_WINDOW_DAYS } from './pedagogicalContext.mjs';
+import { computeContextualIndicators, computeContextualImpact, DATA_STATE, CONTEXT_WINDOW_DAYS } from './pedagogicalContext.mjs';
+import { FOLLOWUP_DAYS } from '../services/outcomeEngine.mjs';
 import { ENABLED as ledgerEnabled } from './contextLedger.mjs';
 import { RECOMMENDATION_TTL_MS } from '../pedagogy/pedagogicalRules.js';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
@@ -267,4 +268,98 @@ export function overviewOf(views) {
     const out = { readers: views.length, ok: 0, no_activity: 0, insufficient: 0, no_course_works: 0, in_attention: 0 };
     for (const v of views) { if (v.result.data_state in out) out[v.result.data_state]++; if (attentionItem(v)) out.in_attention++; }
     return out;
+}
+
+// ── V9 F7-C2R-U3 — impacto de intervenciones y agregados de curso ────────────────────────────────────────────────────
+// Mismas ventanas y mismo clasificador (`computeContextualImpact`), sobre la actividad fechada del contexto. Nada se
+// guarda: el resultado se calcula al consultar, así que no puede quedar etiquetado con lectura ajena al curso.
+
+/**
+ * Intervenciones registradas sobre un lector por quienes median los grupos del contexto (no las de otros cursos).
+ * @param {string} readerId
+ * @param {Iterable<string>} mediatorIds
+ */
+export function contextualInterventions(readerId, mediatorIds, limit = 50) {
+    const ids = [...new Set([...mediatorIds].map(String))];
+    if (ids.length === 0) return [];
+    return getPedagogyExtDb().prepare(
+        `SELECT intervention_id, teacher_id, student_id, intervention_type, created_at, recommendation_origin, outcome, outcome_at
+         FROM pedagogical_interventions
+         WHERE student_id = ? AND teacher_id IN (${ids.map(() => '?').join(',')})
+         ORDER BY created_at DESC LIMIT ?`).all(String(readerId), ...ids, limit);
+}
+
+/** Una fila de impacto por intervención. `pending` = la ventana posterior aún no se cierra: no se compara nada. */
+export function contextualImpactRows({ context, events, nowTs = Date.now(), interventions }) {
+    return interventions.map((i) => {
+        const base = { outcome_id: `ctxout_${i.intervention_id}`, intervention_id: i.intervention_id, recommendation_id: i.recommendation_origin ?? null,
+            user_id: i.student_id, scope_type: 'user', scope_id: i.student_id, intervention_type: i.intervention_type, teacher_id: i.teacher_id,
+            manual_outcome: i.outcome ?? null, created_at: i.created_at };
+        const due = i.created_at + FOLLOWUP_DAYS * DAY;
+        if (nowTs < due) {
+            return { ...base, data_state: 'pending', reason: 'followup_window_open', followup_due_at: due, outcome_label: null, confidence: null,
+                evidence_level: null, baseline_metrics: null, followup_metrics: null, delta_metrics: null };
+        }
+        const r = computeContextualImpact({ context, events, interventionTs: i.created_at, interventionType: i.intervention_type, nowTs }).result;
+        return { ...base, data_state: r.data_state, reason: r.reason, outcome_label: r.outcome_label ?? null, confidence: r.confidence ?? null,
+            evidence_level: r.evidence_level ?? null, baseline_window_start: r.baseline_window.from, baseline_window_end: r.baseline_window.to,
+            followup_window_start: r.followup_window.from, followup_window_end: r.followup_window.to,
+            baseline_metrics: r.baseline_metrics, followup_metrics: r.followup_metrics, delta_metrics: r.delta_metrics };
+    });
+}
+
+/** Cuerpo con la forma de `getImpactSummary`. La distribución solo cuenta comparaciones que el clasificador pudo hacer. */
+export function impactSummaryBody(scope, rows, extra = {}) {
+    const distribution = { improved: 0, stable: 0, worsened: 0, mixed: 0, insufficient_data: 0 };
+    let pending = 0, notComparable = 0;
+    for (const r of rows) {
+        if (r.data_state === 'pending') pending++;
+        else if (r.outcome_label && r.outcome_label in distribution) distribution[r.outcome_label]++;
+        else notComparable++;
+    }
+    return { scope, total_outcomes: rows.length - pending, distribution, pending, not_comparable: notComparable, outcomes: rows, ...extra };
+}
+
+const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+/** Métrica agregada: solo si la sostienen al menos `min` lectores (umbral de divulgación vigente). */
+const disclosed = (values, min) => (values.length >= min ? mean(values) : null);
+const signalOf = (r, id) => r.signals_current.find((s) => s.signal_id === id)?.metric_value;
+
+/**
+ * Agregado de UN curso con los resultados contextuales de sus lectores con seguimiento habilitado. Devuelve la forma de
+ * la comparativa de cohortes. `roster` es la nómina total: se informa para que no se confunda con la población medida.
+ */
+export function groupAggregateBody({ groupId, roster, results, min, period = '28d' }) {
+    const base = { scope: { type: 'group', id: groupId }, period, population: { roster, eligible: results.length }, global_baseline: [] };
+    if (results.length < min) return { ...base, metrics: [], suppressed: true, reason: 'min_eligible_readers', minCohort: min };
+    const ok = results.filter((r) => r.data_state === DATA_STATE.ok && r.profile_current);
+    const risk = ok.map((r) => r.profile_current.abandono_risk).filter((v) => typeof v === 'number');
+    const metric = (metric_key, metric_value) => ({ metric_key, metric_value, trend: null, global_value: null, delta_vs_global: null });
+    const by_state = Object.fromEntries(Object.values(DATA_STATE).map((s) => [s, results.filter((r) => r.data_state === s).length]));
+    return { ...base, suppressed: false, by_state, metrics: [
+        metric('reader_cohort', roster),
+        metric('eligible_readers', results.length),
+        metric('active_users', results.filter((r) => (r.provenance?.events ?? 0) > 0).length),
+        metric('profiles_evaluated', ok.length),
+        metric('avg_continuidad', disclosed(ok.map((r) => signalOf(r, 'continuidad_semanal')).filter((v) => typeof v === 'number'), min)),
+        metric('avg_engagement', disclosed(ok.map((r) => r.profile_current.engagement_score).filter((v) => typeof v === 'number'), min)),
+        metric('at_risk_users', risk.length >= min ? risk.filter((v) => v >= 0.7).length : null),
+    ] };
+}
+
+/** Serie semanal del agregado de un curso (los mismos cortes fijos de la evolución individual). */
+export function groupRollupsBody({ groupId, views, min }) {
+    const weekly = [];
+    const cuts = (views[0]?.points || []).filter((p) => p.ts % WEEK === 0);
+    for (const cut of cuts) {
+        const at = views.map((v) => v.points.find((p) => p.ts === cut.ts)?.result).filter(Boolean);
+        if (at.length < min) continue;
+        const ok = at.filter((r) => r.data_state === DATA_STATE.ok && r.profile_current);
+        const cont = ok.map((r) => signalOf(r, 'continuidad_semanal')).filter((v) => typeof v === 'number');
+        const risk = ok.map((r) => r.profile_current.abandono_risk).filter((v) => typeof v === 'number');
+        const row = (metric_key, metric_value) => ({ scope_type: 'group', scope_id: groupId, period_start: cut.ts - WEEK, period_end: cut.ts, metric_key, metric_value });
+        weekly.push(row('active_users', at.filter((r) => (r.provenance?.events ?? 0) > 0).length),
+            row('avg_continuidad', disclosed(cont, min)), row('at_risk_users', risk.length >= min ? risk.filter((v) => v >= 0.7).length : null));
+    }
+    return { daily: [], weekly, monthly: [], population: { eligible: views.length } };
 }

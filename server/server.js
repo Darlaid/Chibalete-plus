@@ -1746,7 +1746,7 @@ registerRumRoute(app);
 // (inyectada). El scheduler queda OFF salvo AULA_VIVA_SCHEDULER_ENABLED=1.
 try {
     const { createOperationalRouter } = await import('./aulaViva/operationalRouter.mjs');
-    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth, contextAccess: { reader: (c, r) => aulaVivaContextReader(c, r), overview: (c) => aulaVivaContextOverview(c) } }));
+    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o) } }));
     log('[PASO5] /api/aula-viva router mounted', 'INFO');
 } catch (e) {
     log(`[PASO5] aula-viva router mount failed: ${e.message}`, 'WARN');
@@ -1755,7 +1755,7 @@ try {
 // /institutional/* no solapan con PASO 5).
 try {
     const { createInstitutionalRouter } = await import('./aulaViva/institutionalRouter.mjs');
-    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r) => aulaVivaContextReader(c, r) } }));
+    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o), readers: (c, o) => aulaVivaContextReaders(c, o) } }));
     log('[PASO7] /api/aula-viva/institutional/* router mounted', 'INFO');
 } catch (e) {
     log(`[PASO7] institutional router mount failed: ${e.message}`, 'WARN');
@@ -10685,7 +10685,13 @@ app.get('/api/leo/mediator/student/:userId', requireAuth, async (req, res) => {
         if (!(await requireLeoMediatorScope(req, res, userId))) return;
         // V9 F7-C2: por mediación, solo sesiones y evidencias de las obras de los grupos compartidos.
         const works = await leoMediationScope(req, userId);
-        const summary = getMediatorStudentSummary(userId, works ? { includeContent: works.has } : {});
+        // V9 F7-C2R-U3: por mediación, resumen CONTEXTUAL (perfil, ICDLI, alertas y acción con evidencias fechadas del curso).
+        if (works) {
+            const c = await leoContextFor(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], userId);
+            if (!c.ok) return res.status(c.status).json({ success: false, ...c.body });
+            return res.json({ success: true, summary: getMediatorStudentSummary(userId, { leoContext: c.leoContext }) });
+        }
+        const summary = getMediatorStudentSummary(userId);
         res.json({ success: true, summary });
     } catch (e) {
         log(`Leo mediator summary error: ${e.message}`, 'ERROR');
@@ -10704,6 +10710,11 @@ app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, asy
         const works = await leoMediationScope(req, userId);
         if (works && !works.has(contentId)) {
             return res.status(403).json({ success: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(userId) });
+        }
+        if (works) {
+            const c = await leoContextFor(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], userId);
+            if (!c.ok) return res.status(c.status).json({ success: false, ...c.body });
+            return res.json({ success: true, history: getMediatorContentHistory(userId, contentId, { leoContext: c.leoContext }) });
         }
         const history = getMediatorContentHistory(userId, contentId);
         res.json({ success: true, history });
@@ -10733,9 +10744,15 @@ app.get('/api/leo/activation/:userId', requireAuth, async (req, res) => {
         if (!(await requireLeoMediatorScope(req, res, userId, { allowSelf: true }))) return;
         // V9 F7-C2: el propio lector ve lo suyo completo; su mediador, solo lo de las obras de los grupos compartidos.
         const works = await leoMediationScope(req, userId);
-        const outputs = getActivationOutputsForUser(userId, works ? { includeContent: works.has } : {});
-        // V9 F7-C2S: por mediación, las salidas que dependen del perfil del lector no se calculan; se declara cuáles.
-        res.json(works ? { success: true, outputs, withheld: ['family', 'recommendation', 'production'] } : { success: true, outputs });
+        // V9 F7-C2R-U3: por mediación, las cuatro salidas se calculan con las entradas contextuales de Leo.
+        if (works) {
+            const c = await leoContextFor(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], userId);
+            if (!c.ok) return res.status(c.status).json({ success: false, ...c.body });
+            const L = c.leoContext;
+            return res.json({ success: true, outputs: getActivationOutputsForUser(userId, { leoContext: L }), data_state: L.data_state, reason: L.reason, context: L.context });
+        }
+        const outputs = getActivationOutputsForUser(userId);
+        res.json({ success: true, outputs });
     } catch (e) {
         log(`Leo activation error userId=${req.params.userId}: ${e.message}`, 'ERROR');
         res.status(500).json({ success: false, error: 'Error al generar outputs de activación' });
@@ -11478,7 +11495,7 @@ async function contextualIndicatorsFor(requester, users, readerId) {
  * `reader`: contexto y eventos fechados de UN lector para quien lo acompaña por mediación (mismos controles que el
  * resto de la mediación: rol, nunca un B2C personal, CIS + A2 + C005). `{ ok:false, status, body }` si no procede.
  */
-async function aulaVivaContextReader(callerId, readerId) {
+async function aulaVivaContextReader(callerId, readerId, opts = {}) {
     const users = readJSON(USERS_DB) || [];
     const requester = users.find(u => u?.id === String(callerId ?? ''));
     const access = mediatorProgressAccess(requester, users, readerId);
@@ -11493,14 +11510,26 @@ async function aulaVivaContextReader(callerId, readerId) {
     const { HISTORY_DAYS } = await import('./aulaViva/contextualView.mjs');
     const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
     const nowTs = Date.now();
-    return { ok: true, context, nowTs, events: readOwnEventHistory(readerId, nowTs - HISTORY_DAYS * 86_400_000) };
+    return { ok: true, context, nowTs, mediatorIds: groupMediatorIds(context.groupIds),
+        events: readOwnEventHistory(readerId, nowTs - (opts.historyDays ?? HISTORY_DAYS) * 86_400_000) };
+}
+/** Quienes median unos grupos (para saber qué intervenciones pertenecen al contexto de esos cursos). */
+function groupMediatorIds(groupIds) {
+    const wanted = new Set([...groupIds].map(String)), out = new Set();
+    for (const g of readJSON(GROUPS_DB) || []) {
+        if (!g || !wanted.has(String(g.id))) continue;
+        for (const id of Array.isArray(g.mediatorIds) ? g.mediatorIds : []) out.add(String(id));
+        if (g.teacherId) out.add(String(g.teacherId));
+    }
+    return [...out];
 }
 /**
- * `overview`: todos los lectores que ese mediador puede acompañar HOY (miembros de los grupos que media, con A2 vigente
- * y C005 del mediador; nunca un B2C personal), cada uno con su contexto. Registro de decisiones o identidad no
- * verificables ⇒ 503 (fallo cerrado). Las asociaciones se observan una sola vez por petición.
+ * Lectores que ese mediador puede acompañar HOY (miembros de los grupos que media, con A2 vigente y C005 del mediador;
+ * nunca un B2C personal), cada uno con su contexto. `onlyGroup`: solo ese curso, y el contexto se limita a él (agregados
+ * de curso). Registro de decisiones o identidad no verificables ⇒ 503 (fallo cerrado). Las asociaciones se observan una
+ * sola vez por petición.
  */
-async function aulaVivaContextOverview(callerId) {
+async function aulaVivaContextReaders(callerId, { onlyGroup = null, historyDays = null } = {}) {
     const users = readJSON(USERS_DB) || [];
     const requester = users.find(u => u?.id === String(callerId ?? ''));
     if (!requester || !isMediatorRole(requester)) return { ok: false, status: 403, body: { ok: false, error: 'scope_access_denied' } };
@@ -11509,6 +11538,11 @@ async function aulaVivaContextOverview(callerId) {
     catch (e) {
         if (!(e instanceof IdentityUnavailableError)) throw e;
         return { ok: false, status: 503, body: { ok: false, error: 'identity_unavailable' } };
+    }
+    if (onlyGroup !== null) {
+        const roster = rosters.get(String(onlyGroup));
+        if (!roster) return { ok: false, status: 403, body: { ok: false, error: 'scope_access_denied', scope_type: 'group', scope_id: String(onlyGroup) } };
+        rosters = new Map([[String(onlyGroup), roster]]);
     }
     const check = individualAccessChecker(requester.id);
     const shared = new Map();      // lector → grupos compartidos; null = no elegible
@@ -11537,9 +11571,23 @@ async function aulaVivaContextOverview(callerId) {
         if (!gids) continue;
         readers.push({ readerId,
             context: buildPedagogicalContext({ readerId, groups: gids.map(gid => ({ groupId: gid, works: works.get(gid) })), intervals }),
-            events: readOwnEventHistory(readerId, nowTs - CONTEXT_WINDOW_DAYS * 86_400_000) });
+            events: readOwnEventHistory(readerId, nowTs - (historyDays ?? CONTEXT_WINDOW_DAYS) * 86_400_000) });
     }
-    return { ok: true, nowTs, readers };
+    return { ok: true, nowTs, readers, roster: shared.size, mediatorIds: groupMediatorIds(rosters.keys()) };
+}
+const aulaVivaContextOverview = (callerId) => aulaVivaContextReaders(callerId);
+const aulaVivaContextGroup = (callerId, groupId, opts = {}) => aulaVivaContextReaders(callerId, { onlyGroup: groupId, ...opts });
+/**
+ * V9 F7-C2R-U3 — entradas CONTEXTUALES de Leo para quien media a un lector: evidencias fechadas del curso, y con ellas
+ * el perfil, las sesiones por obra y el ICDLI. Mismos controles que el resto de la mediación.
+ */
+async function leoContextFor(callerId, readerId) {
+    const a = await aulaVivaContextReader(callerId, readerId);
+    if (!a.ok) return a;
+    const { computeContextualIndicators } = await import('./aulaViva/pedagogicalContext.mjs');
+    const { buildLeoContextInputs } = await import('./leoContextInputs.js');
+    const reading = computeContextualIndicators({ context: a.context, events: a.events, nowTs: a.nowTs }).result;
+    return { ok: true, leoContext: buildLeoContextInputs(String(readerId), a.context, { readingState: reading, provenanceRecorded: contextLedgerEnabled() }) };
 }
 // Ruta de VERIFICACIÓN del motor (laboratorio): apagada salvo AULA_VIVA_CONTEXT_PREVIEW_ENABLED=1. No reabre ninguna
 // pantalla; las rutas de Aula Viva y Leo siguen reteniendo los indicadores individuales (F7-C2S) hasta U2 y U3.

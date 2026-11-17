@@ -395,8 +395,32 @@ function _productionPrompt(lastObj, hasWritingHistory) {
 // progreso de esas obras. El mensaje a la familia, la recomendación y la invitación a producir dependen del perfil
 // del lector o de su ICDLI (toda su actividad): no se calculan ni se entregan.
 export const PERSON_LEVEL_ACTIVATIONS = Object.freeze(['family', 'recommendation', 'production']);
-export function getActivationOutputsForUser(userId, { includeContent = null } = {}) {
+export function getActivationOutputsForUser(userId, { includeContent = null, leoContext = null } = {}) {
     if (!userId) return [];
+    // V9 F7-C2R-U3: por mediación, las cuatro salidas se calculan con las entradas contextuales (evidencias fechadas del
+    // curso, perfil e ICDLI reconstruidos con ellas). Sin evidencia atribuible no hay salidas.
+    if (leoContext) {
+        try {
+            const L = leoContext;
+            if (L.data_state !== 'ok') return [];
+            const firstTs = (p) => {
+                const ts = (Array.isArray(p.history) ? p.history : []).map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
+                return ts.length ? Math.min(...ts) : undefined;
+            };
+            const activeProgress = _getActiveProgressRecords(userId, _readProgressDb(userId)).filter(p => L.includeContent(p.contentId, firstTs(p)));
+            const outputs = [
+                detectFamilyMessage(userId, L.profile, L.evidence.slice(-30)),
+                detectContinuity(userId, L.sessions, activeProgress),
+                detectRecommendation(userId, L.profile, L.icdli?.hasData ? L.icdli : null),
+                detectProductionPrompt(userId, L.sessions, L.profile),
+            ].filter(Boolean);
+            _log(`userId=${userId} outputs(context)=[${outputs.map(o => o.type).join(', ')}]`);
+            return outputs;
+        } catch (e) {
+            _log(`getActivationOutputsForUser (context) failed userId=${userId}: ${e.message}`, 'ERROR');
+            return [];
+        }
+    }
 
     try {
         const inScope        = (list) => (typeof includeContent === 'function' ? list.filter(x => includeContent(x?.contentId)) : list);

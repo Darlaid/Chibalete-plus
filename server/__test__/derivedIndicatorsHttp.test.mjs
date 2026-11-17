@@ -202,7 +202,12 @@ const allAV = async (u, cookie) => { const out = []; for (const p of AV(u)) out.
 // V9 F7-C2R-U2: por mediación, las rutas de Aula Viva responden con indicadores del CONTEXTO del curso (200) y nunca con
 // el almacén derivado global, que aquí lleva la marca 0.8125 / «marca-<lector>». El impacto por lector sigue retenido.
 const GLOBAL_MARK = /0\.8125|marca-/;
-const contextual = (r) => (/\/outcomes\//.test(r.path) ? withheld(r) : r.status === 200 && !GLOBAL_MARK.test(r.text));
+const contextual = (r) => r.status === 200 && !GLOBAL_MARK.test(r.text);
+// V9 F7-C2R-U3: Leo del mediador también responde desde el contexto. Esta suite corre con el registro de procedencia
+// APAGADO: nada es atribuible, así que no hay nivel, apoyo, alertas ni acción (y jamás los del perfil global).
+const leoWithoutDiagnosis = (r) => r.status === 200 && r.json?.success === true && r.json.summary.data_state !== 'ok' && r.json.summary.preferredSupportType === null
+    && r.json.summary.alerts === null && r.json.summary.suggestedMediatorAction === null && r.json.summary.icdliLevel === null && r.json.summary.icdliHasData === false
+    && r.json.summary.recentEvidenceSignals.length === 0 && !/"vocabulary"|Mantén el ritmo|Inicial|Sin datos ICDLI|Baja actividad/.test(r.text);
 
 try {
     await ready(S1); await ready(S2);
@@ -222,18 +227,17 @@ try {
     section('[1] perfil con actividad de curso y personal: sin indicadores individuales contaminados');
     {
         const rs = await allAV('ra-1', C['med-a']);
-        ok('Aula Viva: las rutas individuales de ra-1 responden desde el contexto del curso, sin el almacén derivado global (impacto: retenido)', rs.length === 14 && rs.every(contextual), st(rs));
+        ok('Aula Viva: las siete rutas individuales de ra-1 responden desde el contexto del curso, sin el almacén derivado global', rs.length === 14 && rs.every(contextual), st(rs));
         const tl = rs.find((r) => /\/timeline$/.test(r.path) && !/signals/.test(r.path));
         ok('…el timeline dice su estado y no trae diagnóstico sin evidencia atribuible', typeof tl.json.data_state === 'string' && tl.json.data_state !== 'ok' && tl.json.profile_current === null && tl.json.risks.length === 0 && tl.json.summaries.length === 1, tl.text.slice(0, 300));
         const q = await both('/api/aula-viva/students-needing-attention', C['med-a']);
         ok('cola de atención: la del mediador, sin lectores ordenados por el riesgo global', q.every((r) => r.status === 200 && Array.isArray(r.json) && !GLOBAL_MARK.test(r.text)), st(q));
         const leo = await both('/api/leo/mediator/student/ra-1', C['med-a']);
-        ok('Leo del mediador: 200 sin ningún campo del perfil del lector ni del ICDLI (ausentes, no en cero)', leo.every((r) => r.status === 200 && r.json?.success === true && LEO_PERSON.every((k) => !(k in r.json.summary))), st(leo));
-        ok('…y declara cuáles retiene', leo.every((r) => JSON.stringify([...(r.json.summary.withheld ?? [])].sort()) === JSON.stringify([...LEO_PERSON].sort())));
-        ok('…conserva lo que sale de la obra del curso: 3 interacciones (no 44), señales solo de c1', leo.every((r) => r.json.summary.totalInteractions === 3 && r.json.summary.recentEvidenceSignals.length === 2 && !/"c3"/.test(r.text)), leo[0].text.slice(0, 400));
+        ok('Leo del mediador: 200 desde el contexto; sin procedencia registrada no hay diagnóstico ni nada del perfil global', leo.every(leoWithoutDiagnosis) && leo.every((r) => r.json.summary.reason === 'provenance_not_recorded'), st(leo));
+        ok('…ya no declara campos retenidos: dice su estado', leo.every((r) => !('withheld' in r.json.summary) && r.json.summary.data_state === 'insufficient'));
+        ok('…sin las 44 interacciones acumuladas ni la obra personal', leo.every((r) => r.json.summary.totalInteractions === null && !/"c3"/.test(r.text)), leo[0].text.slice(0, 400));
         const act = await both('/api/leo/activation/ra-1', C['med-a']);
-        ok('activación: sin mensaje a la familia, recomendación ni invitación a producir; se declaran retenidas', act.every((r) => r.status === 200 && (r.json.outputs ?? []).every((o) => o.type === 'continuity')
-            && JSON.stringify(r.json.withheld) === JSON.stringify(['family', 'recommendation', 'production']) && !/"c3"/.test(r.text)), st(act));
+        ok('activación: sin evidencia atribuible no hay salidas, y el estado lo dice', act.every((r) => r.status === 200 && (r.json.outputs ?? []).length === 0 && r.json.data_state === 'insufficient' && !('withheld' in r.json) && !/"c3"/.test(r.text)), st(act));
     }
 
     section('[2] perfil solo de curso institucional: únicamente indicadores de procedencia demostrable');
@@ -244,7 +248,7 @@ try {
         ok('progreso por obra del curso: sí (c1, 35 %)', pr.every((r) => r.status === 200 && r.json.progressList.length === 1 && r.json.progressList[0].contentId === 'c1'), st(pr));
         ok('estado del lector sobre las obras del curso: sí', stt.every((r) => r.status === 200 && r.json?.progress?.booksStarted === 1), st(stt));
         const leo = await both('/api/leo/mediator/student/ra-2', C['med-a']), hist = await both('/api/leo/mediator/student/ra-2/content/c1', C['med-a']);
-        ok('Leo sobre la obra del curso: sesiones y evidencias de c1 (4 interacciones), sin perfil de persona', leo.every((r) => r.status === 200 && r.json.summary.totalInteractions === 4 && !('preferredSupportType' in r.json.summary)) && hist.every((r) => r.status === 200 && r.json?.history), st(leo));
+        ok('Leo sobre su lector: responde desde el contexto, sin perfil global', leo.every(leoWithoutDiagnosis) && hist.every((r) => r.status === 200 && r.json?.history), st(leo));
         const cm = await both('/api/metrics/course/g-a', C['med-a']);
         const row = (r, id) => (r.json?.studentBreakdown ?? []).find((x) => x.userId === id);
         ok('tablero del curso: el perfil pedagógico de ra-2 y de ra-1 se calcula solo con sesiones de c1', cm.every((r) => r.status === 200 && row(r, 'ra-2') && 'pedagogicalProfile' in row(r, 'ra-2') && row(r, 'ra-1')?.totalSessions === 1 && !/"c3"/.test(r.text) && !r.text.includes('7000000')), cm[0].text.slice(0, 300));
@@ -293,7 +297,7 @@ try {
         const os_ = await both('/api/aula-viva/operational/status', C['med-a']);
         ok('estado operativo: las recomendaciones de un lector (critical) no se cuentan al mediador; sí la de su grupo', os_.every((r) => r.status === 200 && r.json.recommendations_summary.critical === 0 && r.json.recommendations_summary.moderate === 1), st(os_));
         const risk = await both('/api/aula-viva/institutional/cohorts/coh-risk/members', C['med-a']);
-        ok('miembros de una cohorte de riesgo → retenido (pertenecer a ella es un indicador derivado)', risk.every(withheld) && risk.every((r) => !/ra-1/.test(r.text)), st(risk));
+        ok('miembros de una cohorte de riesgo: los del riesgo contextual (aquí ninguno), nunca los del almacén global', risk.every((r) => r.status === 200 && r.json.context === true && r.json.members_count === 0 && !/ra-\d/.test(r.text)), st(risk));
         const roster = await both('/api/aula-viva/institutional/cohorts/coh-g-a/members', C['med-a']);
         ok('nómina de la cohorte de su curso: sí (es la lista del curso, no un indicador)', roster.every((r) => r.status === 200 && r.json.members_count >= 4), st(roster));
         const intv = await post(S1, '/api/aula-viva/interventions', C['med-a'], { studentId: 'ra-1', interventionType: 'lectura_guiada' });
@@ -305,14 +309,13 @@ try {
         const rs = await allAV('ra-z', C['med-z']);
         ok('Aula Viva: curso sin obras ⇒ no_course_works, sin el perfil global de ra-z', rs.every(contextual) && rs.filter((r) => /students\/ra-z\/timeline$/.test(r.path)).every((r) => r.json.data_state === 'no_course_works' && r.json.profile_current === null), st(rs));
         const leo = await both('/api/leo/mediator/student/ra-z', C['med-z']);
-        ok('Leo: 0 interacciones en ámbito y NINGUNA alerta, acción sugerida ni nivel (no «Mantén el ritmo actual» ni «Inicial»)',
-            leo.every((r) => r.status === 200 && r.json.summary.totalInteractions === 0 && LEO_PERSON.every((k) => !(k in r.json.summary)) && !/Mantén el ritmo|Inicial|Sin datos ICDLI|Baja actividad/.test(r.text)), st(leo));
+        ok('Leo: curso sin obras ⇒ no_course_works y NINGUNA alerta, acción sugerida ni nivel (no «Mantén el ritmo actual» ni «Inicial»)', leo.every(leoWithoutDiagnosis) && leo.every((r) => r.json.summary.data_state === 'no_course_works'), st(leo));
         const act = await both('/api/leo/activation/ra-z', C['med-z']);
         ok('activación: ninguna salida (su única actividad es personal)', act.every((r) => r.status === 200 && r.json.outputs.length === 0 && !/"c3"/.test(r.text)), st(act));
         const stt = await both('/api/students/ra-z/status', C['med-z']);
         ok('estado: cero libros en ámbito, sin la compra personal', stt.every((r) => r.status === 200 && r.json?.progress?.booksStarted === 0 && !/"c3"/.test(r.text)), st(stt));
         const og = await both('/api/aula-viva/institutional/outcomes/scope/group/g-z', C['med-z']);
-        ok('impacto del curso de un solo lector: suprimido, sin su resultado individual', og.every((r) => r.status === 200 && r.json.suppressed === true && r.json.outcomes.length === 0 && !/worsened|marca-/.test(r.text)), st(og));
+        ok('impacto del curso de un solo lector: sin el resultado global del lector', og.every((r) => r.status === 200 && r.json.outcomes.length === 0 && r.json.total_outcomes === 0 && !/worsened":[1-9]|marca-/.test(r.text)), st(og));
     }
 
     section('[7] lo propio del lector y la administración: intactos');
@@ -337,10 +340,9 @@ try {
     section('[8] agregados: sin fuga indirecta de perfiles');
     {
         const coh = await both('/api/aula-viva/cohorts/group/g-a', C['med-a']);
-        ok('comparativa del curso: agregado visible (6 activos) y sin identificadores de lector', coh.every((r) => r.status === 200 && (r.json.metrics ?? []).some((m) => m.metric_key === 'active_users' && m.metric_value === 6) && !/ra-\d|marca-/.test(r.text)), st(coh));
+        ok('comparativa del curso: la del contexto (población explicada), sin el agregado global ni identificadores de lector', coh.every((r) => r.status === 200 && r.json.population?.eligible >= 5 && (r.json.metrics ?? []).some((m) => m.metric_key === 'active_users' && m.metric_value === 0) && !/ra-\d|marca-/.test(r.text)), st(coh));
         const og = await both('/api/aula-viva/institutional/outcomes/scope/group/g-a', C['med-a']);
-        ok('impacto del curso: distribución (5 resultados) SIN las filas por lector', og.every((r) => r.status === 200 && r.json.total_outcomes === 5 && r.json.distribution.improved === 4 && r.json.outcomes.length === 0
-            && JSON.stringify(r.json.withheld) === '["outcomes"]' && !/ra-\d|marca-|user_id/.test(r.text)), st(og));
+        ok('impacto del curso: el del contexto (solo intervenciones registradas por quien media, aún sin comparación), sin los resultados globales', og.every((r) => r.status === 200 && r.json.total_outcomes === 0 && r.json.outcomes.every((o) => o.data_state === 'pending' && o.outcome_label === null) && !/marca-/.test(r.text)), st(og));
         const ogAdm = await both('/api/aula-viva/institutional/outcomes/scope/group/g-a', C.adm);
         ok('…la administración conserva las filas', ogAdm.every((r) => r.status === 200 && r.json.outcomes.length === 5), st(ogAdm));
         const recs = await both('/api/aula-viva/recommendations/scope/group/g-a', C['med-a']);

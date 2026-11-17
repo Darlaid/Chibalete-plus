@@ -45,7 +45,9 @@ import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 import { requireScopeAccess, evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
 // V9 F7-C2R-U2 — seguimiento individual por mediación: indicadores del contexto pedagógico (U1), nunca el perfil global.
 import { buildContextualView, timelineBody, featureVectorBody, riskHistoryBody, signalSeriesBody, recommendationsBody,
-    attentionItem, sortAttention, overviewOf, acknowledgeContextual, isContextualRecommendationId, parseRecommendationId } from './contextualView.mjs';
+    attentionItem, sortAttention, overviewOf, acknowledgeContextual, isContextualRecommendationId, parseRecommendationId,
+    groupAggregateBody, groupRollupsBody, HISTORY_DAYS } from './contextualView.mjs';
+import { MIN_COHORT_READERS } from '../analytics/cohortDisclosure.mjs';
 // CHP-SEC-AUTHZ-AULA-VIVA-OPERATIONAL-SCOPE-01 — rol del principal, del CIS.
 import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import {
@@ -539,9 +541,23 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
     });
 
     // ── COHORTS ──────────────────────────────────────────────────────────
-    router.get('/cohorts/:scope_type/:scope_id', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/cohorts/:scope_type/:scope_id', requireUserAuth, requireOperationalRole, async (req, res) => {
         // Alcance ANTES del audit: una consulta denegada no deja rastro.
         if (!requireTenantScope(req.params.scope_type, req.params.scope_id, req, res)) return;
+        // V9 F7-C2R-U3: el agregado guardado de un grupo sale de los perfiles globales de sus miembros (incluye lectura
+        // personal). Quien media recibe el del CURSO: sus lectores con seguimiento habilitado, cada uno con el contexto de
+        // ese curso, y la nómina total aparte para que no se confunda con la población medida.
+        if (req.aulaVivaRole !== 'admin' && String(req.params.scope_type) === 'group' && contextAccess?.group) {
+            try {
+                const g = await contextAccess.group(callerIdOf(req), String(req.params.scope_id));
+                if (!g.ok) return res.status(g.status).json(g.body);
+                try { dashboardViewsTotal.labels('cohort_comparison').inc(); } catch {}
+                try { emitMediatorReviewedCohort({ callerId: callerIdOf(req), scopeType: 'group', scopeId: req.params.scope_id }); } catch { /* nunca bloquea */ }
+                const results = g.readers.map((r) => buildContextualView({ context: r.context, events: r.events, nowTs: g.nowTs }).result);
+                return res.json(groupAggregateBody({ groupId: String(req.params.scope_id), roster: g.roster, results, min: MIN_COHORT_READERS,
+                    period: req.query.period || '28d' }));
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
         instrument('aulaViva.cohort_comparison', () => {
             try { cohortRenderMs.observe(0); } catch {}
             try { dashboardViewsTotal.labels('cohort_comparison').inc(); } catch {}
@@ -564,8 +580,16 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
         });
     });
 
-    router.get('/cohorts/:scope_type/:scope_id/rollups', requireUserAuth, requireOperationalRole, (req, res) => {
+    router.get('/cohorts/:scope_type/:scope_id/rollups', requireUserAuth, requireOperationalRole, async (req, res) => {
         if (!requireTenantScope(req.params.scope_type, req.params.scope_id, req, res)) return;
+        if (req.aulaVivaRole !== 'admin' && String(req.params.scope_type) === 'group' && contextAccess?.group) {   // V9 F7-C2R-U3: serie del curso
+            try {
+                const g = await contextAccess.group(callerIdOf(req), String(req.params.scope_id), { historyDays: HISTORY_DAYS });
+                if (!g.ok) return res.status(g.status).json(g.body);
+                const views = g.readers.map((r) => buildContextualView({ context: r.context, events: r.events, nowTs: g.nowTs, withSeries: true }));
+                return res.json(groupRollupsBody({ groupId: String(req.params.scope_id), views, min: MIN_COHORT_READERS }));
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
         const gate = cohortGate(req, req.params.scope_type, req.params.scope_id);
         if (!gate.allowed) return res.json(suppressedAggregate({ daily: [], weekly: [], monthly: [] }, gate.reason));
         const sinceTs = Number(req.query.sinceTs) || (Date.now() - 90 * 86_400_000);

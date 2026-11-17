@@ -287,8 +287,10 @@ function _computeSuggestedAction({ profile, icdliSnapshot, evidence, sessions })
 // sugerida, que los mezclan. Los campos no van (ni vacíos ni en cero) y `withheld` dice cuáles faltan.
 const PERSON_LEVEL_FIELDS = Object.freeze(['icdliHasData', 'icdliLevel', 'icdliComposite', 'icdliDominantAlerts', 'icdliDominantStrengths',
     'dominantPedagogicalObjective', 'preferredSupportType', 'alerts', 'suggestedMediatorAction']);
-export function getMediatorStudentSummary(userId, { includeContent = null } = {}) {
+export function getMediatorStudentSummary(userId, { includeContent = null, leoContext = null } = {}) {
     if (!userId) return { dataAvailable: false, userId: null };
+    // V9 F7-C2R-U3: por mediación, todo sale de las entradas contextuales (evidencias fechadas del curso).
+    if (leoContext) return _contextualSummary(userId, leoContext);
 
     try {
         const scoped        = typeof includeContent === 'function';
@@ -385,8 +387,9 @@ export function getMediatorStudentSummary(userId, { includeContent = null } = {}
  * @param {string} contentId
  * @returns {LeoMediatorContentHistory}
  */
-export function getMediatorContentHistory(userId, contentId) {
+export function getMediatorContentHistory(userId, contentId, { leoContext = null } = {}) {
     if (!userId || !contentId) return { dataAvailable: false, userId, contentId };
+    if (leoContext) return _contextualContentHistory(userId, contentId, leoContext);
 
     try {
         const session  = getLeoSessionMemory(userId, contentId);
@@ -429,6 +432,83 @@ export function getMediatorContentHistory(userId, contentId) {
 
     } catch (e) {
         _log(`getMediatorContentHistory failed userId=${userId} contentId=${contentId}: ${e.message}`, 'ERROR');
+        return { dataAvailable: false, userId, contentId, error: e.message };
+    }
+}
+
+// ── V9 F7-C2R-U3 — vistas CONTEXTUALES (quien media a un lector) ────────────────────────────────────────────────────
+// Mismas reglas de alertas y de acción sugerida, mismas formas. Entradas: `buildLeoContextInputs` (perfil, sesiones e
+// ICDLI reconstruidos con evidencias fechadas del curso). El perfil y la memoria acumulados del lector no se leen.
+
+const _contextMeta = (L) => ({ data_state: L.data_state, reason: L.reason, context: L.context, provenance: L.provenance });
+
+function _contextualSummary(userId, L) {
+    try {
+        const base = { dataAvailable: true, userId, generatedAt: _ts(), ..._contextMeta(L) };
+        if (L.data_state !== 'ok') {
+            // Sin evidencia atribuible no hay nivel, alertas ni acción sugerida: se dice el estado, no se rellena.
+            return { ...base, icdliHasData: false, icdliLevel: null, icdliComposite: null, icdliDominantAlerts: [], icdliDominantStrengths: [],
+                dominantPedagogicalObjective: null, preferredSupportType: null, totalInteractions: null, lastInteractionAt: null,
+                recentEvidenceSignals: [], activeSequence: null, lastSequenceObjective: null, alerts: null, suggestedMediatorAction: null };
+        }
+        const { profile, sessions, icdli } = L;
+        const evidence = L.evidence.slice(-SUMMARY_EVIDENCE_LIMIT);
+        const lastSequenceObjective = [...sessions]
+            .sort((a, b) => ((b.lastSequenceAt ?? '') > (a.lastSequenceAt ?? '') ? 1 : -1))
+            .find(s => s.lastSequenceObjective)?.lastSequenceObjective ?? null;
+        _log(`summary built (context) userId=${userId} evidence=${L.evidence.length}`);
+        return {
+            ...base,
+            icdliHasData:                 icdli?.hasData === true,
+            icdliLevel:                   icdli?.hasData ? icdli.levelLabel : null,
+            icdliComposite:               icdli?.hasData ? icdli.composite : null,
+            icdliDominantAlerts:          icdli?.dominantAlerts    ?? [],
+            icdliDominantStrengths:       icdli?.dominantStrengths ?? [],
+            dominantPedagogicalObjective: _dominantObjectiveFromProfile(profile),
+            preferredSupportType:         profile.preferredSupportType ?? null,
+            totalInteractions:            _computeTotalInteractions(sessions),
+            lastInteractionAt:            _computeLastInteractionAt(sessions),
+            recentEvidenceSignals:        evidence.slice(-SIGNAL_DISPLAY_LIMIT).reverse().map(_toEvidenceSignal),
+            // Una secuencia abierta solo consta en la memoria acumulada: no se afirma desde aquí.
+            activeSequence:               null,
+            lastSequenceObjective,
+            alerts:                       _computeAlerts({ profile, evidence, icdliSnapshot: icdli, sessions }),
+            // Sin ninguna conversación del curso con Leo no se sugiere nada (la frase por defecto sería un relleno).
+            suggestedMediatorAction:      L.evidence.length > 0 || icdli?.hasData
+                ? _computeSuggestedAction({ profile, icdliSnapshot: icdli, evidence, sessions }) : null,
+        };
+    } catch (e) {
+        _log(`contextual summary failed userId=${userId}: ${e.message}`, 'ERROR');
+        return { dataAvailable: false, userId, error: e.message };
+    }
+}
+
+function _contextualContentHistory(userId, contentId, L) {
+    try {
+        const base = { dataAvailable: true, userId, contentId, generatedAt: _ts(), ..._contextMeta(L) };
+        const evidence = L.evidence.filter(e => e.contentId === contentId).slice(-CONTENT_EVIDENCE_LIMIT);
+        const session  = L.sessions.find(s => s.contentId === contentId) ?? null;
+        if (L.data_state !== 'ok' || !session) {
+            return { ...base, data_state: L.data_state !== 'ok' ? L.data_state : 'no_activity', reason: L.data_state !== 'ok' ? L.reason : 'no_activity_in_context',
+                sessionReadingProgress: null, pedagogicalStage: null, difficultyLevel: null, interactionCount: null, lastInterventionAt: null,
+                objectiveDistribution: _computeObjectiveDistribution([]), sequencesSeen: [], recentEvidence: [], difficultyTrend: null, engagementSignals: [] };
+        }
+        return {
+            ...base,
+            // El avance dentro de la obra es un acumulado sin fecha: no se entrega por esta vía.
+            sessionReadingProgress: null,
+            pedagogicalStage:       session.pedagogicalStage ?? null,
+            difficultyLevel:        session.difficultyLevel  ?? null,
+            interactionCount:       session.interactionCount,
+            lastInterventionAt:     session.lastInterventionAt,
+            objectiveDistribution:  _computeObjectiveDistribution(evidence),
+            sequencesSeen:          _getSequencesSeen(evidence),
+            recentEvidence:         [...evidence].reverse().map(_toEvidenceSignal),
+            difficultyTrend:        _computeDifficultyTrend(evidence),
+            engagementSignals:      [...new Set(evidence.map(e => e.interpretationHint).filter(Boolean))],
+        };
+    } catch (e) {
+        _log(`contextual content history failed userId=${userId} contentId=${contentId}: ${e.message}`, 'ERROR');
         return { dataAvailable: false, userId, contentId, error: e.message };
     }
 }

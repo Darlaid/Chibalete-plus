@@ -478,3 +478,8 @@ export function recordInteraction({ userId, contentId, surface, interactionType,
         _log(`recordInteraction: profile write failed userId=${userId}: ${e.message}`, 'WARN');
     }
 }
+
+// V9 F7-C2R-U3 — las mismas reglas del perfil, para aplicarlas a las evidencias de un contexto pedagógico
+// (`leoContextInputs.js`) sin duplicarlas.
+export const derivePreferredSupportType = _derivePreferredSupportType;
+export const interactionTypeToCounter = _interactionTypeToCounter;

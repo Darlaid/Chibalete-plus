@@ -38,5 +38,10 @@ ok('un timeline que no respondió no se pinta como «sin sesiones»', /const tim
 ok('el timeline muestra los riesgos ya resueltos con sus dos fechas', /Riesgos resueltos/.test(timeline) && /typeof r\.resolved_at === 'number'/.test(timeline) && /dejó de observarse/.test(timeline));
 ok('el tipo del timeline admite el estado del cálculo contextual', /data_state\?: 'ok' \| 'no_activity' \| 'insufficient' \| 'no_course_works';/.test(service));
 
+console.log('\n[3] agregado del curso (V9 F7-C2R-U3)');
+ok('el servicio declara la población medida y la supresión por umbral', /population\?: \{ roster: number; eligible: number \};/.test(service) && /suppressed\?: boolean;/.test(service));
+ok('agregado suprimido: se explica el umbral, no «materialización pendiente»', at('cohort_suppressed') > 0 && at('cohort_suppressed') < at('where="cohort_global"') && /cohort\?\.suppressed \?/.test(page));
+ok('con agregado visible se dice con cuántos lectores de la nómina se calculó', /data-testid="cohort-population"/.test(page) && /los que tienen seguimiento habilitado/.test(page));
+
 console.log(`\nAulaVivaContextStatesU2 — ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);

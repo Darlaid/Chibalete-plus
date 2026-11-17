@@ -38,8 +38,12 @@ import { cohortDisclosure, suppressedAggregate, MIN_COHORT_READERS } from '../an
 import { getOutcomesExtDb, getOutcomesStatements } from '../db/outcomesDbExt.mjs';
 import { instrument } from '../services/queryProfiler.mjs';
 import { evaluateScopeAccess, individualAccessChecker, individualAccess, respondScopeDecision, withholdIndividualIndicators, isMediatedSubject } from './scopeAccess.mjs';
+import { getPrincipal } from '../identity/cis.mjs';
+import { MIN_SUPPORT as LEARNING_MIN_SUPPORT, buildHint as learningHint, computeConfidence as learningConfidence } from '../services/institutionalLearning.mjs';
 // V9 F7-C2R-U2 — perfil del lector para quien lo media: contexto pedagógico (U1), nunca el perfil global.
-import { buildContextualView, timelineBody, featureVectorBody } from './contextualView.mjs';
+import { buildContextualView, timelineBody, featureVectorBody, contextualInterventions, contextualImpactRows, impactSummaryBody } from './contextualView.mjs';
+// V9 F7-C2R-U3 — el impacto compara 14 días antes y 14 después de cada intervención: se lee toda la retención caliente.
+const IMPACT_HISTORY_DAYS = 90;
 import {
     outcomesViewsTotal, cohortViewsTotal, trajectoryViewsTotal,
     learningViewsTotal, comparativeQueriesTotal, scopeSwitchTotal,
@@ -100,9 +104,54 @@ function requireScope(req, res, scope_type, scope_id) {
 
 export function createInstitutionalRouter({ requireUserAuth, contextAccess = null }) {
     const router = express.Router();
+    /** true si quien llama media (no es la administración de plataforma): su vista de curso es la contextual. */
+    const isMediatorOnlyCaller = (callerId) => {
+        try { const p = getPrincipal(String(callerId ?? '')); return !!p && !p.platformAdmin && !!p.mediatorRole; } catch { return false; }
+    };
+    const callerOf = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    /**
+     * V9 F7-C2R-U3 — impacto de las intervenciones de los cursos que media quien llama, sobre sus lectores con seguimiento
+     * habilitado. Es lo que alimenta su pestaña Institucional: los totales, aprendizajes y comparativas GUARDADOS salen de
+     * todas las instituciones y de toda la actividad de cada lector, y no son de quien media. null si ya respondió.
+     */
+    async function mediatorImpact(req, res) {
+        try {
+            const o = await contextAccess.readers(callerOf(req), { historyDays: IMPACT_HISTORY_DAYS });
+            if (!o.ok) { res.status(o.status).json(o.body); return null; }
+            const rows = o.readers.flatMap((r) => contextualImpactRows({ context: r.context, events: r.events, nowTs: o.nowTs,
+                interventions: contextualInterventions(r.readerId, o.mediatorIds) }));
+            const byType = new Map();
+            for (const r of rows) {
+                if (!r.outcome_label) continue;
+                const e = byType.get(r.intervention_type) ?? { intervention_type: r.intervention_type, improved: 0, stable: 0, worsened: 0, mixed: 0, insufficient_data: 0, total: 0 };
+                e[r.outcome_label] += 1; e.total += 1;
+                byType.set(r.intervention_type, e);
+            }
+            const learnings = [...byType.values()].filter((e) => e.total >= LEARNING_MIN_SUPPORT).map((e) => {
+                const distribution = { improved: e.improved, stable: e.stable, worsened: e.worsened, mixed: e.mixed, insufficient_data: e.insufficient_data };
+                return { learning_id: `ctxlrn_${e.intervention_type}`, scope_type: 'cursos', scope_id: 'mediados', learning_type: 'observed_strategy_effect',
+                    evidence: { support_count: e.total, outcome_distribution: distribution, intervention_type: e.intervention_type, min_support_threshold: LEARNING_MIN_SUPPORT },
+                    confidence: learningConfidence(e.total), recommendation_hint: learningHint('cursos', 'mediados', e.intervention_type, distribution, e.total), active: 1 };
+            });
+            return { rows, byType, learnings, population: { roster: o.roster, eligible: o.readers.length } };
+        } catch {
+            res.status(500).json({ ok: false, error: 'context_indicators_failed' });
+            return null;
+        }
+    }
 
     // ── /institutional/status ────────────────────────────────────────────
-    router.get('/institutional/status', requireUserAuth, (req, res) => {
+    router.get('/institutional/status', requireUserAuth, async (req, res) => {
+        if (contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {   // V9 F7-C2R-U3: totales del contexto de quien media
+            const m = await mediatorImpact(req, res);
+            if (!m) return;
+            const by_label = {};
+            for (const r of m.rows) if (r.outcome_label) by_label[r.outcome_label] = (by_label[r.outcome_label] || 0) + 1;
+            return res.json({ ts: Date.now(), outcomes: { total: Object.values(by_label).reduce((a, b) => a + b, 0), by_label,
+                    pending: m.rows.filter((r) => r.data_state === 'pending').length },
+                cohorts: { total_active: 0, total_memberships: 0 }, trajectories: { total: 0 }, learnings: { total_active: m.learnings.length },
+                patterns: { total_active: 0 }, context: true, population: m.population });
+        }
         instrument('institutional.status', () => {
             safeJson(res, () => {
                 getOutcomesExtDb();
@@ -135,12 +184,37 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         });
     });
 
-    router.get('/institutional/outcomes/scope/:type/:id', requireUserAuth, (req, res) => {
+    router.get('/institutional/outcomes/scope/:type/:id', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, req.params.type, req.params.id)) return;
-        // V9 F7-C2S: el impacto por lector se etiqueta con señales calculadas sobre toda su actividad.
-        if (String(req.params.type) === 'user' && isMediatedSubject(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'], req.params.id)) return withholdIndividualIndicators(res);
-        try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
+        const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
         const limit = parseLimit(req.query.limit);
+        // V9 F7-C2S / F7-C2R-U3: el impacto guardado se etiqueta con señales de TODA la actividad del lector y no se entrega
+        // por mediación. Quien media recibe el impacto de las intervenciones de su curso, comparado solo con la actividad
+        // fechada del contexto; sin evidencia en las dos ventanas no hay «mejoró» ni «empeoró».
+        if (String(req.params.type) === 'user' && isMediatedSubject(callerId, req.params.id)) {
+            if (!contextAccess) return withholdIndividualIndicators(res);
+            try {
+                const a = await contextAccess.reader(callerId, String(req.params.id), { historyDays: IMPACT_HISTORY_DAYS });
+                if (!a.ok) return res.status(a.status).json(a.body);
+                const rows = contextualImpactRows({ context: a.context, events: a.events, nowTs: a.nowTs,
+                    interventions: contextualInterventions(req.params.id, a.mediatorIds, limit) });
+                try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
+                return res.json(impactSummaryBody({ type: 'user', id: req.params.id }, rows, { context: a.context.describe() }));
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
+        // Impacto de un CURSO para quien lo media: las intervenciones de sus lectores con seguimiento habilitado, cada una
+        // comparada con el contexto de ese curso. Solo entran lectores que el mediador ya puede ver individualmente.
+        if (String(req.params.type) === 'group' && contextAccess?.group && isMediatorOnlyCaller(callerId)) {
+            try {
+                const g = await contextAccess.group(callerId, String(req.params.id), { historyDays: IMPACT_HISTORY_DAYS });
+                if (!g.ok) return res.status(g.status).json(g.body);
+                const rows = g.readers.flatMap((r) => contextualImpactRows({ context: r.context, events: r.events, nowTs: g.nowTs,
+                    interventions: contextualInterventions(r.readerId, g.mediatorIds, limit) }));
+                try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
+                return res.json(impactSummaryBody({ type: 'group', id: req.params.id }, rows, { population: { roster: g.roster, eligible: g.readers.length } }));
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
+        try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
         const gate = cohortGate(req, req.params.type, req.params.id);
         if (!gate.allowed) return res.json(suppressedAggregate({ scope: { type: req.params.type, id: req.params.id }, total_outcomes: 0, distribution: {}, outcomes: [] }, gate.reason));
         instrument('institutional.outcomes_scope', () => {
@@ -221,6 +295,19 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
             if (!requireScope(req, res, cohort.scope_type, cohort.scope_id)) return;
             // V9 F7-C2S: pertenecer a una cohorte que no es una nómina (p. ej. una de riesgo) ES un indicador
             // individual derivado. Solo las nóminas (colegio, grupo, club) se listan para quien media.
+            // V9 F7-C2R-U3: una cohorte de RIESGO se resuelve para quien media con el riesgo contextual de sus lectores
+            // (los que tienen ese riesgo activo en el curso). Las demás cohortes derivadas siguen retenidas.
+            if (!req.aulaVivaPlatformAdmin && String(cohort.cohort_type) === 'risk' && contextAccess?.overview) {
+                return contextAccess.overview(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']).then((o) => {
+                    if (!o.ok) return res.status(o.status).json(o.body);
+                    const members = o.readers.map((r) => buildContextualView({ context: r.context, events: r.events, nowTs: o.nowTs }))
+                        .filter((v) => v.risks.some((x) => x.risk_type === String(cohort.scope_id) && x.resolved_at === null))
+                        .map((v) => ({ cohort_id: req.params.cohort_id, user_id: v.result.user_id, left_at: null }));
+                    try { cohortViewsTotal.labels('members').inc(); } catch {}
+                    return res.json({ cohort_id: req.params.cohort_id, cohort_key: cohort.cohort_key, cohort_type: cohort.cohort_type,
+                        members_count: members.length, members: members.slice(0, parseLimit(req.query.limit)), context: true });
+                }).catch(() => res.status(500).json({ ok: false, error: 'context_indicators_failed' }));
+            }
             if (!req.aulaVivaPlatformAdmin && !['school', 'group', 'club'].includes(String(cohort.cohort_type))) return withholdIndividualIndicators(res);
             try { cohortViewsTotal.labels('members').inc(); } catch {}
             instrument('institutional.cohort_members', () => {
@@ -294,8 +381,13 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         });
     });
 
-    router.get('/institutional/learnings/global', requireUserAuth, (req, res) => {
+    router.get('/institutional/learnings/global', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
+        if (!req.aulaVivaPlatformAdmin && contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {   // V9 F7-C2R-U3
+            const m = await mediatorImpact(req, res);
+            if (!m) return;
+            return res.json(m.learnings);
+        }
         try { learningViewsTotal.labels('global').inc(); } catch {}
         instrument('institutional.learnings_global', () => {
             safeJson(res, () => {
@@ -328,8 +420,16 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     });
 
     // ── COMPARATIVE INTELLIGENCE §8 ──────────────────────────────────────
-    router.get('/institutional/comparative/strategies', requireUserAuth, (req, res) => {
+    router.get('/institutional/comparative/strategies', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
+        if (!req.aulaVivaPlatformAdmin && contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {   // V9 F7-C2R-U3
+            const m = await mediatorImpact(req, res);
+            if (!m) return;
+            const strategies = [...m.byType.values()].map((s) => ({ ...s, improved_ratio: s.total ? +(s.improved / s.total).toFixed(3) : null, note: 'Observacional. NO implica causalidad.' }));
+            strategies.sort((a, b) => (a.total < 5 && b.total >= 5 ? 1 : b.total < 5 && a.total >= 5 ? -1 : (b.improved_ratio ?? 0) - (a.improved_ratio ?? 0)));
+            return res.json({ strategies, vocabulary_class: 'observational', context: true, population: m.population,
+                caveat: 'Las comparaciones reflejan patrones observados en tus cursos, no efectos causales.' });
+        }
         try { comparativeQueriesTotal.labels('strategies').inc(); } catch {}
         instrument('institutional.comparative_strategies', () => {
             safeJson(res, () => {
@@ -383,8 +483,12 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                 const a = await contextAccess.reader(callerId, String(req.params.userId));
                 if (!a.ok) return res.status(a.status).json(a.body);
                 const view = buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs, withSeries: true });
+                const wide = await contextAccess.reader(callerId, String(req.params.userId), { historyDays: IMPACT_HISTORY_DAYS });
+                if (!wide.ok) return res.status(wide.status).json(wide.body);
+                const rows = contextualImpactRows({ context: wide.context, events: wide.events, nowTs: wide.nowTs,
+                    interventions: contextualInterventions(req.params.userId, wide.mediatorIds) });
                 return res.json({ user_id: req.params.userId, timeline: timelineBody(view), feature_vector: featureVectorBody(view),
-                    impact_history: null, withheld: ['impact_history'] });
+                    impact_history: impactSummaryBody({ type: 'user', id: req.params.userId }, rows) });
             } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
         }
         try { outcomesViewsTotal.labels('profile').inc(); } catch {}

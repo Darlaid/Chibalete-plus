@@ -219,6 +219,12 @@ export interface CohortComparison {
         delta_vs_global: number | null;
     }>;
     global_baseline: Array<{ metric_key: string; metric_value: number | null }>;
+    // V9 F7-C2R-U3 — agregado del CURSO para quien media: nómina total y lectores con seguimiento habilitado (los únicos
+    // que entran en el cálculo). `suppressed`: menos lectores habilitados que el umbral de divulgación.
+    population?: { roster: number; eligible: number };
+    suppressed?: boolean;
+    reason?: string;
+    minCohort?: number;
 }
 
 // CHP-AULA-VIVA-MOOK-INTEGRATION-01A — proyección canónica de Experiencias
