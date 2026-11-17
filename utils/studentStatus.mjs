@@ -23,6 +23,10 @@
 export const STUDENT_STATE = Object.freeze({
     ACTIVE_PROGRESS:     'ACTIVE_PROGRESS',
     ACTIVE_NO_PROGRESS:  'ACTIVE_NO_PROGRESS',
+    // V9 F7-C2R-U3B: hay lectura registrada, pero no puede acreditarse que sea del curso.
+    ACTIVE_UNVERIFIED_HISTORY: 'ACTIVE_UNVERIFIED_HISTORY',
+    // V9 F7-C2R-U3B: el curso compartido no tiene obras: no hay lectura del curso que mostrar (no es «sin avance»).
+    NO_COURSE_WORKS: 'NO_COURSE_WORKS',
     REGISTERED_NO_LOGIN: 'REGISTERED_NO_LOGIN',
     NO_GROUP:            'NO_GROUP',
     NO_ACCESS:           'NO_ACCESS',
@@ -33,6 +37,8 @@ export const STUDENT_STATE = Object.freeze({
 const STATE_TONE = {
     ACTIVE_PROGRESS:     'ok',
     ACTIVE_NO_PROGRESS:  'warning',
+    ACTIVE_UNVERIFIED_HISTORY: 'warning',
+    NO_COURSE_WORKS: 'warning',
     REGISTERED_NO_LOGIN: 'warning',
     NO_GROUP:            'warning',
     NO_ACCESS:           'warning',
@@ -53,6 +59,18 @@ const STATE_NARRATIVE = {
         message:           'El estudiante ya entró a Chibalete+ pero todavía no ha registrado avance en ninguna lectura.',
         cause:             'No hay eventos de lectura asociados desde su último ingreso.',
         recommendedAction: 'Revisar si tiene contenido asignado o invitarlo a comenzar una lectura específica.',
+    },
+    ACTIVE_UNVERIFIED_HISTORY: {
+        headline:          'Tiene lectura registrada, pero no puede atribuirse al curso.',
+        message:           'El estudiante tiene avance en obras del curso cuya pertenencia al curso no está acreditada.',
+        cause:             'Esa lectura empezó antes de que la obra se asignara o de que el estudiante entrara al curso, o antes de que se registraran esas fechas.',
+        recommendedAction: 'No interpretarlo como falta de lectura. El avance del curso se mostrará con la lectura que haga a partir de ahora.',
+    },
+    NO_COURSE_WORKS: {
+        headline:          'El curso no tiene obras asociadas.',
+        message:           'No hay lectura del curso que mostrar para este estudiante.',
+        cause:             'Los cursos que comparte con el estudiante no tienen obras asociadas; su lectura fuera del curso no se muestra aquí.',
+        recommendedAction: 'Asociar obras al curso para acompañar su lectura. No interpretarlo como falta de lectura.',
     },
     REGISTERED_NO_LOGIN: {
         headline:          'El estudiante nunca ha entrado a Chibalete+.',
@@ -131,7 +149,9 @@ function decideState(metrics, logs) {
 
     // 5. ACTIVE_NO_PROGRESS — entró pero no avanzó.
     const hasReading = !!m.lastReadingEventAt || isPos(m.booksStarted) || isPos(m.progressPercentage);
-    if (!hasReading) return STUDENT_STATE.ACTIVE_NO_PROGRESS;
+    // V9 F7-C2R-U3B: sin avance ACREDITADO pero con lectura que no puede atribuirse al curso: no es «sin avance».
+    if (!hasReading && m.courseHasWorks === false) return STUDENT_STATE.NO_COURSE_WORKS;
+    if (!hasReading) return isPos(m.unverifiableHistoryCount) ? STUDENT_STATE.ACTIVE_UNVERIFIED_HISTORY : STUDENT_STATE.ACTIVE_NO_PROGRESS;
 
     // 6. ACTIVE_PROGRESS — el caso positivo.
     return STUDENT_STATE.ACTIVE_PROGRESS;
@@ -209,6 +229,9 @@ export function buildStudentStatus(user, metrics, logs) {
             percentage:     isNum(m.progressPercentage)
                 ? Math.max(0, Math.min(100, m.progressPercentage))
                 : 0,
+            // Obras con lectura registrada que no entra en las cifras anteriores (solo cuando quien consulta media).
+            ...(isNum(m.unverifiableHistoryCount) ? { unverifiableHistory: m.unverifiableHistoryCount } : {}),
+            ...(typeof m.courseHasWorks === 'boolean' ? { courseHasWorks: m.courseHasWorks } : {}),
         },
     };
 }

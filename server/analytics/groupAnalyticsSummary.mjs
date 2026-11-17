@@ -207,13 +207,27 @@ export function buildGroupAnalyticsSummary({
 }) {
     const readerIds = resolveGroupLectorCohort(group, users, allGroups);
     const { byUser, rowsConsidered } = readCohortHistoricalRows(readerIds, { eventsPath, archivePath });
+    const historicalReaders = new Set();
     // V9 F7-C2: `includeContent` (opcional) limita el resumen a la actividad de unas obras: tiempo de lectura,
     // interacciones de Leo y libros de las demás no entran ni en el detalle ni en los agregados.
     if (typeof includeContent === 'function') {
-        for (const [id, rows] of byUser) byUser.set(id, rows.filter(r => includeContent(r.content_id)));
-        leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId));
+        // V9 F7-C2R-U3B: el predicado recibe además la fecha del dato y el lector (pertenencia temporal al curso); uno de
+        // un solo argumento los ignora. Del progreso se toma la fecha de su primera sesión y, si el historial de sesiones
+        // está recortado (20), no se da por acreditado.
+        const firstSessionTs = (p) => {
+            const h = Array.isArray(p?.history) ? p.history : [];
+            const ts = h.map(x => Date.parse(x?.startedAt)).filter(Number.isFinite);
+            return ts.length && h.length < 20 ? Math.min(...ts) : undefined;
+        };
+        // Lectores con lectura fechada de obras del curso que el predicado no puede acreditar: se anota (no se cuenta
+        // en ninguna cifra) para que un tiempo de lectura en cero no se lea como «no leyeron».
+        if (typeof includeContent.historical === 'function') {
+            for (const [id, rows] of byUser) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id))) historicalReaders.add(id);
+        }
+        for (const [id, rows] of byUser) byUser.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
+        leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId, it?.timestamp, it?.userId));
         const allProgress = getProgressByUser;
-        getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId));
+        getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId, firstSessionTs(p), id));
     }
     const reading = readingPerReader(byUser, readerIds, nowTs);
     const leo = leoPerReader(leoInteractions, readerIds);
@@ -229,6 +243,7 @@ export function buildGroupAnalyticsSummary({
             pisa: { state: NO_SERVER_SOURCE },
             readers: readerIds.map((userId, i) => ({
                 userId, reading: reading[i], leo: leo[i], progress: progress[i],
+                ...(historicalReaders.has(userId) ? { historicalActivity: true } : {}),
             })),
         },
         rowsConsidered,

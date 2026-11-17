@@ -213,9 +213,9 @@ try {
     await ready(S1); await ready(S2);
     const C = {};
     for (const id of ['adm', 'med-a', 'med-noc', 'med-z', 'med-b', 'ra-1', 'ra-2', 'ra-z', 'rb-1']) C[id] = await login(id.length % 2 ? S1 : S2, id);
-    const CP = (pct) => ({ canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, contentAnchor: null, contentFingerprint: null, lastInteractedMode: 'text', anchor: { type: 'text', value: pct }, viewportHint: pct }, updatedAt: new Date().toISOString() });
+    const CP = (pct, u = 'x') => ({ canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, contentAnchor: null, contentFingerprint: null, lastInteractedMode: 'text', anchor: { type: 'text', value: pct }, viewportHint: pct }, updatedAt: new Date().toISOString(), session: { sessionId: `s-${u}-${Date.now()}`, mode: 'text', durationSec: 60 } });
     const saved = [];
-    for (const [u, c, pct] of [['ra-1', 'c1', 40], ['ra-1', 'c3', 70], ['ra-2', 'c1', 35], ['ra-z', 'c3', 20], ['rb-1', 'cb', 25]]) saved.push((await post(S1, `/api/progress/${u}/${c}/sync`, C[u], CP(pct))).status);
+    for (const [u, c, pct] of [['ra-1', 'c1', 40], ['ra-1', 'c3', 70], ['ra-2', 'c1', 35], ['ra-z', 'c3', 20], ['rb-1', 'cb', 25]]) saved.push((await post(S1, `/api/progress/${u}/${c}/sync`, C[u], CP(pct, u))).status);
     ok('preparación: cada lector guarda su propio progreso', saved.every((x) => x === 200), saved.join(' '));
     {   // El almacén derivado SÍ tiene datos: la administración los ve (si no, las retenciones no probarían nada).
         const t = await get(S1, '/api/aula-viva/students/ra-1/timeline', C.adm), s = await get(S2, '/api/leo/mediator/student/ra-1', C.adm);
@@ -245,13 +245,17 @@ try {
         const rs = await allAV('ra-2', C['med-a']);
         ok('el perfil derivado global de ra-2 tampoco se entrega: responde el contexto', rs.every(contextual), st(rs));
         const pr = await both('/api/progress/user/ra-2', C['med-a']), stt = await both('/api/students/ra-2/status', C['med-a']);
-        ok('progreso por obra del curso: sí (c1, 35 %)', pr.every((r) => r.status === 200 && r.json.progressList.length === 1 && r.json.progressList[0].contentId === 'c1'), st(pr));
-        ok('estado del lector sobre las obras del curso: sí', stt.every((r) => r.status === 200 && r.json?.progress?.booksStarted === 1), st(stt));
+        // V9 F7-C2R-U3B: esta suite no registra procedencia; el progreso de la obra del curso no se certifica como del curso
+        // ni desaparece: se identifica como historial no acreditable (la atribución con procedencia la cubre temporalProgressHttp).
+        ok('progreso por obra del curso: identificado (c1), sin certificar su porcentaje', pr.every((r) => r.status === 200 && r.json.progressList.length === 0 && r.json.historicalProgress.length === 1
+            && r.json.historicalProgress[0].contentId === 'c1' && r.json.historicalProgress[0].reason === 'provenance_not_verifiable'), st(pr));
+        ok('estado del lector sobre las obras del curso: lectura no atribuible, no «sin avance»', stt.every((r) => r.status === 200 && r.json?.progress?.booksStarted === 0 && r.json.progress.unverifiableHistory === 1
+            && r.json.state === 'ACTIVE_UNVERIFIED_HISTORY'), st(stt));
         const leo = await both('/api/leo/mediator/student/ra-2', C['med-a']), hist = await both('/api/leo/mediator/student/ra-2/content/c1', C['med-a']);
         ok('Leo sobre su lector: responde desde el contexto, sin perfil global', leo.every(leoWithoutDiagnosis) && hist.every((r) => r.status === 200 && r.json?.history), st(leo));
         const cm = await both('/api/metrics/course/g-a', C['med-a']);
         const row = (r, id) => (r.json?.studentBreakdown ?? []).find((x) => x.userId === id);
-        ok('tablero del curso: el perfil pedagógico de ra-2 y de ra-1 se calcula solo con sesiones de c1', cm.every((r) => r.status === 200 && row(r, 'ra-2') && 'pedagogicalProfile' in row(r, 'ra-2') && row(r, 'ra-1')?.totalSessions === 1 && !/"c3"/.test(r.text) && !r.text.includes('7000000')), cm[0].text.slice(0, 300));
+        ok('tablero del curso: el perfil pedagógico de ra-2 y de ra-1 se calcula solo con sesiones de c1', cm.every((r) => r.status === 200 && row(r, 'ra-2') && 'pedagogicalProfile' in row(r, 'ra-2') && row(r, 'ra-1')?.totalSessions === 0 && row(r, 'ra-1')?.dataState === 'unverifiable_history' && !/"c3"/.test(r.text) && !r.text.includes('7000000')), cm[0].text.slice(0, 300));
     }
 
     section('[3] otra institución: rechazo');

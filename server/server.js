@@ -5425,9 +5425,11 @@ app.get('/api/progress/user/:userId', async (req, res) => {
         }
         let userProgressList = getProgressByUser(userId);
         // V9 F7-C2: por mediación, solo la actividad de las obras asociadas a los grupos que comparte con el lector.
+        // V9 F7-C2R-U3B: y solo el progreso cuya pertenencia temporal al curso consta. El que no puede acreditarse no se
+        // entrega como cifra ni desaparece: va aparte, identificado.
         if (mediatorAccess === 'allow') {
-            const scope = mediatorContentScope(requester.id, userId);
-            userProgressList = (userProgressList || []).filter(p => scope.has(p?.contentId));
+            const a = attributeProgress(userProgressList, await mediatorPedagogicalContext(requester.id, userId));
+            return res.json({ success: true, progressList: a.verified, historicalProgress: a.historical, courseAttribution: a.summary });
         }
         res.json({ success: true, progressList: userProgressList });
     } catch (e) {
@@ -5471,6 +5473,12 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
 
         const progress = getProgressItem(userId, contentId);
 
+        if (mediatorAccess === 'allow') {   // V9 F7-C2R-U3B
+            const a = attributeProgress(progress ? [progress] : [], await mediatorPedagogicalContext(requester.id, userId));
+            if (a.verified.length) return res.json({ success: true, progress, attribution: 'verified_context' });
+            if (a.historical.length) return res.json({ success: true, progress: null, ...a.historical[0] });
+            return res.json({ success: true, progress: null, attribution: 'no_activity' });
+        }
         if (!progress) return res.json({ success: true, progress: null });
         res.json({ success: true, progress });
     } catch (e) {
@@ -9483,13 +9491,15 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         // V9 F7-C2: para su mediador, el resumen cuenta solo la actividad de las obras asociadas a ESTE grupo. Se
         // cachea aparte del resumen completo (el de la administración), que no cambia.
         const works = viewerMediatorId ? groupsContentScope([id]) : null;
+        // V9 F7-C2R-U3B: además, solo la actividad fechada dentro del curso; y cuánta lectura no puede acreditarse.
+        const contextOf = viewerMediatorId ? await courseContextResolver([id]) : null;
 
         const t0 = performance.now();
         const r = await groupAnalyticsCache.get(works ? `${id} obras` : id, () => buildGroupAnalyticsSummary({
             group, users, allGroups: groups,
             leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
             getProgressByUser,
-            ...(works ? { includeContent: works.has } : {}),
+            ...(works ? { includeContent: temporalContentPredicate(contextOf) } : {}),
         }));
         const ms = Math.round(performance.now() - t0);
         log(r.cache === 'miss'
@@ -9507,7 +9517,17 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         const shown = a2.aggregateOver === 'allowed'
             ? restrictSummaryToReaders(r.data, a2.allowed)
             : { ...r.data, readers: (r.data.readers || []).filter(x => a2.allowed.has(x.userId)) };
-        const data = { ...shown, individualAccess: { status: a2.status, aggregateOver: a2.aggregateOver } };
+        let data = { ...shown, individualAccess: { status: a2.status, aggregateOver: a2.aggregateOver } };
+        if (contextOf) {
+            // El recuento se hace sobre la MISMA población que los agregados (solo cifras); el detalle, sobre los visibles.
+            const population = a2.aggregateOver === 'allowed' ? [...a2.allowed] : cohortIds;
+            const { byReader, ...totals } = courseAttributionOf(population, contextOf);
+            const dated = new Set((r.data.readers || []).filter(x => x.historicalActivity === true).map(x => x.userId));
+            // También cuenta quien tiene LECTURA fechada de obras del curso que no cae en un periodo acreditado.
+            totals.readers_with_unverifiable_history = population.filter(id => (byReader[id]?.unverifiable_history ?? 0) > 0 || dated.has(id)).length;
+            const readers = (data.readers || []).map(x => ({ ...x, courseAttribution: byReader[x.userId] ?? { verified_context: 0, unverifiable_history: 0 } }));
+            data = { ...data, courseAttribution: totals, readers };
+        }
         const recognition = await groupRecognitionBlock(a2.aggregateOver === 'allowed' ? [...a2.allowed] : cohortIds);
         res.json(recognition ? { ...data, recognition } : data);
     } catch (e) {
@@ -9654,7 +9674,16 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
             if (!(e instanceof IdentityUnavailableError)) throw e;
             return res.status(503).json({ error: 'identity_unavailable' });
         }
-        const progressList = (getProgressByUser(id) || []).filter(p => !statusScope || statusScope.has(p?.contentId));
+        let progressList = (getProgressByUser(id) || []).filter(p => !statusScope || statusScope.has(p?.contentId));
+        // V9 F7-C2R-U3B: por mediación, los totales salen del progreso con pertenencia temporal acreditada. La lectura que
+        // no puede atribuirse al curso se cuenta aparte: no entra en el porcentaje y tampoco se presenta como «sin avance».
+        let statusAttribution = null;
+        if (statusScope) {
+            const statusContext = await mediatorPedagogicalContext(statusCallerId, id);
+            statusAttribution = attributeProgress(progressList, statusContext);
+            statusAttribution.summary.course_has_works = statusContext.hasWorks === true;
+            progressList = statusAttribution.verified;
+        }
         const booksStarted   = progressList.length;
         const booksCompleted = progressList.filter(p =>
             (p?.canonicalProgress?.globalPercentage ?? p?.porcentaje ?? 0) >= 90 || p?.isCompleted === true
@@ -9664,12 +9693,16 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
                 acc + (p?.canonicalProgress?.globalPercentage ?? p?.porcentaje ?? 0), 0) / booksStarted
         );
         // lastReadingEventAt: el updatedAt más reciente de cualquier progreso
-        const lastReadingEventAt = progressList.reduce((latest, p) => {
+        let lastReadingEventAt = progressList.reduce((latest, p) => {
             const ts = p?.updatedAt || p?.fecha_actualizacion || null;
             if (!ts) return latest;
             if (!latest) return ts;
             return new Date(ts) > new Date(latest) ? ts : latest;
         }, null);
+        // Las sesiones fechadas dentro del curso sí son actividad acreditada, aunque el acumulado de su obra no lo sea.
+        for (const h of statusAttribution?.historical ?? []) {
+            if (h.lastVerifiedAt && (!lastReadingEventAt || new Date(h.lastVerifiedAt) > new Date(lastReadingEventAt))) lastReadingEventAt = h.lastVerifiedAt;
+        }
 
         const metrics = {
             inAnyGroup,
@@ -9678,6 +9711,7 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
             booksStarted,
             booksCompleted,
             progressPercentage,
+            ...(statusAttribution ? { unverifiableHistoryCount: statusAttribution.summary.unverifiable_history, courseHasWorks: statusAttribution.summary.course_has_works } : {}),
         };
         const logs = {
             lastLoginAt:       typeof user.lastLoginAt === 'string' ? user.lastLoginAt : null,
@@ -9685,7 +9719,7 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
         };
 
         const status = buildStudentStatus(user, metrics, logs);
-        res.json(status);
+        res.json(statusAttribution ? { ...status, courseAttribution: statusAttribution.summary } : status);
     } catch (e) {
         log(`GET /api/students/${req.params.id}/status error: ${e.message}`, 'ERROR');
         res.status(500).json({
@@ -11471,6 +11505,140 @@ async function mediatorPedagogicalContext(mediatorId, readerId) {
     return buildPedagogicalContext({ readerId, groups: shared.map(gid => ({ groupId: gid, works: groupsContentScope([gid]) })), intervals: contextIntervals(shared) });
 }
 /**
+ * V9 F7-C2R-U3B — atribución TEMPORAL del progreso al curso.
+ *
+ * Un progreso es un acumulado por lector y obra: el porcentaje no dice cuándo se leyó. Sí lo dicen sus sesiones
+ * (`history[].startedAt`), aunque solo se conservan las últimas 20. Regla, la misma en todas las rutas de mediación:
+ *   - `verified_context`     el historial de sesiones está completo y su primera sesión ocurrió con la obra asociada y
+ *                            el lector en el curso (y eso consta): el acumulado es del curso y se entrega;
+ *   - `unverifiable_history` hay progreso, pero no puede acreditarse que todo él sea del curso (empezó antes de la
+ *                            asignación o del ingreso, antes de que se registrara la procedencia, sin sesiones fechadas,
+ *                            o con el historial recortado). El porcentaje NO se entrega; sí las sesiones fechadas que
+ *                            caen dentro del curso (cuántas, cuánto tiempo, la última);
+ *   - sin registro           no hay actividad: `no_activity`.
+ * El progreso del lector no se toca: él lo sigue viendo completo. Nada se reescribe ni se infiere.
+ */
+const PROGRESS_HISTORY_CAP = 20;
+const progressSessionTs = (p) => (Array.isArray(p?.history) ? p.history : []).map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
+function attributeProgress(records, context) {
+    const verified = [], historical = [];
+    for (const p of Array.isArray(records) ? records : []) {
+        if (!p) continue;
+        const stamps = progressSessionTs(p);
+        const first = stamps.length ? Math.min(...stamps) : undefined;
+        const cls = context.classify(p.contentId, first);
+        if (cls === 'outside_context' || cls === 'no_work') continue;          // la obra no es del curso: no es de quien media
+        const complete = stamps.length > 0 && (p.history || []).length < PROGRESS_HISTORY_CAP;
+        if (cls === 'in' && complete) { verified.push(p); continue; }
+        const inCourse = (p.history || []).filter(h => context.classify(p.contentId, Date.parse(h?.startedAt)) === 'in');
+        historical.push({
+            contentId: p.contentId, attribution: 'unverifiable_history',
+            reason: cls === 'outside_period' ? 'started_before_course' : cls === 'in' ? 'session_history_truncated' : stamps.length === 0 ? 'undated_progress' : 'provenance_not_verifiable',
+            verifiedSessions: inCourse.length,
+            verifiedReadingTimeMs: inCourse.reduce((sum, h) => sum + Math.max(0, h?.durationSec ?? 0) * 1000, 0),
+            lastVerifiedAt: inCourse.map(h => h.startedAt).sort().pop() ?? null,
+        });
+    }
+    return { verified, historical, summary: { verified_context: verified.length, unverifiable_history: historical.length } };
+}
+/**
+ * Contexto de cada lector frente a unos cursos (los que comparte con ellos HOY), con una sola observación del registro.
+ * Devuelve `(readerId) => context`. No autoriza: se usa después de los controles de mediación.
+ */
+async function courseContextResolver(groupIds) {
+    const gids = [...new Set([...groupIds].map(String))];
+    observePedagogicalContext();
+    const { buildPedagogicalContext } = await import('./aulaViva/pedagogicalContext.mjs');
+    const groups = readJSON(GROUPS_DB) || [], users = readJSON(USERS_DB) || [];
+    const rosters = new Map(gids.map(gid => {
+        const g = groups.find(x => x?.id === gid);
+        return [gid, new Set(g ? getGroupMembers(g, users, { allGroups: groups, useLegacyColegioFallback: false, warnFn: () => {} }) : [])];
+    }));
+    const works = new Map(gids.map(gid => [gid, groupsContentScope([gid])]));
+    const intervals = contextIntervals(gids);
+    const memo = new Map();
+    const hasWorks = gids.some(gid => works.get(gid).all || works.get(gid).ids.length > 0);
+    return Object.assign((readerId) => {
+        const id = String(readerId ?? '');
+        if (!memo.has(id)) {
+            memo.set(id, buildPedagogicalContext({ readerId: id, intervals,
+                groups: gids.filter(gid => rosters.get(gid).has(id)).map(gid => ({ groupId: gid, works: works.get(gid) })) }));
+        }
+        return memo.get(id);
+    }, { hasWorks });
+}
+const msOfStamp = (ts) => (typeof ts === 'number' ? ts : (typeof ts === 'string' ? Date.parse(ts) : NaN));
+/**
+ * Actividad FECHADA atribuible: de cada progreso, solo las sesiones que caen dentro del curso (los cálculos que usan
+ * esto leen sesiones, no el porcentaje); de Leo, solo las interacciones fechadas dentro del curso.
+ */
+function attributableActivity(pAll, leoAll, contextOf) {
+    const progressMap = {};
+    for (const [key, e] of Object.entries(pAll?.progressMap ?? {})) {
+        const ctx = e?.userId ? contextOf(e.userId) : null;
+        if (!ctx) continue;
+        const history = (Array.isArray(e.history) ? e.history : []).filter(h => ctx.includeContent(e.contentId, Date.parse(h?.startedAt)));
+        if (history.length > 0) progressMap[key] = { ...e, history };
+    }
+    return { pDb: { ...pAll, progressMap }, leoRaw: (leoAll || []).filter(e => e?.userId && contextOf(e.userId).includeContent(e.contentId, msOfStamp(e.timestamp))) };
+}
+/** Predicado con fecha para `metricsService` y el resumen de grupo: (obra, fecha, lector). */
+function temporalContentPredicate(contextOf) {
+    const forUser = (userId) => (contentId, ts) => contextOf(userId).includeContent(contentId, msOfStamp(ts));
+    // `historical`: el dato es de una obra del curso, pero su fecha no cae en un periodo acreditado (ni dentro ni fuera).
+    const historical = (contentId, ts, userId) => {
+        if (!userId) return false;
+        const cls = contextOf(userId).classify(contentId, msOfStamp(ts));
+        return cls === 'unverifiable' || cls === 'outside_period';
+    };
+    return Object.assign((contentId, ts, userId) => (userId ? forUser(userId)(contentId, ts) : false), { strict: true, forUser, historical });
+}
+/**
+ * Añade a la respuesta de un curso (métricas o informe) el recuento de atribución, por lector y total. Un lector sin
+ * actividad acreditada PERO con lectura que no puede atribuirse al curso no se marca como «necesita atención»: de él no
+ * se sabe que no lea. Se identifica con `dataState: 'unverifiable_history'` y sale de la lista de atención.
+ */
+function applyCourseAttribution(response, attributionSummary) {
+    const { byReader, ...totals } = attributionSummary;
+    const unknown = new Set();
+    if (Array.isArray(response.studentBreakdown)) {
+        response.studentBreakdown = response.studentBreakdown.map(st => {
+            const courseAttribution = byReader[st.userId] ?? { verified_context: 0, unverifiable_history: 0 };
+            if (st.hasData === false && courseAttribution.unverifiable_history > 0) {
+                unknown.add(st.userId);
+                return { ...st, needsAttention: false, dataState: 'unverifiable_history', courseAttribution };
+            }
+            return { ...st, dataState: st.hasData === false ? 'no_activity' : 'verified_context', courseAttribution };
+        });
+    }
+    if (Array.isArray(response.needsAttention)) response.needsAttention = response.needsAttention.filter(x => !unknown.has(x?.userId));
+    // Curso sin obras asociadas: no hay lectura del curso; las alertas (calculadas sobre nada) no se afirman.
+    if (totals.course_has_works === false && Array.isArray(response.alerts)) response.alerts = [];
+    // La alerta de baja participación no cuenta como inactivos a quienes tienen lectura que no puede atribuirse: se
+    // recalcula sobre los lectores de actividad determinable y lo dice.
+    const sc = response.summary?.studentCount, ac = response.summary?.activeStudentCount;
+    const i = Array.isArray(response.alerts) ? response.alerts.findIndex(x => x?.type === 'low_engagement') : -1;
+    if (unknown.size > 0 && i >= 0 && Number.isFinite(sc) && Number.isFinite(ac)) {
+        const known = sc - unknown.size;
+        if (known <= 0 || ac / known >= 0.50) response.alerts.splice(i, 1);
+        else response.alerts[i] = { ...response.alerts[i], message: `Solo ${ac} de ${known} estudiantes con actividad determinable tienen sesiones registradas (otros ${unknown.size} tienen lectura que no puede atribuirse al curso).` };
+    }
+    response.courseAttribution = { ...totals, readers_without_verified_activity: unknown.size };
+    return response;
+}
+/** Recuento de atribución de unos lectores frente a su contexto (para decir cuánta lectura no se puede acreditar). */
+function courseAttributionOf(readerIds, contextOf) {
+    const out = { verified_context: 0, unverifiable_history: 0, readers_with_unverifiable_history: 0, course_has_works: contextOf.hasWorks !== false, byReader: {} };
+    for (const id of readerIds) {
+        const a = attributeProgress(getProgressByUser(id) || [], contextOf(id));
+        out.verified_context += a.summary.verified_context;
+        out.unverifiable_history += a.summary.unverifiable_history;
+        if (a.summary.unverifiable_history > 0) out.readers_with_unverifiable_history++;
+        out.byReader[id] = a.summary;
+    }
+    return out;
+}
+/**
  * Indicadores contextuales de un lector para quien lo acompaña por mediación (CIS + A2 + C005, nunca un B2C personal).
  * Es la entrada que U2 y U3 usarán desde las rutas de Aula Viva y Leo. `{ status, body }`; no escribe la respuesta.
  */
@@ -11668,7 +11836,10 @@ async function courseMetricsOptions(req, res, requester, courseId) {
     // V9 F7-C2: además, solo la actividad de las obras asociadas a ESE curso (ni otras obras institucionales ni compras).
     if (scope.decision === 'allow') {
         const works = groupsContentScope([String(courseId)]);
-        return { includeStudent: (id) => scope.eligible.has(id), includeContent: works.has, contentScope: works };
+        // V9 F7-C2R-U3B: y solo la actividad FECHADA dentro del curso (obra asociada y lector miembro en ese momento).
+        const contextOf = await courseContextResolver([String(courseId)]);
+        return { includeStudent: (id) => scope.eligible.has(id), includeContent: temporalContentPredicate(contextOf), contentScope: works,
+            contextOf, eligibleIds: [...scope.eligible] };
     }
     // V9 F5-E4 — administrador de plataforma con sesión firmada y cuenta activa: el curso COMPLETO, pero solo en
     // agregados (`aggregateOnly`). El rol no concede por sí mismo el desglose individual: ese sigue siendo de la
@@ -12233,6 +12404,8 @@ function safeLoadBackboneMetrics(opts = {}) {
             windowFrom: result.windowFrom,
             windowTo:   result.windowTo,
         };
+        // V9 F7-C2R-U3B: filtro opcional por evento (pertenencia temporal al curso), antes de cualquier agregado.
+        if (typeof opts.includeEvent === 'function') result.events = result.events.filter(opts.includeEvent);
         const metrics = aggregateBackboneMetrics(result.events, meta);
 
         // Sprint Data Backbone Fase 6A: funnels aditivos. Si el cómputo
@@ -12310,12 +12483,17 @@ const legacyMetricsCourseHandler = async (req, res) => {
         // V9 F7-C2: para el mediador, sobre el progreso y las interacciones de las obras del curso únicamente.
         const works     = metricsOptions.contentScope ?? null;
         const pAll      = getAllProgressAsMap();
-        const pDb       = works ? { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => works.has(e?.contentId))) } : pAll;
         const leoAll    = readJSON(LEO_INTERACTIONS_DB) || [];
-        const leoRaw    = works ? leoAll.filter(e => works.has(e?.contentId)) : leoAll;
+        // V9 F7-C2R-U3B: con mediación, sesiones e interacciones fechadas dentro del curso (no basta la asociación de hoy).
+        const scoped    = metricsOptions.contextOf ? attributableActivity(pAll, leoAll, metricsOptions.contextOf) : null;
+        const pDb       = scoped ? scoped.pDb : works ? { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => works.has(e?.contentId))) } : pAll;
+        const leoRaw    = scoped ? scoped.leoRaw : works ? leoAll.filter(e => works.has(e?.contentId)) : leoAll;
         const timelines = buildStudentSessionTimelines(pDb);
         const leoByUser = buildStudentLeoInteractionsMap(leoRaw);
 
+        // Cuánta lectura de cada lector NO puede acreditarse como del curso: se dice, para que un tablero sin cifras no
+        // se lea como «no leyó».
+        const attributionSummary = metricsOptions.contextOf ? courseAttributionOf(metricsOptions.eligibleIds, metricsOptions.contextOf) : null;
         response.studentBreakdown = response.studentBreakdown.map(student => ({
             ...student,
             pedagogicalProfile: computePedagogicalProfile(
@@ -12323,6 +12501,7 @@ const legacyMetricsCourseHandler = async (req, res) => {
                 leoByUser[student.userId] ?? []
             ),
         }));
+        if (attributionSummary) applyCourseAttribution(response, attributionSummary);
 
         // Sprint Data Backbone Fase 3: backboneMetrics filtrado por los
         // alumnos del curso. Aditivo, no rompe shape existente.
@@ -12335,7 +12514,9 @@ const legacyMetricsCourseHandler = async (req, res) => {
         // (una lista vacía equivaldría a «sin filtro»).
         const worksEmpty = works && !works.all && works.ids.length === 0;
         if (courseUserIds.length > 0 && !worksEmpty) {
-            response.backboneMetrics = safeLoadBackboneMetrics({ userIds: courseUserIds, windowDays: 30, ...(works && !works.all ? { contentIds: works.ids } : {}) });
+            response.backboneMetrics = safeLoadBackboneMetrics({ userIds: courseUserIds, windowDays: 30, ...(works && !works.all ? { contentIds: works.ids } : {}),
+                // V9 F7-C2R-U3B: solo los eventos fechados dentro del curso.
+                ...(metricsOptions.contextOf ? { includeEvent: (e) => !!e?.userId && metricsOptions.contextOf(e.userId).includeContent(e.contentId, e.serverTs) } : {}) });
         } else {
             response.backboneMetrics = emptyBackboneMetrics({ windowDays: 30 });
             response.backboneMetrics.funnels  = emptyBackboneFunnels({ windowDays: 30 });
@@ -12735,6 +12916,8 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
             groupType:   group?.type            ?? 'course',
             dataWindow,
         };
+        // V9 F7-C2R-U3B: el informe dice cuánta lectura no pudo acreditarse como del curso (no entra en sus cifras).
+        if (metricsOptions.contextOf) applyCourseAttribution(response, courseAttributionOf(metricsOptions.eligibleIds, metricsOptions.contextOf));
 
         // V9 F5-E4: administración humana ⇒ solo agregados (sin desglose ni listas con nombre).
         res.json(metricsOptions.aggregateOnly ? aggregateCourseProjection(response) : response);
@@ -13154,14 +13337,12 @@ function interventionScope(req, res) {
     return { admin: false, mediates: (courseId) => rosters.has(String(courseId ?? '')), reader, courses: [...rosters.keys()], works: groupsContentScope(rosters.keys()) };
 }
 /** V9 F7-C2 — progreso e interacciones de Leo que ese alcance puede usar en sus cálculos (la administración, todo). */
-function interventionActivity(scope) {
+async function interventionActivity(scope) {
     const pAll = getAllProgressAsMap();
     const leoAll = readJSON(LEO_INTERACTIONS_DB) || [];
     if (scope.admin || !scope.works) return { pDb: pAll, leoRaw: leoAll };
-    return {
-        pDb: { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => scope.works.has(e?.contentId))) },
-        leoRaw: leoAll.filter(e => scope.works.has(e?.contentId)),
-    };
+    // V9 F7-C2R-U3B: sesiones e interacciones fechadas dentro de los cursos que media (antes bastaba la asociación de hoy).
+    return attributableActivity(pAll, leoAll, await courseContextResolver(scope.courses));
 }
 /** Filtra intervenciones a las que ese alcance puede ver. Devuelve null si el registro no es verificable (ya respondió 503). */
 function visibleInterventions(scope, interventions, res) {
@@ -13224,7 +13405,7 @@ app.post('/api/interventions', requireUserAuth, async (req, res) => {
  * Get all interventions for students in a course.
  * Auth: mediador or administrador
  */
-app.get('/api/interventions/course/:courseId', requireUserAuth, (req, res) => {
+app.get('/api/interventions/course/:courseId', requireUserAuth, async (req, res) => {
     try {
         const requester = req.user;
         if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
@@ -13252,7 +13433,7 @@ app.get('/api/interventions/course/:courseId', requireUserAuth, (req, res) => {
  * Full intervention history for one student with computed impact.
  * Auth: mediador or administrador
  */
-app.get('/api/interventions/student/:studentId', requireUserAuth, (req, res) => {
+app.get('/api/interventions/student/:studentId', requireUserAuth, async (req, res) => {
     try {
         const requester = req.user;
         if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
@@ -13267,7 +13448,7 @@ app.get('/api/interventions/student/:studentId', requireUserAuth, (req, res) => 
         const visible  = visibleInterventions(scope, iDb.interventions.filter(i => i.studentId === studentId), res);
         if (!visible) return;
         if (!scope.admin && !scope.courses.some(c => scope.reader(c, studentId) === 'allow')) return res.status(403).json(INTERVENTION_DENIED);
-        const { pDb }  = interventionActivity(scope);
+        const { pDb }  = await interventionActivity(scope);
         const timeMap  = buildStudentReadingTimeMap(pDb);
         const timelines = buildStudentSessionTimelines(pDb);
         const history  = buildStudentInterventionHistory(visible, studentId, timeMap, timelines);
@@ -13284,7 +13465,7 @@ app.get('/api/interventions/student/:studentId', requireUserAuth, (req, res) => 
  * Query params: courseId (optional, scopes to one course)
  * Auth: mediador or administrador
  */
-app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
+app.get('/api/interventions/effectiveness', requireUserAuth, async (req, res) => {
     try {
         const requester = req.user;
         if (!isMediatorRole(requester) && !(requester.roles ?? []).includes('administrador')) {
@@ -13297,7 +13478,7 @@ app.get('/api/interventions/effectiveness', requireUserAuth, (req, res) => {
         if (!scope) return;
         if (courseId && !scope.mediates(courseId)) return res.status(403).json(INTERVENTION_DENIED);
         const iDb = readInterventionsDb();
-        const { pDb, leoRaw } = interventionActivity(scope);
+        const { pDb, leoRaw } = await interventionActivity(scope);
 
         let interventions = iDb.interventions;
         if (courseId) {
@@ -13404,7 +13585,10 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
         const cMap = buildContentMap();
         // V9 F7-C2: por mediación, solo las obras asociadas a los grupos compartidos (también el resumen).
         const scope = mediatorAccess === 'allow' ? mediatorContentScope(requester.id, userId) : null;
-        const entries = Object.values(db.progressMap).filter(p => p.userId === userId && (!scope || scope.has(p.contentId)));
+        let entries = Object.values(db.progressMap).filter(p => p.userId === userId && (!scope || scope.has(p.contentId)));
+        // V9 F7-C2R-U3B: por mediación, solo el progreso con pertenencia temporal acreditada; el resto, identificado aparte.
+        const attribution = mediatorAccess === 'allow' ? attributeProgress(entries, await mediatorPedagogicalContext(requester.id, userId)) : null;
+        if (attribution) entries = attribution.verified;
         const readingProgress = entries.map(raw => {
             const rp = computeReadingProgress(raw);
             rp.title = resolveContentTitle(rp.contentId, cMap);
@@ -13417,6 +13601,10 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
             completed:  readingProgress.filter(p => p.status === 'completed').length,
             abandoned:  readingProgress.filter(p => p.status === 'abandoned').length,
         };
+        if (attribution) {
+            const historicalProgress = attribution.historical.map(h => ({ ...h, title: resolveContentTitle(h.contentId, cMap), type: cMap.get(h.contentId)?.type ?? null }));
+            return res.json({ success: true, userId, summary: { ...summary, unverifiableHistory: historicalProgress.length }, readingProgress, historicalProgress, courseAttribution: attribution.summary });
+        }
         res.json({ success: true, userId, summary, readingProgress });
     } catch (e) {
         log(`GET reading-progress/${req.params.userId} error: ${e.message}`, 'ERROR');
@@ -13446,6 +13634,12 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
         const key = makeProgressKey(userId, contentId);
         const db  = getAllProgressAsMap();
         const raw = db.progressMap[key];
+        if (mediatorAccess === 'allow') {   // V9 F7-C2R-U3B
+            const a = attributeProgress(raw ? [raw] : [], await mediatorPedagogicalContext(requester.id, userId));
+            if (a.verified.length) return res.json({ success: true, readingProgress: computeReadingProgress(raw), attribution: 'verified_context' });
+            if (a.historical.length) return res.json({ success: true, readingProgress: null, ...a.historical[0] });
+            return res.json({ success: true, readingProgress: notStartedProgress(userId, contentId), attribution: 'no_activity' });
+        }
         const readingProgress = raw ? computeReadingProgress(raw) : notStartedProgress(userId, contentId);
         res.json({ success: true, readingProgress });
     } catch (e) {

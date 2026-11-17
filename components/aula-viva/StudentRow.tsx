@@ -18,7 +18,15 @@ const NoData: React.FC<{ title: string }> = ({ title }) => (
     <span className="text-gray-400" title={title} aria-label={title}>—</span>
 );
 
+/** V9 F7-C2R-U3B — hay lectura, pero no puede atribuirse al curso: ni cero ni cifra. */
+const UNATTRIBUTED_TITLE = 'Tiene lectura que no puede atribuirse al curso';
+const Unattributed: React.FC = () => (
+    <span className="text-xs text-gray-500 dark:text-gray-400" title={UNATTRIBUTED_TITLE} data-state="unverifiable_history">No atribuible</span>
+);
+
 export const StudentRow: React.FC<StudentRowProps> = React.memo(({ student, analytics, onSelect }) => {
+    const unattributedWorks = (analytics?.courseAttribution?.unverifiable_history ?? 0) > 0;
+    const unattributedReading = unattributedWorks || analytics?.historicalActivity === true;
     return (
         <tr className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer group" onClick={onSelect}>
             <td className="p-4 flex items-center">
@@ -26,10 +34,12 @@ export const StudentRow: React.FC<StudentRowProps> = React.memo(({ student, anal
                 <span className="font-medium group-hover:text-indigo-600 transition-colors">{student.nombre_completo}</span>
             </td>
             <td className="p-4 text-center">
-                {analytics ? analytics.progress.booksStarted : <NoData title="Sin datos" />}
+                {!analytics ? <NoData title="Sin datos" />
+                    : analytics.progress.booksStarted === 0 && unattributedWorks ? <Unattributed /> : analytics.progress.booksStarted}
             </td>
             <td className="p-4 text-center font-mono text-sm">
-                {analytics ? formatReadingDuration(analytics.reading.allEffectiveMs) : <NoData title="Sin datos" />}
+                {!analytics ? <NoData title="Sin datos" />
+                    : analytics.reading.allEffectiveMs === 0 && unattributedReading ? <Unattributed /> : formatReadingDuration(analytics.reading.allEffectiveMs)}
             </td>
             <td className="p-4 text-center">
                 <div className="flex items-center justify-center gap-1" title="Interacciones con Chatbot">

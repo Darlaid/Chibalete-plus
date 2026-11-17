@@ -404,8 +404,9 @@ export function getActivationOutputsForUser(userId, { includeContent = null, leo
             const L = leoContext;
             if (L.data_state !== 'ok') return [];
             const firstTs = (p) => {
-                const ts = (Array.isArray(p.history) ? p.history : []).map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
-                return ts.length ? Math.min(...ts) : undefined;
+                const h = Array.isArray(p.history) ? p.history : [];
+                const ts = h.map(x => Date.parse(x?.startedAt)).filter(Number.isFinite);
+                return ts.length && h.length < 20 ? Math.min(...ts) : undefined;   // historial recortado: sin fecha de inicio
             };
             const activeProgress = _getActiveProgressRecords(userId, _readProgressDb(userId)).filter(p => L.includeContent(p.contentId, firstTs(p)));
             const outputs = [

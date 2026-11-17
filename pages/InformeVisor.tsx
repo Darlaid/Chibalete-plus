@@ -68,6 +68,8 @@ interface StudentRow {
     userId: string;
     name: string;
     hasData: boolean;
+    // V9 F7-C2R-U3B — sin actividad acreditada del curso, pero con lectura que no puede atribuirse.
+    dataState?: 'verified_context' | 'no_activity' | 'unverifiable_history';
     needsAttention: boolean;
     totalSessions: number;
     composite: number;
@@ -107,6 +109,8 @@ interface CourseReport {
     // V9 F5-E4: ausente en la vista agregada de administración (`aggregateOnly`).
     studentBreakdown?: StudentRow[];
     aggregateOnly?: boolean;
+    // V9 F7-C2R-U3B — lectura que no pudo acreditarse como del curso y no entra en las cifras del informe.
+    courseAttribution?: { verified_context: number; unverifiable_history: number; readers_with_unverifiable_history: number; course_has_works?: boolean };
     reportMeta: CourseReportMeta;
 }
 
@@ -615,6 +619,14 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                         {isCourse && !Array.isArray(cd!.studentBreakdown) && (
                             <p role="note" className="text-sm text-gray-500 dark:text-gray-400 pb-8">{AGGREGATE_VIEW_NOTE}</p>
                         )}
+                        {isCourse && cd!.courseAttribution?.course_has_works === false && (
+                            <p role="note" data-testid="report-no-course-works" className="text-sm text-gray-600 dark:text-gray-300 pt-6">Este curso no tiene obras asociadas: no hay lectura del curso que mostrar. Las cifras en cero no significan que sus estudiantes no lean.</p>
+                        )}
+                        {isCourse && (cd!.courseAttribution?.readers_with_unverifiable_history ?? 0) > 0 && (
+                            <p role="note" data-testid="report-unverifiable-history" className="text-sm text-gray-600 dark:text-gray-300 pt-6">
+                                {cd!.courseAttribution!.readers_with_unverifiable_history} {cd!.courseAttribution!.readers_with_unverifiable_history === 1 ? 'estudiante tiene' : 'estudiantes tienen'} lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas). Esa lectura no entra en las cifras de este informe y no significa que no hayan leído.
+                            </p>
+                        )}
                         {isCourse && Array.isArray(cd!.studentBreakdown) && cd!.studentBreakdown.length > 0 && (
                             <section className="py-8">
                                 <DocLabel>
@@ -692,7 +704,7 @@ const StudentBreakdownTable: React.FC<{ students: StudentRow[] }> = ({ students 
                                 {s.hasData ? s.inferential : '—'}
                             </td>
                             <td className="py-2 px-3 text-right text-xs text-gray-400 dark:text-gray-500 tabular-nums">
-                                {s.totalSessions}
+                                {s.dataState === 'unverifiable_history' ? '—' : s.totalSessions}
                             </td>
                             <td className="py-2">
                                 <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
@@ -703,7 +715,7 @@ const StudentBreakdownTable: React.FC<{ students: StudentRow[] }> = ({ students 
                                         'Inicial':       'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
                                     }[s.level] ?? 'bg-gray-100 text-gray-500'
                                 }`}>
-                                    {s.hasData ? s.level : 'Sin datos'}
+                                    {s.hasData ? s.level : s.dataState === 'unverifiable_history' ? 'Lectura no atribuible' : 'Sin datos'}
                                 </span>
                             </td>
                         </tr>

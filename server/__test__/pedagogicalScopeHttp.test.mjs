@@ -95,6 +95,8 @@ const REG = a2RegistryPath();
 grantA2(['ra-1', 'ra-x', 'ra-z', 'rb-1']);
 grantC005(['med-a', 'med-a2', 'med-z', 'med-b']);
 
+// V9 F7-C2R-U3B: la procedencia (obra–curso y membresía) consta desde antes de la actividad de esta suite.
+const { ledgerEnv } = await (await import('./helpers/seedContextLedger.mjs')).seedContextLedger({ groupsPath: P.groups, accessPath: P.access, insightsPath: path.join(P.data, 'insights.db') });
 const ports = await freePorts(2);
 const ORIGINS = ports.map((p) => `http://127.0.0.1:${p}`).join(',');
 const start = (port, i) => {
@@ -103,9 +105,9 @@ const start = (port, i) => {
         ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: path.join(tmp, 'uploads'), ACCESS_FALLBACK_MODE: 'restricted', ALLOWED_ORIGINS: ORIGINS,
         SESSION_AUTH_MODE: 'enforce', SESSION_LEGACY_ALLOW: '', SESSIONS_DB: P.sessions, SESSION_KEY_CURRENT_PATH: P.key,
         USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), PROGRESS_SQLITE_PATH: path.join(tmp, 'progress.db'), LEO_EVIDENCE_DB: path.join(tmp, 'leo_evidence.json'),
-        EVENTS_SQLITE_PATH: path.join(P.data, `events-${i}.db`), INSIGHTS_SQLITE_PATH: path.join(P.data, `insights-${i}.db`), ARCHIVE_SQLITE_PATH: path.join(P.data, `archive-${i}.db`),
+        EVENTS_SQLITE_PATH: path.join(P.data, `events-${i}.db`), ARCHIVE_SQLITE_PATH: path.join(P.data, `archive-${i}.db`),
         OFFLINE_ASSIGNMENT_DB_PATH: path.join(P.data, `offline-${i}.db`), IDENTITY_DB: path.join(P.data, `identity-${i}.db`),
-        IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json', CHP_A2_REGISTRY: REG, OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
+        IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json', CHP_A2_REGISTRY: REG, OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock', ...ledgerEnv,
     } });
     const s = { child, base: `http://127.0.0.1:${port}`, out: '' };
     child.stdout.on('data', (d) => { s.out += d; }); child.stderr.on('data', (d) => { s.out += d; });
@@ -143,9 +145,9 @@ try {
     await ready(S1); await ready(S2);
     const C = {};
     for (const id of ['adm', 'med-a', 'med-a2', 'med-noc', 'med-z', 'med-b', 'ra-1', 'ra-x', 'ra-z', 'rb-1', 'b2c']) C[id] = await login(id.length % 2 ? S1 : S2, id);
-    const CP = (pct) => ({ canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, contentAnchor: null, contentFingerprint: null, lastInteractedMode: 'text', anchor: { type: 'text', value: pct }, viewportHint: pct }, updatedAt: new Date().toISOString() });
+    const CP = (pct, u = 'x') => ({ canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, contentAnchor: null, contentFingerprint: null, lastInteractedMode: 'text', anchor: { type: 'text', value: pct }, viewportHint: pct }, updatedAt: new Date().toISOString(), session: { sessionId: `s-${u}-${Date.now()}`, mode: 'text', durationSec: 60 } });
     const saved = [];
-    for (const [u, c, pct] of [['ra-1', 'c1', 40], ['ra-1', 'c2', 55], ['ra-1', 'c3', 70], ['ra-x', 'c4', 30], ['ra-z', 'c2', 20], ['rb-1', 'cb', 25], ['b2c', 'c3', 80]]) saved.push((await post(S1, `/api/progress/${u}/${c}/sync`, C[u], CP(pct))).status);
+    for (const [u, c, pct] of [['ra-1', 'c1', 40], ['ra-1', 'c2', 55], ['ra-1', 'c3', 70], ['ra-x', 'c4', 30], ['ra-z', 'c2', 20], ['rb-1', 'cb', 25], ['b2c', 'c3', 80]]) saved.push((await post(S1, `/api/progress/${u}/${c}/sync`, C[u], CP(pct, u))).status);
     ok('preparación: cada lector guarda su propio progreso (el mismo lector en sus tres obras)', saved.every((x) => x === 200), saved.join(' '));
     const sub = await post(S2, '/api/submissions', C['ra-1'], { taskId: 't-ga', studentId: 'ra-1', groupId: 'g-a', responseText: 'Entrega sintética del curso.', contentId: 'c1', taskTitle: 'Tarea del curso' });
     ok('preparación: el lector entrega una tarea de su curso', sub.status === 201, `${sub.status} ${sub.text.slice(0, 120)}`);

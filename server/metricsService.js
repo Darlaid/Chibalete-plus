@@ -697,9 +697,11 @@ function computeContentStats(userId, ctx = null, includeContent = null) {
         ? ctx.progressFor(userId)
         : Object.values(_progress.progressMap || {}).filter(p => p.userId === userId);
     // La fecha de un progreso es la de su PRIMERA sesión registrada: el avance acumula desde ahí.
+    // Solo se conservan las últimas 20 sesiones: con el historial recortado no se sabe cuándo empezó (sin fecha).
     const firstSessionTs = (p) => {
-        const ts = (Array.isArray(p.history) ? p.history : []).map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
-        return ts.length ? Math.min(...ts) : undefined;
+        const h = Array.isArray(p.history) ? p.history : [];
+        const ts = h.map(x => Date.parse(x?.startedAt)).filter(Number.isFinite);
+        return ts.length && h.length < 20 ? Math.min(...ts) : undefined;
     };
     const entries = includeContent ? all.filter(p => includeContent(p.contentId, firstSessionTs(p))) : all;
     const contents = entries.map(raw => {
@@ -773,6 +775,8 @@ function computeLeoMetrics(userId, userEvents = null, includeContent = null) {
 // comporta como antes. `includeContent.strict`: una fila sin obra no se atribuye. `extra.leoEntries`: sesiones de Leo
 // ya delimitadas por quien llama, en lugar de la memoria acumulada.
 function computeStudentMetricsUncached(userId, ctx, includeContent = null, extra = null) {
+  // V9 F7-C2R-U3B: `includeContent.forUser(lector)` da el predicado de ESE lector (su pertenencia temporal al curso).
+  if (typeof includeContent?.forUser === 'function') includeContent = Object.assign(includeContent.forUser(userId), { strict: includeContent.strict === true });
   const allEvents    = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
   const allSessions  = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
   const userEvents   = includeContent ? allEvents.filter(e => (e.contentId == null ? includeContent.strict !== true : includeContent(e.contentId, e.timestamp))) : allEvents;

@@ -73,15 +73,17 @@ const R = await import('../privacy/a2Registry.mjs');
 grantA2(['ra-yes', 'ra-yes2', 'ra-otro', 'rb-yes', 'b2c']); grantA2(['ra-no'], 'denied');
 grantC005(['med-a', 'med-a2', 'med-b']);            // med-noc media g-a pero no tiene compromiso 005
 
+// V9 F7-C2R-U3B: la procedencia (obra–curso y membresía) consta desde antes de la actividad de esta suite.
+const { ledgerEnv } = await (await import('./helpers/seedContextLedger.mjs')).seedContextLedger({ groupsPath: P.groups, accessPath: P.access, insightsPath: path.join(P.data, 'insights.db') });
 const ports = await freePorts(2);
 const start = (port, i) => {
     const child = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env: {
         ...process.env, NODE_ENV: 'test', PORT: String(port), CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: P.schools,
         ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: path.join(tmp, 'uploads'), ACCESS_FALLBACK_MODE: 'restricted', SESSION_AUTH_MODE: 'off',
         USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), PROGRESS_SQLITE_PATH: path.join(tmp, 'progress.db'), LEO_EVIDENCE_DB: P.evidence,
-        EVENTS_SQLITE_PATH: path.join(P.data, `events-${i}.db`), INSIGHTS_SQLITE_PATH: path.join(P.data, `insights-${i}.db`), ARCHIVE_SQLITE_PATH: path.join(P.data, `archive-${i}.db`),
+        EVENTS_SQLITE_PATH: path.join(P.data, `events-${i}.db`), ARCHIVE_SQLITE_PATH: path.join(P.data, `archive-${i}.db`),
         OFFLINE_ASSIGNMENT_DB_PATH: path.join(P.data, `offline-${i}.db`), IDENTITY_DB: path.join(P.data, `identity-${i}.db`), SESSIONS_DB: path.join(P.data, `sessions-${i}.db`),
-        IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json', CHP_A2_REGISTRY: REG, OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
+        IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json', CHP_A2_REGISTRY: REG, OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock', ...ledgerEnv,
     } });
     const s = { child, base: `http://127.0.0.1:${port}`, out: '' };
     child.stdout.on('data', (d) => { s.out += d; }); child.stderr.on('data', (d) => { s.out += d; });
@@ -102,7 +104,7 @@ const hint = (r, u) => r.text.includes(`pista-privada-${u}"`);
 const avgMs = (r) => r.json?.productMetrics?.totalReadingTimeMs;
 const LEO = [(u) => `/api/leo/mediator/student/${u}`, (u) => `/api/leo/mediator/student/${u}/content/c1`, (u) => `/api/leo/activation/${u}`];
 const leo3 = async (s, who, u) => { const out = []; for (const f of LEO) out.push(await req(s, f(u), who)); return out; };
-const BASE_KEYS = ['alerts', 'computedAt', 'courseId', 'courseName', 'distributions', 'icdli', 'needsAttention', 'productMetrics', 'readingLevels', 'studentBreakdown', 'summary', 'topPerformers'];
+const BASE_KEYS = ['alerts', 'computedAt', 'courseAttribution', 'courseId', 'courseName', 'distributions', 'icdli', 'needsAttention', 'productMetrics', 'readingLevels', 'studentBreakdown', 'summary', 'topPerformers'];
 const SHAPE = { '/api/metrics/course': [...BASE_KEYS, 'backboneMetrics'].sort().join(), '/api/reports/course': [...BASE_KEYS, 'reportMeta'].sort().join() };
 const PRIVATE = /pista-privada|Lector |Mediador |fixture\.invalid|nombre_completo|studentBreakdown|summary|history|outputs/;
 
@@ -135,8 +137,8 @@ try {
     const l = await leo3(S1, 'med-a', 'ra-yes'), l2 = await leo3(S2, 'med-a', 'ra-yes');
     ok('mediador → lector de su grupo con A2 y C005 → resumen, historial y activaciones (dos réplicas)', [...l, ...l2].every((r) => r.status === 200 && r.json?.success === true) && 'summary' in l[0].json && 'history' in l[1].json && 'outputs' in l[2].json, l.map((r) => r.status).join(' '));
     // V9 F7-C2R-U3: el contenido de Leo sale del contexto pedagógico con procedencia temporal (lo cubre pedagogicalRecoveryHttp).
-    // Aquí el registro de procedencia está apagado: el mediador autorizado recibe el estado, no un diagnóstico, y nada de otros lectores.
-    ok('…desde el contexto del curso: sin procedencia registrada dice «insufficient», sin evidencia de otros lectores', l[0].json.summary.data_state === 'insufficient' && l[0].json.summary.reason === 'provenance_not_recorded'
+    // V9 F7-C2R-U3B: esta suite registra la procedencia (la necesitan sus cifras de curso): el mediador recibe el estado de SU contexto, y nada de otros lectores.
+    ok('…desde el contexto del curso: declara su estado, sin evidencia de otros lectores', typeof l[0].json.summary.data_state === 'string' && l[0].json.summary.reason !== 'provenance_not_recorded'
         && !/pista-privada-(ra-no|ra-otro|rb-yes|b2c)"/.test(l[0].text + l[1].text), l[0].text.slice(0, 200));
     for (const [who, u, label] of [['med-b', 'ra-yes', 'otra institución'], ['med-a2', 'ra-yes', 'misma institución, grupo que no media'], ['med-noc', 'ra-yes', 'mediador sin C005'], ['med-a', 'ra-no', 'lector sin A2'], ['med-a', 'b2c', 'lector B2C (aun en la nómina y con A2)'], ['med-b', 'b2c', 'lector B2C, otro mediador'], ['med-a', 'no-existe', 'lector inexistente'], ['ra-yes2', 'ra-yes', 'otro lector']]) {
         const r = [...await leo3(S1, who, u), ...await leo3(S2, who, u)];
@@ -178,7 +180,7 @@ try {
     ok('administración: Leo de cualquier lector, como antes', admLeo.every((r) => r.status === 200), admLeo.map((r) => r.status).join(' '));
     ok('el lector conserva sus propias métricas', (await req(S1, '/api/metrics/student/ra-yes2', 'ra-yes2')).status === 200);
     const legit = [await req(S2, '/api/metrics/course/g-a', 'med-a'), await req(S1, '/api/reports/course/g-a', 'med-a'), ...await leo3(S2, 'med-a', 'ra-yes2')];
-    ok('mediador con todo en regla: métricas, reporte y Leo de su lector siguen funcionando', legit.every((r) => r.status === 200) && ids(legit[0]) === 'ra-yes2' && legit[0].json.studentBreakdown[0].pedagogicalProfile !== undefined && legit[1].json.reportMeta?.entityId === 'g-a' && legit[2].json.summary.data_state === 'insufficient');
+    ok('mediador con todo en regla: métricas, reporte y Leo de su lector siguen funcionando', legit.every((r) => r.status === 200) && ids(legit[0]) === 'ra-yes2' && legit[0].json.studentBreakdown[0].pedagogicalProfile !== undefined && legit[1].json.reportMeta?.entityId === 'g-a' && typeof legit[2].json.summary.data_state === 'string');
     ok('otro mediador de la misma institución ve SU curso, no el ajeno', ids(await req(S1, '/api/metrics/course/g-a2', 'med-a2')) === 'ra-otro');
     ok('los registros del servidor no contienen evidencia de Leo ni nombres de lectores', !/pista-privada|Lector ra-|Lector b2c/.test(S1.out + S2.out));
 } catch (e) {

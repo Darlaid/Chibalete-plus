@@ -251,9 +251,19 @@ export function StudentStatusPanel({ status, loading, error, onClose }: StudentS
                         value={
                             status.progress.booksStarted > 0
                                 ? `${status.progress.percentage}% · ${status.progress.booksCompleted}/${status.progress.booksStarted} libros`
+                                : status.progress.courseHasWorks === false
+                                ? 'El curso no tiene obras'
+                                : (status.progress.unverifiableHistory ?? 0) > 0
+                                ? 'Sin avance acreditado en el curso'
                                 : 'Sin lecturas iniciadas'
                         }
                     />
+                )}
+                {/* V9 F7-C2R-U3B — lectura que existe pero no puede atribuirse al curso: se dice, no se cuenta como cero. */}
+                {(status.progress.unverifiableHistory ?? 0) > 0 && (
+                    <p className="text-sm text-gray-600 dark:text-gray-300 md:col-span-2" data-testid="status-unverifiable-history">
+                        Además, {status.progress.unverifiableHistory} {status.progress.unverifiableHistory === 1 ? 'obra' : 'obras'} con lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas). No entra en el avance mostrado ni significa que no haya leído.
+                    </p>
                 )}
             </dl>
 

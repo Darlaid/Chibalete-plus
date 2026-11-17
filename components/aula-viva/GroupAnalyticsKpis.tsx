@@ -45,7 +45,19 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
     }
     const loading = state.status === 'loading';
     const s = state.status === 'ready' ? state.summary : null;
+    // V9 F7-C2R-U3B — cuántos lectores tienen lectura que no puede atribuirse al curso (no entra en estas cifras).
+    const attribution = (s as { courseAttribution?: { readers_with_unverifiable_history?: number; course_has_works?: boolean } } | null)?.courseAttribution;
+    const unattributed = attribution?.readers_with_unverifiable_history ?? 0;
     return (
+        <>
+        {attribution?.course_has_works === false && (
+            <p role="note" data-testid="group-no-course-works" className="mb-3 text-sm text-gray-600 dark:text-gray-300">Este curso no tiene obras asociadas: no hay lectura del curso que mostrar. Las cifras en cero no significan que sus estudiantes no lean.</p>
+        )}
+        {unattributed > 0 && (
+            <p role="note" data-testid="group-unverifiable-history" className="mb-3 text-sm text-gray-600 dark:text-gray-300">
+                {unattributed} {unattributed === 1 ? 'lector tiene' : 'lectores tienen'} lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas). Esa lectura no entra en estas cifras y no significa que no hayan leído.
+            </p>
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6 mb-8 animate-in fade-in">
             <Kpi title="Interacción Chatbot" subtitle="Promedio interacciones/alumno" loading={loading}
                 icon={<MessageCircle className="text-blue-400 mb-1" size={28} />}>
@@ -63,6 +75,7 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
                 {s && hasNoServerSource(s.pisa) ? <EmptyValue text={EMPTY_TEXT.pisa} /> : <EmptyValue text="—" />}
             </Kpi>
         </div>
+        </>
     );
 };
 

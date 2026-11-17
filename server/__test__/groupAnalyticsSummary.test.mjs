@@ -502,7 +502,11 @@ async function main() {
         // así que se compara con SU resumen sin parámetros, que no puede superar el total de la cohorte.
         const q0 = await json(await GET('med-01', ROUTE('g-a1')));
         ok('userIds por query se ignoran (mismo resumen)', q?.readerCount === 80 && q0?.readerCount === 80 && q?.reading?.all?.totalEffectiveMs === q0?.reading?.all?.totalEffectiveMs
-            && q.reading.all.totalEffectiveMs > 0 && q.reading.all.totalEffectiveMs <= expectedAllMs, `${q?.reading?.all?.totalEffectiveMs} vs ${q0?.reading?.all?.totalEffectiveMs} (cohorte ${expectedAllMs})`);
+            && q.reading.all.totalEffectiveMs <= expectedAllMs, `${q?.reading?.all?.totalEffectiveMs} vs ${q0?.reading?.all?.totalEffectiveMs} (cohorte ${expectedAllMs})`);
+        // V9 F7-C2R-U3B: sin registro de procedencia (esta suite no lo enciende) ninguna lectura puede acreditarse como
+        // del curso: el resumen del mediador no la suma, y DICE cuántos lectores tienen lectura no atribuible.
+        ok('U3B sin procedencia registrada: nada se suma como del curso y se declara la lectura no atribuible', q0?.reading?.all?.totalEffectiveMs === 0
+            && q0?.courseAttribution?.readers_with_unverifiable_history > 0, JSON.stringify(q0?.courseAttribution));
         const src = fs.readFileSync(path.join(REPO, 'server', 'server.js'), 'utf8');
         const i = src.indexOf(`app.get('/api/groups/:id/analytics-summary'`);
         const handler = src.slice(i, src.indexOf('\n});', i));

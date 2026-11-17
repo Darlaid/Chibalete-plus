@@ -66,15 +66,17 @@ grantA2(['ra-yes', 'ra-otro', 'rb-yes']);
 grantA2(['ra-no'], 'denied');                       // ra-pend: sin decisión
 grantC005(['med-a', 'med-a2', 'med-b']);            // med-noc: sin compromiso 005
 
+// V9 F7-C2R-U3B: la procedencia (obra–curso y membresía) consta desde antes de la actividad de esta suite.
+const { ledgerEnv } = await (await import('./helpers/seedContextLedger.mjs')).seedContextLedger({ groupsPath: P.groups, accessPath: P.access, insightsPath: path.join(P.data, 'insights.db') });
 const ports = await freePorts(2);
 const start = (port, i) => {
     const child = spawn(process.execPath, ['server/server.js'], { cwd: REPO, env: {
         ...process.env, NODE_ENV: 'test', PORT: String(port), CHP_DATA_DIR: P.data, USERS_DB: P.users, GROUPS_DB: P.groups, SCHOOLS_DB: P.schools,
         ACCESS_DB: P.access, CONTENT_DB: P.content, UPLOADS_ROOT: path.join(tmp, 'uploads'), ACCESS_FALLBACK_MODE: 'restricted', SESSION_AUTH_MODE: 'off',
         USER_AUDIT_DB: path.join(tmp, 'user_audit.json'), PROGRESS_SQLITE_PATH: path.join(tmp, 'progress.db'),
-        EVENTS_SQLITE_PATH: path.join(P.data, `events-${i}.db`), INSIGHTS_SQLITE_PATH: path.join(P.data, `insights-${i}.db`), ARCHIVE_SQLITE_PATH: path.join(P.data, `archive-${i}.db`),
+        EVENTS_SQLITE_PATH: path.join(P.data, `events-${i}.db`), ARCHIVE_SQLITE_PATH: path.join(P.data, `archive-${i}.db`),
         OFFLINE_ASSIGNMENT_DB_PATH: path.join(P.data, `offline-${i}.db`), IDENTITY_DB: path.join(P.data, `identity-${i}.db`), SESSIONS_DB: path.join(P.data, `sessions-${i}.db`),
-        IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json', CHP_A2_REGISTRY: REG, OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock',
+        IDENTITY_SQLITE_ENABLED: '0', IDENTITY_READ: 'json', CHP_A2_REGISTRY: REG, OPENAI_API_KEY: '', GEMINI_API_KEY: '', TTS_MODE: 'mock', AI_MODE: 'mock', ...ledgerEnv,
     } });
     const s = { child, base: `http://127.0.0.1:${port}`, out: '' };
     child.stdout.on('data', (d) => { s.out += d; }); child.stderr.on('data', (d) => { s.out += d; });
@@ -96,7 +98,7 @@ const S1 = start(ports[0], 1), S2 = start(ports[1], 2);
 try {
     await ready(S1); await ready(S2);
     // Cada lector guarda su propio progreso (lo que después se intenta leer).
-    for (const u of READERS) await req(S1, `/api/progress/${u}/${C1}/sync`, u, { method: 'POST', body: { canonicalProgress: { globalPercentage: 37, percentage: 37, readerMode: 'text' }, updatedAt: new Date().toISOString() } });
+    for (const u of READERS) await req(S1, `/api/progress/${u}/${C1}/sync`, u, { method: 'POST', body: { canonicalProgress: { globalPercentage: 37, percentage: 37, readerMode: 'text' }, updatedAt: new Date().toISOString(), session: { sessionId: `s-${u}-${Date.now()}`, mode: 'text', durationSec: 60 } } });
     const own = await req(S1, '/api/progress/user/ra-yes', 'ra-yes');
     ok('siembra: cada lector tiene progreso propio guardado', own.status === 200 && own.json?.progressList?.length === 1);
 

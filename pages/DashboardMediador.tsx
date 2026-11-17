@@ -73,6 +73,9 @@ interface StudentRow {
     name: string;
     hasData: boolean;
     needsAttention: boolean;
+    // V9 F7-C2R-U3B — `unverifiable_history`: sin actividad ACREDITADA del curso, pero con lectura que no puede atribuirse.
+    dataState?: 'verified_context' | 'no_activity' | 'unverifiable_history';
+    courseAttribution?: { verified_context: number; unverifiable_history: number };
     totalSessions: number;
     totalReadingTimeMs: number;
     composite: number;
@@ -97,6 +100,7 @@ interface StudentRow {
 }
 
 interface CourseMetrics {
+    courseAttribution?: { verified_context: number; unverifiable_history: number; readers_with_unverifiable_history: number; course_has_works?: boolean };
     courseId: string;
     courseName: string;
     computedAt: number;
@@ -374,6 +378,11 @@ function buildSummaryInterpretation(
  * 'risk'      — active but composite < 30 (needsAttention + hasData)
  * 'attention' — no activity recorded
  */
+/** V9 F7-C2R-U3B — tiene lectura que no puede atribuirse al curso y ninguna acreditada: no es «inactivo». */
+const isUnattributed = (s: StudentRow): boolean => s.dataState === 'unverifiable_history';
+const UNATTRIBUTED_LABEL = 'Lectura no atribuible';
+const UNATTRIBUTED_NOTE = 'lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas)';
+
 function studentStatus(s: StudentRow): 'stable' | 'risk' | 'attention' {
     if (!s.hasData)          return 'attention';
     if (s.needsAttention)    return 'risk';
@@ -391,7 +400,7 @@ const STATUS_CONFIG = {
  * Returns an ordered list of pattern type strings (highest severity first).
  */
 function detectStudentPatterns(student: StudentRow): string[] {
-    if (!student.hasData) return ['sin_actividad'];
+    if (!student.hasData) return isUnattributed(student) ? [] : ['sin_actividad'];
 
     const avgSessionMs = student.totalSessions > 0
         ? student.totalReadingTimeMs / student.totalSessions
@@ -430,7 +439,9 @@ function detectStudentPatterns(student: StudentRow): string[] {
 }
 
 function buildStudentProfileSummary(student: StudentRow, patterns: string[]): string {
-    if (!student.hasData) return 'No ha registrado actividad lectora aún.';
+    if (!student.hasData) return isUnattributed(student)
+        ? `Tiene ${UNATTRIBUTED_NOTE}. No se interpreta como falta de lectura.`
+        : 'No ha registrado actividad lectora aún.';
     if (patterns.length === 0) {
         const inProg = student.readingDetails.inProgress[0];
         if (inProg) return `Leyendo "${inProg.title}" (${inProg.progressPercentage}%) — ${student.totalSessions} sesiones.`;
@@ -706,7 +717,7 @@ interface ReaderProfileResult {
  */
 function classifyReaderProfile(student: StudentRow): ReaderProfileResult {
     if (!student.hasData || student.totalSessions < 2) {
-        return { profileId: 'sin_datos_suficientes', confidence: 'bajo', signals: ['sin_actividad'] };
+        return { profileId: 'sin_datos_suficientes', confidence: 'bajo', signals: isUnattributed(student) ? ['lectura_no_atribuible'] : ['sin_actividad'] };
     }
 
     const p = student.pedagogicalProfile;
@@ -1229,7 +1240,7 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
                     </p>
                     {recs.immediateAction && (
                         <p className="text-xs text-indigo-600 dark:text-indigo-400 leading-relaxed">
-                            → {recs.immediateAction}
+                            → {isUnattributed(student) ? 'El avance del curso se mostrará con la lectura que haga a partir de ahora.' : recs.immediateAction}
                         </p>
                     )}
                 </div>
@@ -1244,7 +1255,7 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
                         </button>
                     )}
                     <span className="text-xs tabular-nums text-gray-400 dark:text-gray-500">
-                        {student.totalSessions} ses.
+                        {isUnattributed(student) ? UNATTRIBUTED_LABEL : `${student.totalSessions} ses.`}
                     </span>
                     {student.totalReadingTimeMs > 0 && (
                         <span className="text-xs tabular-nums text-gray-400 dark:text-gray-500">
@@ -1393,7 +1404,7 @@ const StudentTable: React.FC<{ students: StudentRow[] }> = ({ students }) => {
         });
     }, [students, sortKey, sortDir, onlyAlerts]);
 
-    const attentionCount = students.filter(s => s.needsAttention || !s.hasData).length;
+    const attentionCount = students.filter(s => (s.needsAttention || !s.hasData) && !isUnattributed(s)).length;
 
     const Th: React.FC<{ col: SortKey; className?: string; children: React.ReactNode }> = ({ col, className = '', children }) => (
         <th
@@ -1444,7 +1455,7 @@ const StudentTable: React.FC<{ students: StudentRow[] }> = ({ students }) => {
                         <tbody className="divide-y divide-gray-50 dark:divide-gray-700/50">
                             {visible.map(student => {
                                 const status = studentStatus(student);
-                                const sc     = STATUS_CONFIG[status];
+                                const sc     = isUnattributed(student) ? { ...STATUS_CONFIG[status], label: UNATTRIBUTED_LABEL } : STATUS_CONFIG[status];
                                 return (
                                     <tr
                                         key={student.userId}
@@ -1492,7 +1503,7 @@ const StudentTable: React.FC<{ students: StudentRow[] }> = ({ students }) => {
                                             {student.hasData ? student.reflective : '—'}
                                         </td>
                                         <td className="px-3 py-2.5 text-gray-600 dark:text-gray-400 tabular-nums">
-                                            {student.totalSessions}
+                                            {isUnattributed(student) ? '—' : student.totalSessions}
                                         </td>
                                         <td className="px-3 py-2.5 text-gray-600 dark:text-gray-400 tabular-nums text-xs">
                                             {student.hasData ? formatDuration(student.totalReadingTimeMs) : '—'}
@@ -1691,9 +1702,18 @@ const DashboardMediador: React.FC = () => {
                         <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                             {data.aggregateOnly ? describeRosterCount(summary.studentCount) : describeReaderCoverage(summary.studentCount, rosterCount)} &bull; {summary.activeStudentCount} activos &bull; {pct(summary.engagementRate)} participación
                         </p>
+                        {data.courseAttribution?.course_has_works === false && (
+                            <p role="note" data-testid="dashboard-no-course-works" className="text-sm text-gray-600 dark:text-gray-300 mt-2 max-w-xl">Este curso no tiene obras asociadas: no hay lectura del curso que mostrar. Las cifras en cero no significan que sus estudiantes no lean.</p>
+                        )}
+                        {/* V9 F7-C2R-U3B — lectura que existe pero no puede atribuirse al curso: no es inactividad. */}
+                        {(data.courseAttribution?.readers_with_unverifiable_history ?? 0) > 0 && (
+                            <p role="note" data-testid="dashboard-unverifiable-history" className="text-sm text-gray-600 dark:text-gray-300 mt-2 max-w-xl">
+                                {data.courseAttribution!.readers_with_unverifiable_history} {data.courseAttribution!.readers_with_unverifiable_history === 1 ? 'estudiante tiene' : 'estudiantes tienen'} {UNATTRIBUTED_NOTE}. Esa lectura no entra en las cifras del curso y no cuenta como inactividad.
+                            </p>
+                        )}
                         {/* Interpretive sentence */}
                         <p className="text-sm text-gray-600 dark:text-gray-400 mt-2 max-w-xl leading-relaxed">
-                            {interpretation}
+                            {data.courseAttribution?.course_has_works === false ? '' : interpretation}
                         </p>
                     </div>
                     <div className="flex items-center gap-2 mt-1">
