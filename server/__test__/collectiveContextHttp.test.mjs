@@ -344,8 +344,11 @@ try {
             && p.readers === 5 && p.confidence === 0.5 && rs[0].json.min_support === 5 && rs[0].json.min_cohort === 5, JSON.stringify(rs[0].json).slice(0, 400));
         ok('es un recuento de lo observado: no nombra lectores ni predice nada de ninguno', !/"ra-\d"|user_id|probab|predic/i.test(rs[0].text));
         ok('los episodios del lector sin A2 (quince días de abandonos) no entran en el soporte', p.support_count === 5);
+        // Que su único lector llegue a tener un episodio contado depende de dónde caen los cortes diarios de la semana en
+        // curso (64A: de jueves a sábado no lo hay). Lo que se afirma es que no recibe NINGÚN patrón, ni el de la otra institución.
         const b = await both(PAT, C['med-b']);
-        ok('la otra institución, con el mismo tipo de riesgo, no ve este patrón: el suyo no alcanza el soporte y se dice', b.every((r) => r.status === 200 && r.json.patterns.length === 0 && r.json.withheld_below_support === 1 && r.json.population.eligible === 1));
+        ok('la otra institución, con el mismo tipo de riesgo, no ve este patrón: el suyo no alcanza el soporte y se dice', b.every((r) => r.status === 200 && r.json.patterns.length === 0 && r.json.withheld_below_support <= 1 && r.json.population.eligible === 1
+            && r.json.population.roster === 1 && !/ctxpat_|support_count|"ra-\d"/.test(r.text)), st(b));
         const stRs = await both(STATUS, C['med-a']);
         ok('los totales de la pestaña ya no están en cero: cohortes con miembros, trayectorias divulgables y patrones de SUS cursos', stRs.every((r) => r.status === 200 && r.json.context === true && r.json.cohorts.total_active >= 5
             && r.json.trajectories.total >= 1 && r.json.patterns.total_active === 1 && r.json.population.eligible === 7 && !MARK.test(r.text)), st(stRs));
