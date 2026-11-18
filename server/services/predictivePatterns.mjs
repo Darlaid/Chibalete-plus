@@ -27,10 +27,10 @@ import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 import { predictivePatternsTotal } from '../observability/metrics.js';
 
 export const ENABLED = () => process.env.AULA_VIVA_PREDICTIVE_PATTERNS_ENABLED === '1';
-const MIN_SUPPORT = Number(process.env.AULA_VIVA_PATTERN_MIN_SUPPORT || 5);
-const PATTERN_VERSION = 1;
+export const MIN_SUPPORT = Number(process.env.AULA_VIVA_PATTERN_MIN_SUPPORT || 5);
+export const PATTERN_VERSION = 1;
 
-function confidenceFromSupport(n) {
+export function confidenceFromSupport(n) {
     if (n < 5) return 0.2;
     if (n < 20) return 0.5;
     if (n < 50) return 0.7;

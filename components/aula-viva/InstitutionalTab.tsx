@@ -15,8 +15,10 @@ import { ChevronDown, ChevronUp, Lightbulb, Users, Activity, Clock } from 'lucid
 import {
     aulaVivaInstitutionalService,
     type InstitutionalStatus, type InstitutionalLearning,
-    type ComparativeStrategies, type CohortDefinition,
+    type ComparativeStrategies, type CohortDefinition, type CollectiveMeta, type ObservedPatterns,
 } from '../../services/aulaVivaInstitutionalService';
+import { dataService } from '../../services/dataService';
+import { cohortLabel, ruleLabel, describeCollectiveState, describeSuppressed } from '../../utils/pedagogicalStates';
 import { fetchMetaOf, describeFetchFailure, type FetchMeta } from '../../services/aulaVivaOperationalService';
 import { EmptyState } from './EmptyState';
 import { InstitutionalLearningCard } from './InstitutionalLearningCard';
@@ -54,18 +56,22 @@ export const InstitutionalTab: React.FC = () => {
     const [trajCohort, setTrajCohort] = useState<CohortDefinition | null>(null);
     const [trajSeries, setTrajSeries] = useState<Array<any>>([]);
     const [trajMeta, setTrajMeta] = useState<FetchMeta>({});
+    // V9 F7-C2R-U3D — estado y población de la trayectoria abierta, y patrones observados.
+    const [trajInfo, setTrajInfo] = useState<CollectiveMeta>({});
+    const [patterns, setPatterns] = useState<ObservedPatterns>({ patterns: [] });
     const [loading, setLoading] = useState(true);
 
     const refresh = useCallback(async () => {
-        const [s, l, c, cd, fq] = await Promise.all([
+        const [s, l, c, cd, fq, pt] = await Promise.all([
             aulaVivaInstitutionalService.getStatus(),
             aulaVivaInstitutionalService.getLearningsGlobal(),
             aulaVivaInstitutionalService.getComparativeStrategies(),
             aulaVivaInstitutionalService.getCohortDefinitions(),
             aulaVivaInstitutionalService.getFollowupQueue(),
+            aulaVivaInstitutionalService.getPatternsRecent(),
         ]);
         setStatus(s); setLearnings(l); setComparative(c);
-        setCohorts(cd); setFollowup(fq);
+        setCohorts(cd); setFollowup(fq); setPatterns(pt);
         setLoading(false);
     }, []);
 
@@ -74,6 +80,7 @@ export const InstitutionalTab: React.FC = () => {
         const r = await aulaVivaInstitutionalService.getCohortTrajectory(cohort.cohort_id);
         setTrajSeries(r.series || []);
         setTrajMeta(fetchMetaOf(r));
+        setTrajInfo(r);
     }, []);
 
     useEffect(() => { refresh(); }, [refresh]);
@@ -89,6 +96,11 @@ export const InstitutionalTab: React.FC = () => {
     const cachedMetas = [statusMeta, learningsMeta, comparativeMeta, cohortsMeta, followupMeta].filter(m => m.cached);
     const cachedAgeMin = Math.max(0, ...cachedMetas.map(m => Math.round((m.age_ms ?? 0) / 60000)));
     const kpi = (v: number | undefined) => (statusMeta.failed ? '—' : v ?? 0);
+    // V9 F7-C2R-U3D — nombres para docentes y estados de la evidencia colectiva (nunca claves técnicas ni ceros mudos).
+    const cohortName = (c: CohortDefinition) => cohortLabel(c, id => dataService.getAllGroups().find(g => g.id === id)?.name);
+    const patternsMeta = fetchMetaOf(patterns);
+    const trajState = describeCollectiveState(trajInfo.data_state, trajInfo.reason);
+    const patternsState = describeCollectiveState(patterns.data_state, patterns.reason);
     const count = (m: FetchMeta, n: number, unit: string) => (m.failed ? 'no se pudo consultar' : `${n} ${unit}`);
     const Failed: React.FC<{ meta: FetchMeta; where: string; what: string; note?: string }> = ({ meta, where, what, note }) => (
         <div className="mt-3">
@@ -189,13 +201,13 @@ export const InstitutionalTab: React.FC = () => {
 
             {/* Cohortes + trayectorias */}
             <Section title="Cohortes y trayectorias" icon={Users}
-                     subtitle={count(cohortsMeta, cohorts.length, 'cohortes activas')}>
+                     subtitle={count(cohortsMeta, cohorts.length, 'cohortes consultables')}>
                 {cohortsMeta.failed ? (
                     <Failed meta={cohortsMeta} where="cohort_definitions_failed" what="las cohortes"/>
                 ) : cohorts.length === 0 ? (
                     <EmptyState kind="snapshots_pending" where="cohort_definitions"
                                 title="Sin cohortes construidas todavía"
-                                body="Activa AULA_VIVA_COHORT_BUILDER_ENABLED y espera al próximo ciclo del scheduler."/>
+                                body="Todavía no hay cohortes que consultar. Aparecerán cuando el curso tenga lectores con seguimiento habilitado."/>
                 ) : (
                     <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                         <div className="space-y-1 max-h-72 overflow-y-auto pr-2">
@@ -204,7 +216,7 @@ export const InstitutionalTab: React.FC = () => {
                                         onClick={() => openTrajectory(c)}
                                         className={`w-full text-left px-2 py-1.5 rounded text-xs hover:bg-gray-100
                                                     ${trajCohort?.cohort_id === c.cohort_id ? 'bg-blue-50' : ''}`}>
-                                    <span className="font-medium text-gray-900">{c.cohort_key}</span>
+                                    <span className="font-medium text-gray-900">{cohortName(c)}</span>
                                 </button>
                             ))}
                         </div>
@@ -215,17 +227,51 @@ export const InstitutionalTab: React.FC = () => {
                                 </p>
                             ) : trajMeta.failed ? (
                                 <EmptyState kind="custom" where="cohort_trajectory_failed"
-                                            title={`No pudimos consultar la trayectoria de ${trajCohort.cohort_key}`}
+                                            title={`No pudimos consultar la trayectoria de «${cohortName(trajCohort)}»`}
                                             body={describeFetchFailure(trajMeta, 'Reintentar')}/>
+                            ) : trajState ? (
+                                <div role="status" data-testid="trajectory-state" data-state={trajState.kind}>
+                                    <p className="text-sm font-semibold text-gray-900">{trajState.title}</p>
+                                    <p className="mt-1 text-sm text-gray-600">{trajState.body}</p>
+                                </div>
+                            ) : trajInfo.suppressed || (trajSeries.length === 0 && (trajInfo.suppressed_points ?? 0) > 0) ? (
+                                <div role="status" data-testid="trajectory-suppressed">
+                                    <p className="text-sm font-semibold text-gray-900">Sin trayectoria que mostrar para «{cohortName(trajCohort)}»</p>
+                                    <p className="mt-1 text-sm text-gray-600">{describeSuppressed(trajInfo.minCohort ?? trajInfo.min_cohort ?? 5, trajInfo.suppressed ? trajInfo.population?.members : undefined)}</p>
+                                </div>
                             ) : trajSeries.length === 0 ? (
                                 <EmptyState kind="snapshots_pending" where="cohort_trajectory_empty"
-                                            title={`Sin serie temporal para ${trajCohort.cohort_key}`}
-                                            body="Active AULA_VIVA_TRAJECTORY_ENABLED y espere al próximo ciclo."/>
+                                            title={`Sin serie temporal para «${cohortName(trajCohort)}»`}
+                                            body="Todavía no hay cortes con indicadores para esta cohorte."/>
                             ) : (
                                 <>
                                     <h4 className="text-xs font-medium text-gray-700 mb-2">
-                                        {trajCohort.cohort_key} · {trajSeries.length} puntos
+                                        {cohortName(trajCohort)} · {trajSeries.length} {trajSeries.length === 1 ? 'corte semanal' : 'cortes semanales'}
                                     </h4>
+                                    {trajInfo.population && (
+                                        <p data-testid="trajectory-population" className="text-xs text-gray-600 mb-2">
+                                            {trajInfo.population.members ?? trajInfo.population.eligible} {(trajInfo.population.members ?? trajInfo.population.eligible) === 1 ? 'lector' : 'lectores'} en la cohorte, de {trajInfo.population.eligible} con seguimiento habilitado ({trajInfo.population.roster} en la nómina). Último corte: promedio de {trajSeries[0]?.sample_size} lectores con indicadores.
+                                            {(trajInfo.suppressed_points ?? 0) > 0 && ` ${trajInfo.suppressed_points} ${trajInfo.suppressed_points === 1 ? 'corte no se muestra' : 'cortes no se muestran'} por tener menos de ${trajInfo.min_cohort ?? 5} lectores.`}
+                                        </p>
+                                    )}
+                                    {/* V9 F7-C2R-U3D — valores del último corte, legibles aunque solo haya un punto. */}
+                                    {trajSeries[0] && (
+                                        <table className="w-full text-xs mb-3" data-testid="trajectory-latest">
+                                            <caption className="text-left text-[10px] uppercase text-gray-500 mb-1">Último corte (promedio de la cohorte)</caption>
+                                            <tbody>
+                                                {([['continuidad_semanal', 'Continuidad semanal'], ['engagement_score', 'Compromiso lector'], ['abandono_risk', 'Señal de abandono']] as const).map(([k, label]) => {
+                                                    const v = trajSeries[0].metrics?.[k], t = trajSeries[0].trend?.[k];
+                                                    return (
+                                                        <tr key={k} className="border-t border-gray-100">
+                                                            <th scope="row" className="py-1 pr-2 font-normal text-left text-gray-700">{label}</th>
+                                                            <td className="py-1 pr-2 tabular-nums">{typeof v === 'number' ? `${Math.round(v * 100)} %` : 'sin dato'}</td>
+                                                            <td className="py-1 text-gray-500">{t === 'up' ? 'sube frente al corte anterior' : t === 'down' ? 'baja frente al corte anterior' : t === 'flat' ? 'estable' : 'sin corte anterior comparable'}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    )}
                                     <CohortTrajectorySVG series={trajSeries} metric="engagement_score"
                                                           label="engagement score" color="#3B82F6"/>
                                     <CohortTrajectorySVG series={trajSeries} metric="continuidad_semanal"
@@ -235,6 +281,53 @@ export const InstitutionalTab: React.FC = () => {
                                 </>
                             )}
                         </div>
+                    </div>
+                )}
+            </Section>
+
+            {/* V9 F7-C2R-U3D — patrones observados (recuento de señales, no predicción sobre ningún lector) */}
+            <Section title="Patrones observados" icon={Activity}
+                     subtitle={count(patternsMeta, patterns.patterns.length, patterns.patterns.length === 1 ? 'patrón' : 'patrones')}>
+                {patternsMeta.failed ? (
+                    <Failed meta={patternsMeta} where="observed_patterns_failed" what="los patrones observados"
+                            note="Esto no significa que no haya patrones."/>
+                ) : patternsState ? (
+                    <div role="status" data-testid="patterns-state" data-state={patternsState.kind} className="mt-3">
+                        <p className="text-sm font-semibold text-gray-900">{patternsState.title}</p>
+                        <p className="mt-1 text-sm text-gray-600">{patternsState.body}</p>
+                    </div>
+                ) : (
+                    <div className="mt-3" data-testid="observed-patterns">
+                        <p className="text-xs text-gray-500 mb-3 italic">
+                            Cuenta cuántas veces se observó cada señal en {patterns.context ? 'tus cursos' : 'la plataforma'}{patterns.weeks ? ` durante las últimas ${patterns.weeks} semanas` : ''}. Es una observación agregada: no predice nada sobre ningún lector.
+                            {patterns.population && ` Población: ${patterns.population.eligible} ${patterns.population.eligible === 1 ? 'lector' : 'lectores'} con seguimiento habilitado, de ${patterns.population.roster} en la nómina.`}
+                        </p>
+                        {patterns.patterns.length === 0 ? (
+                            <p role="status" data-testid="patterns-empty" className="text-sm text-gray-600">
+                                {(patterns.withheld_below_support ?? 0) > 0
+                                    ? `Se han observado señales, pero ninguna reúne todavía el mínimo para mostrarse como patrón (al menos ${patterns.min_support ?? 5} observaciones de ${patterns.min_cohort ?? 5} lectores distintos).`
+                                    : 'No se han observado señales repetidas en el período.'}
+                            </p>
+                        ) : (
+                            <table className="w-full text-sm">
+                                <thead>
+                                    <tr className="text-left text-[10px] uppercase text-gray-500">
+                                        <th scope="col" className="py-1">Señal observada</th><th scope="col" className="py-1">Veces</th>
+                                        <th scope="col" className="py-1">Lectores</th><th scope="col" className="py-1">Solidez de la evidencia</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {patterns.patterns.map(p => (
+                                        <tr key={p.pattern_id} className="border-t border-gray-100">
+                                            <th scope="row" className="py-2 pr-2 font-medium text-gray-900 text-left">{ruleLabel(p.observed_outcome)}</th>
+                                            <td className="py-2 pr-2 tabular-nums">{p.support_count}</td>
+                                            <td className="py-2 pr-2 tabular-nums">{p.readers ?? '—'}</td>
+                                            <td className="py-2">{p.confidence >= 0.7 ? 'alta' : p.confidence >= 0.4 ? 'media' : 'baja'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
                     </div>
                 )}
             </Section>

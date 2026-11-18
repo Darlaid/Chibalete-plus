@@ -11740,11 +11740,14 @@ async function aulaVivaContextReaders(callerId, { onlyGroup = null, historyDays 
     const readers = [];
     for (const [readerId, gids] of shared) {
         if (!gids) continue;
-        readers.push({ readerId,
+        readers.push({ readerId, groupIds: gids,
             context: buildPedagogicalContext({ readerId, groups: gids.map(gid => ({ groupId: gid, works: works.get(gid) })), intervals }),
             events: readOwnEventHistory(readerId, nowTs - (historyDays ?? CONTEXT_WINDOW_DAYS) * 86_400_000) });
     }
-    return { ok: true, nowTs, readers, roster: shared.size, mediatorIds: groupMediatorIds(rosters.keys()) };
+    // V9 F7-C2R-U3D: los cursos y clubes mediados (para las cohortes de nómina de quien media).
+    const allGroups = readJSON(GROUPS_DB) || [];
+    const groups = [...rosters.keys()].map(gid => { const g = allGroups.find(x => x?.id === gid); return { id: gid, type: g?.type === 'club' ? 'club' : 'course', name: g?.name ?? gid }; });
+    return { ok: true, nowTs, readers, roster: shared.size, mediatorIds: groupMediatorIds(rosters.keys()), groups };
 }
 const aulaVivaContextOverview = (callerId) => aulaVivaContextReaders(callerId);
 const aulaVivaContextGroup = (callerId, groupId, opts = {}) => aulaVivaContextReaders(callerId, { onlyGroup: groupId, ...opts });

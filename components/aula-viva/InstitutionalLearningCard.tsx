@@ -1,3 +1,4 @@
+import { interventionLabel, learningHintText } from '../../utils/pedagogicalStates';
 import React from 'react';
 import { Lightbulb, Info } from 'lucide-react';
 import { OutcomeDistributionBars } from './OutcomeDistributionBars';
@@ -29,11 +30,11 @@ export const InstitutionalLearningCard: React.FC<{
                 <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-[10px] uppercase tracking-wide text-gray-500">
-                            {learning.scope_type}:{learning.scope_id}
+                            {learning.scope_type === 'group' ? 'Este curso' : learning.scope_type === 'club' ? 'Este club' : learning.scope_type === 'cursos' ? 'Tus cursos' : `${learning.scope_type}:${learning.scope_id}`}
                         </span>
                         {intervention && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
-                                {intervention.replace(/_/g, ' ')}
+                                {interventionLabel(intervention)}
                             </span>
                         )}
                         <span className="text-[10px] text-gray-500">
@@ -44,7 +45,7 @@ export const InstitutionalLearningCard: React.FC<{
                         </span>
                     </div>
                     <p className="mt-2 text-sm text-gray-800 leading-snug">
-                        {learning.recommendation_hint}
+                        {learningHintText(learning.recommendation_hint, learning.scope_type)}
                     </p>
                 </div>
             </div>

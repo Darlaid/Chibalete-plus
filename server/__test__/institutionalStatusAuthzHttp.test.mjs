@@ -225,7 +225,7 @@ try {
     {
         const a = await both(STATUS, C['med-a']);
         ok('mediadora A: 200, igual en las dos réplicas y NO los recuentos globales', a.every((r) => r.status === 200) && sameBody(a) && !isGlobalStatus(a[0].json) && a[0].json.context === true, st(a));
-        ok('…sus propios recuentos: 1 comparación de su curso, población de sus lectores habilitados', a[0].json.outcomes.total === 1 && a[0].json.population.eligible === 6 && a[0].json.cohorts.total_active === 0
+        ok('…sus propios recuentos: 1 comparación de su curso, población de sus lectores habilitados', a[0].json.outcomes.total === 1 && a[0].json.population.eligible === 6 && a[0].json.cohorts.total_active >= 1
             && a[0].json.learnings.total_active === 0 && a[0].json.patterns.total_active === 0, JSON.stringify(a[0].json));
         ok('…sin la estrategia ni las filas de la otra institución', a.every((r) => !GLOBAL_MARK.test(r.text) && !/worsened":1[01]/.test(r.text)));
         const b = await both(STATUS, C['med-b']);
@@ -255,11 +255,14 @@ try {
             ok(`${p.replace(I, '')} — mediadora A: nada de otras instituciones ni recuentos globales`, med.every((r) => [200, 403].includes(r.status) && !GLOBAL_MARK.test(r.text.replace('"intervention_type":"estrategia_global"', '')) && !/"total":1\d/.test(r.text)) && JSON.stringify(med[0].json) === JSON.stringify(med[1].json), st(med));   // el nombre de la estrategia consultada es eco de la propia petición
         }
         const defs = await both(`${I}/cohorts/definitions`, C['med-a']), byType = await both(`${I}/cohorts/by-type/group`, C['med-a']);
-        ok('definiciones de cohortes: la de su curso y las tipadas; no las de otros cursos o colegios', defs.every((r) => r.status === 200 && r.json.map((c) => c.cohort_id).sort().join() === 'coh-g-a,coh-risk'), st(defs));
-        ok('cohortes por tipo «group»: solo la de su curso', byType.every((r) => r.status === 200 && r.json.map((c) => c.cohort_id).join() === 'coh-g-a'), st(byType));
+        ok('definiciones de cohortes: la de su curso y las tipadas; no las de otros cursos o colegios', defs.every((r) => r.status === 200 && r.json.every((c) => c.context === true) && r.json.filter((c) => ['group', 'club', 'school'].includes(c.cohort_type)).map((c) => c.cohort_key).join() === 'group:g-a'
+            && r.json.some((c) => c.cohort_key === 'habit:high_continuity') && !/g-b|org-/.test(r.text)), st(defs));   // V9 F7-C2R-U3D: definiciones del contexto (abstractas)
+        ok('cohortes por tipo «group»: solo la de su curso', byType.every((r) => r.status === 200 && r.json.map((c) => c.cohort_key).join() === 'group:g-a'), st(byType));
         const bt = await both(`${I}/outcomes/by-type/lectura_guiada`, C['med-a']);
         ok('impacto por estrategia: el de sus cursos (1 caso), no el global', bt.every((r) => r.status === 200 && r.json.total === 1 && r.json.intervention_type === 'lectura_guiada'), st(bt));
-        ok('patrones predictivos (agregado entre instituciones, sin versión por curso): no se entregan a quien media', (await both(`${I}/patterns/recent`, C['med-a'])).every((r) => denied(r, 403)));
+        // V9 F7-C2R-U3D: quien media recibe los patrones OBSERVADOS en sus cursos (aquí ninguno alcanza el soporte), nunca los guardados.
+        ok('patrones: los de sus cursos, con población y umbrales; no el agregado guardado entre instituciones', (await both(`${I}/patterns/recent`, C['med-a'])).every((r) => r.status === 200 && r.json.context === true
+            && Array.isArray(r.json.patterns) && r.json.patterns.length === 0 && r.json.population.eligible === 6 && r.json.min_support === 5 && !/pat_|support_count":[1-9]/.test(r.text)));
         const tr = await both(`${I}/cohorts/coh-g-b/trajectory`, C['med-a']), mem = await both(`${I}/cohorts/coh-g-b/members`, C['med-a']);
         ok('trayectoria y miembros de la cohorte de otro curso: denegados', [...tr, ...mem].every((r) => r.status === 403 && !/sample_size|members_count/.test(r.text)), st(tr));
     }

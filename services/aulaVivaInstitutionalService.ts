@@ -106,6 +106,20 @@ export interface InstitutionalStatus {
     trajectories: { total: number };
     learnings: { total_active: number };
     patterns: { total_active: number };
+    // V9 F7-C2R-U3D — vista de quien media: recuentos de su contexto, con la población y el estado de la evidencia.
+    context?: boolean; population?: { roster: number; eligible: number }; data_state?: string; reason?: string | null;
+}
+
+/** V9 F7-C2R-U3D — estado y población que acompañan a un agregado colectivo de quien media. */
+export interface CollectiveMeta {
+    context?: boolean; population?: { roster: number; eligible: number; members?: number };
+    data_state?: string; reason?: string | null; suppressed?: boolean; minCohort?: number; min_cohort?: number; suppressed_points?: number;
+}
+export interface ObservedPattern {
+    pattern_id: string; pattern_key: string; observed_outcome: string; support_count: number; readers?: number; confidence: number;
+}
+export interface ObservedPatterns extends CollectiveMeta {
+    patterns: ObservedPattern[]; withheld_below_support?: number; min_support?: number; weeks?: number;
 }
 
 export interface OutcomeByType {
@@ -198,7 +212,7 @@ export const aulaVivaInstitutionalService = {
               members_count: 0, members: [] }),
 
     getCohortTrajectory: (cohortId: string, period = '28d') =>
-        get<{ cohort_id: string; period: string; series: CohortTrajectoryPoint[] }>(
+        get<{ cohort_id: string; period: string; series: CohortTrajectoryPoint[] } & CollectiveMeta>(
             `/cohorts/${encodeURIComponent(cohortId)}/trajectory?period=${encodeURIComponent(period)}`,
             { cohort_id: cohortId, period, series: [] }),
 
@@ -208,7 +222,11 @@ export const aulaVivaInstitutionalService = {
         get<InstitutionalLearning[]>(
             `/learnings/scope/${scope_type}/${encodeURIComponent(scope_id)}`, []),
 
-    getPatternsRecent: () => get<Array<any>>('/patterns/recent', []),
+    // La administración recibe la lista guardada; quien media, un objeto con los patrones de sus cursos y su estado.
+    getPatternsRecent: async (): Promise<ObservedPatterns> => {
+        const r = await get<ObservedPattern[] | ObservedPatterns>('/patterns/recent', { patterns: [] });
+        return withMeta(Array.isArray(r) ? { patterns: r } : r, (r as { _meta?: FetchMeta })._meta ?? {});
+    },
 
     getComparativeStrategies: () => get<ComparativeStrategies>('/comparative/strategies', {
         strategies: [], vocabulary_class: 'observational', caveat: 'no_data_yet',

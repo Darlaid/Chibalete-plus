@@ -23,13 +23,13 @@ export const ENABLED = () => process.env.AULA_VIVA_TRAJECTORY_ENABLED === '1';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function avg(xs) {
+export function avg(xs) {
     const vals = xs.filter(x => typeof x === 'number' && isFinite(x));
     if (!vals.length) return null;
     return +(vals.reduce((s, x) => s + x, 0) / vals.length).toFixed(3);
 }
 
-function trendOf(curr, prev) {
+export function trendOf(curr, prev) {
     if (typeof curr !== 'number' || typeof prev !== 'number') return null;
     const delta = curr - prev;
     if (Math.abs(delta) < 0.05) return 'flat';

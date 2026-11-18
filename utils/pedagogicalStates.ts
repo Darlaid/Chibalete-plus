@@ -147,3 +147,73 @@ export function describeImpactState(row: Pick<ImpactRow, 'data_state' | 'outcome
     }
     return `Resultado calculado: ${outcomeLabel(row.outcome_label).toLowerCase()}.`;
 }
+
+// ── Analítica colectiva (V9 F7-C2R-U3D) ─────────────────────────────────────
+
+const RULE_LABEL: Record<string, string> = {
+    abandono_alto: 'Patrón de abandono temprano', fatiga_lectora: 'Posible fatiga lectora',
+    invisibilidad_prolongada: 'Sin actividad lectora reciente', alta_autonomia: 'Buen momento para explorar más géneros',
+    diversidad_baja: 'Lectura concentrada en pocos contenidos', deterioro_continuidad: 'Continuidad semanal descendió',
+    mejora_destacada: 'Mejora notable en compromiso lector', habito_emergente: 'Hábito de lectura emergente',
+};
+/** Nombre para docentes de una regla pedagógica (las mismas etiquetas de las recomendaciones individuales). */
+export function ruleLabel(id: unknown): string {
+    return (typeof id === 'string' && RULE_LABEL[id]) || (typeof id === 'string' ? id.replace(/_/g, ' ') : 'Observación');
+}
+
+/** Nombre para docentes de una cohorte; la clave técnica (`risk:abandono_alto`) nunca se muestra. */
+export function cohortLabel(c: { cohort_type: string; scope_id: string }, groupName?: (id: string) => string | undefined): string {
+    switch (c.cohort_type) {
+        case 'group': return `Curso: ${groupName?.(c.scope_id) ?? 'curso'}`;
+        case 'club': return `Club: ${groupName?.(c.scope_id) ?? 'club de lectura'}`;
+        case 'school': return 'Colegio';
+        case 'habit': return c.scope_id === 'high_continuity' ? 'Hábito: continuidad alta de lectura' : 'Hábito de lectura';
+        case 'trajectory': return c.scope_id === 'recovered_after_risk' ? 'Trayectoria: superaron una señal de riesgo' : 'Trayectoria';
+        case 'modality': return c.scope_id === 'audio_plus_immersive' ? 'Modalidad: lectura inmersiva y con audio' : 'Modalidad de lectura';
+        case 'intervention': return `Estrategia recibida: ${interventionLabel(c.scope_id)}`;
+        case 'risk': return `Señal activa: ${ruleLabel(c.scope_id)}`;
+        default: return 'Cohorte';
+    }
+}
+
+/**
+ * Estado de la evidencia de un agregado colectivo (una trayectoria, los patrones). null si hay lectores con
+ * indicadores. Nunca afirma nada sobre cómo lee el grupo.
+ */
+export function describeCollectiveState(state: unknown, reason?: unknown): StateText | null {
+    if (state === 'ok' || state === undefined || state === null) return null;
+    if (state === 'no_eligible_readers') {
+        return { kind: 'no_eligible_readers', title: 'Sin lectores con seguimiento habilitado',
+            body: 'Ningún lector de tus cursos tiene habilitado el seguimiento individual para tu cuenta, así que no hay información colectiva que calcular. Esto no describe la actividad del grupo.' };
+    }
+    if (state === 'no_course_works' || reason === 'no_course_works') {
+        return { kind: 'no_course_works', title: 'Curso sin obras asociadas',
+            body: 'El curso no tiene obras asociadas, así que no hay lectura del curso con la que calcular agregados. Esto no describe cuánto leen sus estudiantes.' };
+    }
+    if (reason === 'provenance_not_recorded') {
+        return { kind: 'ledger_off', title: 'Registro contextual todavía no habilitado',
+            body: 'La plataforma aún no registra desde cuándo cada obra pertenece al curso ni desde cuándo cada lector está en él. Sin esas fechas no se puede saber qué actividad es del curso y no se calculan agregados. No significa que el grupo no lea.' };
+    }
+    if (reason === 'unverifiable_history') {
+        return { kind: 'unverifiable_history', title: 'Lectura histórica no atribuible al curso',
+            body: 'La actividad registrada ocurrió antes de la asignación de las obras, del ingreso de los lectores o del registro de esas fechas. No se usa para calcular agregados del curso ni se interpreta como falta de lectura.' };
+    }
+    if (state === 'no_activity') {
+        return { kind: 'no_activity', title: 'Sin actividad en las obras del curso',
+            body: 'No hay lectura registrada de las obras del curso en el período observado. No se calculan agregados.' };
+    }
+    return { kind: 'insufficient', title: 'Información insuficiente',
+        body: 'Todavía hay muy poca actividad del curso para calcular agregados confiables. Se mostrarán cuando haya más evidencia.' };
+}
+
+/** Texto para una serie o un agregado que no se entrega por tener menos lectores que el mínimo de divulgación. */
+export function describeSuppressed(min: number, members?: number): string {
+    return `Esta cohorte reúne ${typeof members === 'number' ? `${members} ${members === 1 ? 'lector' : 'lectores'} con seguimiento` : 'pocos lectores'}; los agregados solo se muestran con al menos ${min}, para que no describan a personas concretas. No significa que no haya actividad.`;
+}
+
+/** Indicación de un aprendizaje sin la etiqueta técnica del ámbito («En el scope group:g-a, …»). */
+export function learningHintText(hint: unknown, scopeType?: string): string {
+    if (typeof hint !== 'string') return '';
+    const where = scopeType === 'group' ? 'En este curso' : scopeType === 'club' ? 'En este club' : scopeType === 'cursos' ? 'En tus cursos' : null;
+    return where ? hint.replace(/^En el scope [^,]+,/, `${where},`).replace(/"([a-z_]+)"/g, (_m, t) => `«${interventionLabel(t)}»`) : hint;
+}

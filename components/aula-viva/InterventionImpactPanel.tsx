@@ -12,6 +12,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Activity, RefreshCw } from 'lucide-react';
 import { describeInstitutionalError, describeNoEligibleReaders } from '../../utils/institutionalErrors';
+import { InstitutionalLearningCard } from './InstitutionalLearningCard';
+import type { InstitutionalLearning } from '../../services/aulaVivaInstitutionalService';
 import {
     impactStateOf, describeImpactState, outcomeLabel, interventionLabel, formatImpactValue, IMPACT_METRICS, type ImpactRow,
 } from '../../utils/pedagogicalStates';
@@ -38,6 +40,8 @@ export const InterventionImpactPanel: React.FC<{
 }> = ({ scope, nameOf }) => {
     const [load, setLoad] = useState<Load>({ status: 'loading' });
     const isGroup = scope.type === 'group';
+    // V9 F7-C2R-U3D — aprendizajes del curso (recomendación de grupo): solo en la vista de curso. null = no se pudo consultar.
+    const [learnings, setLearnings] = useState<InstitutionalLearning[] | null>([]);
 
     const refresh = useCallback(async () => {
         setLoad({ status: 'loading' });
@@ -49,6 +53,13 @@ export const InterventionImpactPanel: React.FC<{
                 return setLoad({ status: 'error', message: describeInstitutionalError(isGroup ? 'course' : 'reader', r.status, body?.error) });
             }
             setLoad({ status: 'ready', body });
+            if (isGroup) {
+                try {
+                    const l = await fetch(`/api/aula-viva/institutional/learnings/scope/group/${encodeURIComponent(scope.id)}`, { cache: 'no-store' });
+                    const list = l.ok ? await l.json() : null;
+                    setLearnings(Array.isArray(list) ? list : null);
+                } catch { setLearnings(null); }
+            }
         } catch {
             setLoad({ status: 'error', message: 'No hubo respuesta del servidor. Revisa la conexión e inténtalo de nuevo.' });
         }
@@ -138,6 +149,17 @@ export const InterventionImpactPanel: React.FC<{
                                         ))}
                                     </tbody>
                                 </table>
+                            </div>
+                        )}
+
+                        {isGroup && (
+                            <div className="mt-4" data-testid="course-learnings">
+                                <h4 className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Aprendizajes del curso</h4>
+                                {learnings === null
+                                    ? <p role="alert" className="text-sm text-red-700 dark:text-red-300">No se pudieron consultar los aprendizajes del curso. Inténtalo de nuevo con «Actualizar».</p>
+                                    : learnings.length === 0
+                                        ? <p role="status" className="text-sm text-gray-600 dark:text-gray-300">Todavía no hay aprendizajes: una estrategia genera una indicación cuando reúne al menos {b.min_support ?? 5} intervenciones en el curso. No significa que las estrategias no funcionen.</p>
+                                        : <div className="space-y-2">{learnings.map(l => <InstitutionalLearningCard key={l.learning_id} learning={l} />)}</div>}
                             </div>
                         )}
 

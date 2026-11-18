@@ -41,7 +41,9 @@ import { evaluateScopeAccess, individualAccessChecker, individualAccess, respond
 import { getPrincipal, IdentityUnavailableError } from '../identity/cis.mjs';
 import { MIN_SUPPORT as LEARNING_MIN_SUPPORT, buildHint as learningHint, computeConfidence as learningConfidence } from '../services/institutionalLearning.mjs';
 // V9 F7-C2R-U2 — perfil del lector para quien lo media: contexto pedagógico (U1), nunca el perfil global.
-import { buildContextualView, timelineBody, featureVectorBody, contextualInterventions, contextualImpactRows, impactSummaryBody } from './contextualView.mjs';
+import { buildContextualView, timelineBody, featureVectorBody, contextualInterventions, contextualImpactRows, impactSummaryBody, HISTORY_DAYS as SERIES_HISTORY_DAYS } from './contextualView.mjs';
+// V9 F7-C2R-U3D — analítica colectiva de quien media (cohortes tipadas, trayectorias, patrones) desde el contexto.
+import { contextualCohortDefinitions, parseCohortId, collectiveEntries, cohortMembers, populationState, cohortTrajectoryBody, contextualPatternsBody } from './collectiveView.mjs';
 // V9 F7-C2R-U3 — el impacto compara 14 días antes y 14 después de cada intervención: se lee toda la retención caliente.
 const IMPACT_HISTORY_DAYS = 90;
 import {
@@ -153,9 +155,11 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
      * habilitado. Es lo que alimenta su pestaña Institucional: los totales, aprendizajes y comparativas GUARDADOS salen de
      * todas las instituciones y de toda la actividad de cada lector, y no son de quien media. null si ya respondió.
      */
-    async function mediatorImpact(req, res) {
+    async function mediatorImpact(req, res, { onlyGroup = null } = {}) {
         try {
-            const o = await contextAccess.readers(callerOf(req), { historyDays: IMPACT_HISTORY_DAYS });
+            const o = onlyGroup === null ? await contextAccess.readers(callerOf(req), { historyDays: IMPACT_HISTORY_DAYS })
+                : await contextAccess.group(callerOf(req), String(onlyGroup), { historyDays: IMPACT_HISTORY_DAYS });
+            const [lScope, lId] = onlyGroup === null ? ['cursos', 'mediados'] : ['group', String(onlyGroup)];
             if (!o.ok) { res.status(o.status).json(o.body); return null; }
             const rows = o.readers.flatMap((r) => contextualImpactRows({ context: r.context, events: r.events, nowTs: o.nowTs,
                 interventions: interventionsOf(r.readerId, o.mediatorIds) }));
@@ -168,15 +172,56 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
             }
             const learnings = [...byType.values()].filter((e) => e.total >= LEARNING_MIN_SUPPORT).map((e) => {
                 const distribution = { improved: e.improved, stable: e.stable, worsened: e.worsened, mixed: e.mixed, insufficient_data: e.insufficient_data };
-                return { learning_id: `ctxlrn_${e.intervention_type}`, scope_type: 'cursos', scope_id: 'mediados', learning_type: 'observed_strategy_effect',
+                return { learning_id: `ctxlrn_${onlyGroup === null ? '' : `${lId}_`}${e.intervention_type}`, scope_type: lScope, scope_id: lId, learning_type: 'observed_strategy_effect',
                     evidence: { support_count: e.total, outcome_distribution: distribution, intervention_type: e.intervention_type, min_support_threshold: LEARNING_MIN_SUPPORT },
-                    confidence: learningConfidence(e.total), recommendation_hint: learningHint('cursos', 'mediados', e.intervention_type, distribution, e.total), active: 1 };
+                    confidence: learningConfidence(e.total), recommendation_hint: learningHint(lScope, lId, e.intervention_type, distribution, e.total), active: 1 };
             });
             return { rows, byType, learnings, population: { roster: o.roster, eligible: o.readers.length } };
         } catch {
             res.status(500).json({ ok: false, error: 'context_indicators_failed' });
             return null;
         }
+    }
+
+    /**
+     * V9 F7-C2R-U3D — lectores elegibles de quien media (todos sus cursos, o uno) con su vista y su serie contextual.
+     * null si ya respondió (403 fuera de alcance, 503 si la identidad o el registro de decisiones no son verificables).
+     * Nada de esto sale de las tablas guardadas de cohortes, trayectorias o patrones.
+     */
+    async function mediatorCollective(req, res, { onlyGroup = null } = {}) {
+        if (!contextAccess?.readers || !contextAccess?.group) { contextUnavailable(res); return null; }
+        try {
+            const o = onlyGroup === null ? await contextAccess.readers(callerOf(req), { historyDays: SERIES_HISTORY_DAYS })
+                : await contextAccess.group(callerOf(req), String(onlyGroup), { historyDays: SERIES_HISTORY_DAYS });
+            if (!o.ok) { res.status(o.status).json(o.body); return null; }
+            const entries = collectiveEntries(o.readers, o.nowTs);
+            const byReader = new Map(o.readers.map((r) => [r.readerId, interventionsOf(r.readerId, o.mediatorIds)]));
+            return { o, entries, population: { roster: o.roster, eligible: o.readers.length }, state: populationState(entries),
+                interventionsOf: (id) => byReader.get(id) ?? [],
+                interventionTypes: [...new Set([...byReader.values()].flat().map((x) => x.intervention_type))] };
+        } catch {
+            res.status(500).json({ ok: false, error: 'context_indicators_failed' });
+            return null;
+        }
+    }
+    /** Cohorte de quien media a partir de su identificador: miembros entre SUS lectores elegibles. null si ya respondió. */
+    /** Tipo y ámbito de una cohorte por su identificador contextual o, si es uno guardado, por su definición (que es abstracta). */
+    const cohortRef = (id) => {
+        const parsed = parseCohortId(id);
+        if (parsed) return parsed;
+        try {
+            const c = getOutcomesStatements().getCohortById.get(String(id));
+            return c ? parseCohortId(`coh_${c.cohort_type}:${c.scope_id}_v1`) : null;
+        } catch { return null; }
+    };
+    async function mediatorCohort(req, res) {
+        const parsed = cohortRef(req.params.cohort_id);
+        if (!parsed) { res.status(404).json({ ok: false, error: 'cohort_not_found' }); return null; }
+        const roster = parsed.cohort_type === 'group' || parsed.cohort_type === 'club';
+        const c = await mediatorCollective(req, res, roster ? { onlyGroup: parsed.scope_id } : {});
+        if (!c) return null;
+        const members = cohortMembers(parsed, c.entries, { interventionsOf: c.interventionsOf });
+        return { ...c, parsed, members, cohort_key: `${parsed.cohort_type}:${parsed.scope_id}` };
     }
 
     // ── /institutional/status ────────────────────────────────────────────
@@ -190,10 +235,19 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
             if (!m) return;
             const by_label = {};
             for (const r of m.rows) if (r.outcome_label) by_label[r.outcome_label] = (by_label[r.outcome_label] || 0) + 1;
+            // V9 F7-C2R-U3D: cohortes, trayectorias y patrones del contexto (antes se informaban en cero).
+            const c = await mediatorCollective(req, res);
+            if (!c) return;
+            const defs = contextualCohortDefinitions({ groups: c.o.groups ?? [], interventionTypes: c.interventionTypes });
+            const sizes = defs.map((d) => cohortMembers(d, c.entries, { interventionsOf: c.interventionsOf }).length);
+            const trajectories = defs.filter((d, k) => sizes[k] >= MIN_COHORT_READERS
+                && cohortTrajectoryBody({ cohort_id: d.cohort_id, members: cohortMembers(d, c.entries, { interventionsOf: c.interventionsOf }), min: MIN_COHORT_READERS }).series.length > 0).length;
             return res.json({ ts: Date.now(), outcomes: { total: Object.values(by_label).reduce((a, b) => a + b, 0), by_label,
                     pending: m.rows.filter((r) => r.data_state === 'pending').length },
-                cohorts: { total_active: 0, total_memberships: 0 }, trajectories: { total: 0 }, learnings: { total_active: m.learnings.length },
-                patterns: { total_active: 0 }, context: true, population: m.population });
+                cohorts: { total_active: sizes.filter((n) => n > 0).length, total_memberships: sizes.reduce((a, b) => a + b, 0) }, trajectories: { total: trajectories },
+                learnings: { total_active: m.learnings.length },
+                patterns: { total_active: contextualPatternsBody(c.entries, { min: MIN_COHORT_READERS }).patterns.length }, context: true, population: m.population,
+                data_state: c.state.data_state, reason: c.state.reason });
         }
         instrument('institutional.status', () => {
             safeJson(res, () => {
@@ -311,8 +365,16 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     });
 
     // ── COHORTS ──────────────────────────────────────────────────────────
-    router.get('/institutional/cohorts/definitions', requireUserAuth, (req, res) => {
+    router.get('/institutional/cohorts/definitions', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
+        // V9 F7-C2R-U3D: quien media recibe las definiciones de SU contexto (sus nóminas y las cohortes tipadas que el
+        // sistema sabe construir). Son abstractas y no dependen de que el motor global haya corrido.
+        if (!req.aulaVivaPlatformAdmin && contextAccess?.readers) {
+            const c = await mediatorCollective(req, res);
+            if (!c) return;
+            try { cohortViewsTotal.labels('definitions').inc(); } catch {}
+            return res.json(contextualCohortDefinitions({ groups: c.o.groups ?? [], interventionTypes: c.interventionTypes }).slice(0, parseLimit(req.query.limit)));
+        }
         try { cohortViewsTotal.labels('definitions').inc(); } catch {}
         instrument('institutional.cohorts_definitions', () => {
             safeJson(res, () => {
@@ -327,8 +389,14 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         });
     });
 
-    router.get('/institutional/cohorts/by-type/:type', requireUserAuth, (req, res) => {
+    router.get('/institutional/cohorts/by-type/:type', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
+        if (!req.aulaVivaPlatformAdmin && contextAccess?.readers) {   // V9 F7-C2R-U3D
+            const c = await mediatorCollective(req, res);
+            if (!c) return;
+            try { cohortViewsTotal.labels('by_type').inc(); } catch {}
+            return res.json(contextualCohortDefinitions({ groups: c.o.groups ?? [], interventionTypes: c.interventionTypes }).filter((d) => d.cohort_type === String(req.params.type)));
+        }
         try { cohortViewsTotal.labels('by_type').inc(); } catch {}
         instrument('institutional.cohorts_by_type', () => {
             safeJson(res, () => {
@@ -339,7 +407,18 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         });
     });
 
-    router.get('/institutional/cohorts/:cohort_id/members', requireUserAuth, (req, res) => {
+    router.get('/institutional/cohorts/:cohort_id/members', requireUserAuth, async (req, res) => {
+        // V9 F7-C2R-U3D: quien media consulta cualquier cohorte de su contexto (nómina o tipada) entre SUS lectores
+        // elegibles, con el criterio del constructor aplicado a la actividad del curso. Las cohortes de colegio siguen
+        // por la ruta de nóminas de abajo.
+        if (contextAccess?.readers && isMediatorOnlyCaller(callerOf(req)) && cohortRef(req.params.cohort_id)) {
+            const c = await mediatorCohort(req, res);
+            if (!c) return;
+            try { cohortViewsTotal.labels('members').inc(); } catch {}
+            const members = c.members.map((m) => ({ cohort_id: req.params.cohort_id, user_id: m.readerId, left_at: null }));
+            return res.json({ cohort_id: req.params.cohort_id, cohort_key: c.cohort_key, cohort_type: c.parsed.cohort_type, members_count: members.length,
+                members: members.slice(0, parseLimit(req.query.limit)), context: true, population: c.population, data_state: c.state.data_state, reason: c.state.reason });
+        }
         // Verificar scope del cohort (necesitamos saber scope_type+scope_id antes)
         try {
             const stmts = getOutcomesStatements();
@@ -350,19 +429,6 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
             if (!requireScope(req, res, cohort.scope_type, cohort.scope_id)) return;
             // V9 F7-C2S: pertenecer a una cohorte que no es una nómina (p. ej. una de riesgo) ES un indicador
             // individual derivado. Solo las nóminas (colegio, grupo, club) se listan para quien media.
-            // V9 F7-C2R-U3: una cohorte de RIESGO se resuelve para quien media con el riesgo contextual de sus lectores
-            // (los que tienen ese riesgo activo en el curso). Las demás cohortes derivadas siguen retenidas.
-            if (!req.aulaVivaPlatformAdmin && String(cohort.cohort_type) === 'risk' && contextAccess?.overview) {
-                return contextAccess.overview(req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']).then((o) => {
-                    if (!o.ok) return res.status(o.status).json(o.body);
-                    const members = o.readers.map((r) => buildContextualView({ context: r.context, events: r.events, nowTs: o.nowTs }))
-                        .filter((v) => v.risks.some((x) => x.risk_type === String(cohort.scope_id) && x.resolved_at === null))
-                        .map((v) => ({ cohort_id: req.params.cohort_id, user_id: v.result.user_id, left_at: null }));
-                    try { cohortViewsTotal.labels('members').inc(); } catch {}
-                    return res.json({ cohort_id: req.params.cohort_id, cohort_key: cohort.cohort_key, cohort_type: cohort.cohort_type,
-                        members_count: members.length, members: members.slice(0, parseLimit(req.query.limit)), context: true });
-                }).catch(() => res.status(500).json({ ok: false, error: 'context_indicators_failed' }));
-            }
             if (!req.aulaVivaPlatformAdmin && !['school', 'group', 'club'].includes(String(cohort.cohort_type))) return withholdIndividualIndicators(res);
             try { cohortViewsTotal.labels('members').inc(); } catch {}
             instrument('institutional.cohort_members', () => {
@@ -389,7 +455,22 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
         }
     });
 
-    router.get('/institutional/cohorts/:cohort_id/trajectory', requireUserAuth, (req, res) => {
+    router.get('/institutional/cohorts/:cohort_id/trajectory', requireUserAuth, async (req, res) => {
+        // V9 F7-C2R-U3D: la serie guardada promedia a los miembros de TODAS las instituciones con toda su actividad. Quien
+        // media recibe la serie de sus lectores elegibles en el contexto del curso; cada punto exige ≥ 5 lectores.
+        if (contextAccess?.readers && isMediatorOnlyCaller(callerOf(req))) {
+            if (!cohortRef(req.params.cohort_id)) return res.status(403).json({ ok: false, error: 'scope_access_denied' });
+            const c = await mediatorCohort(req, res);
+            if (!c) return;
+            try { trajectoryViewsTotal.labels('cohort').inc(); } catch {}
+            const population = { ...c.population, members: c.members.length };
+            const meta = { context: true, population, data_state: c.state.data_state, reason: c.state.reason };
+            if (c.members.length < MIN_COHORT_READERS) {
+                return res.json({ cohort_id: req.params.cohort_id, period: '28d', series: [], suppressed: true, reason: 'min_eligible_readers', minCohort: MIN_COHORT_READERS,
+                    context: true, population, data_state: c.state.data_state });
+            }
+            return res.json({ ...cohortTrajectoryBody({ cohort_id: req.params.cohort_id, members: c.members, min: MIN_COHORT_READERS }), ...meta });
+        }
         try {
             const stmts = getOutcomesStatements();
             const cohort = stmts.getCohortById.get(req.params.cohort_id);
@@ -421,8 +502,17 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     });
 
     // ── INSTITUTIONAL LEARNINGS ──────────────────────────────────────────
-    router.get('/institutional/learnings/scope/:type/:id', requireUserAuth, (req, res) => {
+    router.get('/institutional/learnings/scope/:type/:id', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, req.params.type, req.params.id)) return;
+        // V9 F7-C2R-U3D: los aprendizajes guardados salen del impacto global. Quien media recibe los de SU curso, con el
+        // impacto contextual de sus lectores elegibles y el mismo soporte mínimo por estrategia.
+        if (contextAccess?.group && isMediatorOnlyCaller(callerOf(req))) {
+            if (!['group', 'club'].includes(String(req.params.type))) return res.status(403).json({ ok: false, error: 'scope_access_denied' });
+            const m = await mediatorImpact(req, res, { onlyGroup: req.params.id });
+            if (!m) return;
+            try { learningViewsTotal.labels('by_scope').inc(); } catch {}
+            return res.json(m.learnings);
+        }
         if (!cohortGate(req, req.params.type, req.params.id).allowed) return res.json([]); // misma forma, sin pistas
         try { learningViewsTotal.labels('by_scope').inc(); } catch {}
         instrument('institutional.learnings_scope', () => {
@@ -457,11 +547,18 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
     });
 
     // ── PREDICTIVE PATTERNS (read-only agregado) ─────────────────────────
-    router.get('/institutional/patterns/recent', requireUserAuth, (req, res) => {
+    router.get('/institutional/patterns/recent', requireUserAuth, async (req, res) => {
         if (!requireScope(req, res, 'all', 'global')) return;
-        // V9 F7-C2R-U3A: los patrones guardados agregan todas las instituciones y no existe un cálculo por curso. No se
-        // entregan a quien media (tampoco una lista vacía, que se leería como «no hay patrones»).
-        if (!req.aulaVivaPlatformAdmin) return res.status(403).json({ ok: false, error: 'scope_access_denied' });
+        // V9 F7-C2R-U3A / U3D: los patrones guardados agregan todas las instituciones y no se entregan a quien media.
+        // Quien media recibe los patrones OBSERVADOS en sus cursos (mismo recuento y mismos umbrales, sobre los
+        // episodios de riesgo contextuales de sus lectores elegibles), con la población y el estado de la evidencia.
+        if (!req.aulaVivaPlatformAdmin) {
+            if (!contextAccess?.readers) return res.status(403).json({ ok: false, error: 'scope_access_denied' });
+            const c = await mediatorCollective(req, res);
+            if (!c) return;
+            return res.json({ ...contextualPatternsBody(c.entries, { min: MIN_COHORT_READERS, nowTs: c.o.nowTs }), context: true, population: c.population,
+                data_state: c.state.data_state, reason: c.state.reason });
+        }
         const limit = parseLimit(req.query.limit);
         instrument('institutional.patterns_recent', () => {
             safeJson(res, () => {
