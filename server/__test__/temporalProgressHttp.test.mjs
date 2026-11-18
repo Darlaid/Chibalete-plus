@@ -30,6 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freePorts } from './helpers/freePort.mjs';
+import { seedSessionReceipts } from './helpers/seedSessionReceipts.mjs';
 
 if (process.platform === 'win32') {
     console.log('temporalProgressHttp: SKIP (POSIX-only: secretos de sesión). No cuenta como aprobada.');
@@ -112,8 +113,11 @@ process.env.PROGRESS_SQLITE_PATH = path.join(tmp, 'progress.db');
 const Progress = await import('../progressService.js');
 const iso = (ms) => new Date(ms).toISOString();
 const sessions = (days) => days.map((d, i) => ({ sessionId: `s-${d}-${i}`, startedAt: iso(at(d)), mode: 'text', durationSec: 600 }));
-const progress = (u, c, pct, days) => Progress.upsertProgress({ id: `${u}__${c}`, userId: u, contentId: c, isCompleted: false,
-    canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, lastInteractedMode: 'text' }, updatedAt: iso(days.length ? at(Math.min(...days)) : at(3)), history: sessions(days) });
+// V9 65A: cada progreso sembrado lleva las constancias que el servidor habría anotado al recibir sus sesiones en línea
+// (se anotan más abajo, con el registro ya abierto). `fromOrigin: false` = progreso anterior al registro.
+const seededProgress = [];
+const progress = (u, c, pct, days, receiptOpts = {}) => { seededProgress.push([Progress.upsertProgress({ id: `${u}__${c}`, userId: u, contentId: c, isCompleted: false,
+    canonicalProgress: { sentenceIndex: 0, totalSentences: 0, globalPercentage: pct, lastInteractedMode: 'text' }, updatedAt: iso(days.length ? at(Math.min(...days)) : at(3)), history: sessions(days) }), receiptOpts]); };
 // ra-1 (en el curso desde siempre; c2 se asignó al curso hace 10 días; c3 es una compra personal; c4 es del club).
 progress('ra-1', 'c1', 40, [20, 12, 6]);        // empezó dentro del curso
 progress('ra-1', 'c2', 65, [15, 5]);            // empezó ANTES de la asignación; una sesión posterior
@@ -123,7 +127,7 @@ progress('ra-1', 'cs', 20, [8]);                // obra compartida entre el curs
 progress('ra-2', 'c1', 35, [30, 14]);
 progress('ra-2', 'cs', 55, []);                 // acumulado SIN sesiones fechadas
 progress('ra-3', 'c1', 50, [15, 4]);            // ra-3 entró al curso hace 10 días: empezó antes
-progress('ra-4', 'c1', 90, Array.from({ length: 20 }, (_, i) => 25 - i));   // historial de sesiones recortado (20)
+progress('ra-4', 'c1', 90, Array.from({ length: 20 }, (_, i) => 25 - i), { fromOrigin: false });   // historial recortado (20), anterior al registro
 progress('ra-z', 'c3', 20, [4]);
 progress('b2c-1', 'c3', 80, [3]);
 // ra-5: sin progreso.
@@ -131,9 +135,10 @@ progress('b2c-1', 'c3', 80, [3]);
 // Sesiones heredadas (analytics_db.json): fuente de las métricas y del informe de curso.
 const legacy = [];
 const session = (userId, contentId, startTs) => {
-    legacy.push({ event: 'session_start', userId, contentId, timestamp: startTs, streak: 0 });
-    legacy.push({ event: 'block_complete', userId, contentId, timestamp: startTs + 1000, streak: 1 });
-    legacy.push({ event: 'session_end', userId, contentId, timestamp: startTs + 600_000, sessionDuration: 600_000, progressPercentage: 50 });
+    // V9 65A: `receivedAt` es el sello que la ingesta pone a cada evento; sin él su fecha no sirve para atribuir.
+    legacy.push({ event: 'session_start', userId, contentId, timestamp: startTs, streak: 0, receivedAt: startTs + 5000 });
+    legacy.push({ event: 'block_complete', userId, contentId, timestamp: startTs + 1000, streak: 1, receivedAt: startTs + 5000 });
+    legacy.push({ event: 'session_end', userId, contentId, timestamp: startTs + 600_000, sessionDuration: 600_000, progressPercentage: 50, receivedAt: startTs + 605_000 });
 };
 for (const d of [20, 12, 6]) session('ra-1', 'c1', at(d));
 session('ra-1', 'c2', at(15)); session('ra-1', 'c2', at(5));
@@ -149,6 +154,7 @@ const Ledger = await import('../aulaViva/contextLedger.mjs');
 const works = (g, without = []) => RULES().filter((r) => r.scope === 'group' && r.scopeId === g.id).flatMap((r) => r.titleIds).filter((t) => !without.includes(t));
 const seeded = Ledger.observeContext(GROUPS().map((g) => ({ groupId: g.id, works: works(g, ['c2']), members: g.memberIds.filter((m) => m !== 'ra-3') })), { nowTs: at(100) });
 Ledger.observeContext(GROUPS().map((g) => ({ groupId: g.id, works: works(g), members: g.memberIds })), { nowTs: at(10) });
+for (const [record, receiptOpts] of seededProgress) seedSessionReceipts(Ledger, record, { undatedAt: at(3), ...receiptOpts });
 
 const ports = await freePorts(3);
 const ORIGINS = ports.map((p) => `http://127.0.0.1:${p}`).join(',');

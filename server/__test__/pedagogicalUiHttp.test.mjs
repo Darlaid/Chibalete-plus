@@ -123,10 +123,11 @@ read('ra-z', 'c3', 4); read('rb-1', 'cb', 3);
 // ── Sesiones heredadas (analytics_db.json): la fuente del ICDLI ──
 const legacy = [];
 const session = (userId, contentId, startTs, d) => {
-    legacy.push({ event: 'session_start', userId, contentId, timestamp: startTs, streak: 0 });
-    legacy.push({ event: 'block_complete', userId, contentId, timestamp: startTs + 1000, streak: 1 });
-    legacy.push({ event: 'block_complete', userId, contentId, timestamp: startTs + 2000, streak: 2 });
-    legacy.push({ event: 'session_end', userId, contentId, timestamp: startTs + d, sessionDuration: d, progressPercentage: 50 });
+    // V9 65A: `receivedAt` es el sello de recepción que la ingesta pone a cada evento; sin él su fecha no sirve para atribuir.
+    legacy.push({ event: 'session_start', userId, contentId, timestamp: startTs, streak: 0, receivedAt: startTs + 5000 });
+    legacy.push({ event: 'block_complete', userId, contentId, timestamp: startTs + 1000, streak: 1, receivedAt: startTs + 1000 + 5000 });
+    legacy.push({ event: 'block_complete', userId, contentId, timestamp: startTs + 2000, streak: 2, receivedAt: startTs + 2000 + 5000 });
+    legacy.push({ event: 'session_end', userId, contentId, timestamp: startTs + d, sessionDuration: d, progressPercentage: 50, receivedAt: startTs + d + 5000 });
 };
 for (const d of [20, 12, 6, 3]) session('ra-1', 'c1', at(d), 600_000);
 for (const d of [19, 15, 11, 9, 5, 2]) session('ra-1', 'c3', at(d), 5_400_000);

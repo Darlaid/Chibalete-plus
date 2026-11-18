@@ -227,7 +227,9 @@ export function buildGroupAnalyticsSummary({
         for (const [id, rows] of byUser) byUser.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
         leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId, it?.timestamp, it?.userId));
         const allProgress = getProgressByUser;
-        getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId, firstSessionTs(p), id));
+        // V9 65A: si el predicado sabe acreditar la fecha de inicio (constancias de recepción del servidor), decide él.
+        const startOf = typeof includeContent.firstSessionTs === 'function' ? includeContent.firstSessionTs : firstSessionTs;
+        getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId, startOf(p, id), id));
     }
     const reading = readingPerReader(byUser, readerIds, nowTs);
     const leo = leoPerReader(leoInteractions, readerIds);

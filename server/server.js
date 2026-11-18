@@ -288,7 +288,7 @@ import { metricsEngineMode } from './metrics/metricsRouterV2.mjs';
 import { evaluateScopeAccess, requireScopeAccess, individualAccess, individualAccessChecker } from './aulaViva/scopeAccess.mjs';
 import { getPrincipal, getMemberships, IdentityUnavailableError, mediatedGroupRosters } from './identity/cis.mjs';
 // V9 F7-C2R-U1 — procedencia temporal del contexto pedagógico (apagada salvo AULA_VIVA_CONTEXT_LEDGER_ENABLED=1).
-import { observeContext, contextIntervals, ENABLED as contextLedgerEnabled, ALL_WORKS } from './aulaViva/contextLedger.mjs';
+import { observeContext, contextIntervals, ENABLED as contextLedgerEnabled, ALL_WORKS, recordSessionReceipt, sessionReceiptsOf } from './aulaViva/contextLedger.mjs';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — tiempo efectivo propio (desbloqueo
@@ -5235,27 +5235,58 @@ const normalizeCanonicalProgress = (payload) => {
     return base;
 };
 
-const shouldAcceptIncomingProgress = (incomingDateStr, existingDateStr) => {
+// V9 65A — tolerancia entre el reloj de un dispositivo y el del servidor.
+const PROGRESS_CLOCK_SKEW_MS = 5 * 60_000;
+const dateMs = (v) => (typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN);
+
+/**
+ * V9 65A — marca de orden de un guardado (`updatedAt`). La declara el dispositivo y decide qué guardado gana. Una
+ * marca que no es una fecha, o posterior al reloj del servidor, no puede ser cierta: guardada tal cual bloquearía
+ * todos los guardados siguientes hasta que el reloj real la alcanzara (o para siempre, si no es una fecha). En esos
+ * casos vale la hora del servidor. Una marca pasada se respeta: es la cronología legítima de una lectura sin conexión.
+ */
+const progressSaveStamp = (declared, nowMs = Date.now()) => {
+    const ms = dateMs(declared);
+    return Number.isFinite(ms) && ms <= nowMs + PROGRESS_CLOCK_SKEW_MS ? new Date(ms).toISOString() : new Date(nowMs).toISOString();
+};
+
+const shouldAcceptIncomingProgress = (incomingDateStr, existingDateStr, nowMs = Date.now()) => {
     if (!existingDateStr) return true; // No history, always accept
     const incoming = new Date(incomingDateStr).getTime();
     const existing = new Date(existingDateStr).getTime();
+    // 65A: una marca imposible ya guardada (no es una fecha, o es futura) no bloquea los guardados siguientes.
+    if (!Number.isFinite(existing) || existing > nowMs + PROGRESS_CLOCK_SKEW_MS) return true;
     return incoming > existing; // Last write wins strictly
+};
+
+/** 65A — sesión de un guardado, con forma comprobada: id acotado, fecha que es una fecha, duración que es un número. */
+const normalizeProgressSession = (newSession) => {
+    if (!newSession || typeof newSession !== 'object') return null;
+    const sid = (typeof newSession.sessionId === 'string' || typeof newSession.sessionId === 'number') ? String(newSession.sessionId).slice(0, 128) : '';
+    if (!sid) return null;
+    const startMs = dateMs(newSession.startedAt);
+    const dur = parseInt(newSession.durationSec || 0, 10);
+    return {
+        sessionId: sid,
+        declaredStartTs: Number.isFinite(startMs) ? startMs : null,   // lo que declaró el dispositivo (null: nada utilizable)
+        startedAt: Number.isFinite(startMs) ? new Date(startMs).toISOString() : new Date().toISOString(),
+        mode: typeof newSession.mode === 'string' && newSession.mode ? newSession.mode.slice(0, 32) : 'text',
+        durationSec: Number.isFinite(dur) ? Math.max(0, dur) : 0,
+    };
 };
 
 const mergeHistoryWithLimit = (existingHistory, newSession) => {
     let history = Array.isArray(existingHistory) ? [...existingHistory] : [];
-    if (newSession && newSession.sessionId) {
-        const sid = String(newSession.sessionId);
-        const existingIdx = history.findIndex(h => h.sessionId === sid);
-        const entry = {
-            sessionId: sid,
-            startedAt: newSession.startedAt || new Date().toISOString(),
-            mode: newSession.mode || 'text',
-            durationSec: Math.max(0, parseInt(newSession.durationSec || 0, 10))
-        };
+    const s = normalizeProgressSession(newSession);
+    if (s) {
+        const existingIdx = history.findIndex(h => h.sessionId === s.sessionId);
+        const entry = { sessionId: s.sessionId, startedAt: s.startedAt, mode: s.mode, durationSec: s.durationSec };
         if (existingIdx >= 0) {
-            // Update in-place — heartbeat keeps updating durationSec for the same session
-            history[existingIdx] = entry;
+            // Update in-place — heartbeat keeps updating durationSec for the same session.
+            // 65A: un reenvío o un guardado atrasado de la MISMA sesión no cambia su fecha ni reduce su duración.
+            const prev = history[existingIdx];
+            history[existingIdx] = { ...entry, startedAt: Number.isFinite(dateMs(prev.startedAt)) ? prev.startedAt : entry.startedAt,
+                durationSec: Math.max(entry.durationSec, Number.isFinite(prev.durationSec) ? prev.durationSec : 0) };
         } else {
             history.push(entry);
         }
@@ -5265,6 +5296,31 @@ const mergeHistoryWithLimit = (existingHistory, newSession) => {
         history = history.slice(history.length - 20);
     }
     return history;
+};
+
+/**
+ * V9 65A — constancia de recepción del guardado (reloj del servidor), para la atribución al curso. No altera el
+ * progreso ni su historial; con el registro de procedencia apagado no hace nada. `existed`: el progreso ya existía.
+ */
+const noteProgressReceipt = (userId, contentId, payload, existed, { saved = true } = {}) => {
+    if (!contextLedgerEnabled()) return;
+    const s = normalizeProgressSession(payload?.session);
+    if (!s && !saved) return;   // un guardado descartado y sin sesión no deja nada que anotar
+    recordSessionReceipt({ userId, workId: contentId, sessionId: s ? s.sessionId : '', declaredStartTs: s ? s.declaredStartTs : null,
+        durationSec: s ? s.durationSec : 0, mode: s ? s.mode : null, fromOrigin: !existed });
+};
+
+/**
+ * V9 65A — guardado que llega DESPUÉS de uno más reciente (reintento de una lectura sin conexión, orden invertido).
+ * La posición y el porcentaje no retroceden, pero su sesión es lectura real: se conserva en el historial del lector.
+ */
+const keepLateSession = (existing, payload) => {
+    if (!normalizeProgressSession(payload?.session)) return existing;
+    const history = mergeHistoryWithLimit(existing.history || [], payload.session);
+    if (JSON.stringify(history) === JSON.stringify(existing.history || [])) return existing;
+    const kept = { ...existing, history };
+    upsertProgress(kept);
+    return kept;
 };
 
 const ensureProgressDbShape = (db) => {
@@ -5500,11 +5556,12 @@ app.post('/api/progress/:userId/:contentId/sync', requireProgressOwner, async (r
         }
 
         const existing = getProgressItem(userId, contentId);
-        const incomingDate = payload.updatedAt || new Date().toISOString();
+        const incomingDate = progressSaveStamp(payload.updatedAt);   // 65A
 
         if (existing && !shouldAcceptIncomingProgress(incomingDate, existing.updatedAt)) {
              log(`Concurrencia: Progreso ignorado por ser más viejo (${key})`, 'DEBUG');
-             return res.json({ success: true, ignored: true, progress: existing });
+             noteProgressReceipt(userId, contentId, payload, true, { saved: false });
+             return res.json({ success: true, ignored: true, progress: keepLateSession(existing, payload) });
         }
 
         // 3E.6: el merge conserva `canonicalProgress.epub` en guardados legacy y,
@@ -5526,6 +5583,7 @@ app.post('/api/progress/:userId/:contentId/sync', requireProgressOwner, async (r
         };
 
         upsertProgress(newProgress);
+        noteProgressReceipt(userId, contentId, payload, !!existing);
 
         res.json({ success: true, progress: newProgress });
     } catch (e) {
@@ -5542,7 +5600,8 @@ app.post('/api/progress/:userId/:contentId/complete', requireProgressOwner, asyn
         const payload = req.body;
         const key = makeProgressKey(userId, contentId);
 
-        const existing = getProgressItem(userId, contentId) || {
+        const stored = getProgressItem(userId, contentId);
+        const existing = stored || {
             id: key, userId, contentId, history: [],
             canonicalProgress: normalizeCanonicalProgress({})
         };
@@ -5555,10 +5614,11 @@ app.post('/api/progress/:userId/:contentId/complete', requireProgressOwner, asyn
              existing.canonicalProgress.sentenceIndex = normalizeCanonicalProgress(payload.canonicalProgress).sentenceIndex;
         }
 
-        existing.updatedAt = payload.updatedAt || new Date().toISOString();
+        existing.updatedAt = progressSaveStamp(payload.updatedAt);   // 65A
         existing.history = mergeHistoryWithLimit(existing.history, payload.session);
 
         upsertProgress(existing);
+        noteProgressReceipt(userId, contentId, payload, !!stored);
 
         log(`Contenido completado: ${key}`, 'SUCCESS');
         res.json({ success: true, progress: existing });
@@ -11305,10 +11365,17 @@ app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWri
             return res.status(200).json({ ok: true, received: 0, discarded: events.length });
         }
 
+        // V9 65A: `timestamp` lo declara el dispositivo. El servidor anota cuándo recibió cada evento (`receivedAt`,
+        // que el cliente no puede fijar) y no guarda en este almacén uno fechado después de su propio reloj: esa
+        // fecha no puede ser cierta. Quien atribuye actividad a un curso solo usa fechas con esa constancia.
+        const receivedAt = Date.now();
+        const datable = validEvents.filter(e => e.timestamp <= receivedAt + PROGRESS_CLOCK_SKEW_MS).map(e => ({ ...e, receivedAt }));
+        if (datable.length < validEvents.length) log(`Analytics: ${validEvents.length - datable.length} evento(s) con fecha posterior al reloj del servidor, no guardados`, 'WARN');
+
         const { received, deduplicated } = await withFileLock(ANALYTICS_DB, () => {
             const existing = readJSON(ANALYTICS_DB) || [];
             const existingEventIds = new Set(existing.map(e => e.eventId).filter(Boolean));
-            const deduped = validEvents.filter(e => {
+            const deduped = datable.filter(e => {
                 if (!e.eventId) return true;
                 if (existingEventIds.has(e.eventId)) {
                     log(`Analytics: evento duplicado descartado eventId=${e.eventId}`, 'DEBUG');
@@ -11319,7 +11386,7 @@ app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWri
             const updated = [...existing, ...deduped];
             const capped = updated.length > 50_000 ? updated.slice(updated.length - 50_000) : updated;
             writeJSON(ANALYTICS_DB, capped);
-            return { received: deduped.length, deduplicated: validEvents.length - deduped.length };
+            return { received: deduped.length, deduplicated: datable.length - deduped.length };
         }, 'analyticsLock');
 
         // ── DUAL-WRITE Backbone v1 (Fase 0) ──────────────────────────────────
@@ -11520,26 +11587,48 @@ async function mediatorPedagogicalContext(mediatorId, readerId) {
  *                            caen dentro del curso (cuántas, cuánto tiempo, la última);
  *   - sin registro           no hay actividad: `no_activity`.
  * El progreso del lector no se toca: él lo sigue viendo completo. Nada se reescribe ni se infiere.
+ *
+ * V9 65A — de qué sesiones se fía la regla. La fecha de una sesión la declara el dispositivo; con el registro de
+ * procedencia encendido solo cuenta la que el servidor recibió y cuya fecha es coherente con esa recepción
+ * (`pedagogicalContext.creditSessions`). Las sesiones salen de las constancias del servidor, no del historial recortado
+ * a 20: un progreso con más de 20 sesiones se acredita si todas constan desde su primer guardado. Motivos nuevos:
+ * `unverified_session_dates` (alguna sesión con fecha no acreditada). Con el registro apagado, la regla anterior.
  */
 const PROGRESS_HISTORY_CAP = 20;
-const progressSessionTs = (p) => (Array.isArray(p?.history) ? p.history : []).map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
+/** Sesiones acreditables de un progreso ante ese contexto; `null` con el registro apagado. `cache`: constancias por lector. */
+function creditedSessionsOf(p, context, cache) {
+    if (!contextLedgerEnabled() || typeof context?.creditSessions !== 'function') return null;
+    const uid = String(p?.userId ?? context.readerId ?? '');
+    if (!cache.has(uid)) {
+        // Sin poder leer las constancias no hay recepción comprobable: todo queda sin acreditar, nunca al revés.
+        try { cache.set(uid, sessionReceiptsOf(uid) ?? new Map()); } catch { cache.set(uid, new Map()); }
+    }
+    return context.creditSessions(p, cache.get(uid).get(String(p.contentId)));
+}
 function attributeProgress(records, context) {
-    const verified = [], historical = [];
+    const verified = [], historical = [], receipts = new Map();
     for (const p of Array.isArray(records) ? records : []) {
         if (!p) continue;
-        const stamps = progressSessionTs(p);
+        const credit = creditedSessionsOf(p, context, receipts);
+        const sessions = credit ? credit.sessions : (Array.isArray(p.history) ? p.history : []);
+        const stamps = sessions.map(h => Date.parse(h?.startedAt)).filter(Number.isFinite);
         const first = stamps.length ? Math.min(...stamps) : undefined;
         const cls = context.classify(p.contentId, first);
         if (cls === 'outside_context' || cls === 'no_work') continue;          // la obra no es del curso: no es de quien media
-        const complete = stamps.length > 0 && (p.history || []).length < PROGRESS_HISTORY_CAP;
+        const truncated = (p.history || []).length >= PROGRESS_HISTORY_CAP;
+        const complete = credit ? credit.complete : (stamps.length > 0 && !truncated);
         if (cls === 'in' && complete) { verified.push(p); continue; }
-        const inCourse = (p.history || []).filter(h => context.classify(p.contentId, Date.parse(h?.startedAt)) === 'in');
+        const inCourse = sessions.filter(h => context.classify(p.contentId, Date.parse(h?.startedAt)) === 'in');
         historical.push({
             contentId: p.contentId, attribution: 'unverifiable_history',
-            reason: cls === 'outside_period' ? 'started_before_course' : cls === 'in' ? 'session_history_truncated' : stamps.length === 0 ? 'undated_progress' : 'provenance_not_verifiable',
+            reason: cls === 'outside_period' ? 'started_before_course'
+                : credit && credit.unverified > 0 ? 'unverified_session_dates'
+                : stamps.length === 0 || credit?.undatedSaves ? 'undated_progress'
+                : cls === 'in' && (!credit || truncated) ? 'session_history_truncated' : 'provenance_not_verifiable',
             verifiedSessions: inCourse.length,
             verifiedReadingTimeMs: inCourse.reduce((sum, h) => sum + Math.max(0, h?.durationSec ?? 0) * 1000, 0),
             lastVerifiedAt: inCourse.map(h => h.startedAt).sort().pop() ?? null,
+            ...(credit ? { unverifiedSessions: credit.unverified } : {}),
         });
     }
     return { verified, historical, summary: { verified_context: verified.length, unverifiable_history: historical.length } };
@@ -11576,11 +11665,13 @@ const msOfStamp = (ts) => (typeof ts === 'number' ? ts : (typeof ts === 'string'
  * esto leen sesiones, no el porcentaje); de Leo, solo las interacciones fechadas dentro del curso.
  */
 function attributableActivity(pAll, leoAll, contextOf) {
-    const progressMap = {};
+    const progressMap = {}, receipts = new Map();
     for (const [key, e] of Object.entries(pAll?.progressMap ?? {})) {
         const ctx = e?.userId ? contextOf(e.userId) : null;
         if (!ctx) continue;
-        const history = (Array.isArray(e.history) ? e.history : []).filter(h => ctx.includeContent(e.contentId, Date.parse(h?.startedAt)));
+        // 65A: las sesiones que el servidor recibió, con la fecha que puede acreditarse (no el historial recortado).
+        const credit = creditedSessionsOf(e, ctx, receipts);
+        const history = (credit ? credit.sessions : (Array.isArray(e.history) ? e.history : [])).filter(h => ctx.includeContent(e.contentId, Date.parse(h?.startedAt)));
         if (history.length > 0) progressMap[key] = { ...e, history };
     }
     return { pDb: { ...pAll, progressMap }, leoRaw: (leoAll || []).filter(e => e?.userId && contextOf(e.userId).includeContent(e.contentId, msOfStamp(e.timestamp))) };
@@ -11594,7 +11685,18 @@ function temporalContentPredicate(contextOf) {
         const cls = contextOf(userId).classify(contentId, msOfStamp(ts));
         return cls === 'unverifiable' || cls === 'outside_period';
     };
-    return Object.assign((contentId, ts, userId) => (userId ? forUser(userId)(contentId, ts) : false), { strict: true, forUser, historical });
+    // 65A: fecha de inicio ACREDITADA de un progreso (su primera sesión, si todas constan recibidas por el servidor
+    // desde el primer guardado y con fecha coherente). Sustituye a la lectura directa del historial recortado a 20.
+    const receipts = new Map();
+    const firstSessionTs = (p, userId) => {
+        const uid = userId ?? p?.userId;
+        if (!p || !uid) return undefined;
+        const credit = creditedSessionsOf({ ...p, userId: uid }, contextOf(uid), receipts);
+        if (!credit?.complete) return undefined;
+        return Math.min(...credit.sessions.map(h => Date.parse(h.startedAt)));
+    };
+    return Object.assign((contentId, ts, userId) => (userId ? forUser(userId)(contentId, ts) : false),
+        { strict: true, forUser, historical, ...(contextLedgerEnabled() ? { firstSessionTs } : {}) });
 }
 /**
  * Añade a la respuesta de un curso (métricas o informe) el recuento de atribución, por lector y total. Un lector sin
@@ -13252,11 +13354,12 @@ app.post('/api/progress/my/:contentId', requireUserAuth, (req, res) => {
 
         const key = makeProgressKey(userId, contentId);
         const existing = getProgressItem(userId, contentId);
-        const incomingDate = payload.updatedAt || new Date().toISOString();
+        const incomingDate = progressSaveStamp(payload.updatedAt);   // 65A
 
         if (existing && !shouldAcceptIncomingProgress(incomingDate, existing.updatedAt)) {
             log(`LU concurrencia: progreso ignorado por ser más viejo (${key})`, 'DEBUG');
-            return res.json({ success: true, ignored: true, progress: existing });
+            noteProgressReceipt(userId, contentId, payload, true, { saved: false });
+            return res.json({ success: true, ignored: true, progress: keepLateSession(existing, payload) });
         }
 
         // 3E.6: mismo merge que …/sync (conserva `canonicalProgress.epub`).
@@ -13277,6 +13380,7 @@ app.post('/api/progress/my/:contentId', requireUserAuth, (req, res) => {
         };
 
         upsertProgress(newProgress);
+        noteProgressReceipt(userId, contentId, payload, !!existing);
 
         res.json({ success: true, progress: newProgress });
     } catch (e) {

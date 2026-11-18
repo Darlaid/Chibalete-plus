@@ -82,9 +82,10 @@ const T0 = Date.now() - 3 * 86400000;
 const BIG2 = 9000000, BIG3 = 7000000;
 const events = [];
 const session = (userId, contentId, d, at) => {
-    events.push({ event: 'session_start', userId, contentId, timestamp: at, streak: 0 });
-    events.push({ event: 'block_complete', userId, contentId, timestamp: at + 1000, streak: 1 });
-    events.push({ event: 'session_end', userId, contentId, timestamp: at + d, sessionDuration: d, progressPercentage: 50 });
+    // V9 65A: `receivedAt` es el sello de recepción que la ingesta pone a cada evento; sin él su fecha no sirve para atribuir.
+    events.push({ event: 'session_start', userId, contentId, timestamp: at, streak: 0, receivedAt: at + 5000 });
+    events.push({ event: 'block_complete', userId, contentId, timestamp: at + 1000, streak: 1, receivedAt: at + 1000 + 5000 });
+    events.push({ event: 'session_end', userId, contentId, timestamp: at + d, sessionDuration: d, progressPercentage: 50, receivedAt: at + d + 5000 });
 };
 session('ra-1', 'c1', 60000, T0); session('ra-1', 'c2', BIG2, T0 + 3600000); session('ra-1', 'c3', BIG3, T0 + 7200000 + BIG2);
 session('ra-x', 'c4', 45000, T0); session('ra-z', 'c2', 30000, T0); session('rb-1', 'cb', 45000, T0);

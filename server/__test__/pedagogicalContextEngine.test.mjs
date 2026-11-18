@@ -274,6 +274,60 @@ section('[9] agregado del curso');
     ok('la actividad personal de un miembro no cambia el agregado', JSON.stringify(Engine.aggregateContextualIndicators(GA.map(clean))) === before);
 }
 
+// ───────────────────────────── [10] V9 65A: fecha acreditable de una sesión ─────────────────────────────
+section('[10] constancia de recepción y fecha acreditable de una sesión (65A)');
+{
+    // Obra asociada desde la línea base; el lector salió del curso hace 2 días y volvió hace 1.
+    const intervals = new Map([['gx', {
+        work: new Map([['w', [{ since: at(100), until: null, origin: 'baseline' }]]]),
+        member: new Map([['u', [{ since: at(100), until: at(2), origin: 'baseline' }, { since: at(1), until: null, origin: 'observed' }]]]),
+    }]]);
+    const ctx = Engine.buildPedagogicalContext({ readerId: 'u', groups: [{ groupId: 'gx', works: { all: false, ids: ['w'] } }], intervals });
+    ok('en un instante: dentro antes de salir y después de volver', ctx.classify('w', at(5)) === 'in' && ctx.classify('w', at(0.5)) === 'in' && ctx.classify('w', at(1.5)) === 'outside_period');
+    ok('en un tramo: «dentro» solo si un mismo intervalo lo cubre entero', ctx.classify('w', at(0.5), NOW) === 'in' && ctx.classify('w', at(5), at(3)) === 'in' && ctx.classify('w', at(5), NOW) === 'unverifiable');
+    ok('el tramo no relaja lo que el instante ya descarta', ctx.classify('w', at(1.5), NOW) === 'outside_period' && ctx.classify('otra', at(0.5), NOW) === 'outside_context' && ctx.classify('w', at(120), NOW) === 'unverifiable');
+
+    const E = Engine.DATE_EVIDENCE;
+    const row = (id, declared, received, extra = {}) => ({ session_id: id, declared_start_ts: declared, duration_sec: 600, mode: 'text', first_received_ts: received, last_received_ts: received + 600_000, from_origin: 0, conflict: 0, ...extra });
+    const credit = (rows, history = []) => ctx.creditSessions({ contentId: 'w', history }, rows);
+    const one = (r) => credit([r]).sessions[0];
+    ok('recibida en línea: fecha declarada, corroborada por el servidor', one(row('a', NOW - 60_000, NOW)).evidence === E.server_corroborated && one(row('a', NOW - 60_000, NOW)).startedAt === new Date(NOW - 60_000).toISOString());
+    ok('recibida después, sin cambios de contexto: conserva SU fecha (no la de recepción)', one(row('b', at(0.5), NOW)).evidence === E.deferred_sync && one(row('b', at(0.5), NOW)).startedAt === new Date(at(0.5)).toISOString());
+    ok('el contexto cambió entre la fecha declarada y la recepción: sin fecha acreditada', one(row('c', at(5), NOW)).evidence === E.context_changed_before_receipt && one(row('c', at(5), NOW)).startedAt === null);
+    ok('…pero recibida antes del cambio sí se acredita', one(row('c2', at(5), at(4))).evidence === E.deferred_sync);
+    ok('declarada después de la recepción: futura, sin fecha acreditada', one(row('d', NOW + DAY, NOW)).evidence === E.future_date && one(row('d', NOW + DAY, NOW)).startedAt === null);
+    ok('…salvo dentro de la tolerancia de reloj', one(row('d2', NOW + 2 * 60_000, NOW)).evidence === E.server_corroborated);
+    ok('fechas contradictorias: sin fecha acreditada', one(row('e', NOW - 60_000, NOW, { conflict: 1 })).startedAt === null && one(row('e', NOW - 60_000, NOW, { conflict: 1 })).evidence === E.conflicting_dates);
+    ok('sin fecha declarada: vale la recepción del servidor', one(row('f', null, NOW)).evidence === E.server_received && one(row('f', null, NOW)).startedAt === new Date(NOW).toISOString());
+    ok('una duración mayor que el tiempo entre el inicio y la última recepción se recorta', one(row('g', NOW - 60_000, NOW, { duration_sec: 99_999, last_received_ts: NOW })).durationSec === 60 + 300);
+    ok('una fecha no acreditada no aporta tiempo', one(row('d', NOW + DAY, NOW)).durationSec === 0);
+    const legacy = credit([], [{ sessionId: 'h1', startedAt: new Date(at(0.5)).toISOString(), durationSec: 600 }]);
+    ok('sesión del historial sin constancia del servidor: sin fecha acreditada, y el progreso no es completo', legacy.sessions[0].evidence === E.no_server_receipt && legacy.sessions[0].startedAt === null && legacy.unverified === 1 && legacy.complete === false);
+    const full = credit([row('s1', at(0.5), at(0.5) + 1000, { from_origin: 1 }), ...Array.from({ length: 24 }, (_, i) => row(`s${i + 2}`, NOW - (30 - i) * 60_000, NOW - (30 - i) * 60_000 + 500))]);
+    ok('25 sesiones con constancia desde el origen: progreso completo (el recorte del historial no interviene)', full.complete === true && full.sessions.length === 25 && full.unverified === 0);
+    ok('sin la constancia del primer guardado no es completo', credit([row('s1', at(0.5), at(0.5) + 1000)]).complete === false);
+    ok('un guardado sin sesión impide certificar el acumulado', credit([row('s1', at(0.5), at(0.5) + 1000, { from_origin: 1 }), row('', null, NOW)]).complete === false && credit([row('', null, NOW)]).undatedSaves === true);
+
+    // Constancias en el almacén: idempotentes, con el reloj del servidor.
+    const rec = (extra) => Ledger.recordSessionReceipt({ userId: 'u-rc', workId: 'w', sessionId: 'z', declaredStartTs: 1000, durationSec: 10, mode: 'text', ...extra });
+    ok('primera recepción anotada', rec({ fromOrigin: true, nowTs: 5000 }) === true);
+    rec({ nowTs: 9000, durationSec: 40 }); rec({ nowTs: 7000, durationSec: 5 }); rec({ nowTs: 3000, durationSec: 5 });
+    const z = Ledger.sessionReceiptsOf('u-rc').get('w');
+    ok('reenvíos: una sola fila; primera recepción = la más antigua, última = la más reciente, duración sin retroceder', z.length === 1 && z[0].first_received_ts === 3000 && z[0].last_received_ts === 9000
+        && z[0].duration_sec === 40 && z[0].from_origin === 1 && z[0].conflict === 0, JSON.stringify(z));
+    rec({ nowTs: 9400, declaredStartTs: 1400 });
+    ok('un redondeo de menos de un segundo en la fecha no es una contradicción', Ledger.sessionReceiptsOf('u-rc').get('w')[0].conflict === 0);
+    rec({ nowTs: 9500, declaredStartTs: 6000 });
+    ok('la misma sesión con otra fecha de inicio queda marcada, para siempre', Ledger.sessionReceiptsOf('u-rc').get('w')[0].conflict === 1 && (rec({ nowTs: 9600 }), Ledger.sessionReceiptsOf('u-rc').get('w')[0].conflict === 1));
+    ok('la fecha declarada guardada es la primera', Ledger.sessionReceiptsOf('u-rc').get('w')[0].declared_start_ts === 1000);
+    ok('sin lector u obra no se anota nada', Ledger.recordSessionReceipt({ userId: '', workId: 'w' }) === false && Ledger.recordSessionReceipt({ userId: 'u', workId: '' }) === false);
+    const prev = process.env.AULA_VIVA_CONTEXT_LEDGER_ENABLED;
+    process.env.AULA_VIVA_CONTEXT_LEDGER_ENABLED = '';
+    ok('con el registro apagado: no se anota y no se leen constancias', Ledger.recordSessionReceipt({ userId: 'u-off', workId: 'w', sessionId: 'q' }) === false && Ledger.sessionReceiptsOf('u-off') === null);
+    process.env.AULA_VIVA_CONTEXT_LEDGER_ENABLED = prev;
+    ok('…y no quedó nada escrito', !Ledger.sessionReceiptsOf('u-off').has('w'));
+}
+
 Ledger.closeContextLedger();
 console.log(`\n${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);

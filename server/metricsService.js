@@ -259,7 +259,19 @@ const STAGE_SCORE      = { comprehension: 1, interpretation: 2, reflection: 3, c
 // SESSION PARSING
 // ---------------------------------------------------------------------------
 
+// V9 65A — fecha de un evento heredado (`timestamp`, declarada por el dispositivo) que puede usarse para ATRIBUIR:
+// solo si el servidor anotó haberlo recibido (`receivedAt`) y la fecha no es posterior a esa recepción. Si no, sin fecha.
+const RECEIPT_SKEW_MS = 5 * 60_000;
+const attributableTs = (ts, receivedAt) => (Number.isFinite(receivedAt) && Number.isFinite(ts) && ts <= receivedAt + RECEIPT_SKEW_MS ? ts : undefined);
+/** Recepción del evento que abrió cada sesión (fuera del objeto: la forma de una sesión no cambia). */
+const SESSION_RECEIVED_AT = new WeakMap();
+
 function sealSession(partial) {
+  const sealed = sealSessionFields(partial);
+  SESSION_RECEIVED_AT.set(sealed, partial.startReceivedAt);
+  return sealed;
+}
+function sealSessionFields(partial) {
   return {
     userId:               partial.userId,
     contentId:            partial.contentId,
@@ -310,6 +322,7 @@ function parseSessions(events) {
             userId:               ev.userId,
             contentId:            ev.contentId,
             startTimestamp:       ev.timestamp,
+            startReceivedAt:      ev.receivedAt,
             endTimestamp:         null,
             durationMs:           0,
             blocksInSession:      0,
@@ -703,7 +716,9 @@ function computeContentStats(userId, ctx = null, includeContent = null) {
         const ts = h.map(x => Date.parse(x?.startedAt)).filter(Number.isFinite);
         return ts.length && h.length < 20 ? Math.min(...ts) : undefined;
     };
-    const entries = includeContent ? all.filter(p => includeContent(p.contentId, firstSessionTs(p))) : all;
+    // V9 65A: si el predicado sabe acreditar la fecha de inicio (constancias de recepción del servidor), decide él.
+    const startOf = typeof includeContent?.firstSessionTs === 'function' ? (p) => includeContent.firstSessionTs(p, userId) : firstSessionTs;
+    const entries = includeContent ? all.filter(p => includeContent(p.contentId, startOf(p))) : all;
     const contents = entries.map(raw => {
         const pct     = raw.canonicalProgress?.globalPercentage ?? 0;
         const history = Array.isArray(raw.history) ? raw.history : [];
@@ -776,11 +791,13 @@ function computeLeoMetrics(userId, userEvents = null, includeContent = null) {
 // ya delimitadas por quien llama, en lugar de la memoria acumulada.
 function computeStudentMetricsUncached(userId, ctx, includeContent = null, extra = null) {
   // V9 F7-C2R-U3B: `includeContent.forUser(lector)` da el predicado de ESE lector (su pertenencia temporal al curso).
-  if (typeof includeContent?.forUser === 'function') includeContent = Object.assign(includeContent.forUser(userId), { strict: includeContent.strict === true });
+  if (typeof includeContent?.forUser === 'function') includeContent = Object.assign(includeContent.forUser(userId), { strict: includeContent.strict === true,
+    ...(typeof includeContent.firstSessionTs === 'function' ? { firstSessionTs: includeContent.firstSessionTs } : {}) });
   const allEvents    = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
   const allSessions  = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
-  const userEvents   = includeContent ? allEvents.filter(e => (e.contentId == null ? includeContent.strict !== true : includeContent(e.contentId, e.timestamp))) : allEvents;
-  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId, s.startTimestamp)) : allSessions;
+  // V9 65A: al predicado solo llega una fecha con constancia de recepción del servidor (`attributableTs`).
+  const userEvents   = includeContent ? allEvents.filter(e => (e.contentId == null ? includeContent.strict !== true : includeContent(e.contentId, attributableTs(e.timestamp, e.receivedAt)))) : allEvents;
+  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId, attributableTs(s.startTimestamp, SESSION_RECEIVED_AT.get(s)))) : allSessions;
   const leoEntries   = Array.isArray(extra?.leoEntries) ? extra.leoEntries : getLeoEntriesForUser(userId, includeContent);
   const leoMetrics   = computeLeoMetrics(userId, (ctx || includeContent) ? userEvents : null, includeContent);
 

@@ -60,9 +60,10 @@ const T0 = Date.now() - 3 * 86400000;
 const DUR = { 'ra-yes': 60000, 'ra-yes2': 120000, 'ra-no': 9000000, b2c: 7000000, 'ra-otro': 30000, 'rb-yes': 45000 };
 const events = [];
 for (const [userId, d] of Object.entries(DUR)) {
-    events.push({ event: 'session_start', userId, contentId: 'c1', timestamp: T0, streak: 0 });
-    events.push({ event: 'block_complete', userId, contentId: 'c1', timestamp: T0 + 1000, streak: 1 });
-    events.push({ event: 'session_end', userId, contentId: 'c1', timestamp: T0 + d, sessionDuration: d, progressPercentage: 50 });
+    // V9 65A: `receivedAt` es el sello de recepción que la ingesta pone a cada evento; sin él su fecha no sirve para atribuir.
+    events.push({ event: 'session_start', userId, contentId: 'c1', timestamp: T0, streak: 0, receivedAt: T0 + 5000 });
+    events.push({ event: 'block_complete', userId, contentId: 'c1', timestamp: T0 + 1000, streak: 1, receivedAt: T0 + 1000 + 5000 });
+    events.push({ event: 'session_end', userId, contentId: 'c1', timestamp: T0 + d, sessionDuration: d, progressPercentage: 50, receivedAt: T0 + d + 5000 });
 }
 fs.writeFileSync(path.join(P.data, 'analytics_db.json'), JSON.stringify(events));
 // Evidencia de Leo con una pista reconocible por lector.

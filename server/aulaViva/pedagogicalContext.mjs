@@ -60,6 +60,17 @@ function statusAt(list, ts) {
 }
 
 /**
+ * Estado de UNA asociación durante todo un tramo [from, to] (65A): 'in' solo si un mismo intervalo registrado lo cubre
+ * entero. Vigente al inicio pero no hasta el final ⇒ no se sabe en qué lado quedó lo ocurrido: 'unverifiable'.
+ */
+function statusOver(list, from, to) {
+    const a = statusAt(list, from);
+    if (a !== 'in' || !(to > from)) return a;
+    for (const iv of list) if (from >= iv.since && (iv.until == null || to < iv.until)) return 'in';
+    return 'unverifiable';
+}
+
+/**
  * Contexto pedagógico de un lector frente a un conjunto de grupos (los que comparte con quien consulta).
  *
  * @param {object} p
@@ -74,8 +85,11 @@ export function buildPedagogicalContext({ readerId, groups, intervals = null }) 
     }));
     const hasWorks = gs.some((g) => g.all || g.ids.size > 0);
 
-    /** 'in' | 'unverifiable' | 'outside_period' | 'outside_context' | 'no_work' */
-    const classify = (contentId, ts) => {
+    /**
+     * 'in' | 'unverifiable' | 'outside_period' | 'outside_context' | 'no_work'.
+     * Con `untilTs` (65A) la asociación y la membresía deben constar vigentes durante todo el tramo [ts, untilTs].
+     */
+    const classify = (contentId, ts, untilTs = ts) => {
         if (contentId == null || contentId === '') return 'no_work';
         const c = String(contentId);
         let best = 'outside_context';
@@ -85,9 +99,9 @@ export function buildPedagogicalContext({ readerId, groups, intervals = null }) 
             if (typeof ts !== 'number' || !Number.isFinite(ts)) { best = better(best, 'unverifiable'); continue; }
             const led = intervals?.get(g.groupId);
             let work = 'outside_period';
-            if (named) work = better(work, statusAt(led?.work.get(c), ts));
-            if (g.all) work = better(work, statusAt(led?.work.get(ALL_WORKS), ts));
-            const member = statusAt(led?.member.get(rid), ts);
+            if (named) work = better(work, statusOver(led?.work.get(c), ts, untilTs));
+            if (g.all) work = better(work, statusOver(led?.work.get(ALL_WORKS), ts, untilTs));
+            const member = statusOver(led?.member.get(rid), ts, untilTs);
             const here = work === 'in' && member === 'in' ? 'in'
                 : (work === 'outside_period' || member === 'outside_period') ? 'outside_period' : 'unverifiable';
             best = better(best, here);
@@ -96,7 +110,7 @@ export function buildPedagogicalContext({ readerId, groups, intervals = null }) 
         return best;
     };
 
-    return {
+    const ctx = {
         readerId: rid,
         groupIds: gs.map((g) => g.groupId),
         hasWorks,
@@ -107,6 +121,72 @@ export function buildPedagogicalContext({ readerId, groups, intervals = null }) 
         includeEvent: (row) => !!row && String(row.user_id) === rid && classify(row.content_id, row.server_ts) === 'in',
         describe: () => ({ groups: gs.map((g) => ({ group_id: g.groupId, works: g.all ? null : g.ids.size, all_works: g.all })) }),
     };
+    /** 65A — sesiones de un progreso con la fecha acreditable en ESTE contexto (`creditSessions`). */
+    ctx.creditSessions = (progress, receipts) => creditSessions(ctx, progress, receipts);
+    return ctx;
+}
+
+/** Tolerancia entre el reloj de un dispositivo y el del servidor. */
+export const CLOCK_SKEW_MS = 5 * 60_000;
+/** Hasta aquí, entre la fecha declarada y la primera recepción, la sesión se considera recibida en línea. */
+export const ONLINE_RECEIPT_MS = 15 * 60_000;
+/** Qué respalda (o no) la fecha de una sesión ante quien media. */
+export const DATE_EVIDENCE = Object.freeze({
+    server_corroborated: 'server_corroborated',   // fecha declarada coherente con la recepción inmediata del servidor
+    deferred_sync: 'deferred_sync',               // llegó después (sin conexión); el contexto no cambió entre la fecha y la recepción
+    server_received: 'server_received',           // el dispositivo no declaró fecha: vale la de recepción
+    no_server_receipt: 'no_server_receipt',       // el servidor no tiene constancia de haberla recibido
+    conflicting_dates: 'conflicting_dates',       // la misma sesión llegó con fechas de inicio distintas
+    future_date: 'future_date',                   // declarada después de que el servidor la recibiera
+    context_changed_before_receipt: 'context_changed_before_receipt',   // el curso o la asignación cambió antes de recibirla
+});
+const CREDITED = new Set([DATE_EVIDENCE.server_corroborated, DATE_EVIDENCE.deferred_sync, DATE_EVIDENCE.server_received]);
+
+/**
+ * V9 65A — sesiones de un progreso con la fecha que puede acreditarse ante quien media.
+ *
+ * La fecha de una sesión la declara el dispositivo. El servidor solo sabe con certeza cuándo la recibió: la lectura
+ * no pudo ocurrir después. Regla:
+ *   - sin constancia de recepción, con fechas contradictorias o declarada en el futuro ⇒ fecha no acreditada;
+ *   - en otro caso la sesión conserva su fecha declarada (la cronología sin conexión no se pierde) si la asociación
+ *     obra–curso y la membresía constan vigentes durante TODO el tramo entre esa fecha y la recepción. Si cambiaron
+ *     en ese tramo, la fecha del dispositivo decidiría sola a qué lado cae la lectura ⇒ no acreditada.
+ * Una sesión con fecha no acreditada sale con `startedAt: null`: para toda la atribución es actividad sin fecha.
+ * No toca el progreso ni el historial del lector.
+ *
+ * @param {ReturnType<typeof buildPedagogicalContext>} context
+ * @param {{contentId:string, history?:Array<object>}} progress
+ * @param {Array<object>|undefined} receipts  filas de `sessionReceiptsOf(lector).get(obra)`
+ * @returns {{sessions:Array<{sessionId:string, startedAt:string|null, durationSec:number, mode:string, evidence:string}>, complete:boolean, undatedSaves:boolean, fromOrigin:boolean, unverified:number}}
+ */
+export function creditSessions(context, progress, receipts) {
+    const rows = Array.isArray(receipts) ? receipts : [];
+    const seen = new Set();
+    const sessions = [];
+    for (const r of rows) {
+        if (r.session_id === '') continue;
+        seen.add(r.session_id);
+        const declared = Number.isFinite(r.declared_start_ts);
+        const R = r.first_received_ts, D = declared ? r.declared_start_ts : R;
+        let evidence;
+        if (r.conflict) evidence = DATE_EVIDENCE.conflicting_dates;
+        else if (D > R + CLOCK_SKEW_MS) evidence = DATE_EVIDENCE.future_date;
+        else if (D < R && context.classify(progress.contentId, D) === 'in' && context.classify(progress.contentId, D, R) !== 'in') evidence = DATE_EVIDENCE.context_changed_before_receipt;
+        else evidence = !declared ? DATE_EVIDENCE.server_received : R - D <= ONLINE_RECEIPT_MS ? DATE_EVIDENCE.server_corroborated : DATE_EVIDENCE.deferred_sync;
+        const credited = CREDITED.has(evidence);
+        // Una sesión no pudo durar más que lo que va de su inicio a la última vez que el servidor la recibió.
+        const ceiling = Math.max(0, Math.round((r.last_received_ts - D) / 1000)) + CLOCK_SKEW_MS / 1000;
+        sessions.push({ sessionId: r.session_id, startedAt: credited ? new Date(D).toISOString() : null,
+            durationSec: credited ? Math.min(Math.max(0, r.duration_sec || 0), ceiling) : 0, mode: r.mode || 'text', evidence });
+    }
+    // Sesiones del historial de las que el servidor no anotó recepción (anteriores al registro, o cuya anotación falló).
+    for (const h of Array.isArray(progress?.history) ? progress.history : []) {
+        if (h && !seen.has(String(h.sessionId))) sessions.push({ sessionId: String(h.sessionId ?? ''), startedAt: null, durationSec: 0, mode: h.mode || 'text', evidence: DATE_EVIDENCE.no_server_receipt });
+    }
+    const unverified = sessions.filter((s) => s.startedAt === null).length;
+    const undatedSaves = rows.some((r) => r.session_id === '');
+    const fromOrigin = rows.some((r) => r.from_origin === 1);
+    return { sessions, unverified, undatedSaves, fromOrigin, complete: fromOrigin && !undatedSaves && unverified === 0 && sessions.length > 0 };
 }
 
 /**

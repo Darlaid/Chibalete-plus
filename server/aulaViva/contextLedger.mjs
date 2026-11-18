@@ -56,6 +56,20 @@ function db() {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pci_open ON pedagogical_context_intervals(kind, group_id, IFNULL(work_id, ''), IFNULL(user_id, '')) WHERE until_ts IS NULL;
       CREATE INDEX IF NOT EXISTS idx_pci_group ON pedagogical_context_intervals(group_id, kind);
       CREATE TABLE IF NOT EXISTS pedagogical_context_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      -- V9 65A: constancia del SERVIDOR de cada sesión de lectura que recibe (ver recordSessionReceipt).
+      CREATE TABLE IF NOT EXISTS reading_session_receipts (
+        user_id            TEXT NOT NULL,
+        work_id            TEXT NOT NULL,
+        session_id         TEXT NOT NULL,      -- '' = guardados que no traían sesión
+        declared_start_ts  INTEGER,            -- lo que declaró el dispositivo; null si no declaró una fecha
+        duration_sec       INTEGER NOT NULL DEFAULT 0,
+        mode               TEXT,
+        first_received_ts  INTEGER NOT NULL,   -- reloj del servidor
+        last_received_ts   INTEGER NOT NULL,   -- reloj del servidor
+        from_origin        INTEGER NOT NULL DEFAULT 0,   -- el progreso de esa obra no existía antes de este guardado
+        conflict           INTEGER NOT NULL DEFAULT 0,   -- el mismo id de sesión volvió con otra fecha de inicio
+        PRIMARY KEY (user_id, work_id, session_id)
+      );
     `);
     _st = {
         open:      _db.prepare(`SELECT id, kind, group_id, IFNULL(work_id, user_id) AS item_id FROM pedagogical_context_intervals WHERE until_ts IS NULL`),
@@ -65,6 +79,16 @@ function db() {
         getMeta:   _db.prepare(`SELECT value FROM pedagogical_context_meta WHERE key = ?`),
         setMeta:   _db.prepare(`INSERT INTO pedagogical_context_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
         counts:    _db.prepare(`SELECT kind, origin, COUNT(*) AS n, SUM(until_ts IS NULL) AS open FROM pedagogical_context_intervals GROUP BY kind, origin`),
+        receipt:   _db.prepare(`INSERT INTO reading_session_receipts (user_id, work_id, session_id, declared_start_ts, duration_sec, mode, first_received_ts, last_received_ts, from_origin)
+            VALUES (@user_id, @work_id, @session_id, @declared_start_ts, @duration_sec, @mode, @now, @now, @from_origin)
+            ON CONFLICT(user_id, work_id, session_id) DO UPDATE SET
+              conflict = CASE WHEN conflict = 1 OR (session_id <> '' AND ((declared_start_ts IS NULL) <> (excluded.declared_start_ts IS NULL)
+                OR ABS(declared_start_ts - excluded.declared_start_ts) > 1000)) THEN 1 ELSE 0 END,
+              duration_sec = MAX(duration_sec, excluded.duration_sec),
+              first_received_ts = MIN(first_received_ts, excluded.first_received_ts),
+              last_received_ts = MAX(last_received_ts, excluded.last_received_ts)`),
+        receiptsOf: _db.prepare(`SELECT work_id, session_id, declared_start_ts, duration_sec, mode, first_received_ts, last_received_ts, from_origin, conflict
+            FROM reading_session_receipts WHERE user_id = ? ORDER BY first_received_ts ASC, session_id ASC`),
     };
     return _db;
 }
@@ -143,6 +167,48 @@ export function contextIntervals(groupIds) {
             m.get(r.item_id).push({ since: r.since_ts, until: r.until_ts ?? null, origin: r.origin });
         }
         out.set(gid, entry);
+    }
+    return out;
+}
+
+/**
+ * V9 65A — constancia de recepción de una sesión de lectura.
+ *
+ * La fecha de una sesión (`startedAt`) la declara el dispositivo y el historial del progreso solo conserva las 20
+ * últimas. Aquí el servidor anota, con SU reloj, cuándo recibió cada sesión por primera y por última vez, junto a la
+ * fecha que el dispositivo declaró. No sustituye una por otra: la lectura sin conexión conserva su fecha declarada, y
+ * quien atribuye (`pedagogicalContext.creditSessions`) decide si esa fecha es coherente con lo que el servidor vio.
+ * No es un segundo progreso: no guarda posición ni porcentaje, y no modifica el historial del lector.
+ *
+ * Un reenvío de la misma sesión no crea filas ni cambia la primera recepción; si vuelve con otra fecha de inicio (más
+ * de un segundo de diferencia) queda marcada (`conflict`) y deja de acreditarse. Un guardado sin sesión se anota bajo `session_id = ''`.
+ * El lector va en `user_id`: la supresión de datos de una persona elimina estas filas como las demás de este almacén.
+ *
+ * @returns {boolean} false si el registro está apagado o no se pudo anotar (la sesión queda sin constancia: no acreditable)
+ */
+export function recordSessionReceipt({ userId, workId, sessionId = '', declaredStartTs = null, durationSec = 0, mode = null, fromOrigin = false, nowTs = Date.now() }) {
+    if (!ENABLED() || !userId || !workId) return false;
+    try {
+        db();
+        _st.receipt.run({ user_id: String(userId), work_id: String(workId), session_id: String(sessionId ?? ''),
+            declared_start_ts: Number.isFinite(declaredStartTs) ? Math.trunc(declaredStartTs) : null,
+            duration_sec: Number.isFinite(durationSec) && durationSec > 0 ? Math.trunc(durationSec) : 0,
+            mode: typeof mode === 'string' && mode ? mode.slice(0, 32) : null, now: nowTs, from_origin: fromOrigin ? 1 : 0 });
+        return true;
+    } catch { return false; }
+}
+
+/**
+ * Constancias de un lector, por obra. `null` con el registro apagado (quien atribuye conserva la regla anterior).
+ * @returns {Map<string, Array<object>>|null}
+ */
+export function sessionReceiptsOf(userId) {
+    if (!ENABLED()) return null;
+    const out = new Map();
+    db();
+    for (const r of _st.receiptsOf.all(String(userId ?? ''))) {
+        if (!out.has(r.work_id)) out.set(r.work_id, []);
+        out.get(r.work_id).push(r);
     }
     return out;
 }
