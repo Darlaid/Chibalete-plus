@@ -297,11 +297,12 @@ export function createGroupAnalyticsCache({ ttlMs = GROUP_ANALYTICS_CACHE_TTL_MS
         /**
          * @param {string} groupId
          * @param {() => { summary:any, rowsConsidered:number }} compute
-         * @returns {Promise<{ data:any, cache:'hit'|'miss'|'inflight', computeMs:number|null, rowsConsidered:number|null }>}
+         * @returns {Promise<{ data:any, cache:'hit'|'miss'|'inflight', computeMs:number|null, rowsConsidered:number|null, fetchedAt:number }>}
+         *          `fetchedAt` (65B): instante en que se calculó lo que se entrega, venga o no de la caché.
          */
         async get(groupId, compute) {
             const hit = entries.get(groupId);
-            if (hit && now() < hit.expiresAt) return { data: hit.data, cache: 'hit', computeMs: null, rowsConsidered: null };
+            if (hit && now() < hit.expiresAt) return { data: hit.data, cache: 'hit', computeMs: null, rowsConsidered: null, fetchedAt: hit.fetchedAt };
             let flight = inflight.get(groupId);
             const joined = !!flight;
             if (!flight) {
@@ -311,13 +312,13 @@ export function createGroupAnalyticsCache({ ttlMs = GROUP_ANALYTICS_CACHE_TTL_MS
                     const computeMs = performance.now() - t0;
                     const fetchedAt = now();
                     entries.set(groupId, { data: summary, fetchedAt, expiresAt: fetchedAt + ttlMs });
-                    return { data: summary, computeMs, rowsConsidered };
+                    return { data: summary, computeMs, rowsConsidered, fetchedAt };
                 }).finally(() => { inflight.delete(groupId); });
                 inflight.set(groupId, flight);
             }
             const r = await flight;
             // 'miss' = esta petición disparó el cálculo; 'inflight' = esperó el de otra.
-            return { data: r.data, cache: joined ? 'inflight' : 'miss', computeMs: r.computeMs, rowsConsidered: r.rowsConsidered };
+            return { data: r.data, cache: joined ? 'inflight' : 'miss', computeMs: r.computeMs, rowsConsidered: r.rowsConsidered, fetchedAt: r.fetchedAt };
         },
         /** Solo diagnóstico/tests: tamaño actual. */
         size() { return { entries: entries.size, inflight: inflight.size }; },

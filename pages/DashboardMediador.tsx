@@ -146,6 +146,11 @@ interface EffectivenessData {
     overallImmediateRate: number;
     overallSustainedRate: number;
     totalAssessed: number;
+    // V9 65B — «efectivas» se dice sobre las EVALUADAS; las recientes (pendientes) y las de lectores sin lectura que
+    // comparar (no comparables) se cuentan aparte.
+    totalEvaluated?: number;
+    totalPending?: number;
+    totalNotComparable?: number;
     topTypes: Array<{ type: string; total: number; improved: number; improvementRate: number }>;
     successPatterns: SuccessPattern[];
     coursePedagogicalProfile: CoursePedagogicalProfile | null;
@@ -162,7 +167,11 @@ interface Intervention {
     patternsAtIntervention: string[];
     readingTimeMsAtIntervention: number;
     createdAt: string;
+    /** V9 65B — evaluación calculada por el servidor (la misma de la efectividad del curso). */
+    impact?: InterventionImpact;
 }
+
+type InterventionImpact = 'improved' | 'unchanged' | 'pending' | 'insufficient';
 
 // ---------------------------------------------------------------------------
 // STATIC MAPS
@@ -517,28 +526,9 @@ function buildContextualAction(student: StudentRow, patterns: string[]): string 
     return primary.action; // static fallback
 }
 
-/**
- * Compare current student state to the snapshot stored when the intervention was created.
- * 'improved': reading time grew >20% OR a negative pattern resolved.
- * 'unchanged': neither condition met.
- */
-function computeInterventionImpact(
-    currentPatterns: string[],
-    currentReadingTimeMs: number,
-    intervention: Intervention
-): 'improved' | 'unchanged' {
-    const timeGrowth = intervention.readingTimeMsAtIntervention > 0
-        ? currentReadingTimeMs / intervention.readingTimeMsAtIntervention
-        : 1;
-    if (timeGrowth > 1.2) return 'improved';
-
-    const negativePatterns = ['sin_actividad', 'dificultad_comprension', 'lectura_fragmentada'];
-    const prevNeg = intervention.patternsAtIntervention.filter(p => negativePatterns.includes(p)).length;
-    const currNeg = currentPatterns.filter(p => negativePatterns.includes(p)).length;
-    if (currNeg < prevNeg) return 'improved';
-
-    return 'unchanged';
-}
+// V9 65B — la evaluación de una intervención la calcula el servidor (`intervention.impact`), con la misma función que
+// la «Efectividad de intervenciones» del curso. Antes esta pantalla la recalculaba con otra fórmula y otra fuente, y
+// la fila de un estudiante podía contradecir el porcentaje del curso.
 
 // Which pedagogical dimension each intervention type primarily targets (mirrors server)
 const INTERVENTION_DIMENSION_MAP: Record<string, string[]> = {
@@ -1183,9 +1173,7 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
     const lastIntervention = interventions.length > 0
         ? [...interventions].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
         : null;
-    const impact = lastIntervention
-        ? computeInterventionImpact(patterns, student.totalReadingTimeMs, lastIntervention)
-        : null;
+    const impact: InterventionImpact | null = lastIntervention?.impact ?? null;
 
     return (
         <div className={`p-4 rounded-lg border ${
@@ -1227,6 +1215,11 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
                         {impact === 'unchanged' && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 font-medium shrink-0">
                                 = Sin cambio
+                            </span>
+                        )}
+                        {impact === 'pending' && (
+                            <span title="La intervención es reciente: todavía no se evalúa" className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-50 dark:bg-sky-900/20 text-sky-600 dark:text-sky-400 font-medium shrink-0">
+                                En seguimiento
                             </span>
                         )}
                     </div>
@@ -1898,13 +1891,22 @@ const DashboardMediador: React.FC = () => {
                         <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
                             {/* Overall binary rate */}
                             <div className="flex items-baseline gap-2">
+                                {/* V9 65B — el porcentaje se dice sobre las intervenciones evaluadas; sin ninguna, no hay porcentaje. */}
                                 <span className="text-2xl font-bold text-gray-900 dark:text-gray-100 tabular-nums">
-                                    {Math.round(effectiveness.overallImprovementRate * 100)}%
+                                    {(effectiveness.totalEvaluated ?? effectiveness.totalInterventions) > 0 ? `${Math.round(effectiveness.overallImprovementRate * 100)}%` : '—'}
                                 </span>
                                 <span className="text-sm text-gray-400 dark:text-gray-500">
-                                    efectivas ({effectiveness.totalImproved}/{effectiveness.totalInterventions})
+                                    efectivas ({effectiveness.totalImproved}/{effectiveness.totalEvaluated ?? effectiveness.totalInterventions} evaluadas)
                                 </span>
                             </div>
+                            {((effectiveness.totalPending ?? 0) > 0 || (effectiveness.totalNotComparable ?? 0) > 0) && (
+                                <span className="text-xs text-gray-400 dark:text-gray-500">
+                                    {[
+                                        (effectiveness.totalPending ?? 0) > 0 ? `${effectiveness.totalPending} en seguimiento (recientes, aún sin evaluar)` : null,
+                                        (effectiveness.totalNotComparable ?? 0) > 0 ? `${effectiveness.totalNotComparable} sin lectura del curso con la que comparar` : null,
+                                    ].filter(Boolean).join(' · ')}
+                                </span>
+                            )}
                             {/* Temporal rates — only shown when there is enough assessed data */}
                             {effectiveness.totalAssessed >= 3 && (
                                 <div className="flex items-center gap-4">

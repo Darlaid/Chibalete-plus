@@ -207,12 +207,39 @@ export function aggregateCoursePedagogicalProfile(studentProfiles) {
 
 /**
  * Binary impact based on total reading time growth.
+ *
+ * V9 65B — con `sessionTimelines`, las dos cifras de la comparación salen de la MISMA fuente: las sesiones fechadas
+ * del lector (antes de la intervención frente al total). Antes se dividía el total de esas sesiones entre
+ * `readingTimeMsAtIntervention`, una cifra que guardó el cliente al registrar la intervención y que procede de otra
+ * fuente (el tiempo que mostraba el tablero): dos magnitudes distintas daban «mejoró» sin lectura posterior. La regla
+ * no cambia (creció más de un 20 %; sin lectura previa, más de un minuto). Además se dice cuándo no hay evaluación:
+ *   'pending'       la intervención tiene menos de MIN_ASSESSABLE_MS (los mismos 3 días de la evaluación temporal);
+ *   'insufficient'  el lector no tiene ninguna sesión fechada con la que comparar.
+ * Sin `sessionTimelines` (llamadas antiguas) se conserva el cálculo anterior.
+ * @returns {'improved'|'unchanged'|'pending'|'insufficient'}
  */
-export function computeImpact(intervention, studentReadingTimeMap) {
+export function computeImpact(intervention, studentReadingTimeMap, sessionTimelines = null, nowMs = Date.now()) {
+    if (sessionTimelines) {
+        const growth = readingGrowthSince(intervention, sessionTimelines, nowMs);
+        if (growth.state) return growth.state;
+        if (growth.beforeMs === 0) return growth.totalMs > 60_000 ? 'improved' : 'unchanged';
+        return growth.totalMs / growth.beforeMs > 1.2 ? 'improved' : 'unchanged';
+    }
     const currentMs = studentReadingTimeMap[intervention.studentId] ?? 0;
     const snapMs    = intervention.readingTimeMsAtIntervention ?? 0;
     if (snapMs === 0) return currentMs > 60_000 ? 'improved' : 'unchanged';
     return currentMs / snapMs > 1.2 ? 'improved' : 'unchanged';
+}
+
+/** Tiempo de lectura fechado del lector antes de la intervención y en total, o por qué no hay comparación. */
+function readingGrowthSince(intervention, sessionTimelines, nowMs = Date.now()) {
+    const t0 = new Date(intervention.createdAt).getTime();
+    if (nowMs - t0 < MIN_ASSESSABLE_MS) return { state: 'pending' };
+    const sessions = sessionTimelines[intervention.studentId] ?? [];
+    if (sessions.length === 0) return { state: 'insufficient' };
+    let beforeMs = 0, totalMs = 0;
+    for (const s of sessions) { totalMs += s.durationMs; if (s.timestamp < t0) beforeMs += s.durationMs; }
+    return { state: null, beforeMs, totalMs };
 }
 
 /**
@@ -301,11 +328,12 @@ export function computeEffectivenessByType(interventions, studentReadingTimeMap,
 
     for (const iv of interventions) {
         if (!byType[iv.type]) {
-            byType[iv.type] = { total: 0, improved: 0, immediate: 0, sustained: 0, continuityImproved: 0, familySupportImproved: 0 };
+            byType[iv.type] = { total: 0, improved: 0, unchanged: 0, pending: 0, insufficient: 0, immediate: 0, sustained: 0, continuityImproved: 0, familySupportImproved: 0 };
         }
         byType[iv.type].total++;
 
-        if (computeImpact(iv, studentReadingTimeMap) === 'improved') byType[iv.type].improved++;
+        // 65B: una intervención aún no evaluable o sin lectura que comparar no cuenta como «sin cambio».
+        byType[iv.type][computeImpact(iv, studentReadingTimeMap, sessionTimelines)]++;
 
         if (sessionTimelines) {
             const sessions = sessionTimelines[iv.studentId] ?? [];
@@ -318,32 +346,41 @@ export function computeEffectivenessByType(interventions, studentReadingTimeMap,
     }
 
     return Object.entries(byType)
-        .map(([type, s]) => ({
-            type,
-            total:           s.total,
-            improved:        s.improved,
-            unchanged:       s.total - s.improved,
-            improvementRate: s.total > 0 ? s.improved / s.total : 0,
-            dimensions:      INTERVENTION_DIMENSION_MAP[type] ?? [],
-            ...(sessionTimelines ? {
-                immediateCount:          s.immediate,
-                sustainedCount:          s.sustained,
-                immediateRate:           s.total > 0 ? s.immediate / s.total : 0,
-                sustainedRate:           s.total > 0 ? s.sustained / s.total : 0,
-                continuityImpactRate:    s.total > 0 ? s.continuityImproved / s.total : 0,
-                familySupportImpactRate: s.total > 0 ? s.familySupportImproved / s.total : 0,
-            } : {}),
-        }))
+        .map(([type, s]) => {
+            // 65B: las tasas se calculan sobre las intervenciones EVALUADAS (mejoró o sin cambio); las temporales, sobre
+            // las que ya tienen el plazo mínimo (las mismas que el agregado `totalAssessed` de la ruta).
+            const evaluated = s.improved + s.unchanged, elapsed = s.total - s.pending;
+            return {
+                type,
+                total:           s.total,
+                improved:        s.improved,
+                unchanged:       s.unchanged,
+                pending:         s.pending,
+                insufficient:    s.insufficient,
+                evaluated,
+                improvementRate: evaluated > 0 ? s.improved / evaluated : 0,
+                dimensions:      INTERVENTION_DIMENSION_MAP[type] ?? [],
+                ...(sessionTimelines ? {
+                    immediateCount:          s.immediate,
+                    sustainedCount:          s.sustained,
+                    immediateRate:           elapsed > 0 ? s.immediate / elapsed : 0,
+                    sustainedRate:           elapsed > 0 ? s.sustained / elapsed : 0,
+                    continuityImpactRate:    elapsed > 0 ? s.continuityImproved / elapsed : 0,
+                    familySupportImpactRate: elapsed > 0 ? s.familySupportImproved / elapsed : 0,
+                } : {}),
+            };
+        })
         .sort((a, b) => b.improvementRate - a.improvementRate);
 }
 
 /**
  * Cross pattern × type → result. Only includes combinations with >=2 data points.
  */
-export function computeSuccessPatterns(interventions, studentReadingTimeMap) {
+export function computeSuccessPatterns(interventions, studentReadingTimeMap, sessionTimelines = null) {
     const matrix = {};
     for (const iv of interventions) {
-        const impact = computeImpact(iv, studentReadingTimeMap);
+        const impact = computeImpact(iv, studentReadingTimeMap, sessionTimelines);
+        if (impact === 'pending' || impact === 'insufficient') continue;   // 65B: sin evaluación no hay dato de éxito ni de fracaso
         for (const pattern of (iv.patternsAtIntervention ?? [])) {
             const key = `${pattern}::${iv.type}`;
             if (!matrix[key]) matrix[key] = { pattern, type: iv.type, total: 0, improved: 0 };
@@ -396,13 +433,17 @@ export function buildStudentInterventionHistory(interventions, studentId, studen
         .map((iv, idx) => {
             const currentMs  = studentReadingTimeMap[studentId] ?? 0;
             const snapMs     = iv.readingTimeMsAtIntervention ?? 0;
-            const timeGrowth = snapMs > 0 ? currentMs / snapMs : (currentMs > 60_000 ? 2 : 1);
+            // 65B: con sesiones fechadas, la razón de crecimiento usa la misma fuente en las dos cifras (ver `computeImpact`).
+            const growth     = sessionTimelines ? readingGrowthSince(iv, sessionTimelines) : null;
+            const timeGrowth = growth
+                ? (growth.state ? null : growth.beforeMs > 0 ? growth.totalMs / growth.beforeMs : (growth.totalMs > 60_000 ? 2 : 1))
+                : snapMs > 0 ? currentMs / snapMs : (currentMs > 60_000 ? 2 : 1);
             const temporal   = computeTemporalImpact(iv, sessions);
 
             return {
                 ...iv,
-                impact:            computeImpact(iv, studentReadingTimeMap),
-                timeGrowthRatio:   Math.round(timeGrowth * 100) / 100,
+                impact:            computeImpact(iv, studentReadingTimeMap, sessionTimelines),
+                timeGrowthRatio:   timeGrowth === null ? null : Math.round(timeGrowth * 100) / 100,
                 temporalImpact:    temporal.temporalImpact,
                 timeToImprovement: temporal.timeToImprovement,
                 dimensionImpacts:  temporal.dimensionImpacts,

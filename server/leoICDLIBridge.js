@@ -43,8 +43,12 @@ const __dirname  = path.dirname(__filename);
 
 // DB paths — mirrors server.js loadAndInitMetrics, no dependency on server.js
 // _USERS_DB y _GROUPS_DB vienen de ./config.js (canónicos, env-overridable)
-const _ANALYTICS_DB  = path.resolve(__dirname, '../data/analytics_db.json');
-const _LEO_MEMORY_DB = path.resolve(__dirname, '../data/leo_memory_db.json');
+// V9 65B: mismo directorio de datos que server.js y leoMemoryService.js (CHP_DATA_DIR; sin definir en producción ⇒
+// ../data, como antes). Con la ruta fija, el ICDLI global leía los eventos y la memoria de Leo del directorio del
+// repositorio aunque el proceso estuviera configurado con otro almacén.
+const _DATA_DIR      = process.env.CHP_DATA_DIR || path.resolve(__dirname, '../data');
+const _ANALYTICS_DB  = path.join(_DATA_DIR, 'analytics_db.json');
+const _LEO_MEMORY_DB = path.join(_DATA_DIR, 'leo_memory_db.json');
 
 // In-memory cache — avoids full metrics recomputation on every Leo message
 const _CACHE_TTL_MS  = 30_000; // 30 s: fresh enough for a reading session
@@ -264,9 +268,8 @@ export function resolveLeoPedagogicalAdjustment(snapshot, sessionMemory, profile
 export function getContextualICDLISnapshot(userId, { includeContent, leoEntries = [] } = {}) {
     if (!userId || typeof includeContent !== 'function') return null;
     try {
-        const analytics = process.env.CHP_DATA_DIR ? path.join(process.env.CHP_DATA_DIR, 'analytics_db.json') : _ANALYTICS_DB;
         initMetrics({
-            events:    _readSafe(analytics,   []),
+            events:    _readSafe(_ANALYTICS_DB, []),
             leoMemory: { memoryMap: {} },
             progress:  getAllProgressAsMap(),
             groups:    _readSafe(_GROUPS_DB,  []),

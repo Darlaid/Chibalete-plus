@@ -36,13 +36,7 @@ export function buildLeoContextInputs(userId, context, opts = {}) {
     const empty = { evidence: [], profile: null, sessions: [], icdli: null, provenance: null };
     if (!context.hasWorks) return { ...base, ...empty, data_state: 'no_course_works', reason: 'no_course_works' };
 
-    const evidence = [];
-    let unverifiable = 0;
-    for (const e of getEvidenceEntriesForUser(userId, EVIDENCE_SCAN)) {
-        const cls = context.classify(e.contentId, msOf(e.timestamp));
-        if (cls === 'in') evidence.push(e);
-        else if (cls === 'unverifiable') unverifiable++;
-    }
+    const { evidence, unverifiable } = contextualLeoEvidence(userId, context);
     const readingBlocked = opts.readingState?.data_state === 'insufficient'
         && ['unverifiable_history', 'provenance_not_recorded'].includes(opts.readingState.reason);
     if (unverifiable > 0 || readingBlocked) {
@@ -50,7 +44,43 @@ export function buildLeoContextInputs(userId, context, opts = {}) {
             reason: opts.provenanceRecorded === false ? 'provenance_not_recorded' : (opts.readingState?.reason && readingBlocked ? opts.readingState.reason : 'unverifiable_history') };
     }
 
-    // Perfil: mismos contadores que `recordInteraction`, sobre las evidencias del contexto.
+    const { profile, sessions } = leoSessionsFromEvidence(userId, evidence);
+
+    const icdli = getContextualICDLISnapshot(userId, { includeContent, leoEntries: sessions });
+    const stamps = evidence.map((e) => e.timestamp).sort();
+    const provenance = { evidence: evidence.length, first_ts: stamps[0] ?? null, last_ts: stamps[stamps.length - 1] ?? null,
+        reading_sessions: icdli?.readingSessions ?? 0 };
+    const nothing = evidence.length === 0 && !(icdli?.hasData);
+    return { ...base, evidence, profile, sessions, icdli, provenance,
+        data_state: nothing ? 'no_activity' : 'ok', reason: nothing ? 'no_activity_in_context' : null };
+}
+
+/** Evidencias de Leo del lector fechadas dentro del contexto, y cuántas son de obras del contexto sin fecha acreditable. */
+function contextualLeoEvidence(userId, context) {
+    const evidence = [];
+    let unverifiable = 0;
+    for (const e of getEvidenceEntriesForUser(userId, EVIDENCE_SCAN)) {
+        const cls = context.classify(e.contentId, msOf(e.timestamp));
+        if (cls === 'in') evidence.push(e);
+        else if (cls === 'unverifiable') unverifiable++;
+    }
+    return { evidence, unverifiable };
+}
+
+/**
+ * V9 65B — sesiones de Leo del lector en ESE contexto, con la forma que usa la fórmula del ICDLI. Son exactamente las
+ * que alimentan el ICDLI de Leo del mediador (`buildLeoContextInputs`): el tablero y el informe del curso las usan
+ * también, para que el mismo índice no salga de dos conjuntos de datos. Con evidencias de fecha no acreditable no se
+ * entrega ninguna (allí Leo declara «insuficiente» y no calcula el índice).
+ */
+export function contextualLeoSessions(userId, context) {
+    if (!context?.hasWorks) return [];
+    const { evidence, unverifiable } = contextualLeoEvidence(userId, context);
+    return unverifiable > 0 ? [] : leoSessionsFromEvidence(userId, evidence).sessions;
+}
+
+/** Perfil (mismos contadores que `recordInteraction`) y sesiones por obra, a partir de evidencias ya delimitadas. */
+function leoSessionsFromEvidence(userId, evidence) {
     const profile = { userId, vocabularyInteractionsCount: 0, inferentialInteractionsCount: 0, reflectionInteractionsCount: 0,
         writingInteractionsCount: 0, totalChatInteractions: 0, preferredSupportType: null };
     const byContent = new Map();
@@ -69,13 +99,5 @@ export function buildLeoContextInputs(userId, context, opts = {}) {
         byContent.set(e.contentId, s);
     }
     profile.preferredSupportType = derivePreferredSupportType(profile);
-    const sessions = [...byContent.values()];
-
-    const icdli = getContextualICDLISnapshot(userId, { includeContent, leoEntries: sessions });
-    const stamps = evidence.map((e) => e.timestamp).sort();
-    const provenance = { evidence: evidence.length, first_ts: stamps[0] ?? null, last_ts: stamps[stamps.length - 1] ?? null,
-        reading_sessions: icdli?.readingSessions ?? 0 };
-    const nothing = evidence.length === 0 && !(icdli?.hasData);
-    return { ...base, evidence, profile, sessions, icdli, provenance,
-        data_state: nothing ? 'no_activity' : 'ok', reason: nothing ? 'no_activity_in_context' : null };
+    return { profile, sessions: [...byContent.values()] };
 }

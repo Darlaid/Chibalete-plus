@@ -46,7 +46,9 @@ import { fileURLToPath } from 'url';
 
 const __filename  = fileURLToPath(import.meta.url);
 const __dirname   = path.dirname(__filename);
-const _DB_FILE    = path.resolve(__dirname, '../data/content.json');
+// V9 65B: el mismo catálogo que server.js (CONTENT_DB, o content.json del directorio de datos configurado). Con la
+// ruta fija, Leo leía el catálogo del directorio del repositorio aunque el proceso usara otro almacén.
+const _DB_FILE    = process.env.CONTENT_DB || path.join(process.env.CHP_DATA_DIR || path.resolve(__dirname, '../data'), 'content.json');
 const _PUBLIC_DIR = path.resolve(__dirname, '../public');
 
 // ── Constants ─────────────────────────────────────────────────────────────────

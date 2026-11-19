@@ -231,6 +231,7 @@ import {
     buildStudentSessionTimelines,
     buildStudentLeoInteractionsMap,
     computeTemporalImpact,
+    computeImpact,
     computePedagogicalProfile,
     aggregateCoursePedagogicalProfile,
     computeEffectivenessByType,
@@ -289,6 +290,7 @@ import { evaluateScopeAccess, requireScopeAccess, individualAccess, individualAc
 import { getPrincipal, getMemberships, IdentityUnavailableError, mediatedGroupRosters } from './identity/cis.mjs';
 // V9 F7-C2R-U1 — procedencia temporal del contexto pedagógico (apagada salvo AULA_VIVA_CONTEXT_LEDGER_ENABLED=1).
 import { observeContext, contextIntervals, ENABLED as contextLedgerEnabled, ALL_WORKS, recordSessionReceipt, sessionReceiptsOf } from './aulaViva/contextLedger.mjs';
+import { contextualLeoSessions } from './leoContextInputs.js';
 import { executeMetricsRoute } from './metrics/metricsRouteBoundary.mjs';
 import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // CHP-MAINT-ACCESSIBLE-NAV-AUTOADVANCE-01 — tiempo efectivo propio (desbloqueo
@@ -1186,7 +1188,10 @@ const UNCACHED_JSON_FILES = new Set([USERS_DB]);
 //   · cualquier duda (stat falla, lectura servida por el seam SQLite, reloj
 //     inconsistente) ⇒ no se cachea. Fallo cerrado hacia «leer del disco».
 // El catálogo (content.json) y el resto de archivos conservan su TTL sin cambios.
-const STAT_VALIDATED_JSON_FILES = new Set([GROUPS_DB, ACCESS_DB]);
+// V9 65B: también el registro de intervenciones del tablero. Lo escribe la réplica que atiende al mediador y lo leen
+// las dos (lista del curso, efectividad, impacto contextual): con el TTL a secas, una intervención recién registrada no
+// existía hasta 30 s para la otra réplica. `writeJSON` lo reemplaza por rename, como los demás.
+const STAT_VALIDATED_JSON_FILES = new Set([GROUPS_DB, ACCESS_DB, INTERVENTIONS_DB]);
 const _STAT_RACY_NS = 2_000_000_000n; // 2 s: por encima de la granularidad de cualquier sistema de archivos habitual
 const _fileSignature = (file) => {
     try {
@@ -9578,7 +9583,9 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         const shown = a2.aggregateOver === 'allowed'
             ? restrictSummaryToReaders(r.data, a2.allowed)
             : { ...r.data, readers: (r.data.readers || []).filter(x => a2.allowed.has(x.userId)) };
-        let data = { ...shown, individualAccess: { status: a2.status, aggregateOver: a2.aggregateOver } };
+        // V9 65B: `computedAt` = cuándo se calcularon las cifras de actividad (el resumen se conserva hasta 5 minutos por
+        // réplica). Un resumen servido de la caché no se presenta como recién calculado.
+        let data = { ...shown, individualAccess: { status: a2.status, aggregateOver: a2.aggregateOver }, computedAt: r.fetchedAt ?? null };
         if (contextOf) {
             // El recuento se hace sobre la MISMA población que los agregados (solo cifras); el detalle, sobre los visibles.
             const population = a2.aggregateOver === 'allowed' ? [...a2.allowed] : cohortIds;
@@ -11373,6 +11380,9 @@ app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWri
         if (datable.length < validEvents.length) log(`Analytics: ${validEvents.length - datable.length} evento(s) con fecha posterior al reloj del servidor, no guardados`, 'WARN');
 
         const { received, deduplicated } = await withFileLock(ANALYTICS_DB, () => {
+            // V9 65B: lectura fresca dentro del candado (como los demás almacenes que se mutan). Con la copia en caché
+            // de ESTE proceso, una réplica reescribía el archivo sin los eventos que la otra había guardado después.
+            _jsonCache.delete(ANALYTICS_DB);
             const existing = readJSON(ANALYTICS_DB) || [];
             const existingEventIds = new Set(existing.map(e => e.eventId).filter(Boolean));
             const deduped = datable.filter(e => {
@@ -11695,8 +11705,10 @@ function temporalContentPredicate(contextOf) {
         if (!credit?.complete) return undefined;
         return Math.min(...credit.sessions.map(h => Date.parse(h.startedAt)));
     };
+    // 65B: sesiones de Leo fechadas del lector en el curso, las mismas del ICDLI de Leo del mediador.
+    const leoEntriesFor = (userId) => contextualLeoSessions(String(userId), contextOf(userId));
     return Object.assign((contentId, ts, userId) => (userId ? forUser(userId)(contentId, ts) : false),
-        { strict: true, forUser, historical, ...(contextLedgerEnabled() ? { firstSessionTs } : {}) });
+        { strict: true, forUser, historical, leoEntriesFor, ...(contextLedgerEnabled() ? { firstSessionTs } : {}) });
 }
 /**
  * Añade a la respuesta de un curso (métricas o informe) el recuento de atribución, por lector y total. Un lector sin
@@ -13543,8 +13555,14 @@ app.get('/api/interventions/course/:courseId', requireUserAuth, async (req, res)
         const db = readInterventionsDb();
         const visible = visibleInterventions(scope, db.interventions.filter(i => i.courseId === courseId), res);
         if (!visible) return;
+        // V9 65B: cada intervención lleva su evaluación, calculada aquí con la misma función que la efectividad del curso
+        // y que el historial del lector. La pantalla ya no la recalcula por su cuenta con otra fórmula.
+        const { pDb }   = await interventionActivity(scope);
+        const timeMap   = buildStudentReadingTimeMap(pDb);
+        const timelines = buildStudentSessionTimelines(pDb);
         const interventions = visible
-            .sort((a, b) => b.createdAt.localeCompare(a.createdAt)); // most recent first
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt)) // most recent first
+            .map(iv => ({ ...iv, impact: computeImpact(iv, timeMap, timelines) }));
         res.json({ success: true, courseId, interventions });
     } catch (e) {
         log(`GET /api/interventions/course error: ${e.message}`, 'ERROR');
@@ -13617,11 +13635,16 @@ app.get('/api/interventions/effectiveness', requireUserAuth, async (req, res) =>
 
         // Pass timelines to get temporal + dimension breakdowns in per-type stats
         const effectivenessByType = computeEffectivenessByType(interventions, timeMap, timelines);
-        const successPatterns     = computeSuccessPatterns(interventions, timeMap);
+        const successPatterns     = computeSuccessPatterns(interventions, timeMap, timelines);
 
+        // V9 65B: «efectivas» se dice sobre las intervenciones EVALUADAS. Una de hace menos de tres días (pendiente) o de
+        // un lector sin lectura fechada que comparar (no comparable) no es una intervención sin efecto.
         const totalInterventions     = interventions.length;
         const totalImproved          = effectivenessByType.reduce((s, e) => s + e.improved, 0);
-        const overallImprovementRate = totalInterventions > 0 ? totalImproved / totalInterventions : 0;
+        const totalEvaluated         = effectivenessByType.reduce((s, e) => s + e.evaluated, 0);
+        const totalPending           = effectivenessByType.reduce((s, e) => s + e.pending, 0);
+        const totalNotComparable     = effectivenessByType.reduce((s, e) => s + e.insufficient, 0);
+        const overallImprovementRate = totalEvaluated > 0 ? totalImproved / totalEvaluated : 0;
 
         // Temporal aggregate rates — exclude interventions < 3 days old (too early)
         const NOW           = Date.now();
@@ -13658,7 +13681,7 @@ app.get('/api/interventions/effectiveness', requireUserAuth, async (req, res) =>
 
         // Top 2 most effective types (need >=2 samples to include)
         const topTypes = effectivenessByType
-            .filter(e => e.total >= 2)
+            .filter(e => e.evaluated >= 2)
             .slice(0, 2);
 
         res.json({
@@ -13666,6 +13689,9 @@ app.get('/api/interventions/effectiveness', requireUserAuth, async (req, res) =>
             courseId:                    courseId ?? null,
             totalInterventions,
             totalImproved,
+            totalEvaluated,
+            totalPending,
+            totalNotComparable,
             overallImprovementRate,
             overallImmediateRate,
             overallSustainedRate,

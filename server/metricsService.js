@@ -791,6 +791,10 @@ function computeLeoMetrics(userId, userEvents = null, includeContent = null) {
 // ya delimitadas por quien llama, en lugar de la memoria acumulada.
 function computeStudentMetricsUncached(userId, ctx, includeContent = null, extra = null) {
   // V9 F7-C2R-U3B: `includeContent.forUser(lector)` da el predicado de ESE lector (su pertenencia temporal al curso).
+  // V9 65B: `includeContent.leoEntriesFor(lector)` da las sesiones de Leo FECHADAS de ese lector en el contexto: las
+  // mismas con las que Leo del mediador calcula el ICDLI. Sin él, la memoria acumulada (sin fecha) de siempre.
+  const contextLeoEntries = typeof includeContent?.leoEntriesFor === 'function' && !Array.isArray(extra?.leoEntries) ? includeContent.leoEntriesFor(userId) : null;
+  if (Array.isArray(contextLeoEntries)) extra = { ...(extra ?? {}), leoEntries: contextLeoEntries };
   if (typeof includeContent?.forUser === 'function') includeContent = Object.assign(includeContent.forUser(userId), { strict: includeContent.strict === true,
     ...(typeof includeContent.firstSessionTs === 'function' ? { firstSessionTs: includeContent.firstSessionTs } : {}) });
   const allEvents    = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);

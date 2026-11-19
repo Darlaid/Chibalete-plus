@@ -432,7 +432,9 @@ async function main() {
         ok('adm → 200', r.status === 200, `${r.status} ${JSON.stringify(body)}`);
         ok('Cache-Control: no-store', r.headers.get('cache-control') === 'no-store', String(r.headers.get('cache-control')));
         ok('A readerCount = 80 (10 mediadores + admin con groupIds fuera)', body?.readerCount === 80, String(body?.readerCount));
-        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess"]', JSON.stringify(Object.keys(body ?? {})));
+        // V9 65B: `computedAt` declara cuándo se calcularon las cifras (el resumen se conserva hasta 5 minutos por réplica).
+        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess","computedAt"]', JSON.stringify(Object.keys(body ?? {})));
+        ok('…y `computedAt` es un instante no posterior a ahora', Number.isFinite(body?.computedAt) && body.computedAt <= Date.now(), String(body?.computedAt));
         const all = body?.reading?.all, d28 = body?.reading?.last28d;
         ok('B all > 0 y == Σ autoridad por lector', all?.totalEffectiveMs > 0 && all.totalEffectiveMs === expectedAllMs, `${all?.totalEffectiveMs} vs ${expectedAllMs}`);
         ok('B lec-001 aporta 130 min (100 hot canónico + 30 archive legacy)',

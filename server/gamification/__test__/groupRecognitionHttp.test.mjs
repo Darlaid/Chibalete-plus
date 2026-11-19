@@ -217,7 +217,8 @@ try {
         const c = await get(on, 'g-7', 'med-a');
         ok('sin GAMIFICATION_ENABLED: 200 sin campo `recognition`', a.status === 200 && a.body && !('recognition' in a.body));
         ok('sin XP_EARNING_ENABLED: 200 sin campo `recognition`', b.status === 200 && b.body && !('recognition' in b.body));
-        const strip = ({ recognition, ...rest }) => JSON.stringify(rest);
+        // V9 65B: `computedAt` es el instante en que CADA servidor calculó su resumen; no es parte de lo que se compara.
+        const strip = ({ recognition, computedAt, ...rest }) => JSON.stringify(rest);
         ok('con todo encendido el resto del resumen es idéntico (campo solo aditivo)', c.status === 200 && 'recognition' in c.body && strip(c.body) === strip(a.body));
     }
 
