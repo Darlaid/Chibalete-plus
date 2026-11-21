@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
+import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import {
     ArrowLeft, AlertCircle, AlertTriangle, Info, Lightbulb,
 } from 'lucide-react';
@@ -286,10 +287,23 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     const viewKey = `${type}:${id ?? ''}`;
     const [dataKey, setDataKey] = useState<string | null>(null);
 
+    // V9 BI-65C — el informe abierto vuelve a preguntar al servidor (foco, visibilidad, reconexión e intervalo). Una
+    // revalidación del mismo informe no pasa por «cargando»; si el servidor ya no lo autoriza, se retira y se explica.
+    const [authTick, setAuthTick] = useState(0);
+    const loadedFor = useRef<string | null>(null);
+    const shown = useRef(false);
+    useSessionRevalidation(user);
+    useAuthorizationRevalidation(() => setAuthTick(t => t + 1), !!user && !!id);
+
     // ── Fetch ───────────────────────────────────────────────────────────────
     useEffect(() => {
         if (!user || !id) return;
         let cancelled = false;
+        const silent = loadedFor.current === viewKey;
+        if (!silent) shown.current = false;
+        loadedFor.current = viewKey;
+        let withdrawnStatus = 0;
+        let httpFailed = false;
 
         const headers: Record<string, string> = {};
 
@@ -297,11 +311,11 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
             ? `/api/reports/course/${encodeURIComponent(id)}`
             : `/api/reports/school/${encodeURIComponent(id)}`;
 
-        setLoading(true);
-        setError(null);
+        if (!silent) { setLoading(true); setError(null); }
 
-        fetch(url, { headers })
+        fetch(url, { headers, cache: 'no-store' })
             .then(r => {
+                if (!r.ok) { httpFailed = true; if (silent && shown.current) withdrawnStatus = r.status; shown.current = false; }
                 // V9 F5-E2: el código del servidor (p. ej. `individual_access_unavailable` en un 503) se
                 // explica; nunca se muestra crudo ni se conserva el informe cargado antes.
                 if (!r.ok) {
@@ -311,11 +325,17 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                 }
                 return r.json();
             })
-            .then((d: CourseReport | SchoolReport) => { if (cancelled) return; setData(d); setDataKey(viewKey); setLoading(false); })
-            .catch((e: Error) => { if (cancelled) return; setError(e.message); setLoading(false); });
+            .then((d: CourseReport | SchoolReport) => { if (cancelled) return; shown.current = true; setData(d); setDataKey(viewKey); setError(null); setLoading(false); })
+            .catch((e: Error) => {
+                if (cancelled) return;
+                // Sin respuesta durante una revalidación: no confirma ni desmiente; se conserva lo que había.
+                if (silent && !httpFailed && shown.current) return;
+                setError(withdrawnStatus && type === 'course' ? describeAccessWithdrawn('course', withdrawnStatus) : e.message);
+                setLoading(false);
+            });
         // Una respuesta que llega después de cambiar de informe ya no corresponde a esta pantalla.
         return () => { cancelled = true; };
-    }, [user, id, type]);
+    }, [user, id, type, authTick]);
 
     // ── Recommendations — derived from alerts in severity order ─────────────
     const recommendations = useMemo(() => {
@@ -624,7 +644,7 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                         )}
                         {isCourse && (cd!.courseAttribution?.readers_with_unverifiable_history ?? 0) > 0 && (
                             <p role="note" data-testid="report-unverifiable-history" className="text-sm text-gray-600 dark:text-gray-300 pt-6">
-                                {cd!.courseAttribution!.readers_with_unverifiable_history} {cd!.courseAttribution!.readers_with_unverifiable_history === 1 ? 'estudiante tiene' : 'estudiantes tienen'} lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas). Esa lectura no entra en las cifras de este informe y no significa que no hayan leído.
+                                {cd!.courseAttribution!.readers_with_unverifiable_history} {cd!.courseAttribution!.readers_with_unverifiable_history === 1 ? 'estudiante tiene' : 'estudiantes tienen'} lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas, o la fecha de lectura no pudo verificarse). Esa lectura no entra en las cifras de este informe y no significa que no hayan leído.
                             </p>
                         )}
                         {isCourse && Array.isArray(cd!.studentBreakdown) && cd!.studentBreakdown.length > 0 && (

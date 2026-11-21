@@ -33,7 +33,7 @@ export const EMPTY_TEXT = Object.freeze({
  *   leo:{ interactions:number, readersWithInteractions:number, averageInteractionsPerReader:number },
  *   progress:{ readersWithProgress:number, booksStarted:number, booksCompleted:number },
  *   tasks:{ state:string }, pisa:{ state:string }, readers: ReaderAnalytics[] }} GroupAnalyticsSummary
- * @typedef {{ status:'loading' } | { status:'ready', summary:GroupAnalyticsSummary } | { status:'error' }} GroupAnalyticsState
+ * @typedef {{ status:'loading' } | { status:'ready', summary:GroupAnalyticsSummary } | { status:'error', httpStatus?:number, withdrawn?:boolean }} GroupAnalyticsState
  */
 
 const num = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -114,16 +114,28 @@ export function createLatestGroupAnalyticsLoader(fetchSummary) {
     let current = null;   // { controller, token }
     let seq = 0;
     return {
-        /** @param {(s:GroupAnalyticsState) => void} onState */
-        load(groupId, onState) {
+        /**
+         * V9 BI-65C — `opts.silent`: revalidación de una pantalla que ya muestra el grupo. No pasa por `loading`; si el
+         * servidor responde que no (o que no puede), el estado pasa a error y lo mostrado se retira; sin respuesta
+         * (sin código HTTP) se conserva lo que había. El error lleva el código HTTP cuando lo hubo.
+         * @param {(s:GroupAnalyticsState) => void} onState
+         * @param {{ silent?: boolean }} [opts]
+         */
+        load(groupId, onState, opts) {
+            const silent = opts?.silent === true;
             current?.controller.abort();
             const token = ++seq;
             const controller = new AbortController();
             current = { controller, token };
-            onState({ status: 'loading' });
+            if (!silent) onState({ status: 'loading' });
             return fetchSummary(groupId, controller.signal).then(
                 (summary) => { if (current?.token === token) onState({ status: 'ready', summary }); },
-                () => { if (current?.token === token && !controller.signal.aborted) onState({ status: 'error' }); },
+                (e) => {
+                    if (current?.token !== token || controller.signal.aborted) return;
+                    const httpStatus = typeof e?.status === 'number' ? e.status : undefined;
+                    if (silent && !httpStatus) return;
+                    onState(httpStatus ? { status: 'error', httpStatus, ...(silent ? { withdrawn: true } : {}) } : { status: 'error' });
+                },
             );
         },
         cancel() { current?.controller.abort(); current = null; },

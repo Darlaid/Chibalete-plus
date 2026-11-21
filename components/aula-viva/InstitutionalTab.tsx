@@ -10,7 +10,8 @@
  * Cada sección colapsable (default expanded la primera).
  * EmptyState honesto en cada sección.
  */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useAuthorizationRevalidation } from '../../hooks/useAuthorizationRevalidation';
 import { ChevronDown, ChevronUp, Lightbulb, Users, Activity, Clock } from 'lucide-react';
 import {
     aulaVivaInstitutionalService,
@@ -61,7 +62,12 @@ export const InstitutionalTab: React.FC = () => {
     const [patterns, setPatterns] = useState<ObservedPatterns>({ patterns: [] });
     const [loading, setLoading] = useState(true);
 
+    // V9 BI-65C — solo la consulta más reciente pinta (una respuesta tardía, de otra cohorte o anterior a un rechazo
+    // ya detectado, se descarta).
+    const refreshSeq = useRef(0);
+    const trajSeq = useRef(0);
     const refresh = useCallback(async () => {
+        const turn = ++refreshSeq.current;
         const [s, l, c, cd, fq, pt] = await Promise.all([
             aulaVivaInstitutionalService.getStatus(),
             aulaVivaInstitutionalService.getLearningsGlobal(),
@@ -70,20 +76,28 @@ export const InstitutionalTab: React.FC = () => {
             aulaVivaInstitutionalService.getFollowupQueue(),
             aulaVivaInstitutionalService.getPatternsRecent(),
         ]);
+        if (turn !== refreshSeq.current) return;
         setStatus(s); setLearnings(l); setComparative(c);
         setCohorts(cd); setFollowup(fq); setPatterns(pt);
         setLoading(false);
     }, []);
 
-    const openTrajectory = useCallback(async (cohort: CohortDefinition) => {
+    const openTrajectory = useCallback(async (cohort: CohortDefinition, mode?: unknown) => {
+        const turn = ++trajSeq.current;
+        // Al abrir OTRA cohorte no queda en pantalla la serie de la anterior mientras llega la nueva.
+        if (mode !== 'silent') { setTrajSeries([]); setTrajMeta({}); setTrajInfo({}); }
         setTrajCohort(cohort);
         const r = await aulaVivaInstitutionalService.getCohortTrajectory(cohort.cohort_id);
+        if (turn !== trajSeq.current) return;
         setTrajSeries(r.series || []);
         setTrajMeta(fetchMetaOf(r));
         setTrajInfo(r);
     }, []);
 
     useEffect(() => { refresh(); }, [refresh]);
+    // La pestaña abierta vuelve a preguntar al servidor (foco, visibilidad, reconexión e intervalo). Lo que ya no
+    // autoriza llega como consulta fallida y deja de mostrarse; el servicio no sirve copias ante un rechazo.
+    useAuthorizationRevalidation(() => { refresh(); if (trajCohort) openTrajectory(trajCohort, 'silent'); });
 
     if (loading) {
         return <div className="p-6 text-sm text-gray-500 animate-pulse">Cargando vista institucional…</div>;

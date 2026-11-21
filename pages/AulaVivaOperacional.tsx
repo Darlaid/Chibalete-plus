@@ -15,7 +15,8 @@
  * Filosofía PASO 5: NO reemplaza al docente, organiza/prioriza/visibiliza.
  * SIN comparaciones individuo↔individuo. Vocabulario observacional.
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import { Users, AlertCircle, Sparkles, TrendingUp, Activity, ChevronRight } from 'lucide-react';
 import {
     aulaVivaOperationalService, fetchMetaOf, describeFetchFailure,
@@ -66,7 +67,13 @@ const AulaVivaOperacional: React.FC = () => {
 
     const { user } = useAuth();
 
+    // V9 BI-65C — solo la consulta más reciente pinta: una respuesta anterior que llega tarde (de otro lector, o previa a
+    // una revocación ya detectada) se descarta.
+    const refreshSeq = useRef(0);
+    const selectionSeq = useRef(0);
+    const [actionError, setActionError] = useState<string | null>(null);
     const refresh = useCallback(async () => {
+        const turn = ++refreshSeq.current;
         // El agregado interinstitucional (all/global) es solo del administrador
         // (el servidor lo deniega al mediador). El mediador ve la cohorte de su
         // grupo: /api/groups ya llega acotado por el servidor y el CIS vuelve a
@@ -82,6 +89,7 @@ const AulaVivaOperacional: React.FC = () => {
             aulaVivaOperationalService.getAttentionQueue(),
             scope ? aulaVivaOperationalService.getCohortComparison(scope[0], scope[1]) : Promise.resolve(null),
         ]);
+        if (turn !== refreshSeq.current) return;
         setStatus(s);
         setAttention(q);
         setCohort(c);
@@ -90,7 +98,9 @@ const AulaVivaOperacional: React.FC = () => {
     }, [user]);
 
     const refreshRecs = useCallback(async (userId: string) => {
+        const turn = selectionSeq.current;
         const r = await aulaVivaOperationalService.getRecommendations('user', userId);
+        if (turn !== selectionSeq.current) return;
         setRecs(r);
     }, []);
 
@@ -99,33 +109,61 @@ const AulaVivaOperacional: React.FC = () => {
     // a su EmptyState interno.
     // CHP-WCAG-01C AULAVIVA-02 (4.1.3): anuncio del cambio de lector sin mover el foco.
     const [selectionAnnounce, setSelectionAnnounce] = useState('');
-    const refreshTimeline = useCallback(async (userId: string) => {
-        setTimelineLoading(true);
+    const refreshTimeline = useCallback(async (userId: string, mode?: unknown) => {
+        const silent = mode === 'silent';   // revalidación del mismo lector: sin «cargando» ni anuncio
+        const turn = selectionSeq.current;
+        if (!silent) setTimelineLoading(true);
         try {
             const t = await aulaVivaOperationalService.getStudentTimeline(userId);
+            if (turn !== selectionSeq.current) return;
             setTimeline(t);
-            setSelectionAnnounce(`Lector ${userId} seleccionado. Recomendaciones y timeline cargados.`);
+            if (!silent) setSelectionAnnounce(`Lector ${userId} seleccionado. Recomendaciones y timeline cargados.`);
         } catch {
+            if (turn !== selectionSeq.current) return;
             setTimeline(null);
-            setSelectionAnnounce(`Lector ${userId} seleccionado. No se pudo cargar el timeline.`);
+            if (!silent) setSelectionAnnounce(`Lector ${userId} seleccionado. No se pudo cargar el timeline.`);
         } finally {
-            setTimelineLoading(false);
+            if (turn === selectionSeq.current) setTimelineLoading(false);
         }
     }, []);
 
     useEffect(() => { refresh(); }, [refresh]);
     useEffect(() => {
+        // Al cambiar de lector no queda nada del anterior en pantalla mientras llega lo nuevo.
+        selectionSeq.current += 1;
+        setRecs([]);
+        setTimeline(null);
+        setActionError(null);
         if (selectedStudent) {
             refreshRecs(selectedStudent);
             refreshTimeline(selectedStudent);
-        } else {
-            setTimeline(null);
         }
     }, [selectedStudent, refreshRecs, refreshTimeline]);
 
+    // V9 BI-65C — la pantalla abierta vuelve a preguntar al servidor (foco, visibilidad, reconexión e intervalo): grupos a
+    // cargo, cola, agregado y, si hay un lector seleccionado, sus recomendaciones y su timeline. Lo que el servidor ya no
+    // autoriza llega como consulta fallida y deja de mostrarse (el servicio no sirve copias ante un rechazo).
+    useSessionRevalidation(user);
+    useAuthorizationRevalidation(() => {
+        void dataService.reloadGroups().then(() => {
+            refresh();
+            if (selectedStudent) { refreshRecs(selectedStudent); refreshTimeline(selectedStudent, 'silent'); }
+        });
+    }, !!user);
+
+    // Una acción de mediación que el servidor rechaza se dice; antes el rechazo pasaba en silencio.
+    const actionFailure = (r: unknown): string | null => {
+        const err = r && typeof r === 'object' && (r as { ok?: boolean }).ok === false ? String((r as { error?: string }).error || '') : null;
+        if (err == null) return null;
+        const status = Number((/^HTTP (\d{3})/.exec(err) || [])[1] || 0);
+        return status === 403 ? 'La acción no se registró: el seguimiento de este lector ya no está habilitado para tu cuenta.'
+            : status === 401 ? 'La acción no se registró: tu sesión terminó. Vuelve a iniciar sesión.'
+            : 'La acción no se registró. Inténtalo de nuevo en unos minutos.';
+    };
+
     const handleAccept = useCallback(async (rec: Recommendation) => {
         setActionBusy(true);
-        await aulaVivaOperationalService.acknowledgeRecommendation(rec.recommendation_id, false);
+        setActionError(actionFailure(await aulaVivaOperationalService.acknowledgeRecommendation(rec.recommendation_id, false)));
         if (selectedStudent) await refreshRecs(selectedStudent);
         await refresh();
         setActionBusy(false);
@@ -133,7 +171,7 @@ const AulaVivaOperacional: React.FC = () => {
 
     const handleDismiss = useCallback(async (rec: Recommendation) => {
         setActionBusy(true);
-        await aulaVivaOperationalService.dismissRecommendation(rec.recommendation_id);
+        setActionError(actionFailure(await aulaVivaOperationalService.dismissRecommendation(rec.recommendation_id)));
         if (selectedStudent) await refreshRecs(selectedStudent);
         await refresh();
         setActionBusy(false);
@@ -143,13 +181,16 @@ const AulaVivaOperacional: React.FC = () => {
         if (!selectedStudent) return;
         const notes = window.prompt('Nota breve sobre la intervención (opcional):') ?? undefined;
         setActionBusy(true);
-        await aulaVivaOperationalService.recordIntervention(
+        const saved = await aulaVivaOperationalService.recordIntervention(
             selectedStudent,
             rec.recommendation_type,
             notes,
             rec.recommendation_id,
         );
-        await aulaVivaOperationalService.acknowledgeRecommendation(rec.recommendation_id, true);
+        const failed = actionFailure(saved);
+        setActionError(failed);
+        // Si la intervención no quedó registrada, la recomendación no se marca como aplicada.
+        if (!failed) setActionError(actionFailure(await aulaVivaOperationalService.acknowledgeRecommendation(rec.recommendation_id, true)));
         if (selectedStudent) await refreshRecs(selectedStudent);
         await refresh();
         setActionBusy(false);
@@ -349,6 +390,7 @@ const AulaVivaOperacional: React.FC = () => {
                             <Sparkles className="w-5 h-5 text-gray-500"/>
                             {selectedStudent ? `Recomendaciones: ${selectedStudent}` : 'Recomendaciones'}
                         </h2>
+                        {actionError && <p role="alert" data-testid="action-error" className="mb-3 text-sm text-red-700">{actionError}</p>}
                         {!selectedStudent ? (
                             <EmptyState kind="custom" where="recommendations_idle"
                                 title="Selecciona un lector"

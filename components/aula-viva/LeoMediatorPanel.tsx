@@ -7,9 +7,10 @@
  * personales: muestra lo que el servidor declara y, cuando no hay evidencia suficiente, lo explica en vez de pintar
  * ceros. No abre ninguna conversación con Leo.
  */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Sparkles, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
-import { describeInstitutionalError } from '../../utils/institutionalErrors';
+import { describeInstitutionalError, describeAccessWithdrawn } from '../../utils/institutionalErrors';
+import { useAuthorizationRevalidation } from '../../hooks/useAuthorizationRevalidation';
 import { describeDataState, objectiveLabel, activationLabel, trendLabel } from '../../utils/pedagogicalStates';
 
 interface EvidenceSignal { timestamp: string; contentId: string | null; pedagogicalObjective: string | null; evidenceType: string | null }
@@ -66,18 +67,30 @@ export const LeoMediatorPanel: React.FC<{
     const [openWork, setOpenWork] = useState<string | null>(null);
     const [history, setHistory] = useState<Record<string, LeoHistory | 'loading' | 'error'>>({});
 
-    const refresh = useCallback(async () => {
-        setLoad({ status: 'loading' }); setOpenWork(null); setHistory({});
+    // V9 BI-65C — solo la consulta más reciente pinta: una respuesta anterior que llega tarde no repone lo retirado.
+    const seq = useRef(0);
+    const shown = useRef(false);
+    const refresh = useCallback(async (mode?: unknown) => {
+        const silent = mode === 'silent';   // revalidación de una pantalla abierta: sin parpadeo ni anuncio si nada cambió
+        const turn = ++seq.current;
+        if (!silent) { setLoad({ status: 'loading' }); setOpenWork(null); setHistory({}); shown.current = false; }
         const id = encodeURIComponent(studentId);
         const [s, a] = await Promise.all([getJson(`/api/leo/mediator/student/${id}`), getJson(`/api/leo/activation/${id}`)]);
+        if (turn !== seq.current) return;
         if (!s.ok || !s.body?.summary) {
+            // Sin respuesta durante una revalidación: no confirma ni desmiente; se conserva lo que había y se reintenta.
+            if (silent && s.status === 0) return;
+            const withdrawn = silent && shown.current;
+            shown.current = false; setOpenWork(null); setHistory({});
             return setLoad({ status: 'error', message: s.status === 0
                 ? 'No hubo respuesta del servidor. Revisa la conexión e inténtalo de nuevo.'
-                : describeInstitutionalError('reader', s.status, s.body?.error) });
+                : withdrawn ? describeAccessWithdrawn('reader', s.status) : describeInstitutionalError('reader', s.status, s.body?.error) });
         }
+        shown.current = true;
         setLoad({ status: 'ready', summary: s.body.summary, outputs: a.ok && Array.isArray(a.body?.outputs) ? a.body.outputs : [] });
     }, [studentId]);
     useEffect(() => { refresh(); }, [refresh]);
+    useAuthorizationRevalidation(() => { refresh('silent'); });
 
     const toggleWork = async (contentId: string) => {
         if (openWork === contentId) return setOpenWork(null);
@@ -85,6 +98,8 @@ export const LeoMediatorPanel: React.FC<{
         if (history[contentId] && history[contentId] !== 'error') return;
         setHistory(h => ({ ...h, [contentId]: 'loading' }));
         const r = await getJson(`/api/leo/mediator/student/${encodeURIComponent(studentId)}/content/${encodeURIComponent(contentId)}`);
+        // El servidor negó el detalle (401/403): el resumen ya cargado tampoco está vigente; se vuelve a consultar.
+        if (r.status === 401 || r.status === 403) { refresh('silent'); return; }
         setHistory(h => ({ ...h, [contentId]: r.ok && r.body?.history ? r.body.history : 'error' }));
     };
 
@@ -100,7 +115,7 @@ export const LeoMediatorPanel: React.FC<{
                     </h3>
                     <p className="text-xs text-gray-500 dark:text-gray-400">{studentName} · solo con la actividad del curso</p>
                 </div>
-                <button type="button" onClick={refresh} aria-label="Actualizar la lectura pedagógica de Leo"
+                <button type="button" onClick={() => refresh()} aria-label="Actualizar la lectura pedagógica de Leo"
                     className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
                     <RefreshCw size={14} aria-hidden="true" />
                 </button>

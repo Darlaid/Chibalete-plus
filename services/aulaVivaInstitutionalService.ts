@@ -64,7 +64,19 @@ async function get<T>(path: string, fallback: T): Promise<T & { _meta?: FetchMet
             // V9 F5-E2S — un 403 se devolvía como relleno sin marca y la pantalla lo pintaba como
             // «0 aprendizajes». Ahora llega marcado: la pantalla dice que la consulta no está
             // habilitada. La copia local de esa ruta se descarta.
-            if (res.status === 401 || res.status === 403) { try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ } }
+            // V9 BI-65C — un rechazo indica que la autorización de la cuenta cambió: se descartan todas las copias de
+            // Aula Viva de este navegador (también las operativas), no solo la de esta ruta.
+            if (res.status === 401 || res.status === 403) {
+                try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ }
+                try {
+                    const doomed: string[] = [];
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.startsWith('chibalete:aulaviva')) doomed.push(k);
+                    }
+                    doomed.forEach(k => localStorage.removeItem(k));
+                } catch { /* ignore */ }
+            }
             httpStatus = res.status;
             throw new Error(`HTTP ${res.status}`);
         }

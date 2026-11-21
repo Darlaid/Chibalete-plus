@@ -23,6 +23,8 @@ import { StudentStatusPanel } from '../components/aula-viva/StudentStatusPanel';
 import { LeoMediatorPanel } from '../components/aula-viva/LeoMediatorPanel';
 import { InterventionImpactPanel } from '../components/aula-viva/InterventionImpactPanel';
 import { StudentProgressBlock } from '../components/aula-viva/StudentProgressBlock';
+import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
+import { describeAccessWithdrawn } from '../utils/institutionalErrors';
 import type { StudentStatus } from '../utils/studentStatus';
 import ClubFormModal from '../components/ClubFormModal';
 
@@ -184,6 +186,12 @@ const AulaViva: React.FC = () => {
     const [studentStatus,        setStudentStatus]        = useState<StudentStatus | null>(null);
     const [studentStatusLoading, setStudentStatusLoading] = useState(false);
     const [studentStatusError,   setStudentStatusError]   = useState<string | null>(null);
+    // V9 BI-65C — revalidación de la pantalla abierta. `authTick` avanza cada vez que se vuelve a preguntar al servidor;
+    // `studentDenied`: el servidor negó el seguimiento del lector seleccionado (se retiran también Leo, impacto y
+    // progreso); `accessNotice`: explicación de lo que se retiró de la selección.
+    const [authTick, setAuthTick] = useState(0);
+    const [studentDenied, setStudentDenied] = useState(false);
+    const [accessNotice, setAccessNotice] = useState<string | null>(null);
     const [studentStats, setStudentStats] = useState<PedagogicalStats | undefined>(undefined);
     const [aiReport, setAiReport] = useState<string>('');
     const [loadingReport, setLoadingReport] = useState(false);
@@ -362,30 +370,47 @@ const AulaViva: React.FC = () => {
 
     // Sprint visibilidad — fetch del diagnóstico narrativo del grupo.
     // Se vuelve a pedir tras asignar/remover estudiantes vía refetchDiagnosis().
-    const refetchDiagnosis = React.useCallback(async (groupId: string | null) => {
-        if (!groupId) { setDiagnosis(null); setDiagnosisError(null); return; }
-        setDiagnosisLoading(true);
-        setDiagnosisError(null);
+    // V9 BI-65C — solo la consulta más reciente pinta (una respuesta tardía de otro grupo, o anterior a una
+    // revocación ya detectada, se descarta). `mode === 'silent'`: revalidación del mismo grupo, sin pasar por «cargando».
+    const diagnosisSeq = React.useRef(0);
+    const diagnosisFor = React.useRef<string | null>(null);
+    const diagnosisShown = React.useRef(false);
+    const refetchDiagnosis = React.useCallback(async (groupId: string | null, mode?: unknown) => {
+        const turn = ++diagnosisSeq.current;
+        if (!groupId) { diagnosisFor.current = null; setDiagnosis(null); setDiagnosisError(null); setDiagnosisLoading(false); return; }
+        const silent = mode === 'silent' && diagnosisFor.current === groupId;
+        diagnosisFor.current = groupId;
+        if (!silent) { diagnosisShown.current = false; setDiagnosisLoading(true); setDiagnosisError(null); }
         try {
             const d = await dataService.getGroupDiagnosis(groupId);
+            if (turn !== diagnosisSeq.current) return;
+            diagnosisShown.current = true;
             setDiagnosis(d);
+            setDiagnosisError(null);
         } catch (e: any) {
+            if (turn !== diagnosisSeq.current) return;
+            const status = typeof e?.status === 'number' ? e.status : 0;
+            if (silent && !status && diagnosisShown.current) return;   // sin respuesta: se conserva lo que había y se reintenta
+            const wasShown = diagnosisShown.current;
+            diagnosisShown.current = false;
             setDiagnosis(null);
-            setDiagnosisError(e?.message || 'Error inesperado al obtener el diagnóstico.');
+            setDiagnosisError(silent && wasShown && (status === 401 || status === 403 || status >= 500)
+                ? describeAccessWithdrawn('group', status)
+                : e?.message || 'Error inesperado al obtener el diagnóstico.');
         } finally {
-            setDiagnosisLoading(false);
+            if (turn === diagnosisSeq.current) setDiagnosisLoading(false);
         }
     }, []);
 
     useEffect(() => {
-        if (selectedGroup && canManageClassroom) refetchDiagnosis(selectedGroup);
-        else { setDiagnosis(null); setDiagnosisError(null); }
-    }, [selectedGroup, canManageClassroom, refetchDiagnosis]);
+        if (selectedGroup && canManageClassroom) refetchDiagnosis(selectedGroup, authTick ? 'silent' : undefined);
+        else refetchDiagnosis(null);
+    }, [selectedGroup, canManageClassroom, refetchDiagnosis, authTick]);
 
     // Analítica del grupo: una carga por cambio de grupo; la anterior se
     // aborta y una respuesta vieja nunca pisa al grupo nuevo. Sin fallback.
     useEffect(() => {
-        if (!selectedGroup || !canManageClassroom) { analyticsLoader.cancel(); return; }
+        if (!selectedGroup || !canManageClassroom) { analyticsLoader.cancel(); setGroupAnalytics({ status: 'loading' }); return; }
         analyticsLoader.load(selectedGroup, setGroupAnalytics);
         return () => analyticsLoader.cancel();
     }, [selectedGroup, canManageClassroom, analyticsLoader]);
@@ -408,25 +433,72 @@ const AulaViva: React.FC = () => {
     // Sprint Panel del estudiante — fetch del status narrativo cada vez que
     // cambia la selección. Si la selección se limpia, también limpiamos el
     // panel (sin stale data del estudiante anterior).
+    // V9 BI-65C — también se vuelve a pedir en cada revalidación (`authTick`) del mismo lector, sin pasar por
+    // «cargando»: si el servidor ya no autoriza su seguimiento, el estado se retira y se explica.
+    const statusFor = React.useRef<string | null>(null);
+    const statusShown = React.useRef(false);
     useEffect(() => {
         if (!selectedStudent) {
+            statusFor.current = null;
             setStudentStatus(null);
             setStudentStatusError(null);
             setStudentStatusLoading(false);
+            setStudentDenied(false);
             return;
         }
         let cancelled = false;
-        setStudentStatusLoading(true);
-        setStudentStatusError(null);
+        const silent = statusFor.current === selectedStudent.id;
+        statusFor.current = selectedStudent.id;
+        if (!silent) { statusShown.current = false; setStudentStatusLoading(true); setStudentStatusError(null); setStudentDenied(false); }
         dataService.getStudentStatus(selectedStudent.id)
-            .then(s  => { if (!cancelled) setStudentStatus(s); })
+            .then(s  => { if (!cancelled) { statusShown.current = true; setStudentStatus(s); setStudentStatusError(null); setStudentDenied(false); } })
             .catch(e => { if (!cancelled) {
+                const status = typeof e?.status === 'number' ? e.status : 0;
+                if (silent && !status && statusShown.current) return;   // sin respuesta: se conserva lo que había y se reintenta
+                const denied = status === 401 || status === 403;
+                const wasShown = statusShown.current;
+                statusShown.current = false;
                 setStudentStatus(null);
-                setStudentStatusError(e?.message || 'Error inesperado al obtener el estado del estudiante.');
+                setStudentDenied(denied);
+                setStudentStatusError(silent && wasShown && (denied || status >= 500)
+                    ? describeAccessWithdrawn('reader', status)
+                    : e?.message || 'Error inesperado al obtener el estado del estudiante.');
             }})
             .finally(() => { if (!cancelled) setStudentStatusLoading(false); });
         return () => { cancelled = true; };
-    }, [selectedStudent]);
+    }, [selectedStudent, authTick]);
+
+    // V9 BI-65C — revalidación de la pantalla abierta (foco, visibilidad, reconexión e intervalo): se vuelven a pedir al
+    // servidor los grupos y la nómina, y con ellos se revisa la selección. Ningún dato ya pintado se da por vigente.
+    useSessionRevalidation(user);
+    useAuthorizationRevalidation(() => {
+        void Promise.all([dataService.reloadGroups(), dataService.reloadUsers()]).then(() => setAuthTick(t => t + 1));
+    }, !!user && canManageClassroom);
+    useEffect(() => {
+        if (!authTick || !user || !canManageClassroom) return;
+        if (!isAdmin) {
+            const mine = dataService.getTeacherGroups(user.id);
+            setGroups(mine);
+            if (selectedGroup && !mine.some(g => g.id === selectedGroup)) {
+                const lost = groups.find(g => g.id === selectedGroup)?.name;
+                setAccessNotice(`Ya no tienes a tu cargo ${lost ? `«${lost}»` : 'el grupo que estabas viendo'}: su información se retiró de la pantalla. Si crees que es un error, pide a la administración de tu institución que revise la asignación.`);
+                setSelectedStudent(null);
+                setStudents([]);
+                setGroupAssignments([]);
+                setSelectedGroup(mine[0]?.id ?? null);
+                return;
+            }
+        }
+        if (!selectedGroup) return;
+        const roster = dataService.getGroupStudents(selectedGroup);
+        setStudents(roster);
+        if (selectedStudent && !roster.some(s => s.id === selectedStudent.id)) {
+            setAccessNotice(`${selectedStudent.nombre_completo} ya no figura en este grupo: su información se retiró de la pantalla.`);
+            setSelectedStudent(null);
+        }
+        analyticsLoader.load(selectedGroup, setGroupAnalytics, { silent: true });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [authTick]);
 
     // Señales pedagógicas básicas derivadas de datos reales del estudiante seleccionado.
     // Se recalculan cuando cambia el estudiante o las tareas del grupo.
@@ -1545,6 +1617,14 @@ const AulaViva: React.FC = () => {
                 </div>
             )}
 
+            {accessNotice && canManageClassroom && (
+                <div role="status" data-testid="aula-viva-access-notice"
+                    className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 text-sm text-amber-900 dark:text-amber-200 flex items-start justify-between gap-3">
+                    <p>{accessNotice}</p>
+                    <button type="button" onClick={() => setAccessNotice(null)}
+                        className="shrink-0 underline font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500 rounded">Entendido</button>
+                </div>
+            )}
             {activeTab === 'analytics' && (
                 <>
                     {/* Sprint visibilidad — panel narrativo SIEMPRE visible cuando hay
@@ -1732,7 +1812,7 @@ const AulaViva: React.FC = () => {
                             )}
                             {/* V9 F7-C2R-U3C — Leo e impacto de ESTE lector, para quien lo media (no para la sesión de
                                 administración, cuya vista es agregada). El servidor decide alcance y estados. */}
-                            {selectedStudent && canManageClassroom && !isAdmin && (
+                            {selectedStudent && !studentDenied && canManageClassroom && !isAdmin && (
                                 <div className="mb-6 space-y-6" key={selectedStudent.id}>
                                     <LeoMediatorPanel studentId={selectedStudent.id} studentName={selectedStudent.nombre_completo}
                                         titleOf={(id) => dataService.getContenidoById(id)?.titulo} />
@@ -1742,7 +1822,7 @@ const AulaViva: React.FC = () => {
                             {/* V8-UNIFIED-XP-01: progreso individual (XP, nivel, logros). Solo si el
                                 grupo trae el bloque de reconocimiento (XP encendido); el servidor
                                 decide el alcance y, si no corresponde, no se pinta nada. */}
-                            {selectedStudent && selectedGroup && groupAnalytics.status === 'ready'
+                            {selectedStudent && !studentDenied && selectedGroup && groupAnalytics.status === 'ready'
                                 && (groupAnalytics.summary as { recognition?: unknown }).recognition != null && (
                                 <div className="mb-6">
                                     <StudentProgressBlock groupId={selectedGroup} studentId={selectedStudent.id} />

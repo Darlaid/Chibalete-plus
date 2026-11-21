@@ -63,7 +63,7 @@ const STATE_NARRATIVE = {
     ACTIVE_UNVERIFIED_HISTORY: {
         headline:          'Tiene lectura registrada, pero no puede atribuirse al curso.',
         message:           'El estudiante tiene avance en obras del curso cuya pertenencia al curso no está acreditada.',
-        cause:             'Esa lectura empezó antes de que la obra se asignara o de que el estudiante entrara al curso, o antes de que se registraran esas fechas.',
+        cause:             'Esa lectura empezó antes de que la obra se asignara o de que el estudiante entrara al curso, o antes de que se registraran esas fechas; o la fecha de lectura no pudo verificarse.',
         recommendedAction: 'No interpretarlo como falta de lectura. El avance del curso se mostrará con la lectura que haga a partir de ahora.',
     },
     NO_COURSE_WORKS: {

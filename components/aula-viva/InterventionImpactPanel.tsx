@@ -9,9 +9,10 @@
  *   - resultado calculado: se muestran los valores anterior y posterior que entrega el servidor.
  * El panel no calcula resultados ni rellena valores ausentes.
  */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Activity, RefreshCw } from 'lucide-react';
-import { describeInstitutionalError, describeNoEligibleReaders } from '../../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn } from '../../utils/institutionalErrors';
+import { useAuthorizationRevalidation } from '../../hooks/useAuthorizationRevalidation';
 import { InstitutionalLearningCard } from './InstitutionalLearningCard';
 import type { InstitutionalLearning } from '../../services/aulaVivaInstitutionalService';
 import {
@@ -43,28 +44,42 @@ export const InterventionImpactPanel: React.FC<{
     // V9 F7-C2R-U3D — aprendizajes del curso (recomendación de grupo): solo en la vista de curso. null = no se pudo consultar.
     const [learnings, setLearnings] = useState<InstitutionalLearning[] | null>([]);
 
-    const refresh = useCallback(async () => {
-        setLoad({ status: 'loading' });
+    // V9 BI-65C — solo la consulta más reciente pinta: una respuesta anterior que llega tarde no repone lo retirado.
+    const seq = useRef(0);
+    const shown = useRef(false);
+    const refresh = useCallback(async (mode?: unknown) => {
+        const silent = mode === 'silent';   // revalidación de una pantalla abierta: sin parpadeo ni anuncio si nada cambió
+        const turn = ++seq.current;
+        if (!silent) { setLoad({ status: 'loading' }); shown.current = false; }
         try {
             const r = await fetch(`/api/aula-viva/institutional/outcomes/scope/${scope.type}/${encodeURIComponent(scope.id)}`, { cache: 'no-store' });
             let body: any = null;
             try { body = await r.json(); } catch { /* cuerpo vacío */ }
+            if (turn !== seq.current) return;
             if (!r.ok || !body || !Array.isArray(body.outcomes)) {
-                return setLoad({ status: 'error', message: describeInstitutionalError(isGroup ? 'course' : 'reader', r.status, body?.error) });
+                const subject = isGroup ? 'course' : 'reader';
+                const withdrawn = silent && shown.current;
+                shown.current = false; setLearnings([]);
+                return setLoad({ status: 'error', message: withdrawn ? describeAccessWithdrawn(subject, r.status) : describeInstitutionalError(subject, r.status, body?.error) });
             }
+            shown.current = true;
             setLoad({ status: 'ready', body });
             if (isGroup) {
                 try {
                     const l = await fetch(`/api/aula-viva/institutional/learnings/scope/group/${encodeURIComponent(scope.id)}`, { cache: 'no-store' });
                     const list = l.ok ? await l.json() : null;
+                    if (turn !== seq.current) return;
                     setLearnings(Array.isArray(list) ? list : null);
-                } catch { setLearnings(null); }
+                } catch { if (turn === seq.current) setLearnings(null); }
             }
         } catch {
+            // Sin respuesta durante una revalidación: no confirma ni desmiente; se conserva lo que había y se reintenta.
+            if (turn !== seq.current || silent) return;
             setLoad({ status: 'error', message: 'No hubo respuesta del servidor. Revisa la conexión e inténtalo de nuevo.' });
         }
     }, [scope.type, scope.id, isGroup]);
     useEffect(() => { refresh(); }, [refresh]);
+    useAuthorizationRevalidation(() => { refresh('silent'); });
 
     const titleId = `impact-title-${scope.type}`;
     return (
@@ -80,7 +95,7 @@ export const InterventionImpactPanel: React.FC<{
                         Compara la actividad del curso en los 14 días anteriores y los 14 posteriores a cada intervención. Es una observación, no prueba de causa.
                     </p>
                 </div>
-                <button type="button" onClick={refresh} aria-label="Actualizar el impacto de las intervenciones"
+                <button type="button" onClick={() => refresh()} aria-label="Actualizar el impacto de las intervenciones"
                     className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
                     <RefreshCw size={14} aria-hidden="true" />
                 </button>

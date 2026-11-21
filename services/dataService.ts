@@ -674,6 +674,22 @@ class DataService {
         }
     }
 
+    /**
+     * V9 BI-65C — vuelve a pedir los grupos al servidor (la lista en memoria solo se cargaba al iniciar sesión, así
+     * que un curso del que se retiró al mediador seguía en su selector). Con respuesta 200 la lista del servidor
+     * reemplaza a la de memoria; con cualquier otro resultado la lista no cambia. Devuelve el código HTTP (0 = sin
+     * respuesta). No lanza.
+     */
+    async reloadGroups(): Promise<number> {
+        try {
+            const res = await fetch(`${this.apiUrl}/groups`, { headers: this.adminWriteHeaders, cache: 'no-store' });
+            if (!res.ok) return res.status;
+            const apiGroups: Group[] = await res.json();
+            if (Array.isArray(apiGroups)) this.groups = apiGroups.map(this.normalizeGroupFrontend);
+            return res.status;
+        } catch { return 0; }
+    }
+
     // --- SYNC METHODS ---
     async syncUserProgress(userId: string) {
         try {

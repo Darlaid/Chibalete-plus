@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
+import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import {
     ArrowLeft, AlertTriangle, Info, AlertCircle,
     Users, Clock, Zap, CheckCircle, BookOpen,
@@ -390,7 +391,7 @@ function buildSummaryInterpretation(
 /** V9 F7-C2R-U3B — tiene lectura que no puede atribuirse al curso y ninguna acreditada: no es «inactivo». */
 const isUnattributed = (s: StudentRow): boolean => s.dataState === 'unverifiable_history';
 const UNATTRIBUTED_LABEL = 'Lectura no atribuible';
-const UNATTRIBUTED_NOTE = 'lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas)';
+const UNATTRIBUTED_NOTE = 'lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas, o la fecha de lectura no pudo verificarse)';
 
 function studentStatus(s: StudentRow): 'stable' | 'risk' | 'attention' {
     if (!s.hasData)          return 'attention';
@@ -990,7 +991,10 @@ const InterventionModal: React.FC<InterventionModalProps> = ({ student, mediator
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
-                throw new Error(body.error ?? `Error ${res.status}`);
+                // V9 BI-65C: si el servidor ya no autoriza anotar sobre este lector, se explica (nunca el código crudo).
+                throw new Error(res.status === 401 || res.status === 403 || res.status === 503
+                    ? describeInstitutionalError('reader', res.status, body.error)
+                    : body.error ?? `Error ${res.status}`);
             }
             const body = await res.json();
             onSaved(body.intervention ?? body);
@@ -1569,43 +1573,80 @@ const DashboardMediador: React.FC = () => {
         return map;
     }, [interventions]);
 
+    // V9 BI-65C — la pantalla abierta vuelve a preguntar al servidor (foco, visibilidad, reconexión e intervalo). Una
+    // revalidación del mismo curso no pasa por «cargando»; si el servidor ya no autoriza el curso, todo lo mostrado se
+    // retira (métricas, anotaciones y efectividad) y se cierra la anotación en curso. Solo la consulta más reciente pinta.
+    const [authTick, setAuthTick] = useState(0);
+    const loadedFor = useRef<string | null>(null);
+    const shown = useRef(false);
+    useSessionRevalidation(user);
+    useAuthorizationRevalidation(() => setAuthTick(t => t + 1), !!courseId && !!user);
+
     useEffect(() => {
         if (!courseId || !user) return;
+        let cancelled = false;
+        const silent = loadedFor.current === courseId;
+        if (!silent) shown.current = false;
+        loadedFor.current = courseId;
 
         const fetchMetrics = async () => {
-            setLoading(true);
-            setError(null);
+            let withdrawnStatus = 0;
+            let httpFailed = false;
+            if (!silent) {
+                setLoading(true);
+                setError(null);
+                setInterventions([]);
+                setEffectiveness(null);
+            }
             try {
                 const headers: Record<string, string> = {};
                 const [metricsRes, interventionsRes, effectivenessRes] = await Promise.all([
-                    fetch(`/api/metrics/course/${encodeURIComponent(courseId)}`, { headers }),
-                    fetch(`/api/interventions/course/${encodeURIComponent(courseId)}`, { headers }),
-                    fetch(`/api/interventions/effectiveness?courseId=${encodeURIComponent(courseId)}`, { headers }),
+                    fetch(`/api/metrics/course/${encodeURIComponent(courseId)}`, { headers, cache: 'no-store' }),
+                    fetch(`/api/interventions/course/${encodeURIComponent(courseId)}`, { headers, cache: 'no-store' }),
+                    fetch(`/api/interventions/effectiveness?courseId=${encodeURIComponent(courseId)}`, { headers, cache: 'no-store' }),
                 ]);
+                if (cancelled) return;
                 if (!metricsRes.ok) {
                     const body = await metricsRes.json().catch(() => ({}));
+                    if (cancelled) return;
+                    httpFailed = true;
+                    if (silent && shown.current) withdrawnStatus = metricsRes.status;
+                    shown.current = false;
+                    setInterventions([]);
+                    setEffectiveness(null);
+                    setInterventionModal(null);
                     // V9 F5-E2: un 503 (`individual_access_unavailable`) se explica como indisponibilidad
                     // temporal; nunca se muestra el código ni se conserva lo cargado antes.
                     setData(null);
                     throw new Error(describeInstitutionalError('course', metricsRes.status, body.error));
                 }
-                setData(await metricsRes.json());
-                if (interventionsRes.ok) {
-                    const iv = await interventionsRes.json();
-                    setInterventions(iv.interventions ?? []);
-                }
-                if (effectivenessRes.ok) {
-                    setEffectiveness(await effectivenessRes.json());
-                }
+                const fresh = await metricsRes.json();
+                const iv = interventionsRes.ok ? await interventionsRes.json() : null;
+                const eff = effectivenessRes.ok ? await effectivenessRes.json() : null;
+                if (cancelled) return;
+                shown.current = true;
+                setData(fresh);
+                setError(null);
+                // Lo que el servidor ya no entrega no se conserva de una respuesta anterior.
+                setInterventions(iv?.interventions ?? []);
+                setEffectiveness(eff);
+                // La anotación abierta sobre un lector que ya no viene en el curso se cierra.
+                const enabled = new Set((fresh?.studentBreakdown ?? []).map((s: { userId: string }) => s.userId));
+                setInterventionModal(m => (m && !enabled.has(m.student.userId) ? null : m));
             } catch (e: unknown) {
-                setError(e instanceof Error ? e.message : 'Error al cargar métricas');
+                if (cancelled) return;
+                // Sin respuesta durante una revalidación: no confirma ni desmiente; se conserva lo que había.
+                if (silent && !httpFailed && shown.current) return;
+                setError(withdrawnStatus ? describeAccessWithdrawn('course', withdrawnStatus)
+                    : e instanceof Error ? e.message : 'Error al cargar métricas');
             } finally {
-                setLoading(false);
+                if (!cancelled) setLoading(false);
             }
         };
 
         fetchMetrics();
-    }, [courseId, user]);
+        return () => { cancelled = true; };
+    }, [courseId, user, authTick]);
 
     // ── Loading ──────────────────────────────────────────────────────────────
     if (loading) {

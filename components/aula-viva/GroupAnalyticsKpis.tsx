@@ -7,6 +7,7 @@
  * PISA, evolución) se muestra como estado vacío explícito, nunca como 0 %.
  */
 import React from 'react';
+import { describeAccessWithdrawn, describeInstitutionalError } from '../../utils/institutionalErrors';
 import { MessageCircle, CheckCircle, Clock, BrainCircuit, TrendingUp } from 'lucide-react';
 import {
     EMPTY_TEXT, GROUP_ANALYTICS_ERROR, formatLeoAverage, formatReadingDuration, hasNoServerSource,
@@ -39,7 +40,9 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
     if (state.status === 'error') {
         return (
             <div role="alert" className="mb-8 p-4 rounded-xl border border-red-200 bg-red-50 dark:bg-red-900/20 dark:border-red-800 text-sm font-medium text-red-700 dark:text-red-300">
-                {GROUP_ANALYTICS_ERROR}
+                {state.withdrawn ? describeAccessWithdrawn('course', state.httpStatus)
+                    : state.httpStatus === 401 || state.httpStatus === 403 || state.httpStatus === 503 ? describeInstitutionalError('course', state.httpStatus)
+                    : GROUP_ANALYTICS_ERROR}
             </div>
         );
     }
@@ -55,7 +58,7 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
         )}
         {unattributed > 0 && (
             <p role="note" data-testid="group-unverifiable-history" className="mb-3 text-sm text-gray-600 dark:text-gray-300">
-                {unattributed} {unattributed === 1 ? 'lector tiene' : 'lectores tienen'} lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas). Esa lectura no entra en estas cifras y no significa que no hayan leído.
+                {unattributed} {unattributed === 1 ? 'lector tiene' : 'lectores tienen'} lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas, o la fecha de lectura no pudo verificarse). Esa lectura no entra en estas cifras y no significa que no hayan leído.
             </p>
         )}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6 mb-8 animate-in fade-in">

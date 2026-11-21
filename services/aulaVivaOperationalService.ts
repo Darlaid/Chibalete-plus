@@ -47,6 +47,22 @@ function dropCache(path: string): void {
     if (!isBrowser) return;
     try { localStorage.removeItem(cacheKey(path)); } catch { /* ignore */ }
 }
+/**
+ * V9 BI-65C — un rechazo del servidor (401/403) indica que la autorización de esta cuenta cambió: se descartan TODAS las
+ * copias de Aula Viva guardadas en este navegador (operativas e institucionales), no solo la de la ruta rechazada. Así
+ * una copia anterior —por ejemplo la cola que aún nombraba al lector— no reaparece después si falla la conexión.
+ */
+export function dropAllCache(): void {
+    if (!isBrowser) return;
+    try {
+        const doomed: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith('chibalete:aulaviva')) doomed.push(k);
+        }
+        doomed.forEach(k => localStorage.removeItem(k));
+    } catch { /* ignore */ }
+}
 
 function getUserId(): string | null {
     if (!isBrowser) return null;
@@ -103,7 +119,7 @@ async function get<T>(path: string, fallback: T): Promise<T & { _meta?: FetchMet
         // V9 F5-E2 — el servidor RESPONDIÓ que no (403) o que ahora no puede (503, 5xx): una copia
         // anterior no lo desmiente y no se muestra. Con 401/403 además se descarta.
         if (httpStatus) {
-            if (httpStatus === 401 || httpStatus === 403) dropCache(path);
+            if (httpStatus === 401 || httpStatus === 403) { dropCache(path); dropAllCache(); }
             return withMeta(fallback, { failed: true, status: httpStatus });
         }
         // Sin respuesta (sin conexión, tiempo agotado): la copia de ESTA cuenta, marcada como tal.

@@ -7,7 +7,8 @@
  * consulta no existe (XP apagado, fuera de alcance o fuera del grupo), no pinta
  * nada. Nada se guarda en el navegador.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useAuthorizationRevalidation } from '../../hooks/useAuthorizationRevalidation';
 import { Award } from 'lucide-react';
 import { dataService } from '../../services/dataService';
 import { classifyStudentProgress } from '../../utils/studentProgressView.mjs';
@@ -23,14 +24,23 @@ const CARD = 'bg-white dark:bg-gray-800 p-5 rounded-xl shadow-sm border border-g
 export const StudentProgressBlock: React.FC<{ groupId: string; studentId: string }> = ({ groupId, studentId }) => {
     const [state, setState] = useState<State>({ kind: 'loading' });
 
+    // V9 BI-65C — la pantalla abierta vuelve a preguntar (foco, visibilidad, intervalo): si el servidor ya no autoriza
+    // el progreso, se retira. Una revalidación no parpadea, y sin respuesta conserva lo que había hasta la siguiente.
+    const [tick, setTick] = useState(0);
+    const loadedFor = useRef('');
+    useAuthorizationRevalidation(() => setTick(t => t + 1));
     useEffect(() => {
         let cancelled = false;
-        setState({ kind: 'loading' });
+        const key = `${groupId}|${studentId}`;
+        const silent = loadedFor.current === key;
+        loadedFor.current = key;
+        if (!silent) setState({ kind: 'loading' });
         dataService.getStudentProgress(groupId, studentId).then(({ status, body }) => {
-            if (!cancelled) setState(classifyStudentProgress(status, body) as State);
+            if (cancelled || (silent && status === 0)) return;
+            setState(classifyStudentProgress(status, body) as State);
         });
         return () => { cancelled = true; };
-    }, [groupId, studentId]);
+    }, [groupId, studentId, tick]);
 
     if (state.kind === 'hidden') return null;
     return (

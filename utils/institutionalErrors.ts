@@ -51,6 +51,17 @@ export function describeInstitutionalError(subject: InstitutionalSubject, status
 }
 
 /**
+ * V9 BI-65C — la pantalla ya mostraba información y, al volver a consultar, el servidor dejó de autorizarla (o no pudo
+ * confirmarla). Se dice que se retiró y por qué, sin revelar qué permiso cambió ni de quién.
+ */
+export function describeAccessWithdrawn(subject: InstitutionalSubject, status?: number): string {
+    const what = subject === 'reader' ? 'del lector' : subject === 'course' ? 'del curso' : 'del grupo';
+    if (status === 401) return `Se retiró de la pantalla la información ${what}. ${SIGNED_OUT}`;
+    if (status === 403) return `La información ${what} que estabas viendo dejó de estar disponible para tu cuenta y se retiró de la pantalla. ${FORBIDDEN[subject]}`;
+    return `Se retiró de la pantalla la información ${what} porque en este momento no se puede confirmar que siga disponible para tu cuenta. ${UNAVAILABLE[subject]}`;
+}
+
+/**
  * Curso sin lectores con seguimiento habilitado: no es un resultado pedagógico. Distingue la nómina
  * del curso (cuántos estudiantes tiene), los lectores habilitados para seguimiento (ninguno) y la
  * consecuencia (no hay información consultable). No afirma nada sobre el desempeño del grupo.
