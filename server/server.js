@@ -11730,6 +11730,7 @@ function applyCourseAttribution(response, attributionSummary) {
     if (Array.isArray(response.studentBreakdown)) {
         response.studentBreakdown = response.studentBreakdown.map(st => {
             const courseAttribution = byReader[st.userId] ?? { verified_context: 0, unverifiable_history: 0 };
+            if (st.readsWithoutTelemetry === true) return { ...st, dataState: 'verified_context', courseAttribution };
             if (st.hasData === false && courseAttribution.unverifiable_history > 0) {
                 unknown.add(st.userId);
                 return { ...st, needsAttention: false, dataState: 'unverifiable_history', courseAttribution };
@@ -12270,14 +12271,21 @@ function buildReadingDetails(contentStats, contentMap) {
 function buildStudentBreakdownRow(student, users, contentMap) {
     const user       = users.find(u => u.id === student.userId);
     const hasData    = student.behavioral.totalSessions > 0;
-    // needsAttention: no activity OR composite score at the lowest ICDLI tier
-    const needsAttention = !hasData || student.readingLevels.composite < 30;
+    // V9 65D-1: lectura registrada solo por el progreso (EPUB, Álbum… visores que no emiten telemetría): cuenta como
+    // actividad, pero sin ella no hay nivel lector que calcular. `hasData` sigue significando «nivel calculable».
+    const progressOnly = student.progressOnly ?? null;
+    const readsWithoutTelemetry = !hasData && (progressOnly?.sessions ?? 0) > 0;
+    // needsAttention: no activity OR composite score at the lowest ICDLI tier (quien lee sin telemetría no es «sin actividad»)
+    const needsAttention = hasData ? student.readingLevels.composite < 30 : !readsWithoutTelemetry;
     return {
         userId:                  student.userId,
         name:                    user?.nombre_completo ?? student.userId,
         hasData,
         needsAttention,
-        totalSessions:           student.behavioral.totalSessions,
+        ...(readsWithoutTelemetry ? { readsWithoutTelemetry: true } : {}),
+        // Sesiones y tiempo: telemetría + progreso de las obras sin telemetría (nunca la misma obra por las dos vías).
+        progressOnlySessions:    progressOnly?.sessions ?? 0,
+        totalSessions:           student.behavioral.totalSessions + (progressOnly?.sessions ?? 0),
         composite:               r1(student.readingLevels.composite),
         literal:                 r1(student.readingLevels.literal),
         inferential:             r1(student.readingLevels.inferential),
@@ -12288,12 +12296,68 @@ function buildStudentBreakdownRow(student, users, contentMap) {
         totalLeoOfflineAttempts: student.leoMetrics?.totalLeoOfflineAttempts ?? 0,
         dominantLeoType:         student.leoMetrics?.dominantType ?? null,
         lastAccessAt:            student.lastAccessAt ?? null,
-        totalReadingTimeMs:      student.behavioral.totalReadingTimeMs,
+        totalReadingTimeMs:      student.behavioral.totalReadingTimeMs + (progressOnly?.readingTimeMs ?? 0),
         contentsInProgress:      student.contentStats?.inProgress ?? 0,
         contentsCompleted:       student.contentStats?.completed  ?? 0,
         contentsAbandoned:       student.contentStats?.abandoned  ?? 0,
         readingDetails:          buildReadingDetails(student.contentStats, contentMap ?? new Map()),
     };
+}
+
+/**
+ * V9 65D-1 — progreso que el tablero y el informe de curso leen además de la telemetría: para quien media, solo las
+ * sesiones fechadas dentro del curso (`attributableActivity`, 65A); sin mediación, el de las obras del ámbito o todo.
+ */
+function courseProgressScope(metricsOptions) {
+    const works = metricsOptions.contentScope ?? null;
+    const pAll  = getAllProgressAsMap();
+    const leoAll = readJSON(LEO_INTERACTIONS_DB) || [];
+    const scoped = metricsOptions.contextOf ? attributableActivity(pAll, leoAll, metricsOptions.contextOf) : null;
+    const pDb = scoped ? scoped.pDb : works ? { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => works.has(e?.contentId))) } : pAll;
+    const leoRaw = scoped ? scoped.leoRaw : works ? leoAll.filter(e => works.has(e?.contentId)) : leoAll;
+    return { pDb, leoRaw, works };
+}
+
+/**
+ * V9 65D-1 — lectura que solo registró el progreso. El EPUB, el Álbum y LU sin telemetría guardan su progreso (con sus
+ * sesiones) pero no emiten los eventos heredados de los que salen sesiones, tiempo y nivel del tablero: el lector
+ * aparecía «Inactivo» / «Sin datos» con lectura registrada. A cada lector se le suman las sesiones del progreso de las
+ * obras en las que NO hay sesiones de telemetría (la misma obra nunca por las dos vías), y quien solo tiene esas
+ * sesiones cuenta como activo y sale de la lista de atención. Su nivel no se calcula: esa fuente no tiene bloques ni
+ * interacciones. No cambia ninguna fórmula.
+ */
+function withProgressOnlyActivity(raw, pDb, courseWorks = null) {
+    // Sin mediación (administración) el progreso no está acotado al curso: solo cuentan las obras del curso, nunca la
+    // lectura personal (B2C) ni la de otros cursos.
+    const inCourse = courseWorks && !courseWorks.all && typeof courseWorks.has === 'function' ? (c) => courseWorks.has(c) : () => true;
+    const byUser = new Map();
+    for (const e of Object.values(pDb?.progressMap ?? {})) {
+        if (!e?.userId || typeof e.contentId !== 'string' || !Array.isArray(e.history) || e.history.length === 0) continue;
+        if (!inCourse(e.contentId)) continue;
+        if (!byUser.has(e.userId)) byUser.set(e.userId, []);
+        byUser.get(e.userId).push(e);
+    }
+    const gained = new Set();
+    raw.studentBreakdown = (raw.studentBreakdown ?? []).map(st => {
+        const legacy = new Set(st.sessionContentIds ?? []);
+        let sessions = 0, readingTimeMs = 0;
+        for (const e of byUser.get(st.userId) ?? []) {
+            if (legacy.has(e.contentId)) continue;
+            for (const h of e.history) {
+                if (!h || typeof h.sessionId !== 'string' || !h.sessionId) continue;
+                sessions += 1;
+                readingTimeMs += Math.max(0, Number(h.durationSec) || 0) * 1000;
+            }
+        }
+        if (sessions === 0) return st;
+        if ((st.behavioral?.totalSessions ?? 0) === 0) gained.add(st.userId);
+        return { ...st, progressOnly: { sessions, readingTimeMs } };
+    });
+    if (gained.size > 0) {
+        raw.activeStudentCount = (raw.activeStudentCount ?? 0) + gained.size;
+        if (Array.isArray(raw.needsAttention)) raw.needsAttention = raw.needsAttention.filter(id => !gained.has(id));
+    }
+    return raw;
 }
 
 /**
@@ -12597,6 +12661,9 @@ const legacyMetricsCourseHandler = async (req, res) => {
 
     try {
         const raw      = computeCourseMetrics(courseId, metricsOptions);
+        // V9 65D-1: lectura registrada solo por el progreso (mismo ámbito que los perfiles de abajo).
+        const progressScope = courseProgressScope(metricsOptions);
+        withProgressOnlyActivity(raw, progressScope.pDb, groupsContentScope([courseId]));
         const response = formatCourseResponse(raw, users);
 
         // V9 F5-E4: administración humana ⇒ solo agregados. Ni se calculan perfiles individuales ni se entrega
@@ -12610,13 +12677,8 @@ const legacyMetricsCourseHandler = async (req, res) => {
 
         // Augment each student with their pedagogical profile (computed from session timelines)
         // V9 F7-C2: para el mediador, sobre el progreso y las interacciones de las obras del curso únicamente.
-        const works     = metricsOptions.contentScope ?? null;
-        const pAll      = getAllProgressAsMap();
-        const leoAll    = readJSON(LEO_INTERACTIONS_DB) || [];
         // V9 F7-C2R-U3B: con mediación, sesiones e interacciones fechadas dentro del curso (no basta la asociación de hoy).
-        const scoped    = metricsOptions.contextOf ? attributableActivity(pAll, leoAll, metricsOptions.contextOf) : null;
-        const pDb       = scoped ? scoped.pDb : works ? { ...pAll, progressMap: Object.fromEntries(Object.entries(pAll.progressMap ?? {}).filter(([, e]) => works.has(e?.contentId))) } : pAll;
-        const leoRaw    = scoped ? scoped.leoRaw : works ? leoAll.filter(e => works.has(e?.contentId)) : leoAll;
+        const { pDb, leoRaw, works } = progressScope;
         const timelines = buildStudentSessionTimelines(pDb);
         const leoByUser = buildStudentLeoInteractionsMap(leoRaw);
 
@@ -13029,6 +13091,8 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
     try {
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         const group    = groups.find(g => g.id === courseId);
+        // V9 65D-1: el informe cuenta la misma lectura que el tablero (también la que solo registró el progreso).
+        withProgressOnlyActivity(raw, courseProgressScope(metricsOptions).pDb, groupsContentScope([courseId]));
         const response = formatCourseResponse(raw, users);
 
         // Compute dataWindow from engine's StudentMetrics[] (before formatting strips it)

@@ -150,8 +150,13 @@ class DataService {
     private pendingSyncs: Map<string, ProgresoLectura> = new Map();
     private lastSyncedPayloads: Map<string, string> = new Map();
     private syncInterval: NodeJS.Timeout | null = null;
-    private currentSessionId: string = crypto.randomUUID();
-    private sessionStartTimeMs: number = Date.now();
+    // V9 65D-1 — sesión de lectura POR OBRA. Antes había una sola por carga de la página, compartida por todos los libros
+    // y con inicio en la carga de la aplicación: leer dos libros seguidos repetía los minutos del primero en el segundo
+    // (el servidor guarda la sesión en cada libro) y la duración incluía el tiempo navegando antes de abrir el visor.
+    // Ahora la sesión empieza al abrir el visor de esa obra, dura hasta el último guardado y una pausa de más de
+    // READING_SESSION_IDLE_MS abre otra.
+    private readingSessions: Map<string, { sessionId: string; startMs: number; lastMs: number; mode: string }> = new Map();
+    private static readonly READING_SESSION_IDLE_MS = 30 * 60 * 1000;
 
     // Fase F — Sync eventual: entries that failed to sync and need retry.
     // Persisted to localStorage so they survive page reload.
@@ -160,7 +165,11 @@ class DataService {
     private failedSyncs: Map<string, FailedSyncEntry> = new Map();
     private static readonly FAILED_SYNCS_KEY = 'chibalete_failed_syncs';
     private static readonly FAILED_SYNCS_MAX = 50;
-    private static readonly FAILED_SYNCS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+    // V9 65D-1: 7 días (antes 24 h). Una lectura hecha sin conexión se perdía si la aplicación no volvía a abrirse con
+    // red al día siguiente; el servidor acepta guardados atrasados y acredita la sesión con la fecha que declara (65A).
+    private static readonly FAILED_SYNCS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    // Claves de la cola ya resueltas en esta página: no se vuelven a adoptar del almacenamiento compartido.
+    private settledFailKeys: Set<string> = new Set();
 
     /**
      * Fase E3 — Árbitro temporal del servidor.
@@ -402,6 +411,9 @@ class DataService {
 
             const hash = JSON.stringify(syncPayload);
             if (this.lastSyncedPayloads.get(key) === hash) return; // Deduplicate
+            // V9 65D-1: en la cola de reintentos, una entrada por SESIÓN: un guardado posterior del mismo libro (otra
+            // sesión) ya no reemplaza al anterior que no llegó, y ninguna sesión hecha sin conexión se pierde.
+            const failKey = session?.sessionId ? `${key}__${session.sessionId}` : key;
 
             // keepalive: true survives page-unload; supports custom headers (unlike sendBeacon)
             fetch(`${this.apiUrl}/progress/${usuario_id}/${contenido_id}/sync`, {
@@ -413,17 +425,18 @@ class DataService {
                 if (res.ok) {
                     // Success: mark as synced and remove from failed queue if present.
                     this.lastSyncedPayloads.set(key, hash);
-                    if (this.failedSyncs.has(key)) {
-                        this.failedSyncs.delete(key);
+                    if (this.failedSyncs.has(failKey)) {
+                        this.failedSyncs.delete(failKey);
+                        this.settledFailKeys.add(failKey);
                         this.saveFailedSyncs();
                     }
                 } else {
                     // Server returned error (4xx/5xx) — add to retry queue.
-                    this.addToFailedSyncs(key, usuario_id, contenido_id, hash);
+                    this.addToFailedSyncs(failKey, usuario_id, contenido_id, hash);
                 }
             }).catch(() => {
                 // Network failure — add to retry queue.
-                this.addToFailedSyncs(key, usuario_id, contenido_id, hash);
+                this.addToFailedSyncs(failKey, usuario_id, contenido_id, hash);
             });
 
             // Optimistic mark — prevents the same payload being re-queued on the next interval
@@ -436,8 +449,26 @@ class DataService {
 
     // Fase F helpers ────────────────────────────────────────────────────────────
 
+    /**
+     * V9 65D-1 — la cola vive en el almacenamiento del navegador y otras páginas del mismo origen (el lector EPUB) también
+     * dejan allí lo que no pudieron enviar. Antes de reintentar o de escribir, se adoptan las entradas que esta página
+     * no conoce, para no borrarlas al guardar su propia copia.
+     */
+    private adoptStoredFailedSyncs(): void {
+        try {
+            const raw = localStorage.getItem(DataService.FAILED_SYNCS_KEY);
+            if (!raw) return;
+            const obj = JSON.parse(raw) as Record<string, FailedSyncEntry>;
+            Object.entries(obj).forEach(([k, v]) => {
+                if (!this.failedSyncs.has(k) && !this.settledFailKeys.has(k) && v?.userId && v?.contentId && v?.payload) this.failedSyncs.set(k, v);
+            });
+        } catch { /* almacenamiento no disponible o corrupto */ }
+    }
+
     private addToFailedSyncs(key: string, userId: string, contentId: string, payload: string): void {
-        // Overwrite any previous entry for this key — the new payload is always more recent.
+        this.adoptStoredFailedSyncs();
+        // Same key (same session) ⇒ the new payload is more recent and replaces it.
+        this.settledFailKeys.delete(key);
         this.failedSyncs.set(key, { userId, contentId, payload, addedAt: new Date().toISOString() });
         // Cap at FAILED_SYNCS_MAX — evict the oldest entry when over limit.
         if (this.failedSyncs.size > DataService.FAILED_SYNCS_MAX) {
@@ -448,6 +479,7 @@ class DataService {
     }
 
     private retryFailedSyncs(): void {
+        this.adoptStoredFailedSyncs();
         if (this.failedSyncs.size === 0) return;
         const cutoff = Date.now() - DataService.FAILED_SYNCS_TTL_MS;
         let pruned = false;
@@ -457,6 +489,7 @@ class DataService {
             if (age < cutoff) {
                 // Prune stale entries — progress this old is unlikely to be useful.
                 this.failedSyncs.delete(key);
+                this.settledFailKeys.add(key);
                 pruned = true;
                 return;
             }
@@ -470,7 +503,8 @@ class DataService {
             }).then(res => {
                 if (res.ok) {
                     this.failedSyncs.delete(key);
-                    this.lastSyncedPayloads.set(key, entry.payload);
+                    this.settledFailKeys.add(key);
+                    this.lastSyncedPayloads.set(`${entry.userId}__${entry.contentId}`, entry.payload);
                     this.saveFailedSyncs();
                 }
                 // Non-ok response: stays in failedSyncs for next retry opportunity.
@@ -483,6 +517,7 @@ class DataService {
     }
 
     private saveFailedSyncs(): void {
+        this.adoptStoredFailedSyncs();
         try {
             const obj: Record<string, FailedSyncEntry> = {};
             this.failedSyncs.forEach((v, k) => { obj[k] = v; });
@@ -2705,11 +2740,7 @@ class DataService {
             ...(viewportHint !== undefined && isFinite(viewportHint) ? { viewportHint } : {}),
         };
 
-        const sessionPayload = {
-            sessionId: this.currentSessionId,
-            startedAt: new Date(this.sessionStartTimeMs).toISOString(),
-            durationSec: Math.floor((Date.now() - this.sessionStartTimeMs) / 1000)
-        };
+        const sessionPayload = this.touchReadingSession(userId, contentId, metricsPatch?.lastMode ?? this.mapDeviceModeToLastMode(deviceMode));
 
         const timestampStr = new Date().toISOString();
         const resolvedLastMode = metricsPatch?.lastMode ?? this.mapDeviceModeToLastMode(deviceMode);
@@ -2764,12 +2795,32 @@ class DataService {
     }
 
     /**
+     * V9 65D-1 — sesión de lectura de UNA obra: la abre el visor (o el primer guardado) y la cierra una pausa larga.
+     * La duración va del inicio al último guardado de esa obra; el modo es el del visor.
+     */
+    private touchReadingSession(userId: string, contentId: string, lastMode: ProgresoLectura['lastMode'] | string | undefined) {
+        const key = `${userId}__${contentId}`;
+        const now = Date.now();
+        const MODE: Record<string, string> = { texto: 'text', text: 'text', pdf: 'pdf', inmersivo: 'immersive', immersive: 'immersive', album: 'album' };
+        let s = this.readingSessions.get(key);
+        if (!s || now - s.lastMs > DataService.READING_SESSION_IDLE_MS) {
+            s = { sessionId: crypto.randomUUID(), startMs: now, lastMs: now, mode: MODE[String(lastMode ?? '')] ?? 'text' };
+            this.readingSessions.set(key, s);
+        }
+        s.lastMs = now;
+        return { sessionId: s.sessionId, startedAt: new Date(s.startMs).toISOString(), durationSec: Math.floor((s.lastMs - s.startMs) / 1000), mode: s.mode };
+    }
+
+    /**
      * recordReaderOpen — call once when a reader mounts.
      * Increments sessionsCount, sets lastOpenedAt, and updates lastMode.
      * Safe to call with old (pre-patch) progress objects.
      */
     recordReaderOpen(userId: string, contentId: string, lastMode: ProgresoLectura['lastMode']): void {
         if (!userId) return;
+        // V9 65D-1: abrir el visor empieza una sesión de lectura nueva de esa obra.
+        this.readingSessions.delete(`${userId}__${contentId}`);
+        this.touchReadingSession(userId, contentId, lastMode);
         const timestampStr = new Date().toISOString();
         let prog = this.progress.find(p => p.usuario_id === userId && p.contenido_id === contentId);
         if (prog) {

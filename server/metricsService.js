@@ -816,7 +816,10 @@ function computeStudentMetricsUncached(userId, ctx, includeContent = null, extra
   const lastAccessAt  = timestamps.length > 0 ? Math.max(...timestamps) : null;
   const contentStats  = computeContentStats(userId, ctx, includeContent);
 
-  return { userId, behavioral, readingLevels, icdli, leoMetrics, contentStats, dataWindow, lastAccessAt, computedAt: Date.now() };
+  // V9 65D-1: obras con sesiones de telemetría (ya filtradas). Quien arma el tablero solo suma las sesiones del progreso
+  // de las DEMÁS obras: una misma lectura nunca se cuenta por las dos fuentes.
+  const sessionContentIds = [...new Set(sessions.map(s => s.contentId).filter(c => typeof c === 'string' && c))];
+  return { userId, behavioral, readingLevels, icdli, leoMetrics, contentStats, dataWindow, lastAccessAt, sessionContentIds, computedAt: Date.now() };
 }
 
 /**

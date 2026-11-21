@@ -341,7 +341,8 @@ try {
         const forged = await post(S1, '/api/analytics/events', C['ra-1'], [{ event: 'session_start', userId: 'ra-1', contentId: 'c5', timestamp: t - 20_000, streak: 0, receivedAt: 1 }]);
         ok('el sello de recepción no lo fija el cliente', forged.status === 200 && JSON.parse(fs.readFileSync(path.join(P.data, 'analytics_db.json'), 'utf8')).find((e) => e.contentId === 'c5').receivedAt >= t);
         const m = await both(METRICS('g-a'), C['med-a']);
-        ok('en el tablero del curso ra-1 tiene sus sesiones reales (2), ninguna «del futuro»', all200(m) && breakdown(m[0].json, 'ra-1')?.totalSessions === 2 && breakdown(m[1].json, 'ra-1')?.totalSessions === 2, JSON.stringify(breakdown(m[0].json, 'ra-1')).slice(0, 300));
+        // V9 65D-1: el tablero suma además la sesión real del progreso de c6 (sin telemetría); la «del futuro» de c6 no se acredita.
+        ok('en el tablero del curso ra-1 tiene sus sesiones reales (2 por telemetría + la real de c6 por el progreso), ninguna «del futuro»', all200(m) && m.every((x) => breakdown(x.json, 'ra-1')?.totalSessions === 3 && breakdown(x.json, 'ra-1')?.progressOnlySessions === 1), JSON.stringify(breakdown(m[0].json, 'ra-1')).slice(0, 300));
     }
 
     section('[13] estado individual, informes de curso, resumen y Leo coherentes');

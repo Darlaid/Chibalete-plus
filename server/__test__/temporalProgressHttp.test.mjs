@@ -264,12 +264,18 @@ try {
         const m = await both(METRICS('g-a'), C['med-a']), rep = await both(REPORT('g-a'), C['med-a']);
         const b1 = breakdown(m[0].json, 'ra-1'), b3 = breakdown(m[0].json, 'ra-3');
         ok('métricas del curso 200 con el recuento de atribución', all200(m) && m[0].json.courseAttribution.unverifiable_history >= 4 && m[0].json.courseAttribution.readers_with_unverifiable_history === 4, JSON.stringify(m[0].json.courseAttribution));
-        ok('ra-1 en el tablero: 4 sesiones (tres de c1 y la de c2 posterior a la asignación); la de c2 anterior y las personales no cuentan', sessionsOf(b1) === 4 && b1.courseAttribution.unverifiable_history === 1, JSON.stringify([sessionsOf(b1), b1.courseAttribution]));
+        // V9 65D-1: el tablero suma además las sesiones del progreso de las obras sin telemetría (aquí, la de cs).
+        ok('ra-1 en el tablero: 5 sesiones (tres de c1 y la de c2 posterior a la asignación por telemetría, y la de cs que solo registró el progreso); la de c2 anterior y las personales no cuentan',
+            sessionsOf(b1) === 5 && b1.progressOnlySessions === 1 && b1.courseAttribution.unverifiable_history === 1, JSON.stringify([sessionsOf(b1), b1.progressOnlySessions, b1.courseAttribution]));
         ok('ra-3 en el tablero: solo la sesión posterior a su ingreso, y marcado con historial no acreditable', sessionsOf(b3) === 1 && b3.courseAttribution.unverifiable_history === 1 && b3.courseAttribution.verified_context === 0, JSON.stringify([sessionsOf(b3), b3.courseAttribution]));
         const b4 = breakdown(m[0].json, 'ra-4'), b5 = breakdown(m[0].json, 'ra-5');
-        ok('un lector sin actividad acreditada pero con lectura no atribuible NO figura como «necesita atención»', sessionsOf(b4) === 0 && b4.dataState === 'unverifiable_history' && b4.needsAttention === false
-            && b4.contentsCompleted === 0 && !/"c1"/.test(JSON.stringify(b4.readingDetails ?? {})) && !(m[0].json.needsAttention || []).some((x) => x.userId === 'ra-4')
-            && m[0].json.courseAttribution.readers_without_verified_activity === 2, JSON.stringify([b4, m[0].json.courseAttribution]).slice(0, 700));
+        // V9 65D-1: ra-4 no tiene telemetría, pero sus 20 sesiones fechadas SÍ están acreditadas (ver [3]): el tablero ya no lo
+        // presenta como «sin actividad». Su acumulado sigue sin certificarse (c1 no aparece en su detalle de lectura).
+        // Lo mismo ra-2 (sesiones fechadas de c1 sin telemetría): ya no queda ningún lector «sin actividad acreditada» que tenga lectura.
+        ok('un lector con sesiones acreditadas solo en el progreso: 20 sesiones, «lee sin nivel calculable», NO figura como «necesita atención»; su acumulado no certificado no aparece',
+            sessionsOf(b4) === 20 && b4.readsWithoutTelemetry === true && b4.hasData === false && b4.dataState === 'verified_context' && b4.needsAttention === false
+            && b4.courseAttribution.unverifiable_history === 1 && b4.contentsCompleted === 0 && !/"c1"/.test(JSON.stringify(b4.readingDetails ?? {})) && !(m[0].json.needsAttention || []).some((x) => x.userId === 'ra-4')
+            && m[0].json.courseAttribution.readers_without_verified_activity === 0 && breakdown(m[0].json, 'ra-2')?.readsWithoutTelemetry === true, JSON.stringify([b4.dataState, b4.courseAttribution, b4.readingDetails, (m[0].json.needsAttention || []).map((x) => x.userId), m[0].json.courseAttribution]));
         ok('…y uno sin ninguna lectura sí figura, como siempre', b5.dataState === 'no_activity' && b5.needsAttention === true);
         ok('informe del curso: mismas cifras y mismo recuento', all200(rep) && JSON.stringify(rep[0].json.courseAttribution) === JSON.stringify(m[0].json.courseAttribution)
             && breakdown(rep[0].json, 'ra-1').courseAttribution.unverifiable_history === 1, st(rep).slice(0, 300));

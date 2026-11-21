@@ -3,7 +3,7 @@ import { BookOpen, Loader2, Lock, ShieldAlert, ChevronLeft } from 'lucide-react'
 import ProtectedContentSurface from '../ProtectedContentSurface';
 import ChibaleteEpubReader, { type EpubOpenInfo, type EpubRelocateState } from './ChibaleteEpubReader';
 import { contentDetailHref, readEpubContentId } from '../../utils/epubReaderLink.mjs';
-import { computeEpubFingerprint, createEpubProgressSaver, pickRestoreCfi } from './epubProgress.mjs';
+import { computeEpubFingerprint, createEpubProgressSaver, createEpubReadingSession, enqueueFailedProgressSync, pickRestoreCfi, shouldRetryProgressSync } from './epubProgress.mjs';
 import { useEconomicTick } from '../../hooks/useEconomicTick';
 import { EPUB_SCROLL_RELOCATE_REASON, isEpubReaderRelocate } from '../../utils/economicTick.mjs';
 
@@ -162,13 +162,17 @@ const EpubReaderApp: React.FC = () => {
             const resume = await resumeRef.current;
             const userId = userIdRef.current;
             if (!resume || !userId || adapterRef.current !== a) return;
+            // V9 65D-1: cada guardado lleva la sesión de lectura; si no llega, queda en la cola de reintentos de la
+            // aplicación (antes se descartaba en silencio y la lectura sin conexión se perdía).
+            const keep = (body: object) => { try { enqueueFailedProgressSync(window.localStorage, { userId, contentId, body }); } catch { /* sin almacenamiento */ } };
             const saver = createEpubProgressSaver({
                 fingerprint: resume.fingerprint,
                 initialCfi: resume.cfi,
+                session: createEpubReadingSession(),
                 send: (body, { keepalive }) => fetch(`/api/progress/${encodeURIComponent(userId)}/${encodeURIComponent(contentId)}/sync`, {
                     method: 'POST', credentials: 'same-origin', keepalive,
                     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-                }).catch(() => undefined),
+                }).then((r) => { if (!r.ok && shouldRetryProgressSync(r.status)) keep(body); }, () => keep(body)),
             });
             saverRef.current = saver;
             if (resume.cfi) {

@@ -69,6 +69,8 @@ interface StudentRow {
     userId: string;
     name: string;
     hasData: boolean;
+    // V9 65D-1 — lectura del curso registrada solo por el progreso: sesiones sin nivel calculable.
+    readsWithoutTelemetry?: boolean;
     // V9 F7-C2R-U3B — sin actividad acreditada del curso, pero con lectura que no puede atribuirse.
     dataState?: 'verified_context' | 'no_activity' | 'unverifiable_history';
     needsAttention: boolean;
@@ -708,9 +710,9 @@ const StudentBreakdownTable: React.FC<{ students: StudentRow[] }> = ({ students 
                 </thead>
                 <tbody className="divide-y divide-gray-50 dark:divide-gray-700/40">
                     {rows.map(s => (
-                        <tr key={s.userId} className={s.hasData ? '' : 'opacity-50'}>
+                        <tr key={s.userId} className={s.hasData || s.readsWithoutTelemetry ? '' : 'opacity-50'}>
                             <td className="py-2 pr-3">
-                                <span className={`text-sm ${s.hasData ? 'text-gray-700 dark:text-gray-300' : 'text-gray-400 dark:text-gray-500 italic'}`}>
+                                <span className={`text-sm ${s.hasData || s.readsWithoutTelemetry ? 'text-gray-700 dark:text-gray-300' : 'text-gray-400 dark:text-gray-500 italic'}`}>
                                     {s.name}
                                 </span>
                             </td>
@@ -728,14 +730,15 @@ const StudentBreakdownTable: React.FC<{ students: StudentRow[] }> = ({ students 
                             </td>
                             <td className="py-2">
                                 <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                                    {
+                                    // V9 65D-1: sin nivel calculado no hereda el color de «Inicial».
+                                    !s.hasData ? (s.readsWithoutTelemetry ? 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300' : 'bg-gray-100 text-gray-500') : {
                                         'Avanzado':      'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
                                         'En desarrollo': 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
                                         'Básico':        'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
                                         'Inicial':       'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
                                     }[s.level] ?? 'bg-gray-100 text-gray-500'
                                 }`}>
-                                    {s.hasData ? s.level : s.dataState === 'unverifiable_history' ? 'Lectura no atribuible' : 'Sin datos'}
+                                    {s.hasData ? s.level : s.readsWithoutTelemetry ? 'Lee · nivel sin calcular' : s.dataState === 'unverifiable_history' ? 'Lectura no atribuible' : 'Sin datos'}
                                 </span>
                             </td>
                         </tr>

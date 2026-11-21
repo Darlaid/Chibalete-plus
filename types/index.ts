@@ -540,6 +540,7 @@ export interface ProgresoLectura {
     sessionId: string;
     startedAt: string;
     durationSec: number;
+    mode?: string;   // V9 65D-1: modo del visor de esa sesión
   };
 
   // Advanced Reading — Unified Continuity (Reading Completion Pass)

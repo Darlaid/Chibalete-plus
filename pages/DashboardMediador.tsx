@@ -74,6 +74,9 @@ interface StudentRow {
     name: string;
     hasData: boolean;
     needsAttention: boolean;
+    // V9 65D-1 — lee obras del curso, pero solo lo registró el progreso (EPUB, Álbum…): hay sesiones y tiempo, no nivel.
+    readsWithoutTelemetry?: boolean;
+    progressOnlySessions?: number;
     // V9 F7-C2R-U3B — `unverifiable_history`: sin actividad ACREDITADA del curso, pero con lectura que no puede atribuirse.
     dataState?: 'verified_context' | 'no_activity' | 'unverifiable_history';
     courseAttribution?: { verified_context: number; unverifiable_history: number };
@@ -393,7 +396,13 @@ const isUnattributed = (s: StudentRow): boolean => s.dataState === 'unverifiable
 const UNATTRIBUTED_LABEL = 'Lectura no atribuible';
 const UNATTRIBUTED_NOTE = 'lectura de obras del curso que no puede atribuirse al curso (empezó antes de la asignación, del ingreso al curso o del registro de esas fechas, o la fecha de lectura no pudo verificarse)';
 
-function studentStatus(s: StudentRow): 'stable' | 'risk' | 'attention' {
+/** V9 65D-1 — tiene lectura del curso registrada por el progreso, sin telemetría para calcular su nivel: no es «inactivo». */
+const readsWithoutLevel = (s: StudentRow): boolean => s.readsWithoutTelemetry === true;
+const NO_LEVEL_LABEL = 'Lee · nivel sin calcular';
+const NO_LEVEL_NOTE = 'su lectura la registró el progreso del libro (por ejemplo, en el lector EPUB), que no aporta datos para calcular el nivel lector';
+
+function studentStatus(s: StudentRow): 'stable' | 'risk' | 'attention' | 'reading' {
+    if (readsWithoutLevel(s)) return 'reading';
     if (!s.hasData)          return 'attention';
     if (s.needsAttention)    return 'risk';
     return 'stable';
@@ -403,6 +412,7 @@ const STATUS_CONFIG = {
     stable:    { label: 'Estable',   dot: 'bg-emerald-400', cls: 'text-emerald-600 dark:text-emerald-400' },
     risk:      { label: 'En riesgo', dot: 'bg-amber-400',   cls: 'text-amber-600 dark:text-amber-400'   },
     attention: { label: 'Inactivo',  dot: 'bg-gray-300 dark:bg-gray-600',    cls: 'text-gray-400 dark:text-gray-500'    },
+    reading:   { label: NO_LEVEL_LABEL, dot: 'bg-sky-400',   cls: 'text-sky-700 dark:text-sky-300'   },
 };
 
 /**
@@ -410,7 +420,7 @@ const STATUS_CONFIG = {
  * Returns an ordered list of pattern type strings (highest severity first).
  */
 function detectStudentPatterns(student: StudentRow): string[] {
-    if (!student.hasData) return isUnattributed(student) ? [] : ['sin_actividad'];
+    if (!student.hasData) return isUnattributed(student) || readsWithoutLevel(student) ? [] : ['sin_actividad'];
 
     const avgSessionMs = student.totalSessions > 0
         ? student.totalReadingTimeMs / student.totalSessions
@@ -449,6 +459,7 @@ function detectStudentPatterns(student: StudentRow): string[] {
 }
 
 function buildStudentProfileSummary(student: StudentRow, patterns: string[]): string {
+    if (readsWithoutLevel(student)) return `Lee obras del curso — ${student.totalSessions} ${student.totalSessions === 1 ? 'sesión' : 'sesiones'}, ${formatDuration(student.totalReadingTimeMs)} en total. Sin nivel calculado: ${NO_LEVEL_NOTE}.`;
     if (!student.hasData) return isUnattributed(student)
         ? `Tiene ${UNATTRIBUTED_NOTE}. No se interpreta como falta de lectura.`
         : 'No ha registrado actividad lectora aún.';
@@ -790,7 +801,10 @@ function getAdaptiveRecommendations(profileId: string, student: StudentRow) {
 
     let immediateAction = typology.immediateAction;
 
-    if (profileId === 'lector_consolidado' && done) {
+    // V9 65D-1: quien lee sin telemetría no necesita que se verifique su acceso: lee. Se acompaña lo que está leyendo.
+    if (readsWithoutLevel(student)) {
+        immediateAction = ip ? `Conversar sobre ${t(ip)} y acompañar la lectura en curso.` : 'Conversar sobre lo que está leyendo y acompañar la lectura en curso.';
+    } else if (profileId === 'lector_consolidado' && done) {
         immediateAction = `Proponer un texto más desafiante después de ${t(done)}.`;
     } else if (profileId === 'constante_superficial' && ip) {
         immediateAction = `Abrir conversación sobre ${t(ip)}: ¿qué fue lo más sorprendente o extraño?`;
@@ -1181,7 +1195,7 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
 
     return (
         <div className={`p-4 rounded-lg border ${
-            !student.hasData
+            !student.hasData && !readsWithoutLevel(student)
                 ? 'border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 opacity-60'
                 : isHigh
                 ? 'border-red-100 dark:border-red-900/40 bg-red-50/30 dark:bg-red-900/10'
@@ -1195,14 +1209,15 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
                 <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 mb-1">
                         <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-                            !student.hasData ? 'bg-gray-300 dark:bg-gray-600'
+                            readsWithoutLevel(student) ? 'bg-sky-400'
+                            : !student.hasData ? 'bg-gray-300 dark:bg-gray-600'
                             : isHigh ? 'bg-red-400'
                             : isMedium ? 'bg-amber-400'
                             : isPositive ? 'bg-emerald-400'
                             : 'bg-sky-400'
                         }`} />
                         <span className={`font-medium text-sm truncate ${
-                            student.hasData ? 'text-gray-800 dark:text-gray-200' : 'text-gray-400 dark:text-gray-500 italic'
+                            student.hasData || readsWithoutLevel(student) ? 'text-gray-800 dark:text-gray-200' : 'text-gray-400 dark:text-gray-500 italic'
                         }`}>
                             {student.name}
                         </span>
@@ -1296,7 +1311,7 @@ const StudentCard: React.FC<StudentCardProps> = ({ student, interventions = [], 
                     })}
                 </div>
             )}
-            {student.hasData && <ReadingSnapshot details={student.readingDetails} />}
+            {(student.hasData || readsWithoutLevel(student)) && <ReadingSnapshot details={student.readingDetails} />}
         </div>
     );
 };
@@ -1401,7 +1416,7 @@ const StudentTable: React.FC<{ students: StudentRow[] }> = ({ students }) => {
         });
     }, [students, sortKey, sortDir, onlyAlerts]);
 
-    const attentionCount = students.filter(s => (s.needsAttention || !s.hasData) && !isUnattributed(s)).length;
+    const attentionCount = students.filter(s => (s.needsAttention || !s.hasData) && !isUnattributed(s) && !readsWithoutLevel(s)).length;
 
     const Th: React.FC<{ col: SortKey; className?: string; children: React.ReactNode }> = ({ col, className = '', children }) => (
         <th
@@ -1466,7 +1481,7 @@ const StudentTable: React.FC<{ students: StudentRow[] }> = ({ students }) => {
                                     >
                                         <td className="pl-4 pr-3 py-2.5">
                                             <span className={`font-medium ${
-                                                student.hasData
+                                                student.hasData || readsWithoutLevel(student)
                                                     ? 'text-gray-800 dark:text-gray-200'
                                                     : 'text-gray-400 dark:text-gray-500 italic'
                                             }`}>
@@ -1503,7 +1518,7 @@ const StudentTable: React.FC<{ students: StudentRow[] }> = ({ students }) => {
                                             {isUnattributed(student) ? '—' : student.totalSessions}
                                         </td>
                                         <td className="px-3 py-2.5 text-gray-600 dark:text-gray-400 tabular-nums text-xs">
-                                            {student.hasData ? formatDuration(student.totalReadingTimeMs) : '—'}
+                                            {student.hasData || readsWithoutLevel(student) ? formatDuration(student.totalReadingTimeMs) : '—'}
                                         </td>
                                         <td className="pr-4 px-3 py-2.5">
                                             {student.totalLeoInteractions > 0 || student.totalLeoOfflineAttempts > 0 ? (
