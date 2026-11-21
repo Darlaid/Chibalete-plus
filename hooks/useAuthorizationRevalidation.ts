@@ -79,6 +79,13 @@ export function useSessionRevalidation(user: { id: string; roles?: string[] } | 
                     // El id local solo etiqueta la sesión; se quita para que el arranque pregunte por la cookie vigente.
                     sessionStorage.removeItem('chibalete_user_id');
                     localStorage.removeItem('chibalete_user_id');
+                    // V9 BI-65C-S: las copias locales de Aula Viva de la cuenta anterior tampoco sobreviven a la recarga.
+                    const doomed: string[] = [];
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.startsWith('chibalete:aulaviva')) doomed.push(k);
+                    }
+                    doomed.forEach((k) => localStorage.removeItem(k));
                 } catch { /* almacenamiento bloqueado: se recarga igual */ }
                 window.location.reload();
             })

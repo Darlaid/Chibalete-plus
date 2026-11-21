@@ -93,14 +93,14 @@ try {
 
     section('[1] compromiso 005');
     ok('sin C005: status individual 403 en ambas réplicas', (await both((c) => status(c, 'r1', 'med-a'))).every((s) => s === 403));
-    ok('sin C005: Aula Viva sin detalle por lector', (await both((c) => readers(c, 'med-a'))).every((r) => r === ''));
+    ok('sin C005: Aula Viva sin resumen del grupo (ni detalle ni agregados: 403)', (await both((c) => readers(c, 'med-a'))).every((r) => r === 'HTTP403'));
     grantC005(['med-a']);
     ok('con C005 verificado: status 200 en ambas réplicas, sin reiniciar', (await both((c) => status(c, 'r1', 'med-a'))).every((s) => s === 200));
     ok('con C005: Aula Viva con el detalle de su grupo', (await both((c) => readers(c, 'med-a'))).every((r) => r === ALL));
 
     section('[2] vigencia del 005');
     grantC005(['med-a'], { validUntil: '2000-12-31' });
-    ok('005 vencido ⇒ 403 y sin detalle, sin reiniciar', (await status(api1, 'r1', 'med-a')) === 403 && (await readers(api2, 'med-a')) === '');
+    ok('005 vencido ⇒ 403 y sin resumen del grupo, sin reiniciar', (await status(api1, 'r1', 'med-a')) === 403 && (await readers(api2, 'med-a')) === 'HTTP403');
     grantC005(['med-a'], { validUntil: '2999-12-31' });
     ok('005 renovado con vigencia futura ⇒ 200', (await status(api2, 'r1', 'med-a')) === 200);
 

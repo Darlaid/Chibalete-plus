@@ -562,6 +562,8 @@ class DataService {
     }
 
     private async initializeUsersAndGroupsFromApi() {
+        // V9 BI-65C-S: si la sesión termina mientras llegan estas listas, ninguna se guarda.
+        const epoch = this.sessionEpoch;
         try {
             // USERS
             // v4.0.4 hotfix: el GET-bypass del backend fue cerrado en v4.0.3 →
@@ -571,6 +573,7 @@ class DataService {
             const usersRes = await fetch(`${this.apiUrl}/users`, { headers: this.adminWriteHeaders });
             if (usersRes.ok) {
                 const rawUsers: any[] = await usersRes.json();
+                if (epoch !== this.sessionEpoch) return;
                 if (Array.isArray(rawUsers)) {
                     // HOTFIX: Disable naive merge. API is absolute Source of Truth for Users.
                     this.users = rawUsers.filter(u => u && u.id) as User[];
@@ -586,6 +589,7 @@ class DataService {
             const groupsRes = await fetch(`${this.apiUrl}/groups`, { headers: this.adminWriteHeaders });
             if (groupsRes.ok) {
                 const apiGroups: Group[] = await groupsRes.json();
+                if (epoch !== this.sessionEpoch) return;
                 if (Array.isArray(apiGroups)) {
                     // HOTFIX: API is absolute Source of Truth for Groups.
                     // Fase Modelo Extendido: Normalizar al ingresar al frontend
@@ -602,6 +606,7 @@ class DataService {
             const schoolsRes = await fetch(`${this.apiUrl}/schools`, { headers: this.adminWriteHeaders });
             if (schoolsRes.ok) {
                 const apiSchools: School[] = await schoolsRes.json();
+                if (epoch !== this.sessionEpoch) return;
                 if (Array.isArray(apiSchools)) {
                     // HOTFIX: API is absolute Source of Truth for Schools.
                     this.schools = apiSchools;
@@ -649,6 +654,7 @@ class DataService {
      *     deben romperse por un refetch.
      */
     async reloadUsers(): Promise<User[]> {
+        const epoch = this.sessionEpoch;
         try {
             // v4.0.4 hotfix: mismo motivo que initializeUsersAndGroupsFromApi —
             // sin headers, el GET-bypass cerrado en v4.0.3 retorna 401.
@@ -662,6 +668,8 @@ class DataService {
                 console.warn('[USERS_CACHE_REFRESH] failed reason=non_array_payload');
                 return this.users;
             }
+            // V9 BI-65C-S: la sesión terminó mientras llegaba la respuesta: no se guarda.
+            if (epoch !== this.sessionEpoch) return this.users;
             const fresh = raw.filter(u => u && u.id) as User[];
             const prevCount = this.users.length;
             this.users = fresh;
@@ -675,16 +683,47 @@ class DataService {
     }
 
     /**
+     * V9 BI-65C-S — al terminar la sesión no queda en memoria nada institucional de la cuenta saliente. La página no se
+     * recarga al cerrar sesión, así que el padrón, los grupos y los colegios que cargó esa cuenta seguían en este
+     * objeto (y las copias locales de Aula Viva en el navegador) para quien entrara después.
+     *  - vacía usuarios, grupos, colegios y las cachés de acceso y de configuración de colegio;
+     *  - borra las copias locales de Aula Viva (`chibalete:aulaviva*`);
+     *  - avanza `sessionEpoch`: una respuesta de esas listas que estaba en camino ya no se guarda.
+     * No toca lo que es propio del dispositivo y no llega del servidor institucional (progreso pendiente de
+     * sincronizar, tareas locales, catálogo). No lanza.
+     */
+    private sessionEpoch = 0;
+    public clearSessionState(): void {
+        this.sessionEpoch += 1;
+        this.users = [];
+        this.groups = [];
+        this.schools = [];
+        this.userContentAccessCache = {};
+        this.schoolConfigsCache.clear();
+        try {
+            const doomed: string[] = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith('chibalete:aulaviva')) doomed.push(k);
+            }
+            doomed.forEach(k => localStorage.removeItem(k));
+        } catch { /* almacenamiento no disponible */ }
+    }
+
+    /**
      * V9 BI-65C — vuelve a pedir los grupos al servidor (la lista en memoria solo se cargaba al iniciar sesión, así
      * que un curso del que se retiró al mediador seguía en su selector). Con respuesta 200 la lista del servidor
      * reemplaza a la de memoria; con cualquier otro resultado la lista no cambia. Devuelve el código HTTP (0 = sin
      * respuesta). No lanza.
      */
     async reloadGroups(): Promise<number> {
+        const epoch = this.sessionEpoch;
         try {
             const res = await fetch(`${this.apiUrl}/groups`, { headers: this.adminWriteHeaders, cache: 'no-store' });
             if (!res.ok) return res.status;
             const apiGroups: Group[] = await res.json();
+            // La sesión terminó mientras llegaba la respuesta: no se guarda.
+            if (epoch !== this.sessionEpoch) return 0;
             if (Array.isArray(apiGroups)) this.groups = apiGroups.map(this.normalizeGroupFrontend);
             return res.status;
         } catch { return 0; }

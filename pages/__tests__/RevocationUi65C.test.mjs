@@ -90,8 +90,10 @@ export default { useRef, useEffect };`);
     me(503, {}); await fireSession();
     globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); }; await fireSession();
     ok('fallo del servidor o sin respuesta: no se concluye nada (no recarga)', reloads === 0);
+    localStorage.setItem('chibalete:aulaviva:/students-needing-attention', '{"owner":"med-a"}'); localStorage.setItem('chibalete:aulaviva7:/status', '{"owner":"med-a"}'); localStorage.setItem('chibalete_progress', '[]');
     me(200, { id: 'med-b', roles: ['mediador'] }); await fireSession();
     ok('otra cuenta en la sesión: recarga y quita el id local para que el arranque pregunte por la sesión vigente', reloads === 1 && sessionStorage.getItem('chibalete_user_id') === null && localStorage.getItem('chibalete_user_id') === null);
+    ok('…y las copias locales de Aula Viva de la cuenta anterior no sobreviven a la recarga (lo propio del dispositivo sí)', [...localStorage._m.keys()].filter((k) => k.startsWith('chibalete:aulaviva')).length === 0 && localStorage.getItem('chibalete_progress') === '[]');
     now += 6_000; win.fire('focus'); await tick(); await tick(); await tick();
     ok('…una sola recarga por intervalo (sin bucle)', reloads === 1);
     now += 61_000;
@@ -210,6 +212,23 @@ export default { useRef, useEffect };`);
     ok('Pestaña institucional: guardas de secuencia; otra cohorte no hereda la serie anterior', /if \(turn !== refreshSeq\.current\) return;/.test(tab) && /if \(turn !== trajSeq\.current\) return;/.test(tab) && /setTrajSeries\(\[\]\); setTrajMeta\(\{\}\); setTrajInfo\(\{\}\);/.test(tab));
     ok('ningún texto nuevo nombra A2/C005', ![aula, dash, inf, opsPage, leo, impact, tab, code('hooks/useAuthorizationRevalidation.ts')].some((s) => /\bA2\b|\bC005\b/.test(s)));
     ok('el gancho no guarda nada ni escribe en el servidor', !/method:\s*'(POST|PUT|PATCH|DELETE)'/.test(code('hooks/useAuthorizationRevalidation.ts')) && !/setItem\('chibalete_user_id'/.test(code('hooks/useAuthorizationRevalidation.ts')));
+
+    // ── Z — cierre de sesión (V9 BI-65C-S) ─────────────────────────────────────────────────────────────────────────
+    section('[Z] al cerrar sesión no queda nada institucional de la cuenta saliente');
+    const auth = code('context/AuthContext.tsx'), ds = code('services/dataService.ts');
+    const logout = auth.slice(auth.indexOf('const logout = () => {'), auth.indexOf('return (', auth.indexOf('const logout = () => {')));
+    ok('el cierre de sesión limpia el estado de la sesión antes de salir de la pantalla', /dataService\.clearSessionState\(\);/.test(logout) && logout.indexOf('dataService.clearSessionState()') > logout.indexOf('setUser(null)')
+        && logout.indexOf('dataService.clearSessionState()') < logout.indexOf("window.location.replace('/#/bienvenida')"));
+    ok('…y sigue revocando la sesión en el servidor y quitando el id local (sin cambios de autenticación)', /dataService\.serverLogout\(\)\.catch/.test(logout) && /localStorage\.removeItem\('chibalete_user_id'\)/.test(logout) && /sessionStorage\.removeItem\('chibalete_user_id'\)/.test(logout));
+    const clear = ds.slice(ds.indexOf('public clearSessionState(): void {'), ds.indexOf('async reloadGroups()'));
+    ok('la limpieza vacía padrón, grupos, colegios y las cachés de acceso y de colegio', ['this.users = [];', 'this.groups = [];', 'this.schools = [];', 'this.userContentAccessCache = {};', 'this.schoolConfigsCache.clear();'].every((x) => clear.includes(x)));
+    ok('…borra las copias locales de Aula Viva y solo esas', /k\.startsWith\('chibalete:aulaviva'\)/.test(clear) && !/clearAll\(|chibalete_progress|failed_syncs|assignments/.test(clear));
+    ok('…y avanza la época de sesión', /this\.sessionEpoch \+= 1;/.test(clear));
+    const guarded = (name, until) => { const body = ds.slice(ds.indexOf(name), ds.indexOf(until, ds.indexOf(name))); return /const epoch = this\.sessionEpoch;/.test(body) && /epoch !== this\.sessionEpoch/.test(body); };
+    ok('una respuesta de grupos o de usuarios que venía en camino no repone lo borrado', guarded('async reloadGroups()', '// --- SYNC METHODS ---') && guarded('async reloadUsers()', 'async reloadGroups()'));
+    const init = ds.slice(ds.indexOf('private async initializeUsersAndGroupsFromApi()'), ds.indexOf('async reloadUsers()'));
+    ok('…tampoco la carga inicial de usuarios, grupos y colegios', /const epoch = this\.sessionEpoch;/.test(init) && (init.match(/if \(epoch !== this\.sessionEpoch\) return;/g) || []).length === 3);
+    ok('la limpieza no añade almacenamiento ni llamadas al servidor', !/setItem|fetch\(/.test(clear));
 
     // ── X — textos pedagógicos ─────────────────────────────────────────────────────────────────────────────────────
     section('[X] lectura no atribuible: la fecha de lectura no verificable es una causa declarada');

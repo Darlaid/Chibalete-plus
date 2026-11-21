@@ -77,6 +77,8 @@ const A2_REG = path.join(tmp, 'a2', 'a2.jsonl');
 fs.writeFileSync(A2_REG, '');
 for (const u of LECTORES) A2.appendA2Decision({ userId: u, status: 'granted', requestRef: `A2-SINT-${u}` }, { env: { CHP_A2_REGISTRY: A2_REG } });
 const MEDIADORES = Array.from({ length: 10 }, (_, i) => `med-${pad(i + 1, 2)}`);
+// V9 BI-65C-S: el resumen del grupo exige el compromiso 005 vigente de quien media (antes solo lo exigía el detalle).
+A2.appendDecisions([...MEDIADORES, 'med-b'].map((id) => ({ subjectId: id, kind: 'C005', status: 'granted', actDay: '2000-01-01', version: '005@1.0', medium: 'paper', capacity: 'mediator', verification: 'verified', requestRef: `C005-SINT-${id}` })), { env: { CHP_A2_REGISTRY: A2_REG } });
 const USERS = [
     ...LECTORES.map(id => ({ id, roles: ['lector'], organizationId: ORG_A, colegio: 'Colegio Alfa', accountStatus: 'active', groupIds: ['g-a1'] })),
     ...MEDIADORES.map(id => ({ id, roles: ['mediador'], organizationId: ORG_A, colegio: 'Colegio Alfa', accountStatus: 'active', mediatorKind: 'teacher', groupIds: ['g-a1'] })),

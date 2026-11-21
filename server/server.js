@@ -9554,6 +9554,15 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
             const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
             try { if (evaluateScopeAccess(viewerId, 'group', id).via === 'mediator_of_group') viewerMediatorId = viewerId; } catch { viewerMediatorId = viewerId; }
         }
+        // V9 BI-65C-S: sin su C005 vigente, quien media no consulta los indicadores del grupo. Antes solo se retiraba el
+        // detalle por lector y los agregados de TODA la nómina seguían saliendo (con 5 o más lectores retenidos el
+        // criterio de divulgación conserva el agregado de la cohorte). Se decide en cada petición, antes de mirar la
+        // caché: una revocación rige de inmediato en todas las réplicas. Registro no verificable ⇒ 503, nunca cifras.
+        if (viewerMediatorId) {
+            let committed;
+            try { committed = decisionGate().effective('C005', viewerMediatorId); } catch { return a2Unavailable(res); }
+            if (!committed) return res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: id });
+        }
         // V9 F7-C2: para su mediador, el resumen cuenta solo la actividad de las obras asociadas a ESTE grupo. Se
         // cachea aparte del resumen completo (el de la administración), que no cambia.
         const works = viewerMediatorId ? groupsContentScope([id]) : null;

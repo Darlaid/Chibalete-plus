@@ -135,6 +135,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setAccessReady(false);
     localStorage.removeItem('chibalete_user_id');
     sessionStorage.removeItem('chibalete_user_id');
+    // V9 BI-65C-S: el padrón, los grupos y las copias de Aula Viva que cargó esta cuenta no quedan en memoria (el
+    // cierre de sesión no recarga la página) ni las repone una respuesta que venía en camino.
+    dataService.clearSessionState();
     // CP-3 (R7): contenido editorial y localizadores cacheados en el navegador.
     clearEditorialClientStorage();
     // Ensure full hard redirect and avoid back-button unmounting issues by forcing Window relocation

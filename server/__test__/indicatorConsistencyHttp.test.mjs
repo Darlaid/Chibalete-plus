@@ -366,6 +366,19 @@ try {
         Reg.appendDecisions([{ subjectId: 'med-a', kind: 'C005', status: 'revoked', actDay: Reg.dayOf(Date.now()), version: '005@1.0', medium: 'paper', capacity: 'mediator', verification: 'verified', requestRef: 'C005-SINT-65B' }]);
         const gone = [await both(METRICS('g-a'), C['med-a']), await both(IVC('g-a'), C['med-a']), await both(EFF('g-a'), C['med-a']), await both(GIMP('g-a'), C['med-a']), await both(LEO('ra-2'), C['med-a']), await both(IVS('ra-2'), C['med-a'])].flat();
         ok('C005 del mediador revocado: ninguna cifra individual ni lista de intervenciones, en las dos réplicas', gone.every((r) => r.status !== 200 || !/"studentId":"ra-|"userId":"ra-|"user_id":"ra-/.test(r.text)), gone.map((r) => r.status).join());
+        // V9 BI-65C-S — el resumen del grupo tampoco: antes respondía 200 con los agregados de TODA la nómina.
+        const sumGone = await both(SUMMARY('g-a'), C['med-a']);
+        ok('…ni el resumen agregado del grupo: 403 sin cifras, en las dos réplicas', sumGone.every((r) => r.status === 403 && r.json?.error === 'scope_access_denied'
+            && !/totalEffectiveMs|readersWithActivity|readerCount|booksStarted|recognition/.test(r.text)), sumGone.map((r) => `${r.status} ${r.text.slice(0, 80)}`).join(' | '));
+        const sumPeer = await both(SUMMARY('g-a2'), C['med-a2']), sumAdmin = await both(SUMMARY('g-a'), C['adm']), sumOther = [await both(SUMMARY('g-a'), C['med-b']), await both(SUMMARY('g-a'), C['med-a2'])].flat();
+        ok('el mediador de otro curso, con su compromiso vigente, conserva el resumen de SU curso', all200(sumPeer) && sumPeer.every((r) => Number.isFinite(r.json.readerCount) && r.json.groupId === 'g-a2'), sumPeer.map((r) => r.status).join());
+        ok('la administración conserva el resumen del grupo (sin el lector revocado, como antes)', all200(sumAdmin) && sumAdmin.every((r) => r.json.readerCount === 5 && r.json.reading?.all && !r.json.readers.some((x) => x.userId === 'ra-1')), sumAdmin.map((r) => `${r.status} ${r.json?.readerCount}`).join());
+        ok('otra institución y el mediador de otro curso siguen sin acceso a este grupo', sumOther.every((r) => r.status === 403), sumOther.map((r) => r.status).join());
+        const peerReaders = sumPeer.flatMap((r) => (r.json.readers || []).map((x) => x.userId));
+        ok('…y un lector sin autorización vigente no aparece en ningún detalle (ra-1 revocado es el único miembro de g-a2)', !peerReaders.includes('ra-1'), peerReaders.join());
+        grantC005(['med-a']);
+        const sumBack = await both(SUMMARY('g-a'), C['med-a']);
+        ok('compromiso otorgado de nuevo ⇒ vuelve el resumen, sin el lector revocado, en las dos réplicas', all200(sumBack) && sumBack.every((r) => r.json.readerCount === 5 && !r.json.readers.some((x) => x.userId === 'ra-1')), sumBack.map((r) => `${r.status} ${r.json?.readerCount}`).join());
     }
 } catch (e) {
     if (e?.message !== 'PROBE') { fail++; console.error('  ✗ excepción', e?.stack || e, '\n', S1.out.slice(-1500)); }

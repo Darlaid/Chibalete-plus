@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { grantA1, grantC005 } from '../../__test__/helpers/testA2.mjs';
 import { freePorts } from '../../__test__/helpers/freePort.mjs';
 
 let pass = 0, fail = 0;
@@ -132,6 +133,11 @@ Store.requestChanges(doc, deliver('5s2').id, { reviewerId: 'med-a', comment: 'aj
 ['4s1', '4s2'].forEach((u) => approve(deliver(u)));
 fs.writeFileSync(P.mook, JSON.stringify(doc, null, 2));
 
+// V9 BI-65C-S: el resumen del grupo exige el compromiso 005 vigente de quien media. El registro sintético se crea
+// aquí y los servidores de la prueba lo heredan por entorno. Ningún lector tiene autorización individual: como antes,
+// la prueba solo mira agregados. Con un registro presente, la emisión de XP exige además la autorización A1 de cada
+// lector (sin registro, la siembra no la consultaba): se otorga para que la siembra sea la misma de siempre.
+grantC005(['med-a', 'med-b']); grantA1(USERS.filter((u) => u.roles.includes('lector')).map((u) => u.id));
 const ENV = { GAMIFICATION_ENABLED: '1', XP_EARNING_ENABLED: '1', GAMIFICATION_DB: P.gamDb,
     GAMIFICATION_EXCLUSION_REGISTRY: P.reg, GAMIFICATION_MOOK_SINCE: new Date(SINCE).toISOString() };
 Object.assign(process.env, { GAMIFICATION_DB: P.gamDb, GAMIFICATION_EXCLUSION_REGISTRY: P.reg });
