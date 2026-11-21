@@ -39,7 +39,10 @@ RUN npm run build
 # (OpenSSL, libxml2, pcre2, curl, libexpat, musl…). 1.30 es la rama ESTABLE
 # vigente de la misma imagen oficial; nginx.prod.conf no usa directivas que
 # cambien entre ramas (validado con `nginx -t`). Pinneada por digest.
-FROM nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951 AS runner
+# V9 BI-65B-C — digest avanzado a la imagen oficial con nginx 1.30.7-r1 (antes
+# 1.30.6-r1): CVE-2026-113425, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633
+# y CVE-2026-123634 (HIGH), fix 1.30.7-r0 (Trivy de CI en 56ba051).
+FROM nginx:1.30-alpine@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3 AS runner
 
 # SEC-ACCOUNT-01 — piso de versión sobre la base pinneada (mismo patrón que
 # Dockerfile.api, Lote E): CVE-2026-111497 en brotli-libs (fix 1.2.1-r0, repo de
@@ -52,7 +55,9 @@ FROM nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee178
 # main de Alpine 3.24. El digest de nginx:1.30-alpine (amd64) no ha cambiado.
 # SEC-FRONT-LIBXSLT-01 (V8.1-PROD-01B) — mismo patrón: CVE-2026-87636 y CVE-2026-9947 (HIGH) en
 # libxslt 1.1.43-r3 de la base; fix 1.1.43-r4, repo de Alpine 3.24 (Trivy de CI en 25d4b52).
-RUN apk add --no-cache 'brotli-libs>=1.2.1-r0' 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' 'libexpat>=2.10.0-r0' 'libxslt>=1.1.43-r4'
+# V9 BI-65B-C — mismo patrón: CVE-2026-86144 (HIGH) en libxml2 2.13.9-r2 de la
+# base; fix 2.13.9-r3, repo main de Alpine 3.24.
+RUN apk add --no-cache 'brotli-libs>=1.2.1-r0' 'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' 'libexpat>=2.10.0-r0' 'libxslt>=1.1.43-r4' 'libxml2>=2.13.9-r3'
 
 # Remove default nginx content
 RUN rm -rf /usr/share/nginx/html/*
