@@ -25,6 +25,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import { subtractMonthsUtc } from './archiveRotation.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.INSIGHTS_SQLITE_PATH || path.resolve(__dirname, '..', '..', 'data-critical', 'insights.db');
@@ -213,13 +214,79 @@ export function sessionReceiptsOf(userId) {
     return out;
 }
 
+/**
+ * V9 65D-2R — conservación del registro (regla operativa de Dirección, 2026-11-22; sin validación jurídica registrada).
+ *
+ *   constancias de sesión          12 meses desde su ÚLTIMA recepción (`last_received_ts`)
+ *   membresía cerrada              12 meses desde su cierre (`until_ts`)
+ *   membresía abierta              no caduca: se conserva mientras exista la vinculación
+ *   asociación obra–curso          no caduca aquí: solo lleva ids de grupo y de obra, ningún identificador de persona
+ *
+ * El límite es de calendario UTC, como el del archivo de eventos (`subtractMonthsUtc`): una fila caduca cuando `now`
+ * SUPERA su fecha + 12 meses; a los 12 meses exactos todavía existe. La poda es idempotente y de una sola transacción
+ * inmediata (dos réplicas a la vez dejan el mismo resultado; la que no obtiene el turno se omite y lo dice).
+ *
+ * Lo podado NO se reconstruye: `observeContext` solo abre intervalos de asociaciones vigentes, con fecha de hoy. Quien
+ * atribuye lee lo que queda: una sesión sin constancia o un periodo sin intervalo dejan de acreditarse (historial no
+ * verificable), nunca se dan por buenos.
+ *
+ * GATING doble, apagado por defecto: el registro (`AULA_VIVA_CONTEXT_LEDGER_ENABLED=1`) y además
+ * `AULA_VIVA_CONTEXT_LEDGER_RETENTION_ENABLED=1`. La bandera habilita CAPACIDAD: encenderla en producción es una
+ * decisión operativa aparte. `dryRun` cuenta lo que caducaría sin borrar nada.
+ */
+export const LEDGER_RETENTION_MONTHS = 12;
+export const RETENTION_ENABLED = () => ENABLED() && process.env.AULA_VIVA_CONTEXT_LEDGER_RETENTION_ENABLED === '1';
+
+/**
+ * @param {{nowTs?:number, dryRun?:boolean}} [opts]
+ * @returns {{ok:boolean, skipped?:string, dry_run:boolean, cutoff_ts:number|null, receipts_removed:number, member_intervals_removed:number}}
+ */
+export function pruneContextLedger(opts = {}) {
+    const out = { ok: false, dry_run: opts.dryRun === true, cutoff_ts: null, receipts_removed: 0, member_intervals_removed: 0 };
+    if (!ENABLED()) return { ...out, ok: true, skipped: 'ledger_disabled' };
+    if (!out.dry_run && !RETENTION_ENABLED()) return { ...out, ok: true, skipped: 'retention_disabled_default_off' };
+    const nowTs = opts.nowTs ?? Date.now();
+    const cutoff = subtractMonthsUtc(nowTs, LEDGER_RETENTION_MONTHS);
+    out.cutoff_ts = cutoff;
+    try {
+        db();
+        if (out.dry_run) {
+            out.receipts_removed = _db.prepare(`SELECT COUNT(*) AS n FROM reading_session_receipts WHERE last_received_ts < ?`).get(cutoff).n;
+            out.member_intervals_removed = _db.prepare(`SELECT COUNT(*) AS n FROM pedagogical_context_intervals WHERE kind = 'member' AND until_ts IS NOT NULL AND until_ts < ?`).get(cutoff).n;
+            return { ...out, ok: true };
+        }
+        // Lo que borra esta conexión se sobrescribe (no queda en páginas libres), igual que la supresión por titular.
+        _db.pragma('secure_delete = ON');
+        _db.transaction(() => {
+            out.receipts_removed = _db.prepare(`DELETE FROM reading_session_receipts WHERE last_received_ts < ?`).run(cutoff).changes;
+            out.member_intervals_removed = _db.prepare(`DELETE FROM pedagogical_context_intervals WHERE kind = 'member' AND until_ts IS NOT NULL AND until_ts < ?`).run(cutoff).changes;
+            _st.setMeta.run('last_pruned_ts', String(nowTs));
+        }).immediate();
+        return { ...out, ok: true };
+    } catch (e) {
+        return e?.code === 'SQLITE_BUSY' ? { ...out, ok: true, skipped: 'busy', receipts_removed: 0, member_intervals_removed: 0 }
+            : { ...out, error: String(e?.message || e) };
+    }
+}
+/** Entrada del planificador (`scheduler.mjs`), con elección de líder: una sola réplica poda en cada ciclo. */
+export function pruneOnce({ log = () => {} } = {}) {
+    const r = pruneContextLedger();
+    if (!r.skipped && r.ok && (r.receipts_removed || r.member_intervals_removed)) log(`[CONTEXT] conservación: ${r.receipts_removed} constancias y ${r.member_intervals_removed} membresías cerradas caducadas`);
+    return r;
+}
+
 /** Estado agregado (salud y medición): solo recuentos y marcas de tiempo, ningún identificador. */
 export function ledgerStatus() {
     if (!ENABLED()) return { enabled: false };
     try {
         db();
         const num = (k) => { const v = _st.getMeta.get(k)?.value; return v ? Number(v) : null; };
+        // V9 65D-2: también las constancias de sesión (cuántas, cuántas sin sesión o contradictorias, y desde cuándo).
+        const rc = _db.prepare(`SELECT COUNT(*) AS total, IFNULL(SUM(session_id = ''), 0) AS without_session, IFNULL(SUM(conflict), 0) AS conflicts,
+            MIN(first_received_ts) AS oldest_ts, MAX(last_received_ts) AS newest_ts FROM reading_session_receipts`).get();
         return { enabled: true, baseline_ts: num('baseline_ts'), last_observed_ts: num('last_observed_ts'),
-            intervals: _st.counts.all().map((r) => ({ kind: r.kind, origin: r.origin, total: r.n, open: r.open })) };
+            intervals: _st.counts.all().map((r) => ({ kind: r.kind, origin: r.origin, total: r.n, open: r.open })),
+            receipts: { total: rc.total, without_session: rc.without_session, conflicts: rc.conflicts, oldest_ts: rc.oldest_ts ?? null, newest_ts: rc.newest_ts ?? null },
+            retention: { enabled: RETENTION_ENABLED(), months: LEDGER_RETENTION_MONTHS, last_pruned_ts: num('last_pruned_ts') } };
     } catch (e) { return { enabled: true, error: String(e?.message || e) }; }
 }

@@ -297,7 +297,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
-import { buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders } from './analytics/groupAnalyticsSummary.mjs';
+import { buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders, readCohortHistoricalRows, accessibleReaderActivity } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -9448,6 +9448,19 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
         // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: el diagnóstico enumera canales y
         // miembros del grupo; mismo alcance que su nómina.
         if (!(await requireSubjectScope(req, res, 'group', id, { allowSelf: false }))) return;
+        // V9 65D-2: quien accede por mediar el grupo necesita además su C005 vigente (como el resumen del grupo,
+        // 65C-S): el diagnóstico enumera a los miembros. Se decide en cada petición; registro no verificable ⇒ 503.
+        // La administración conserva su acceso y no se exige A2: es información administrativa de la nómina.
+        if (!(await isAdminRequest(req))) {
+            const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+            let viaMediation = true;
+            try { viaMediation = evaluateScopeAccess(viewerId, 'group', id).via === 'mediator_of_group'; } catch { /* sin poder saberlo, se exige */ }
+            if (viaMediation) {
+                let committed;
+                try { committed = decisionGate().effective('C005', viewerId); } catch { return a2Unavailable(res); }
+                if (!committed) return res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: id });
+            }
+        }
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -9574,6 +9587,8 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
             group, users, allGroups: groups,
             leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
             getProgressByUser,
+            // V9 65D-2: la lectura de LU solo existe como telemetría heredada; el resumen la suma (ver luReadingRows).
+            legacyEvents: readJSON(ANALYTICS_DB) || [],
             ...(works ? { includeContent: temporalContentPredicate(contextOf) } : {}),
         }));
         const ms = Math.round(performance.now() - t0);
@@ -11731,7 +11746,8 @@ function applyCourseAttribution(response, attributionSummary) {
         response.studentBreakdown = response.studentBreakdown.map(st => {
             const courseAttribution = byReader[st.userId] ?? { verified_context: 0, unverifiable_history: 0 };
             if (st.readsWithoutTelemetry === true) return { ...st, dataState: 'verified_context', courseAttribution };
-            if (st.hasData === false && courseAttribution.unverifiable_history > 0) {
+            // V9 65D-2: también quien solo tiene lectura accesible (sin progreso) de obras del curso fuera de un periodo acreditado.
+            if (st.hasData === false && (courseAttribution.unverifiable_history > 0 || st.unattributedReading === true)) {
                 unknown.add(st.userId);
                 return { ...st, needsAttention: false, dataState: 'unverifiable_history', courseAttribution };
             }
@@ -12283,8 +12299,11 @@ function buildStudentBreakdownRow(student, users, contentMap) {
         hasData,
         needsAttention,
         ...(readsWithoutTelemetry ? { readsWithoutTelemetry: true } : {}),
+        ...(student.unattributedReading === true ? { unattributedReading: true } : {}),
         // Sesiones y tiempo: telemetría + progreso de las obras sin telemetría (nunca la misma obra por las dos vías).
         progressOnlySessions:    progressOnly?.sessions ?? 0,
+        // V9 65D-2: de ellas, las del Visor Accesible (eventos nativos).
+        accessibleReaderSessions: progressOnly?.accessibleSessions ?? 0,
         totalSessions:           student.behavioral.totalSessions + (progressOnly?.sessions ?? 0),
         composite:               r1(student.readingLevels.composite),
         literal:                 r1(student.readingLevels.literal),
@@ -12352,6 +12371,43 @@ function withProgressOnlyActivity(raw, pDb, courseWorks = null) {
         if (sessions === 0) return st;
         if ((st.behavioral?.totalSessions ?? 0) === 0) gained.add(st.userId);
         return { ...st, progressOnly: { sessions, readingTimeMs } };
+    });
+    if (gained.size > 0) {
+        raw.activeStudentCount = (raw.activeStudentCount ?? 0) + gained.size;
+        if (Array.isArray(raw.needsAttention)) raw.needsAttention = raw.needsAttention.filter(id => !gained.has(id));
+    }
+    return raw;
+}
+
+/**
+ * V9 65D-2 — lectura del Visor Accesible en el tablero y el informe. Ese visor registra su sesión solo por el hook
+ * nativo (events.db): ni telemetría heredada ni progreso, las dos fuentes que estas superficies leen. Sus sesiones y
+ * su tiempo se suman al lector con la misma marca que la lectura registrada solo por el progreso (activo, sin nivel
+ * calculable: no hay bloques ni interacciones). No puede duplicar: ninguna otra fuente contiene esas sesiones.
+ * Ámbito: para quien media, solo filas fechadas dentro del curso (reloj del servidor); sin mediación, obras del curso.
+ */
+function withAccessibleReaderActivity(raw, metricsOptions, courseWorks) {
+    const ids = (raw.studentBreakdown ?? []).map(s => s.userId).filter(id => typeof id === 'string' && id);
+    if (ids.length === 0) return raw;
+    let activity;
+    try {
+        const inCourse = courseWorks && !courseWorks.all && typeof courseWorks.has === 'function' ? (c) => courseWorks.has(c) : () => true;
+        const include = typeof metricsOptions?.includeContent === 'function' ? metricsOptions.includeContent : inCourse;
+        activity = accessibleReaderActivity(readCohortHistoricalRows(ids).byUser, include);
+    } catch (e) {
+        // Sin poder leer los eventos, el tablero queda como estaba: nunca cifras inventadas.
+        log(`[METRICS] lectura del visor accesible no disponible: ${e?.code || e?.message}`, 'WARN');
+        return raw;
+    }
+    if (activity.size === 0 && activity.unattributed.size === 0) return raw;
+    const gained = new Set();
+    raw.studentBreakdown = raw.studentBreakdown.map(st => {
+        const a = activity.get(st.userId);
+        // Lectura accesible de obras del curso que no puede fecharse dentro de él: no se cuenta, pero se anota.
+        if (!a) return activity.unattributed.has(st.userId) ? { ...st, unattributedReading: true } : st;
+        if ((st.behavioral?.totalSessions ?? 0) === 0 && (st.progressOnly?.sessions ?? 0) === 0) gained.add(st.userId);
+        return { ...st, lastAccessAt: Math.max(st.lastAccessAt ?? 0, a.lastTs),
+            progressOnly: { sessions: (st.progressOnly?.sessions ?? 0) + a.sessions, readingTimeMs: (st.progressOnly?.readingTimeMs ?? 0) + a.readingTimeMs, accessibleSessions: a.sessions } };
     });
     if (gained.size > 0) {
         raw.activeStudentCount = (raw.activeStudentCount ?? 0) + gained.size;
@@ -12664,6 +12720,7 @@ const legacyMetricsCourseHandler = async (req, res) => {
         // V9 65D-1: lectura registrada solo por el progreso (mismo ámbito que los perfiles de abajo).
         const progressScope = courseProgressScope(metricsOptions);
         withProgressOnlyActivity(raw, progressScope.pDb, groupsContentScope([courseId]));
+        withAccessibleReaderActivity(raw, metricsOptions, groupsContentScope([courseId]));
         const response = formatCourseResponse(raw, users);
 
         // V9 F5-E4: administración humana ⇒ solo agregados. Ni se calculan perfiles individuales ni se entrega
@@ -13093,6 +13150,7 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
         const group    = groups.find(g => g.id === courseId);
         // V9 65D-1: el informe cuenta la misma lectura que el tablero (también la que solo registró el progreso).
         withProgressOnlyActivity(raw, courseProgressScope(metricsOptions).pDb, groupsContentScope([courseId]));
+        withAccessibleReaderActivity(raw, metricsOptions, groupsContentScope([courseId]));
         const response = formatCourseResponse(raw, users);
 
         // Compute dataWindow from engine's StudentMetrics[] (before formatting strips it)

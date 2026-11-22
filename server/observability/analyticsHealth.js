@@ -160,6 +160,13 @@ export async function analyticsHealthHandler(_req, res) {
                 },
             };
         });
+        // V9 65D-2 — registro de procedencia del contexto pedagógico y constancias de sesión: si está encendido en ESTA
+        // réplica, desde cuándo y cuánto contiene. Solo recuentos y marcas de tiempo. Apagado no abre ninguna base.
+        checks.context_ledger = await safe(async () => {
+            const m = await import('../aulaViva/contextLedger.mjs');
+            const s = m.ledgerStatus();
+            return { ok: !s.error, ...s };
+        });
         checks.archive_db = await safe(async () => {
             const present = fs.existsSync(ARCHIVE_DB);
             let sizeMb = null;

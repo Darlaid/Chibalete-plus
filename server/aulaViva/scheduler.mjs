@@ -52,6 +52,8 @@ const DEFAULTS = {
     trajectory_analyzer:    Number(process.env.TRAJECTORY_INTERVAL_MS             || 21_600_000), // 6h
     institutional_learning: Number(process.env.INSTITUTIONAL_LEARNING_INTERVAL_MS || 21_600_000), // 6h
     predictive_patterns:    Number(process.env.PREDICTIVE_PATTERNS_INTERVAL_MS    || 86_400_000), // 24h
+    // V9 65D-2R — conservación del registro de procedencia (apagada salvo su propia bandera).
+    context_ledger_retention: Number(process.env.CONTEXT_LEDGER_RETENTION_INTERVAL_MS || 86_400_000), // 24h
 };
 
 const MAX_CONSECUTIVE_ERRORS = 5;  // degraded mode trigger
@@ -114,6 +116,7 @@ export async function start(opts = {}) {
     const trajectories = await import('../services/trajectoryAnalyzer.mjs');
     const learnings    = await import('../services/institutionalLearning.mjs');
     const patterns     = await import('../services/predictivePatterns.mjs');
+    const ledger       = await import('./contextLedger.mjs');
 
     const loops = [
         // CHP-V6-INSIGHTS-PRODUCTION-01 / A1 — hasta ahora INSIGHTS_MATERIALIZER_ENABLED
@@ -146,6 +149,10 @@ export async function start(opts = {}) {
           fn: () => learnings.runOnce({ log }) },
         { key: 'predictive_patterns',   lock: 'predictive_patterns',   interval: intervals.predictive_patterns,
           fn: () => patterns.runOnce({ log }) },
+        // V9 65D-2R: caducidad de constancias y membresías cerradas (12 meses). Con su bandera apagada devuelve
+        // `skipped` sin abrir ni tocar ninguna base, como los demás.
+        { key: 'context_ledger_retention', lock: 'context_ledger_retention', interval: intervals.context_ledger_retention,
+          fn: () => ledger.pruneOnce({ log }) },
     ];
 
     for (const l of loops) {

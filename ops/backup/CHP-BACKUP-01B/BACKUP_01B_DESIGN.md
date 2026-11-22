@@ -158,7 +158,7 @@ La Application Key **sí** tiene permiso de borrado (restic lo necesita para sus
 
 **Fallback `VACUUM INTO`** — solo si el principal falla, y exige: **preflight de espacio** (§7) · **lock controlado** · **integridad posterior** · **justificación registrada** en el log.
 
-Cubre `events.db`, `progress.db`, `offline_assignments.db`, `insights.db` (PROJ, marcado reconstruible), `identity.db` (§17; ruta `identity/identity.db`) y `events.archive.db` (§18; opcional hasta activar la rotación).
+Cubre `events.db`, `progress.db`, `offline_assignments.db`, `insights.db` (CANON, **no** reconstruible desde V9 65D-2R: además de las materializaciones contiene el registro de procedencia del contexto pedagógico y las constancias de recepción de sesiones, que ninguna otra fuente conserva; ver `docs/ops/CHP_V9_65D2R_CONTEXT_LEDGER_RETENTION.md`), `identity.db` (§17; ruta `identity/identity.db`) y `events.archive.db` (§18; opcional hasta activar la rotación).
 
 ## 7. Espacio y caché — cálculo dinámico (Corrección 5)
 

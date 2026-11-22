@@ -399,7 +399,8 @@ const UNATTRIBUTED_NOTE = 'lectura de obras del curso que no puede atribuirse al
 /** V9 65D-1 — tiene lectura del curso registrada por el progreso, sin telemetría para calcular su nivel: no es «inactivo». */
 const readsWithoutLevel = (s: StudentRow): boolean => s.readsWithoutTelemetry === true;
 const NO_LEVEL_LABEL = 'Lee · nivel sin calcular';
-const NO_LEVEL_NOTE = 'su lectura la registró el progreso del libro (por ejemplo, en el lector EPUB), que no aporta datos para calcular el nivel lector';
+// V9 65D-2: también es el caso del Modo Accesible, cuya lectura llega por sus propios eventos (sin bloques ni interacciones).
+const NO_LEVEL_NOTE = 'su lectura quedó registrada por un lector que no aporta datos para calcular el nivel lector (por ejemplo, el lector EPUB o el Modo Accesible)';
 
 function studentStatus(s: StudentRow): 'stable' | 'risk' | 'attention' | 'reading' {
     if (readsWithoutLevel(s)) return 'reading';

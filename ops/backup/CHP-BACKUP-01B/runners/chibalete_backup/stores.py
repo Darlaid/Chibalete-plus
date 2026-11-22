@@ -58,7 +58,17 @@ SQLITE_STORES: tuple[SqliteStore, ...] = (
     SqliteStore("data-critical/events.db", "CANON", reconstructible=False),
     SqliteStore("data/progress.db", "CANON", reconstructible=False),
     SqliteStore("data/offline_assignments.db", "CANON", reconstructible=False),
-    SqliteStore("data-critical/insights.db", "PROJ", reconstructible=True),
+    # CHP V9 65D-2R: insights.db ya NO es solo proyeccion. Ademas de las
+    # materializaciones (reconstruibles desde events.db) guarda registros
+    # ORIGINALES que ninguna otra fuente contiene: el registro de procedencia del
+    # contexto pedagogico (`pedagogical_context_intervals`: desde cuando consta
+    # cada membresia y cada asociacion obra-curso) y las constancias de recepcion
+    # de sesiones de lectura (`reading_session_receipts`), ambos de
+    # server/aulaViva/contextLedger.mjs. Si se pierden no se regeneran: la
+    # atribucion de lectura al curso queda como «no verificable». Por eso CANON y
+    # no reconstruible; su restauracion sigue el mismo procedimiento que
+    # events.db (incluida la re-supresion posterior de titulares suprimidos).
+    SqliteStore("data-critical/insights.db", "CANON", reconstructible=False),
     # CHP-IDDB-02B-B-R1: identity.db vive en su propio directorio dedicado
     # (`identity/`), no bajo data-critical. La ruta la fija el contrato de
     # CHP-IDDB-02B-PATH-01 y la declara IDENTITY_DB en el compose.

@@ -77,7 +77,7 @@ function readRowsIn(dbPath, userIds) {
         const events = EFFECTIVE_READING_RAW_EVENTS;
         for (let i = 0; i < userIds.length; i += IN_CHUNK) {
             const chunk = userIds.slice(i, i + IN_CHUNK);
-            const sql = `SELECT id, event_id, event, user_id, content_id, server_ts, elapsed_ms, payload_json
+            const sql = `SELECT id, event_id, event, mode, user_id, content_id, server_ts, elapsed_ms, payload_json
                 FROM events WHERE user_id IN (${chunk.map(() => '?').join(',')})
                 AND event IN (${events.map(() => '?').join(',')})`;
             for (const r of db.prepare(sql).all(...chunk, ...events)) out.push(r);
@@ -112,6 +112,72 @@ export function readCohortHistoricalRows(userIds, opts = {}) {
     }
     for (const list of byUser.values()) list.sort((a, b) => (a.server_ts - b.server_ts) || (a.id - b.id));
     return { byUser, rowsConsidered, sources: { hot: hot.length, archive: archive.length } };
+}
+
+/**
+ * V9 65D-2 — lectura de Lector Único (LU). LU no usa el hook nativo: su sesión (abrir, latido, cerrar) llega solo como
+ * telemetría heredada a /api/analytics/events, marcada por la propia app con `source: 'lu_android'`
+ * (AnalyticsSyncCoordinator.kt), y desde el cutover canónico esos tres hechos ya no se copian a events.db. El resumen
+ * de Aula Viva, que mide el tiempo sobre events.db, no veía ni un minuto de LU.
+ *
+ * Aquí esos eventos se presentan como filas con la forma de events.db para que el tiempo lo calcule la MISMA función
+ * (`computeEffectiveReadingMs`). Solo entran los que llevan la constancia de recepción del servidor (`receivedAt`,
+ * 65A): esa constancia es posterior al cutover, así que ninguno de ellos existe también en events.db (sin doble
+ * conteo, aunque el lector lea la misma obra en la web), y su fecha —la del dispositivo, nunca posterior a la
+ * recepción— es la que el tablero ya usa para atribuir. Los eventos de LU sin constancia quedan fuera.
+ */
+export const LU_ANALYTICS_SOURCE = 'lu_android';
+const LU_EVENT_TO_CANONICAL = Object.freeze({ session_start: 'reading_started', session_heartbeat: 'session_heartbeat', session_end: 'session_ended' });
+const LU_RECEIPT_SKEW_MS = 5 * 60_000;
+
+/** @returns {Map<string, object[]>} filas por lector, en orden de fecha */
+export function luReadingRows(legacyEvents, userIds) {
+    const cohort = new Set(userIds);
+    const byUser = new Map();
+    const seen = new Set();
+    let n = 0;
+    for (const e of Array.isArray(legacyEvents) ? legacyEvents : []) {
+        if (!e || e.source !== LU_ANALYTICS_SOURCE || !cohort.has(e.userId)) continue;
+        const event = LU_EVENT_TO_CANONICAL[e.event];
+        if (!event || typeof e.contentId !== 'string' || !e.contentId) continue;
+        if (!Number.isFinite(e.receivedAt) || !Number.isFinite(e.timestamp) || e.timestamp > e.receivedAt + LU_RECEIPT_SKEW_MS) continue;
+        if (typeof e.eventId === 'string' && e.eventId) {
+            if (seen.has(e.eventId)) continue;
+            seen.add(e.eventId);
+        }
+        const acc = [e.sessionDuration, e.elapsedMs].find(v => typeof v === 'number' && v > 0) ?? 0;
+        let list = byUser.get(e.userId);
+        if (!list) { list = []; byUser.set(e.userId, list); }
+        list.push({ id: n++, event_id: typeof e.eventId === 'string' && e.eventId ? `lu:${e.eventId}` : null, event, mode: 'lu',
+            user_id: e.userId, content_id: e.contentId, server_ts: e.timestamp, elapsed_ms: acc, payload_json: '{}' });
+    }
+    for (const list of byUser.values()) list.sort((a, b) => (a.server_ts - b.server_ts) || (a.id - b.id));
+    return byUser;
+}
+
+/**
+ * V9 65D-2 — actividad del Visor Accesible por lector. Ese visor solo emite por el hook nativo (/api/v1/events): no
+ * envía telemetría heredada ni guarda progreso, así que sus filas (`mode = 'a11y'`) no pueden estar contadas por
+ * ninguna de las otras dos fuentes del tablero. Sesiones = aperturas registradas (o tramos con tiempo, si faltan);
+ * tiempo = `computeEffectiveReadingMs`. `include(obra, fecha, lector)` acota al curso; si además trae
+ * `include.historical`, `unattributed` reúne a quienes tienen filas de obras del curso fuera de un periodo acreditado
+ * (no entran en ninguna cifra: sirven para no presentarlos como «sin actividad»).
+ * @returns {Map<string, {sessions:number, readingTimeMs:number, lastTs:number}> & {unattributed:Set<string>}}
+ */
+export function accessibleReaderActivity(byUser, include = null) {
+    const out = Object.assign(new Map(), { unattributed: new Set() });
+    for (const [userId, rows] of byUser) {
+        const all = rows.filter(r => r.mode === 'a11y' && typeof r.content_id === 'string' && r.content_id);
+        if (typeof include?.historical === 'function' && all.some(r => include.historical(r.content_id, r.server_ts, userId))) out.unattributed.add(userId);
+        const mine = all.filter(r => typeof include !== 'function' || include(r.content_id, r.server_ts, userId));
+        if (mine.length === 0) continue;
+        const t = computeEffectiveReadingMs(mine, nameOf);
+        const opened = mine.filter(r => nameOf(r) === 'reading_started').length;
+        const sessions = Math.max(opened, t.sessions);
+        if (sessions === 0) continue;
+        out.set(userId, { sessions, readingTimeMs: t.ms, lastTs: Math.max(...mine.map(r => r.server_ts)) });
+    }
+    return out;
 }
 
 const windowStats = (msByReader, readerCount) => {
@@ -203,10 +269,12 @@ const aggregateProgress = (per) => ({
  */
 export function buildGroupAnalyticsSummary({
     group, users, allGroups, leoInteractions, getProgressByUser,
-    nowTs = Date.now(), eventsPath, archivePath, includeContent = null,
+    nowTs = Date.now(), eventsPath, archivePath, includeContent = null, legacyEvents = null,
 }) {
     const readerIds = resolveGroupLectorCohort(group, users, allGroups);
     const { byUser, rowsConsidered } = readCohortHistoricalRows(readerIds, { eventsPath, archivePath });
+    // V9 65D-2: lectura de LU (telemetría heredada con constancia de recepción). Se calcula aparte y se suma.
+    const luByUser = luReadingRows(legacyEvents, readerIds);
     const historicalReaders = new Set();
     // V9 F7-C2: `includeContent` (opcional) limita el resumen a la actividad de unas obras: tiempo de lectura,
     // interacciones de Leo y libros de las demás no entran ni en el detalle ni en los agregados.
@@ -222,16 +290,20 @@ export function buildGroupAnalyticsSummary({
         // Lectores con lectura fechada de obras del curso que el predicado no puede acreditar: se anota (no se cuenta
         // en ninguna cifra) para que un tiempo de lectura en cero no se lea como «no leyeron».
         if (typeof includeContent.historical === 'function') {
-            for (const [id, rows] of byUser) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id))) historicalReaders.add(id);
+            for (const src of [byUser, luByUser]) for (const [id, rows] of src) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id))) historicalReaders.add(id);
         }
-        for (const [id, rows] of byUser) byUser.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
+        for (const src of [byUser, luByUser]) for (const [id, rows] of src) src.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
         leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId, it?.timestamp, it?.userId));
         const allProgress = getProgressByUser;
         // V9 65A: si el predicado sabe acreditar la fecha de inicio (constancias de recepción del servidor), decide él.
         const startOf = typeof includeContent.firstSessionTs === 'function' ? includeContent.firstSessionTs : firstSessionTs;
         getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId, startOf(p, id), id));
     }
-    const reading = readingPerReader(byUser, readerIds, nowTs);
+    const luReading = readingPerReader(luByUser, readerIds, nowTs);
+    const reading = readingPerReader(byUser, readerIds, nowTs).map((r, i) => ({
+        allEffectiveMs: r.allEffectiveMs + luReading[i].allEffectiveMs,
+        last28dEffectiveMs: r.last28dEffectiveMs + luReading[i].last28dEffectiveMs,
+    }));
     const leo = leoPerReader(leoInteractions, readerIds);
     const progress = progressPerReader(getProgressByUser, readerIds);
     return {

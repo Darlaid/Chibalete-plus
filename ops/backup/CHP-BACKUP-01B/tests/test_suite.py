@@ -3869,7 +3869,9 @@ def test_ea_required_unchanged():
         assert entry["integrity_result"] == "ok", (lp, entry)
         assert entry["capture_method"] == "sqlite_online_backup_api", (lp, entry)
         assert sha256_file(os.path.join(env.base, lp)) or True  # la fuente sigue legible
-    assert entries["data-critical/insights.db"]["reconstructible"] is True
+    # 65D-2R: insights.db guarda el registro de procedencia y las constancias de sesion (originales).
+    assert entries["data-critical/insights.db"]["reconstructible"] is False
+    assert entries["data-critical/insights.db"]["category"] == "CANON"
     assert entries[ARCHIVE_LOGICAL_PATH]["reconstructible"] is False
 
 

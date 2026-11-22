@@ -250,6 +250,8 @@ export function residualPaths(env = process.env, appRoot = '/app') {
         leoProfile: path.join(data, 'leo_profile_db.json'),
         leoInteractions: path.join(data, 'leo_interactions_db.json'),
         leoEvidence: env.LEO_EVIDENCE_DB || path.join(data, 'leo_evidence_db.json'),
+        // V9 65D-2: telemetría heredada de lectura (una fila por evento, con `userId`). No estaba entre las fuentes.
+        analytics: path.join(data, 'analytics_db.json'),
         audit: env.USER_AUDIT_DB || path.join(data, 'user_audit_log.json'),
         access: env.ACCESS_DB || path.join(data, 'access_db.json'),
         identityDb: env.IDENTITY_DB || null,
@@ -387,6 +389,11 @@ export async function suppressResidualSources(paths, userId, { now = Date.now() 
         if (kept.length !== rows.length) d.entries = kept;
         return { changed: kept.length !== rows.length, ack: { removed: rows.length - kept.length } };
     });
+    ack.analytics = await rewriteJson(paths.analytics, (d) => {
+        const rows = Array.isArray(d) ? d : [];
+        const kept = rows.filter((e) => e?.userId !== userId);
+        return { changed: kept.length !== rows.length, doc: kept, ack: { removed: rows.length - kept.length } };
+    });
     ack.audit = await rewriteJson(paths.audit, (d) => {
         const rows = Array.isArray(d) ? d : [];
         let n = 0;
@@ -461,6 +468,7 @@ export function residualSubjectIds(paths) {
     for (const k of Object.keys(readJsonIfExists(paths.leoProfile)?.profileMap ?? {})) add(k);
     for (const e of readJsonIfExists(paths.leoInteractions) ?? []) add(e?.userId);
     for (const e of readJsonIfExists(paths.leoEvidence)?.entries ?? []) add(e?.userId);
+    if (paths.analytics) for (const e of readJsonIfExists(paths.analytics) ?? []) add(e?.userId);
     for (const e of readJsonIfExists(paths.audit) ?? []) { add(e?.targetUserId); add(e?.actor); }
     for (const r of readJsonIfExists(paths.access) ?? []) if (r?.scope === 'user') add(r.scopeId);
     return ids;
