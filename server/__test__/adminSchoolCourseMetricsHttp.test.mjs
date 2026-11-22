@@ -154,7 +154,7 @@ try {
     ok('informe de curso: conserva `reportMeta` con su ventana de datos', rcA.reportMeta?.entityId === 'g-a' && rcA.reportMeta.entityType === 'course' && 'dataWindow' in rcA.reportMeta);
     const msA = adm[SCHOOL[0]][0].json, rsA = adm[SCHOOL[1]][0].json;
     ok('colegio: contrato de siempre (totales, promedios y una fila por curso)', ['schoolId', 'schoolName', 'summary', 'productMetrics', 'readingLevels', 'icdli', 'distributions', 'courseBreakdown', 'alerts', 'backboneMetrics'].every((k) => k in msA) && msA.summary.studentCount === 4 && rsA.reportMeta?.entityType === 'school', Object.keys(msA).join());
-    ok('colegio: las filas por curso son solo de ESE colegio y solo agregados', msA.courseBreakdown.every((c) => c.courseId === 'g-a' && Object.keys(c).sort().join() === 'avgComposite,avgCritical,avgInferential,avgLiteral,avgReflective,courseId,courseName,studentCount') && !/g-b|Sexto|Beta/.test(JSON.stringify(msA.courseBreakdown)), JSON.stringify(msA.courseBreakdown).slice(0, 200));
+    ok('colegio: las filas por curso son solo de ESE colegio y solo agregados', msA.courseBreakdown.every((c) => c.courseId === 'g-a' && Object.keys(c).sort().join() === 'activeStudentCount,avgComposite,avgCritical,avgInferential,avgLiteral,avgReflective,courseId,courseName,studentCount') && !/g-b|Sexto|Beta/.test(JSON.stringify(msA.courseBreakdown)), JSON.stringify(msA.courseBreakdown).slice(0, 200));
 
     console.log('[3] administrador desactivado');
     const before = await all(FOUR, { cookie: C['adm-off'] });

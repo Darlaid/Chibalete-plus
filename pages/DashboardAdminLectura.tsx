@@ -41,6 +41,10 @@ interface CourseBreakdownItem {
     avgInferential: number;
     avgCritical: number;
     avgReflective: number;
+    // V9 65E-C — el curso no tiene obras asociadas: no hay lectura del curso que medir (no es «en riesgo»).
+    hasWorks?: boolean;
+    // V9 65E-C — lectores del curso con actividad registrada (0 = sin evidencia que interpretar, no «en riesgo»).
+    activeStudentCount?: number;
 }
 
 interface SchoolMetrics {
@@ -56,6 +60,9 @@ interface SchoolMetrics {
         level: string;
     };
     alerts: Alert[];
+    // V9 65E-C — colegio sin ningún lector activo (y, si aplica, sin obras asociadas en ninguno de sus cursos).
+    noActivity?: boolean;
+    noCourseWorks?: boolean;
     courseBreakdown: CourseBreakdownItem[];
 }
 
@@ -166,10 +173,12 @@ function buildNetworkInterpretation(
 // COURSE STATUS
 // ---------------------------------------------------------------------------
 
-type CourseStatus = 'ok' | 'risk' | 'nodata';
+type CourseStatus = 'ok' | 'risk' | 'nodata' | 'noworks' | 'noactivity';
 
 function courseStatus(c: CourseRow): CourseStatus {
     if (c.studentCount === 0) return 'nodata';
+    if (c.hasWorks === false) return 'noworks';
+    if (c.activeStudentCount === 0) return 'noactivity';
     if (c.avgComposite < 30)  return 'risk';
     return 'ok';
 }
@@ -178,6 +187,8 @@ const COURSE_STATUS_CONFIG: Record<CourseStatus, { label: string; dot: string; c
     ok:     { label: 'Normal',    dot: 'bg-emerald-400',                     cls: 'text-emerald-600 dark:text-emerald-400' },
     risk:   { label: 'En riesgo', dot: 'bg-amber-400',                       cls: 'text-amber-600 dark:text-amber-400'   },
     nodata: { label: 'Sin datos', dot: 'bg-gray-300 dark:bg-gray-600',        cls: 'text-gray-400 dark:text-gray-500'     },
+    noworks: { label: 'Sin obras asociadas', dot: 'bg-gray-300 dark:bg-gray-600', cls: 'text-gray-500 dark:text-gray-400'   },
+    noactivity: { label: 'Sin actividad registrada', dot: 'bg-gray-300 dark:bg-gray-600', cls: 'text-gray-500 dark:text-gray-400' },
 };
 
 // ---------------------------------------------------------------------------
@@ -248,9 +259,15 @@ const SchoolCard: React.FC<{
                             {metrics.schoolName}
                         </p>
                         <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                            {metrics.noActivity ? (
+                                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300" data-state={metrics.noCourseWorks ? 'no_course_works' : 'no_activity'}>
+                                    {metrics.noCourseWorks ? 'Sin obras asociadas' : 'Sin actividad registrada'}
+                                </span>
+                            ) : (
                             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${LEVEL_COLORS[summary.level] ?? ''}`}>
                                 {summary.level}
                             </span>
+                            )}
                             {hasAlerts && (
                                 <span className={`flex items-center gap-1 text-xs font-medium ${
                                     highCount > 0
@@ -272,7 +289,7 @@ const SchoolCard: React.FC<{
                         <div className="text-right">
                             <div className="flex items-baseline gap-0.5 justify-end">
                                 <span className="text-2xl font-bold text-gray-900 dark:text-gray-100 tabular-nums leading-none">
-                                    {summary.avgComposite.toFixed(1)}
+                                    {metrics.noActivity ? '—' : summary.avgComposite.toFixed(1)}
                                 </span>
                                 <span className="text-xs text-gray-400 dark:text-gray-500">/100</span>
                             </div>
@@ -391,7 +408,7 @@ const CourseTable: React.FC<{
                                         </div>
                                     </td>
                                     <td className="px-3 py-2.5 text-right font-semibold text-gray-900 dark:text-gray-100 tabular-nums">
-                                        {course.studentCount > 0 ? course.avgComposite : '—'}
+                                        {course.studentCount > 0 && course.hasWorks !== false && course.activeStudentCount !== 0 ? course.avgComposite : '—'}
                                     </td>
                                     {/* Secondary data — reduced weight */}
                                     <td className="px-3 py-2.5 text-right text-xs text-gray-400 dark:text-gray-500 tabular-nums">
@@ -591,12 +608,12 @@ const DashboardAdminLectura: React.FC = () => {
 
     const filteredCourses = useMemo((): CourseRow[] => {
         if (courseFilter === 'top')       return allCourses.slice(0, 5);
-        if (courseFilter === 'attention') return allCourses.filter(c => c.avgComposite < 30);
+        if (courseFilter === 'attention') return allCourses.filter(c => c.avgComposite < 30 && c.hasWorks !== false && c.activeStudentCount !== 0);
         return allCourses;
     }, [allCourses, courseFilter]);
 
     const attentionCount = useMemo(
-        () => allCourses.filter(c => c.avgComposite < 30 && c.studentCount > 0).length,
+        () => allCourses.filter(c => c.avgComposite < 30 && c.studentCount > 0 && c.hasWorks !== false && c.activeStudentCount !== 0).length,
         [allCourses]
     );
 

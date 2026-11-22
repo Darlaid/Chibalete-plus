@@ -32,7 +32,6 @@ const AdminDashboard: React.FC = () => {
             await new Promise(resolve => setTimeout(resolve, 50)); // Sim delay
             setOrders(dataService.getStoreOrders());
             setSchools(dataService.getColegios());
-            setContentInsights(dataService.getContentInsights());
             setAllGroups(dataService.getAllGroups());
             setAllBundles(dataService.getBundles());
             setIsLoading(false);
@@ -40,30 +39,7 @@ const AdminDashboard: React.FC = () => {
         loadData();
     }, []);
 
-    // Effect to update stats when school selection changes
-    useEffect(() => {
-        if (!isLoading) {
-            // If Global, we aggregate (mockly) or pick a representative view
-            // For this version, if 'Global', we might just show the first school or an average, 
-            // but let's assume getSchoolPerformance allows handling 'Global' in a real backend.
-            // Here we'll just sum up if multiple schools exist, or pick the first one for the specific metrics.
-            // To keep it simple and robust for the user:
-            const targetSchool = selectedSchool === 'Global' && schools.length > 0 ? schools[0] : selectedSchool;
-
-            if (targetSchool && targetSchool !== 'Global') {
-                setSchoolStats(dataService.getSchoolPerformance(targetSchool));
-            } else if (schools.length > 0) {
-                // Default to first school if detailed global aggregation isn't built
-                setSchoolStats(dataService.getSchoolPerformance(schools[0]));
-            } else {
-                // Fallback for no data
-                setSchoolStats({
-                    adoptionRate: 0, avgHoursPerStudent: 0, totalStudents: 0,
-                    learningObjectives: { criticalThinking: 0, autonomy: 0, writing: 0, inference: 0, knowledge: 0, engagement: 0 }
-                });
-            }
-        }
-    }, [selectedSchool, schools, isLoading]);
+    // V9 65E-C: ya no se calculan aquí «estadísticas del colegio» (eran estimaciones y valores al azar; ver la pestaña).
 
     const handleStatusUpdate = (orderId: string, newStatus: StoreOrder['status']) => {
         dataService.updateOrderStatus(orderId, newStatus);
@@ -141,169 +117,38 @@ const AdminDashboard: React.FC = () => {
                 </Suspense>
             )}
 
+            {/* V9 65E-C — esta pestaña mostraba cifras sin fuente de datos: puntajes de «objetivos de aprendizaje» generados
+                al azar, un tiempo promedio estimado (libros × 2,5 h), «+12 % vs mes anterior», «4/8 objetivos» y un «45 %» de
+                interés escritos a mano, y en «Vista Global» los datos del primer colegio. Se retiran: no se presenta ningún
+                indicador que el servidor no calcule con actividad registrada. Las cifras reales están en Métricas de lectura. */}
             {activeTab === 'reports' && (
-                <div className="animate-in fade-in space-y-8">
-
-                    {/* CONTEXT SELECTOR */}
-                    <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex items-center gap-4">
-                        <MapPin className="text-gray-400" />
-                        <span className="font-bold text-gray-700 dark:text-gray-200">Contexto:</span>
-                        <select
-                            value={selectedSchool}
-                            onChange={(e) => setSelectedSchool(e.target.value)}
-                            className="bg-gray-50 dark:bg-gray-700 border-none rounded-lg p-2 font-medium focus:ring-2 focus:ring-indigo-500"
-                        >
-                            <option value="Global">Vista Global (Todos los Colegios)</option>
-                            {schools.map(s => <option key={s} value={s}>{s}</option>)}
-                        </select>
+                <div className="animate-in fade-in space-y-6" data-testid="admin-impact-real">
+                    <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+                        <h3 className="font-bold text-lg text-gray-800 dark:text-white flex items-center">
+                            <BookOpen className="mr-2 text-indigo-500" /> Indicadores de lectura
+                        </h3>
+                        <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 max-w-2xl">
+                            Los indicadores de cada colegio y de cada curso (estudiantes activos, sesiones, tiempo y niveles de lectura) se calculan en el servidor con la actividad registrada de las obras asociadas a cada curso.
+                        </p>
+                        <a href="#/admin/metricas" data-testid="admin-impact-open-metrics" className="inline-flex items-center mt-4 px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">
+                            <TrendingUp size={16} className="mr-2" /> Abrir métricas de lectura
+                        </a>
                     </div>
-
-                    {/* TOP STATS CARDS */}
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                        <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 text-white p-6 rounded-xl shadow-lg">
-                            <div className="flex justify-between items-start mb-4">
-                                <div>
-                                    <p className="text-indigo-100 text-xs font-bold uppercase tracking-wider">Tasa de Adopción</p>
-                                    <h3 className="text-4xl font-extrabold mt-1">{schoolStats?.adoptionRate}%</h3>
-                                </div>
-                                <div className="p-2 bg-white/20 rounded-lg"><TrendingUp size={24} /></div>
-                            </div>
-                            <div className="w-full bg-black/20 rounded-full h-1.5 mt-2">
-                                <div className="bg-white h-1.5 rounded-full" style={{ width: `${schoolStats?.adoptionRate}%` }}></div>
-                            </div>
-                            <p className="text-xs text-indigo-100 mt-3 font-medium">Estudiantes activos vs matriculados</p>
-                        </div>
-
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">Tiempo Promedio</p>
-                                    <h3 className="text-3xl font-bold mt-1 text-gray-800 dark:text-white">{schoolStats?.avgHoursPerStudent}h<span className="text-sm font-normal text-gray-400">/sem</span></h3>
-                                </div>
-                                <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><Clock size={24} /></div>
-                            </div>
-                            <p className="text-xs text-green-500 mt-4 font-bold flex items-center">
-                                <TrendingUp size={12} className="mr-1" /> +12% vs mes anterior
-                            </p>
+                            <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">Colegios</p>
+                            <h3 className="text-3xl font-bold mt-1 text-gray-800 dark:text-white">{schools.length}</h3>
+                            <p className="text-xs text-gray-400 mt-4">Con grupos registrados</p>
                         </div>
-
                         <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">Estudiantes</p>
-                                    <h3 className="text-3xl font-bold mt-1 text-gray-800 dark:text-white">{schoolStats?.totalStudents}</h3>
-                                </div>
-                                <div className="p-2 bg-purple-50 text-purple-600 rounded-lg"><Users size={24} /></div>
-                            </div>
-                            <p className="text-xs text-gray-400 mt-4">Total inscritos en plataforma</p>
-                        </div>
-
-                        <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">Objetivos Alcanzados</p>
-                                    <h3 className="text-3xl font-bold mt-1 text-gray-800 dark:text-white">4/8</h3>
-                                </div>
-                                <div className="p-2 bg-amber-50 text-amber-600 rounded-lg"><Award size={24} /></div>
-                            </div>
-                            <p className="text-xs text-gray-400 mt-4">Metas PISA/Saber Pro</p>
+                            <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">Cursos y clubes</p>
+                            <h3 className="text-3xl font-bold mt-1 text-gray-800 dark:text-white">{allGroups.length}</h3>
+                            <p className="text-xs text-gray-400 mt-4">Su estado está en «Estado de Grupos»</p>
                         </div>
                     </div>
-
-                    <div className="grid lg:grid-cols-2 gap-8">
-                        {/* LEFT: PISA/SABER OBJECTIVES */}
-                        <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
-                            <div className="flex items-center justify-between mb-6">
-                                <h3 className="font-bold text-lg text-gray-800 dark:text-white flex items-center">
-                                    <Brain className="mr-2 text-indigo-500" /> Objetivos de Aprendizaje
-                                </h3>
-                                <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full font-bold">PISA / Saber Pro</span>
-                            </div>
-
-                            <div className="space-y-4">
-                                {[
-                                    { label: 'Pensamiento Crítico', val: schoolStats?.learningObjectives.criticalThinking, color: 'bg-blue-500' },
-                                    { label: 'Autonomía Lectora', val: schoolStats?.learningObjectives.autonomy, color: 'bg-purple-500' },
-                                    { label: 'Producción Escrita', val: schoolStats?.learningObjectives.writing, color: 'bg-green-500' },
-                                    { label: 'Inferencia y Análisis', val: schoolStats?.learningObjectives.inference, color: 'bg-amber-500' },
-                                    { label: 'Gestión del Conocimiento', val: schoolStats?.learningObjectives.knowledge, color: 'bg-rose-500' },
-                                    { label: 'Compromiso Socioemocional', val: schoolStats?.learningObjectives.engagement, color: 'bg-indigo-500' },
-                                ].map((item) => (
-                                    <div key={item.label}>
-                                        <div className="flex justify-between text-sm mb-1">
-                                            <span className="font-medium text-gray-600 dark:text-gray-300">{item.label}</span>
-                                            <span className="font-bold text-gray-800 dark:text-white">{item.val}/100</span>
-                                        </div>
-                                        <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-2.5">
-                                            <div className={`h-2.5 rounded-full transition-all duration-1000 ${item.color}`} style={{ width: `${item.val}%` }}></div>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-
-                            <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg flex items-start">
-                                <Search className="text-blue-500 mr-2 flex-shrink-0 mt-1" size={18} />
-                                <p className="text-sm text-blue-800 dark:text-blue-200">
-                                    <strong>Recomendación Pedagógica:</strong> Para mejorar el "Pensamiento Crítico", sugiere a los docentes asignar más <em>Reseñas Argumentativas</em> en los grupos de 9° y 10°.
-                                </p>
-                            </div>
-                        </div>
-
-                        {/* RIGHT: CONTENT INTELLIGENCE */}
-                        <div className="space-y-6">
-                            {/* TOP GENRES */}
-                            <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
-                                <h3 className="font-bold text-lg text-gray-800 dark:text-white mb-6 flex items-center">
-                                    <BookOpen className="mr-2 text-indigo-500" /> Inteligencia de Contenido
-                                </h3>
-
-                                <div className="mb-6">
-                                    <p className="text-sm font-bold text-gray-500 mb-3 uppercase">Lo que más gusta leer</p>
-                                    <div className="flex flex-wrap gap-2">
-                                        {contentInsights?.topGenres.map((g: any, i: number) => (
-                                            <div key={g.name} className={`px-4 py-2 rounded-lg font-bold border-2 ${i === 0 ? 'bg-indigo-50 border-indigo-500 text-indigo-700' :
-                                                i === 1 ? 'bg-indigo-50/50 border-indigo-300 text-indigo-600' :
-                                                    'bg-white dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300'
-                                                }`}>
-                                                {g.name} <span className="opacity-60 ml-1 text-xs">{g.count}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                <div>
-                                    <p className="text-sm font-bold text-gray-500 mb-3 uppercase">Autores de Mayor Enganche</p>
-                                    <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-                                        {contentInsights?.topAuthors.map((a: any, i: number) => (
-                                            <li key={a.name} className="py-2 flex justify-between items-center">
-                                                <div className="flex items-center">
-                                                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold mr-3 ${i < 3 ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'
-                                                        }`}>
-                                                        {i + 1}
-                                                    </span>
-                                                    <span className="font-medium text-gray-700 dark:text-gray-200">{a.name}</span>
-                                                </div>
-                                                <div className="w-24 bg-gray-100 dark:bg-gray-700 rounded-full h-1.5 ml-4">
-                                                    <div className="bg-indigo-500 h-1.5 rounded-full" style={{ width: `${Math.min(100, (a.count / (contentInsights.topAuthors[0]?.count || 1)) * 100)}%` }}></div>
-                                                </div>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            </div>
-
-                            {/* INSIGHT CARD */}
-                            <div className="bg-gradient-to-r from-purple-500 to-indigo-600 p-6 rounded-xl text-white shadow-lg">
-                                <h4 className="font-bold text-lg mb-2 flex items-center"><TrendingUp className="mr-2" /> Oportunidad Editorial</h4>
-                                <p className="text-indigo-100 text-sm mb-4">
-                                    Los datos indican un interés creciente del <strong>45%</strong> por contenidos de <strong>Ciencia Ficción</strong> y <strong>Naturaleza</strong> en los grados inferiores.
-                                </p>
-                                <button className="w-full py-2 bg-white text-indigo-600 font-bold rounded-lg hover:bg-indigo-50 transition-colors">
-                                    Ver Proyectos Sugeridos
-                                </button>
-                            </div>
-                        </div>
-                    </div>
+                    <p role="note" data-testid="admin-impact-no-source" className="text-sm text-gray-600 dark:text-gray-300 max-w-2xl">
+                        Tasa de adopción, tiempo promedio por estudiante, objetivos de aprendizaje y tendencias de contenido: todavía no tienen una fuente de datos del servidor, así que no se muestran. Aquí no se presentan cifras estimadas.
+                    </p>
                 </div>
             )}
 

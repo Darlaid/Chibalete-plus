@@ -93,6 +93,7 @@ interface CourseBreakdownItem {
     avgInferential: number;
     avgCritical: number;
     avgReflective: number;
+    hasWorks?: boolean;   // V9 65E-C: false = curso sin obras asociadas (sus ceros no son falta de lectura)
 }
 
 interface CourseReport {
@@ -775,7 +776,7 @@ const CourseBreakdownTable: React.FC<{ courses: CourseBreakdownItem[] }> = ({ co
                     const level = c.avgComposite >= 75 ? 'Avanzado' : c.avgComposite >= 55 ? 'En desarrollo' : c.avgComposite >= 30 ? 'Básico' : 'Inicial';
                     return (
                         <tr key={c.courseId}>
-                            <td className="py-2 pr-3 font-medium text-gray-700 dark:text-gray-300">{c.courseName}</td>
+                            <td className="py-2 pr-3 font-medium text-gray-700 dark:text-gray-300">{c.courseName}{c.hasWorks === false && <span className="ml-2 text-xs font-normal text-gray-500" data-state="no_course_works">· sin obras asociadas (sus cifras en cero no indican falta de lectura)</span>}</td>
                             <td className="py-2 px-3 text-right">
                                 <span className="font-semibold text-gray-900 dark:text-gray-100 tabular-nums">
                                     {r1(c.avgComposite)}

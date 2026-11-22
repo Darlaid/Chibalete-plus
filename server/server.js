@@ -297,7 +297,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
-import { buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders, readCohortHistoricalRows, accessibleReaderActivity, isProgressOnlySession } from './analytics/groupAnalyticsSummary.mjs';
+import { LU_ANALYTICS_SOURCE, buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders, readCohortHistoricalRows, accessibleReaderActivity, isProgressOnlySession } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -11507,7 +11507,7 @@ app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWri
  * Called fresh on each request — data is always current without a server restart.
  * Returns the raw loaded data so callers can use it for auth checks too.
  */
-function loadAndInitMetrics() {
+function loadAndInitMetrics({ creditedLuOnly = false } = {}) {
     const groups = readJSON(GROUPS_DB) || [];
     // CHP-IDDB-GAP2-01: MÉTRICAS LEGACY = JSON físico SIEMPRE. El universo de
     // usuarios de las métricas existentes no cambia con el cutover de
@@ -11515,7 +11515,13 @@ function loadAndInitMetrics() {
     const users  = readJSONMetricsLegacy(USERS_DB) || [];
     // V9 65E-B: la telemetría y las interacciones de Leo se leen UNA vez por petición y se devuelven, para que quien
     // arma la respuesta (cobertura declarada, lectura no atribuible) use exactamente lo mismo que el motor calculó.
-    const events = readJSON(ANALYTICS_DB) || [], leoInteractions = readJSON(LEO_INTERACTIONS_DB) || [];
+    const allEvents = readJSON(ANALYTICS_DB) || [], leoInteractions = readJSON(LEO_INTERACTIONS_DB) || [];
+    // V9 65E-C (A1): `creditedLuOnly` (tablero, informe y agregados de curso y colegio) deja fuera del cálculo la
+    // telemetría de LU SIN constancia de recepción (anterior a 65A). El resumen de Aula Viva nunca la sumó y quien media
+    // tampoco la recibe; la administración sí la contaba en el tablero, y el mismo curso daba un lector «activo» en una
+    // pantalla y «lectura no atribuible» en la otra. No se acredita en ninguna; se anota (`withUnattributedTelemetry`).
+    // La telemetría web sin constancia no cambia: esa lectura consta además en events.db, que es lo que Aula Viva mide.
+    const events = creditedLuOnly ? allEvents.filter(e => !(e?.source === LU_ANALYTICS_SOURCE && !Number.isFinite(e?.receivedAt))) : allEvents;
     initMetrics({
         events,
         leoMemory:       readJSON(LEO_MEMORY_DB)      || { memoryMap: {} },
@@ -11524,7 +11530,7 @@ function loadAndInitMetrics() {
         groups,
         users,
     });
-    return { groups, users, events, leoInteractions };
+    return { groups, users, events, allEvents, leoInteractions };
 }
 
 // ---------------------------------------------------------------------------
@@ -11827,7 +11833,7 @@ function adminCourseOptions(courseId) {
 }
 /** Desde cuándo es completo lo que conservan las dos memorias rodantes de actividad (65E-B). Solo fechas. */
 function activityDataCoverage(loaded = null) {
-    return { telemetry: rollingCoverage(loaded?.events ?? readJSON(ANALYTICS_DB), e => e?.receivedAt ?? e?.timestamp),
+    return { telemetry: rollingCoverage(loaded?.allEvents ?? readJSON(ANALYTICS_DB), e => e?.receivedAt ?? e?.timestamp),
         leo: rollingCoverage(loaded?.leoInteractions ?? readJSON(LEO_INTERACTIONS_DB), e => e?.timestamp) };
 }
 /**
@@ -11838,12 +11844,17 @@ function activityDataCoverage(loaded = null) {
 const LEGACY_SESSION_EVENTS = new Set(['session_start', 'session_heartbeat', 'session_end']);
 function withUnattributedTelemetry(raw, metricsOptions, events = null) {
     const historical = metricsOptions?.contextOf ? metricsOptions?.includeContent?.historical : null;
-    if (typeof historical !== 'function') return raw;
+    // 65E-C (A1): la administración (sin condición de fecha) anota solo lo que tampoco cuenta: LU sin constancia de
+    // recepción, de obras del curso.
+    const adminWorks = typeof historical === 'function' ? null : (metricsOptions?.adminWorks ?? null);
+    if (typeof historical !== 'function' && !adminWorks) return raw;
     const ids = new Set((raw.studentBreakdown ?? []).map(st => st.userId));
     const marked = new Set();
     for (const e of events ?? readJSON(ANALYTICS_DB) ?? []) {
         if (!e || !ids.has(e.userId) || marked.has(e.userId) || !LEGACY_SESSION_EVENTS.has(e.event) || typeof e.contentId !== 'string') continue;
-        if (historical(e.contentId, Number.isFinite(e.receivedAt) ? e.timestamp : NaN, e.userId)) marked.add(e.userId);
+        const hit = adminWorks ? (e.source === LU_ANALYTICS_SOURCE && !Number.isFinite(e.receivedAt) && adminWorks.has(e.contentId))
+            : historical(e.contentId, Number.isFinite(e.receivedAt) ? e.timestamp : NaN, e.userId);
+        if (hit) marked.add(e.userId);
     }
     if (marked.size > 0) raw.studentBreakdown = raw.studentBreakdown.map(st => (marked.has(st.userId) ? { ...st, unattributedReading: true } : st));
     return raw;
@@ -11865,10 +11876,24 @@ function applyActivityCoverage(response, loaded = null) {
 /** Curso sin obras asociadas visto por la administración: se dice (las cifras en cero no son inactividad). */
 function applyAdminCourseScope(response, metricsOptions) {
     const works = metricsOptions.adminWorks;
-    if (works && !works.all && works.ids.length === 0) {
-        response.courseAttribution = { course_has_works: false };
-        if (Array.isArray(response.alerts)) response.alerts = [];
+    if (!works) return response;
+    const noWorks = !works.all && works.ids.length === 0;
+    // 65E-C (A1): lectores con lectura de obras del curso que no se acredita (LU sin constancia de recepción). No son
+    // «sin actividad»: la fila lo dice y el curso anuncia cuántos son, igual que el resumen de Aula Viva.
+    let unattributed = 0;
+    if (Array.isArray(response.studentBreakdown)) {
+        const unknown = new Set();
+        response.studentBreakdown = response.studentBreakdown.map(st => {
+            if (st.unattributedReading !== true) return st;
+            unattributed += 1;
+            if (st.hasData !== false || st.readsWithoutTelemetry === true) return st;
+            unknown.add(st.userId);
+            return { ...st, needsAttention: false, dataState: 'unverifiable_history' };
+        });
+        if (Array.isArray(response.needsAttention)) response.needsAttention = response.needsAttention.filter(x => !unknown.has(x?.userId));
     }
+    response.courseAttribution = { course_has_works: !noWorks, readers_with_unverifiable_history: unattributed };
+    if (noWorks && Array.isArray(response.alerts)) response.alerts = [];
     return response;
 }
 /**
@@ -12854,6 +12879,7 @@ function safeLoadBackboneMetrics(opts = {}) {
 function schoolWorksScope(schoolName, groups) {
     const users = readJSON(USERS_DB) || [];
     const byUser = new Map();      // estudiante → ámbitos de sus grupos en el colegio
+    const membersOf = new Map();   // grupo → sus miembros (para contar activos por curso)
     const union = new Set(); let all = false;
     for (const g of groups) {
         if (typeof g?.school !== 'string' || g.school.toLowerCase() !== schoolName.toLowerCase()) continue;
@@ -12863,10 +12889,23 @@ function schoolWorksScope(schoolName, groups) {
         const members = new Set([...(Array.isArray(g.studentIds) ? g.studentIds : []), ...(Array.isArray(g.memberIds) ? g.memberIds : []),
             ...getGroupMembers(g, users, { allGroups: groups, useLegacyColegioFallback: false, warnFn: () => {} })]);
         for (const id of members) { if (!byUser.has(id)) byUser.set(id, []); byUser.get(id).push(works); }
+        membersOf.set(g.id, members);
     }
     const forUser = (userId) => { const scopes = byUser.get(userId) || []; return (contentId) => scopes.some(w => w.has(contentId)); };
     const includeContent = Object.assign((contentId, _ts, userId) => (userId ? forUser(userId)(contentId) : false), { strict: true, forUser });
-    return { options: { includeContent }, works: { all, ids: [...union] } };
+    return { options: { includeContent }, works: { all, ids: [...union] }, membersOf };
+}
+/**
+ * V9 65E-C — un colegio sin ningún lector activo no tiene promedios que interpretar: sus alertas (calculadas sobre
+ * nada) no se afirman y la respuesta lo declara (`noActivity`), con el motivo si ninguno de sus cursos tiene obras.
+ */
+function applySchoolEvidence(response) {
+    if ((response.summary?.activeStudentCount ?? 0) > 0) return response;
+    response.alerts = [];
+    response.noActivity = true;
+    const courses = Array.isArray(response.courseBreakdown) ? response.courseBreakdown : [];
+    if (courses.length > 0 && courses.every(c => c.hasWorks === false)) response.noCourseWorks = true;
+    return response;
 }
 /**
  * V9 65E-B — cálculo de un colegio con el mismo criterio de «activo» que el tablero de curso: además de la telemetría
@@ -12883,6 +12922,18 @@ function schoolRawMetrics(schoolName, groups) {
     withAccessibleReaderActivity(view, scope.options, null);
     raw.activeStudentCount = view.activeStudentCount;
     delete raw.students;
+    // 65E-C (A2): un curso sin obras asociadas no tiene lectura del curso que medir: se dice, para que su promedio en
+    // cero no se lea como «curso en riesgo».
+    // Y cuántos de sus lectores tienen actividad (mismo criterio de «activo»): un promedio sobre ningún lector activo es
+    // ausencia de evidencia, no un curso «en riesgo».
+    const activeIds = new Set(view.studentBreakdown.filter(st => (st.behavioral?.totalSessions ?? 0) > 0 || (st.progressOnly?.sessions ?? 0) > 0).map(st => st.userId));
+    if (Array.isArray(raw.courseBreakdown)) raw.courseBreakdown = raw.courseBreakdown.map(c => {
+        const w = groupsContentScope([c.courseId]);
+        const hasWorks = w.all || w.ids.length > 0;
+        // «Activo» = con actividad en obras de sus cursos de este colegio; un curso sin obras no tiene actividad propia.
+        const activeStudentCount = hasWorks ? [...(scope.membersOf.get(c.courseId) ?? [])].filter(id => activeIds.has(id)).length : 0;
+        return { ...c, activeStudentCount, ...(hasWorks ? {} : { hasWorks: false }) };
+    });
     return { raw, scope };
 }
 
@@ -12917,13 +12968,13 @@ const legacyMetricsCourseHandler = async (req, res) => {
         // calculaba DESPUÉS de las esperas de autorización: otra petición atendida en ese hueco (el ICDLI contextual de
         // Leo lo reinicializa sin la memoria ni las interacciones de Leo) dejaba este cálculo con datos ajenos. Ahora
         // la carga y el cálculo van seguidos, sin ninguna espera entre ambos.
-        const loaded   = loadAndInitMetrics();
+        const loaded   = loadAndInitMetrics({ creditedLuOnly: true });
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         // V9 65D-1: lectura registrada solo por el progreso (mismo ámbito que los perfiles de abajo).
         const progressScope = courseProgressScope(metricsOptions);
         withProgressOnlyActivity(raw, progressScope.pDb, groupsContentScope([courseId]));
         withAccessibleReaderActivity(raw, metricsOptions, groupsContentScope([courseId]));
-        withUnattributedTelemetry(raw, metricsOptions, loaded.events);
+        withUnattributedTelemetry(raw, metricsOptions, loaded.allEvents);
         const response = formatCourseResponse(raw, users);
         applyActivityCoverage(response, loaded);   // 65E-B
         applyAdminCourseScope(response, metricsOptions);
@@ -12993,7 +13044,7 @@ app.get('/api/metrics/course/:courseId', mountLegacyMetricsRoute('metrics.course
 const legacyMetricsSchoolHandler = async (req, res) => {
     // V9 F5-E4: máquina o administrador de plataforma con sesión firmada y cuenta activa.
     if (!(await requireSchoolMetricsAdmin(req, res))) return;
-    const loaded         = loadAndInitMetrics();
+    const loaded         = loadAndInitMetrics({ creditedLuOnly: true });
     const { groups }     = loaded;
     const input          = decodeURIComponent(req.params.schoolId);
     const schoolRecord   = resolveSchoolRecord(input, groups);
@@ -13004,7 +13055,7 @@ const legacyMetricsSchoolHandler = async (req, res) => {
 
     try {
         const { raw, scope } = schoolRawMetrics(schoolRecord.schoolName, groups);   // 65E-B
-        const response = formatSchoolResponse(raw, schoolRecord);
+        const response = applySchoolEvidence(formatSchoolResponse(raw, schoolRecord));
         response.dataCoverage = activityDataCoverage(loaded);
 
         // Sprint Data Backbone Fase 3: backboneMetrics agregado para todos
@@ -13353,14 +13404,14 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
     if (!metricsOptions) return;
 
     try {
-        const loaded = loadAndInitMetrics();   // 65E-A: carga y cálculo seguidos (ver legacyMetricsCourseHandler)
+        const loaded = loadAndInitMetrics({ creditedLuOnly: true });   // 65E-A: carga y cálculo seguidos (ver legacyMetricsCourseHandler)
         const { groups } = loaded;
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         const group    = groups.find(g => g.id === courseId);
         // V9 65D-1: el informe cuenta la misma lectura que el tablero (también la que solo registró el progreso).
         withProgressOnlyActivity(raw, courseProgressScope(metricsOptions).pDb, groupsContentScope([courseId]));
         withAccessibleReaderActivity(raw, metricsOptions, groupsContentScope([courseId]));
-        withUnattributedTelemetry(raw, metricsOptions, loaded.events);
+        withUnattributedTelemetry(raw, metricsOptions, loaded.allEvents);
         const response = formatCourseResponse(raw, users);
         applyActivityCoverage(response, loaded);   // 65E-B
         applyAdminCourseScope(response, metricsOptions);
@@ -13397,7 +13448,7 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
 app.get('/api/reports/school/:schoolId', async (req, res) => {
     // V9 F5-E4: máquina o administrador de plataforma con sesión firmada y cuenta activa.
     if (!(await requireSchoolMetricsAdmin(req, res))) return;
-    const loaded       = loadAndInitMetrics();
+    const loaded       = loadAndInitMetrics({ creditedLuOnly: true });
     const { groups }   = loaded;
     const input        = decodeURIComponent(req.params.schoolId);
     const schoolRecord = resolveSchoolRecord(input, groups);
@@ -13408,7 +13459,7 @@ app.get('/api/reports/school/:schoolId', async (req, res) => {
 
     try {
         const { raw }  = schoolRawMetrics(schoolRecord.schoolName, groups);   // 65E-B
-        const response = formatSchoolResponse(raw, schoolRecord);
+        const response = applySchoolEvidence(formatSchoolResponse(raw, schoolRecord));
         response.dataCoverage = activityDataCoverage(loaded);
 
         response.reportMeta = {

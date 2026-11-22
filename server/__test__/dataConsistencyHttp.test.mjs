@@ -61,9 +61,9 @@ const acct = (id, roles, extra = {}) => ({ id, email: `${id}@fixture.invalid`, p
 const reader = (id, org) => acct(id, ['lector'], { ...org });
 // re-epub: solo lector EPUB · re-mix: web + EPUB (misma obra) + LU + accesible · re-b2c: solo lectura personal
 // re-hist: LU anterior a 65A (sin constancia) · re-cap: 25 sesiones EPUB de una obra · re-rev: A2 revocada
-// re-big: más de 20 000 eventos · re-pre1/re-pre2: lectura accesible anterior a constar como miembros · re-pre3: ídem, lectura web
+// re-big: más de 20 000 eventos · re-huge: más de 100 000 (el techo real) · re-pre1/re-pre2: lectura accesible anterior a constar como miembros · re-pre3: ídem, lectura web
 // re-old: una sesión web de hace 60 días (la primera que la memoria rodante descarta) · re-fresh: lee durante la prueba
-const GA = ['re-epub', 're-mix', 're-b2c', 're-hist', 're-cap', 're-rev', 're-big', 're-pre1', 're-pre2', 're-pre3', 're-old', 're-fresh', 're-none'];
+const GA = ['re-epub', 're-mix', 're-b2c', 're-hist', 're-cap', 're-rev', 're-big', 're-huge', 're-pre1', 're-pre2', 're-pre3', 're-old', 're-fresh', 're-none'];
 fs.writeFileSync(P.users, JSON.stringify([acct('adm', ['administrador']), acct('med-a', ['mediador'], { mediatorKind: 'teacher', ...A }),
     acct('med-b', ['mediador'], { mediatorKind: 'teacher', ...B }), ...GA.map((id) => reader(id, A)), reader('rb-1', B), acct('filler', ['lector'])]));
 const GROUPS = [
@@ -276,12 +276,20 @@ try {
     const sch = await both(`/api/metrics/school/${encodeURIComponent('Colegio Alfa')}`, C.adm), schB = await both(`/api/metrics/school/${encodeURIComponent('Colegio Beta')}`, C.adm);
     {
         ok('responden a la administración en las dos réplicas', okAll(am) && okAll(ar) && okAll(as) && okAll(sch) && okAll(schB), st([...am, ...ar, ...as, ...sch, ...schB]));
-        // Activos del curso: re-epub, re-mix, re-cap, re-rev (EPUB), re-pre1, re-pre2 (accesible), re-old y re-hist (telemetría de obras del curso). re-b2c NO.
+        // Activos del curso: re-epub, re-mix, re-cap, re-rev (EPUB), re-pre1, re-pre2 (accesible) y re-old (telemetría de obras
+        // del curso). re-b2c NO (lectura personal). re-hist TAMPOCO (65E-C): su telemetría de LU no tiene constancia de recepción;
+        // no se acredita en el tablero, igual que en Aula Viva, y el curso anuncia que existe.
         TABLA['administración · activos del curso g-a (tablero)'] = am[0].json?.summary?.activeStudentCount;
         TABLA['administración · activos del colegio Alfa'] = sch[0].json?.summary?.activeStudentCount;
-        ok('tablero agregado: 13 en la nómina y 8 activos; quien solo tiene lectura personal no cuenta como activo', am.every((x) => x.json.aggregateOnly === true && x.json.summary.studentCount === 13 && x.json.summary.activeStudentCount === 8), JSON.stringify(am.map((x) => x.json.summary)));
-        ok('informe agregado: los mismos 8 activos', ar.every((x) => x.json.summary.activeStudentCount === 8), JSON.stringify(ar.map((x) => x.json.summary)));
-        ok('agregado del colegio: los mismos 8 activos (también quien lee por EPUB o por el Visor Accesible)', sch.every((x) => x.json.summary.studentCount === 13 && x.json.summary.activeStudentCount === 8), JSON.stringify(sch.map((x) => x.json.summary)));
+        ok('tablero agregado: 14 en la nómina y 7 activos; quien solo tiene lectura personal no cuenta como activo', am.every((x) => x.json.aggregateOnly === true && x.json.summary.studentCount === 14 && x.json.summary.activeStudentCount === 7), JSON.stringify(am.map((x) => x.json.summary)));
+        // A1 — mismo curso, misma población: lo que una pantalla no acredita, la otra tampoco; y las dos lo anuncian.
+        const avActive = as.map((x) => (x.json.readers || []).filter((q) => q.reading.allEffectiveMs > 0 || q.progress.booksStarted > 0).map((q) => q.userId));
+        TABLA['administración · LU sin constancia: activo en tablero / minutos en Aula Viva / anunciados (tablero, Aula Viva)'] = [am[0].json.summary.activeStudentCount, mins(as, 're-hist')[0]?.[0] ?? null, am[0].json.courseAttribution?.readers_with_unverifiable_history ?? null, as[0].json.courseAttribution?.readers_with_unverifiable_history ?? null];
+        ok('A1: la telemetría de LU sin constancia no hace «activo» al lector en el tablero de la administración ni suma minutos en su Aula Viva', as.every((x) => rdr(x.json, 're-hist')?.reading.allEffectiveMs === 0) && avActive.every((ids) => !ids.includes('re-hist')), JSON.stringify(avActive));
+        ok('A1: …y las dos pantallas anuncian al mismo lector como «lectura no atribuible» (1)', am.every((x) => x.json.courseAttribution?.readers_with_unverifiable_history === 1 && x.json.courseAttribution.course_has_works === true) && as.every((x) => x.json.courseAttribution?.readers_with_unverifiable_history === 1 && rdr(x.json, 're-hist')?.historicalActivity === true), JSON.stringify([am[0].json.courseAttribution, as[0].json.courseAttribution]));
+        ok('A1: la telemetría WEB con constancia (re-old) y la lectura por progreso o eventos nativos siguen contando en las dos', as.every((x) => rdr(x.json, 're-epub')?.reading.allEffectiveMs === 20 * MIN) && am.every((x) => x.json.summary.activeStudentCount === 7));
+        ok('informe agregado: los mismos 7 activos', ar.every((x) => x.json.summary.activeStudentCount === 7 && x.json.courseAttribution?.readers_with_unverifiable_history === 1), JSON.stringify(ar.map((x) => x.json.summary)));
+        ok('agregado del colegio: los mismos 7 activos (también quien lee por EPUB o por el Visor Accesible)', sch.every((x) => x.json.summary.studentCount === 14 && x.json.summary.activeStudentCount === 7), JSON.stringify(sch.map((x) => x.json.summary)));
         ok('el colegio Beta cuenta solo a su lector y su lectura', schB.every((x) => x.json.summary.studentCount === 1 && x.json.summary.activeStudentCount === 1), JSON.stringify(schB.map((x) => x.json.summary)));
         const b2c = mins(as, 're-b2c');
         TABLA['administración · Aula Viva re-b2c [min]'] = b2c[0]?.[0] ?? null;
@@ -293,6 +301,14 @@ try {
         const em = await both('/api/metrics/course/g-empty', C.adm), es = await both('/api/groups/g-empty/analytics-summary', C.adm);
         ok('curso sin obras asociadas: la administración recibe la marca (cifras en cero ≠ no leen) y ninguna alerta', em.every((x) => x.status === 200 && x.json.courseAttribution?.course_has_works === false && (x.json.alerts || []).length === 0)
             && es.every((x) => x.status === 200 && x.json.courseAttribution?.course_has_works === false), st([...em, ...es]));
+        const er = await both('/api/reports/course/g-empty', C.adm), ec = await both('/api/aula-viva/cohorts/group/g-empty', C['med-a']), emm = await both('/api/metrics/course/g-empty', C['med-a']);
+        ok('A2: también el informe, y el mediador en tablero y agregado contextual (ningún lector «inactivo» por falta de asociación)', er.every((x) => x.json.courseAttribution?.course_has_works === false) && emm.every((x) => x.status === 200 && x.json.courseAttribution?.course_has_works === false && (x.json.needsAttention || []).length === 0)
+            && ec.every((x) => x.status === 200 && (x.json.suppressed === true || x.json.by_state?.no_course_works >= 1)), st([...er, ...emm, ...ec]).slice(0, 500));
+        const cb = (x, id) => (x.json.courseBreakdown || []).find((c) => c.courseId === id);
+        ok('A2: el agregado del colegio marca el curso sin obras (y no los demás)', sch.every((x) => cb(x, 'g-empty')?.hasWorks === false && cb(x, 'g-a') && !('hasWorks' in cb(x, 'g-a'))), JSON.stringify(sch[0].json.courseBreakdown));
+        ok('A2: cada curso del colegio lleva sus lectores activos (g-a 7, g-empty 0): sin activos no hay promedio que juzgar', sch.every((x) => cb(x, 'g-a')?.activeStudentCount === 7 && cb(x, 'g-empty')?.activeStudentCount === 0), JSON.stringify(sch[0].json.courseBreakdown.map((c) => [c.courseId, c.activeStudentCount])));
+        ok('A2: un colegio CON lectores activos no se marca; el agregado conserva sus alertas', sch.every((x) => x.json.noActivity === undefined) && schB.every((x) => x.json.noActivity === undefined));
+        ok('A2: la lectura personal del miembro de ese curso no se usa para llenarlo', em.every((x) => x.json.summary.activeStudentCount === 0) && es.every((x) => x.json.reading.all.totalEffectiveMs === 0), JSON.stringify(em[0].json.summary));
     }
 
     section('[5] no atribuible ≠ insuficiente ≠ inactivo');
@@ -331,6 +347,27 @@ try {
         const capped = typeof Mat.HISTORY_MAX_ROWS === 'number' ? Mat.readOwnEventHistory('re-big', NOW - 28 * DAY, 5000) : all;
         ok('con el techo alcanzado: se conservan las MÁS RECIENTES y el resultado lo declara', capped.length === 5000 && capped.truncated === true && capped[capped.length - 1].event_id === 'big-new-99' && capped[0].server_ts < capped[4999].server_ts, `${capped.length} ${capped.truncated} ${capped[capped.length - 1]?.event_id}`);
         Mat.closeMaterializerEventsDb();
+        // A3 (65E-C) — el techo REAL por HTTP: un lector con 100 500 filas en la ventana, en tres obras del curso.
+        {
+            const db = new Database(P.events); db.pragma('busy_timeout = 5000');
+            const ins = db.prepare(`INSERT INTO events (event_id, schema_version, event, mode, user_id, content_id, session_id, client_ts, server_ts, elapsed_ms, progress_fraction, payload_json, created_at)
+                VALUES (?, 1, 'text.session_heartbeat', 'text', 're-huge', ?, ?, ?, ?, ?, NULL, '{}', ?)`);
+            db.transaction(() => { const from = NOW - 27 * DAY, span = 26.9 * DAY; for (let i = 0; i < 100_500; i++) { const ts = from + Math.floor((i / 100_500) * span); ins.run(`huge-${i}`, i % 3 === 2 ? 'cs' : 'c1', `huge-s-${Math.floor(i / 60)}`, ts, ts, 30_000 * (i % 60), ts); } })();
+            db.close();
+            const rss = (s) => { try { return Math.round(Number(/VmRSS:\s+(\d+)/.exec(fs.readFileSync(`/proc/${s.child.pid}/status`, 'utf8'))[1]) / 1024); } catch { return null; } };
+            const rss0 = rss(S1), t0 = Date.now();
+            const huge = await both('/api/aula-viva/students/re-huge/timeline', C['med-a']);
+            const ms = Date.now() - t0, rss1 = rss(S1);
+            const t1 = Date.now(); const cohort = await get(S1, '/api/aula-viva/cohorts/group/g-a', C['med-a']); const cohortMs = Date.now() - t1, rss2 = rss(S1);
+            TABLA['re-huge (100 500 filas) · estado / ms por consulta / memoria del proceso antes→después (MB)'] = [huge[0].json?.reason ?? huge[0].json?.data_state, Math.round(ms / 2), `${rss0}→${rss1}`];
+            TABLA['agregado del curso con ese lector · ms / memoria (MB)'] = [cohortMs, rss2];
+            ok('más de 100 000 filas: «insuficiente», motivo propio, sin perfil ni riesgo (no un perfil parcial), en las dos réplicas', huge.every((x) => x.status === 200 && x.json.data_state === 'insufficient' && x.json.reason === 'history_truncated' && x.json.profile_current === null && (x.json.risks || []).length === 0), JSON.stringify(huge.map((x) => [x.status, x.json?.data_state, x.json?.reason])));
+            ok('…con su explicación en la tarjeta de estado', huge.every((x) => (x.json.summaries || []).some((c) => c.id === 'context_history_truncated')), JSON.stringify(huge[0].json?.summaries?.map((c) => c.id)));
+            ok('…el agregado del curso lo cuenta aparte (no como inactivo) y sigue respondiendo', cohort.status === 200 && (cohort.json.metrics || []).find((y) => y.metric_key === 'readers_with_unattributable_activity')?.metric_value === 4, JSON.stringify(cohort.json?.metrics));
+            ok('…sin degradar el servicio: cada consulta en menos de 15 s y el proceso por debajo de 1,5 GB', ms / 2 < 15_000 && cohortMs < 15_000 && (rss2 === null || rss2 < 1500), `${ms} ${cohortMs} ${rss2}`);
+            const h = await get(S1, '/api/health/analytics');
+            ok('…y la salud analítica lo registra (lecturas que alcanzaron el techo > 0)', (h.json?.checks?.materializer?.history_truncations ?? 0) > 0 || (await get(S2, '/api/health/analytics')).json?.checks?.materializer?.history_truncations > 0, JSON.stringify(h.json?.checks?.materializer));
+        }
         const Ctx = await import('../aulaViva/pedagogicalContext.mjs');
         const ctx = Ctx.buildPedagogicalContext({ readerId: 're-big', groups: [{ groupId: 'g-a', works: { all: false, ids: ['c1'] } }], intervals: null });
         const res = Ctx.computeContextualIndicators({ context: ctx, events: capped, nowTs: Date.now() }).result;
@@ -366,7 +403,8 @@ try {
         const [x1, x2] = await both('/api/metrics/course/g-a', C['med-a']);
         const [y1, y2] = await both('/api/groups/g-a/analytics-summary', C['med-a']);
         const proj = (j) => JSON.stringify((j.studentBreakdown || []).map((q) => [q.userId, q.totalSessions, q.totalReadingTimeMs, q.dataState]).sort());
-        const sproj = (j) => JSON.stringify((j.readers || []).map((q) => [q.userId, q.reading.allEffectiveMs, q.historicalActivity === true]).sort());
+        // re-huge queda fuera: sus filas se insertaron después de que la otra réplica calculara su resumen (lo declara su `computedAt`).
+        const sproj = (j) => JSON.stringify((j.readers || []).filter((q) => q.userId !== 're-huge').map((q) => [q.userId, q.reading.allEffectiveMs, q.historicalActivity === true]).sort());
         ok('tras reiniciar una réplica: tablero idéntico en las dos (sesiones, tiempo y estado por lector)', x1.status === 200 && x2.status === 200 && proj(x1.json) === proj(x2.json), `${proj(x1.json)}\n${proj(x2.json)}`);
         ok('…y el mismo detalle por lector en el resumen de Aula Viva', y1.status === 200 && y2.status === 200 && sproj(y1.json) === sproj(y2.json), `${sproj(y1.json)}\n${sproj(y2.json)}`);
         ok('…con la lectura EPUB y la mixta intactas tras el reinicio', rdr(y2.json, 're-epub')?.reading.allEffectiveMs === 20 * MIN && rdr(y2.json, 're-mix')?.reading.allEffectiveMs === 41 * MIN, sproj(y2.json));
@@ -382,7 +420,7 @@ try {
         ok('consistencia con la telemetría heredada: muestrea la del directorio de datos configurado', h.every((x) => (x.json?.checks?.shadow_consistency?.legacyTailSampled ?? 0) > 0), JSON.stringify(h.map((x) => x.json?.checks?.shadow_consistency)));
         const wal = fs.existsSync(`${P.events}-wal`) ? fs.statSync(`${P.events}-wal`).size : 0;
         ok('tamaño del WAL: el de la base configurada', h.every((x) => (wal > 0) === ((x.json?.checks?.wal_size?.events_wal_bytes ?? 0) > 0)), JSON.stringify(h.map((x) => x.json?.checks?.wal_size)) + ` real=${wal}`);
-        ok('el materializador declara su techo de historia y cuántas lecturas lo alcanzaron', h.every((x) => x.json?.checks?.materializer?.history_max_rows === 100_000 && x.json.checks.materializer.history_truncations === 0), JSON.stringify(h.map((x) => x.json?.checks?.materializer)));
+        ok('el materializador declara su techo de historia y cuántas lecturas lo alcanzaron', h.every((x) => x.json?.checks?.materializer?.history_max_rows === 100_000 && Number.isFinite(x.json.checks.materializer.history_truncations)), JSON.stringify(h.map((x) => x.json?.checks?.materializer)));
     }
 
     section('[10] telemetría de LU anterior a 65A (sin constancia de recepción)');
@@ -432,7 +470,7 @@ try {
         const empty = (x) => x.status === 200 && x.json?.summary?.studentCount === 0 && (x.json.studentBreakdown || []).length === 0 && x.json.productMetrics?.totalSessions === 0;
         ok('C005 revocado: ninguna superficie entrega lectores ni cifras de lectura (403/503, o el curso sin ningún lector elegible), en las dos réplicas', denied.every((x) => (x.status === 403 || x.status === 503 || empty(x) || suppressed(x)) && !/re-(epub|mix|cap|big|old|hist)|allEffectiveMs/.test(x.text.replace(/"scope_id":"[^"]*"/, ''))), denied.map((x) => `${x.status}:${x.text.slice(0, 110)}`).join(' | '));
         const admStill = await both('/api/metrics/course/g-a', C.adm);
-        ok('la administración conserva su agregado', admStill.every((x) => x.status === 200 && x.json.summary.studentCount === 13));
+        ok('la administración conserva su agregado', admStill.every((x) => x.status === 200 && x.json.summary.studentCount === 14));
     }
 
     section('[11] memoria rodante de 50 000 eventos');
@@ -452,15 +490,18 @@ try {
         const w = await post(S1, '/api/analytics/events', C.filler, more);
         const after = JSON.parse(fs.readFileSync(P.analytics, 'utf8'));
         ok('la escritura se acepta y el almacén queda en 50 000: se descartaron los 40 más antiguos', w.status === 200 && w.json.received === 50 && after.length === 50_000 && !after.some((e) => e.userId === 're-old'), `${w.status} ${after.length}`);
-        const [d1, d2] = await both('/api/metrics/course/g-a', C.adm);
+        const tw = Date.now(); const w2 = await post(S2, '/api/analytics/events', C.filler, [{ eventId: 'fill-cost', event: 'page_change', userId: 'filler', contentId: 'cp', timestamp: Date.now() - 500 }]); const writeMs = Date.now() - tw;
+        const tr = Date.now(); const [d1, d2] = await both('/api/metrics/course/g-a', C.adm); const readMs = Math.round((Date.now() - tr) / 2);
+        TABLA['almacén lleno (50 000) · ms de una escritura / ms de un tablero / tamaño (MB)'] = [writeMs, readMs, Math.round(fs.statSync(P.analytics).size / 104857.6) / 10];
+        ok('con el almacén lleno, escribir un evento y calcular un tablero siguen siendo rápidos (< 5 s cada uno)', w2.status === 200 && writeMs < 5000 && readMs < 5000, `${writeMs} ${readMs}`);
         const [e1, e2] = await both('/api/groups/g-a/analytics-summary', C.adm);
         const [f1] = await both(`/api/metrics/school/${encodeURIComponent('Colegio Alfa')}`, C.adm);
         TABLA['memoria rodante · activos del curso antes / después de rodar'] = [pre.json?.summary?.activeStudentCount, d1.json?.summary?.activeStudentCount];
         TABLA['memoria rodante · cobertura declarada'] = d1.json?.dataCoverage?.telemetry ?? null;
         // Ruedan 40 eventos: la sesión de re-old, la telemetría de re-hist, la de re-mix (que sigue activo por su progreso),
         // la de re-b2c y la sesión reciente de re-fresh.
-        ok('las cifras bajan (re-old, re-hist y re-fresh ya no constan): 9 activos antes, 6 después', pre.json.summary.activeStudentCount === 9 && d1.json.summary.activeStudentCount === 6 && d2.json.summary.activeStudentCount === 6, `${pre.json.summary.activeStudentCount} → ${d1.json.summary.activeStudentCount}/${d2.json.summary.activeStudentCount}`);
-        const first = after[0].receivedAt ?? after[0].timestamp;
+        ok('las cifras bajan (re-old y re-fresh ya no constan): 8 activos antes, 6 después', pre.json.summary.activeStudentCount === 8 && d1.json.summary.activeStudentCount === 6 && d2.json.summary.activeStudentCount === 6, `${pre.json.summary.activeStudentCount} → ${d1.json.summary.activeStudentCount}/${d2.json.summary.activeStudentCount}`);
+        const kept = JSON.parse(fs.readFileSync(P.analytics, 'utf8')); const first = kept[0].receivedAt ?? kept[0].timestamp;   // tras la última escritura
         ok('…y la respuesta lo DECLARA: memoria rodante, completa solo desde la llegada del evento más antiguo conservado (tablero, las dos réplicas)', [d1, d2].every((x) => x.json.dataCoverage?.telemetry?.rolling === true && x.json.dataCoverage.telemetry.from === first), JSON.stringify([d1.json.dataCoverage, d2.json.dataCoverage, first]));
         ok('…también el informe, el resumen de Aula Viva y el agregado del colegio', [e1, e2, f1].every((x) => x.json.dataCoverage?.telemetry?.rolling === true) && (await get(S1, '/api/reports/course/g-a', C.adm)).json.dataCoverage?.telemetry?.rolling === true, JSON.stringify([e1.json.dataCoverage, f1.json.dataCoverage]));
         ok('el registro de interacciones de Leo (sin llenar) no declara recorte', d1.json.dataCoverage.leo.rolling === false);

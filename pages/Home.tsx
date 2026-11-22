@@ -425,11 +425,11 @@ const Home: React.FC = () => {
                 <div className="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
                     <div className="flex justify-between items-center mb-4">
                         <div className="flex items-center gap-2">
-                            <button onClick={() => changeDateRange('prev')} className="p-3 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full touch-manipulation"><ChevronLeft size={24} /></button>
+                            <button onClick={() => changeDateRange('prev')} aria-label="Periodo anterior" className="p-3 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full touch-manipulation"><ChevronLeft size={24} /></button>
                             <span className="font-bold text-lg capitalize px-2">
                                 {currentDate.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })}
                             </span>
-                            <button onClick={() => changeDateRange('next')} className="p-3 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full touch-manipulation"><ChevronRight size={24} /></button>
+                            <button onClick={() => changeDateRange('next')} aria-label="Periodo siguiente" className="p-3 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full touch-manipulation"><ChevronRight size={24} /></button>
                         </div>
                         <div className="flex bg-gray-100 dark:bg-gray-700 rounded-lg p-1 text-xs font-bold">
                             <button

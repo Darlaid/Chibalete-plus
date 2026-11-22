@@ -53,6 +53,8 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
     const unattributed = attribution?.readers_with_unverifiable_history ?? 0;
     // V9 65E-B — desde cuándo es completa la actividad contada, y cuántos lectores tienen un total que es un mínimo.
     const coverage = describeActivityCoverage((s as { dataCoverage?: ActivityDataCoverage } | null)?.dataCoverage);
+    const rawComputedAt = (s as { computedAt?: number | null } | null)?.computedAt;
+    const computedAt = typeof rawComputedAt === 'number' && Number.isFinite(rawComputedAt) ? rawComputedAt : null;
     const capped = s ? s.readers.filter(r => (r as { sessionHistoryCapped?: boolean }).sessionHistoryCapped === true).length : 0;
     return (
         <>
@@ -87,6 +89,13 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
                 {s && hasNoServerSource(s.pisa) ? <EmptyValue text={EMPTY_TEXT.pisa} /> : <EmptyValue text="—" />}
             </Kpi>
         </div>
+        {/* V9 65E-C — el resumen se conserva hasta 5 minutos: se dice cuándo se calculó, para que una lectura recién
+            hecha que todavía no aparece aquí (y sí en el tablero del curso) no se lea como una contradicción. */}
+        {computedAt !== null && (
+            <p role="note" data-testid="group-computed-at" className="-mt-5 mb-8 text-xs text-gray-500 dark:text-gray-400">
+                Cifras calculadas a las {new Date(computedAt).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}. Se actualizan como máximo cada 5 minutos; la lectura más reciente puede tardar ese tiempo en aparecer aquí.
+            </p>
+        )}
         </>
     );
 };
