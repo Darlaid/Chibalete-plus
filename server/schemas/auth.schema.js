@@ -11,18 +11,22 @@
  */
 import { z } from 'zod';
 
+// zod 4: `required_error` ya no existe. Mismo efecto: el texto propio solo cuando el campo falta;
+// con otro tipo, el mensaje por defecto de zod.
+const required = (message) => (issue) => (issue.input === undefined ? message : undefined);
+
 export const loginSchema = z.object({
-    email: z.string({ required_error: 'email requerido' })
+    email: z.string({ error: required('email requerido') })
         .trim()
         .min(3, 'email demasiado corto')
         .max(254, 'email demasiado largo'),
-    password: z.string({ required_error: 'password requerido' })
+    password: z.string({ error: required('password requerido') })
         .min(1, 'password requerido')
         .max(512, 'password demasiado largo'),
 }).strip();   // descarta campos extra (anti param-pollution) sin fallar
 
 export const resetRequestSchema = z.object({
-    email: z.string({ required_error: 'email requerido' })
+    email: z.string({ error: required('email requerido') })
         .trim()
         .min(3)
         .max(254),
@@ -31,8 +35,8 @@ export const resetRequestSchema = z.object({
 // Confirmación de reset: acá SÍ corresponde un piso de longitud de password
 // (es donde se setea la nueva). Mantener laxo en caracteres permitidos.
 export const resetConfirmSchema = z.object({
-    token: z.string({ required_error: 'token requerido' }).min(10).max(512),
-    password: z.string({ required_error: 'password requerido' })
+    token: z.string({ error: required('token requerido') }).min(10).max(512),
+    password: z.string({ error: required('password requerido') })
         .min(8, 'mínimo 8 caracteres')
         .max(512),
 }).strip();

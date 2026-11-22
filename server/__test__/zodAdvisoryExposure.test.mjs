@@ -1,13 +1,12 @@
 /**
- * zodAdvisoryExposure.test.mjs — SEC-DEPS-02 / ZOD-01.
+ * zodAdvisoryExposure.test.mjs — SEC-DEPS-02 / ZOD-01, cerrado en V9 65-SEC.
  *
- * Fija las condiciones que justifican la excepción temporal de OSV para
- * GHSA-mrhx-c7xc-m3w5 (zod: un array inválido genera un issue por elemento).
- * En zod 3 `.max()` NO corta la validación: registra too_big y aun así recorre
- * cada elemento. La mitigación es que ninguna entrada externa llegue a un
- * array de zod y que todo cuerpo JSON quede en 100 kB tras descomprimir.
- * Si este test falla, la excepción de osv-scanner.toml deja de estar
- * justificada: revisar antes de tocar el test.
+ * GHSA-mrhx-c7xc-m3w5 / CVE-2023-54404 (zod: un array inválido generaba un issue por elemento y `.max()` no cortaba)
+ * está CORREGIDO con zod >= 4.6.6: una colección con tope deja de recorrerse al superarlo. Ya no hay excepción en
+ * osv-scanner.toml ni en .trivyignore, y este test impide que vuelva sin decisión expresa:
+ *   - zod no baja de la versión corregida y las colecciones siguen teniendo tope (sin tope, el parche no aplica);
+ *   - se conservan las defensas que justificaron la excepción (inventario de módulos, emisores, 100 kB por cuerpo);
+ *   - los esquemas de entrada conservan su comportamiento tras la migración a zod 4.
  *
  *   node server/__test__/zodAdvisoryExposure.test.mjs
  */
@@ -112,19 +111,47 @@ for (const [n, s] of [['login', loginSchema], ['resetRequest', resetRequestSchem
     }
 }
 
-console.log('\n[6] excepción OSV acotada');
-const osv = read('osv-scanner.toml');
-const entry = osv.split('[[IgnoredVulns]]').find((b) => /id\s*=\s*"GHSA-mrhx-c7xc-m3w5"/.test(b)) || '';
-const until = (entry.match(/ignoreUntil\s*=\s*(\d{4}-\d{2}-\d{2})/) || [])[1];
-ok('osv-scanner.toml ignora GHSA-mrhx-c7xc-m3w5 con fecha', !!until, entry.slice(0, 80));
-ok('la excepción caduca a más tardar el 2026-11-23 (no se renueva sola)', !!until && until <= '2026-11-23', until);
-ok('la excepción es solo para ese id (sin alias ni comodines)', (osv.match(/mrhx/g) || []).length >= 1 && !/id\s*=\s*"CVE-2023-54404"/.test(osv));
-const lockZod = JSON.parse(read('package-lock.json')).packages['node_modules/zod']?.version;
-ok('zod sigue en 3.25.76 (otra versión exige reevaluar)', lockZod === '3.25.76', lockZod);
+console.log('\n[6] corrección aplicada: zod >= 4.6.6 y sin excepciones');
+const lockPackages = JSON.parse(read('package-lock.json')).packages;
+const lockZod = lockPackages['node_modules/zod']?.version;
+const [zMaj, zMin, zPat] = String(lockZod).split('.').map((n) => parseInt(n, 10));
+ok('zod instalado >= 4.6.6 (primera versión corregida)', zMaj > 4 || (zMaj === 4 && (zMin > 6 || (zMin === 6 && zPat >= 6))), lockZod);
+ok('el lock no trae otra copia de zod', Object.keys(lockPackages).filter((k) => /(^|\/)node_modules\/zod$/.test(k)).length === 1);
+const osv = read('osv-scanner.toml'), trivy = read('.trivyignore');
+ok('osv-scanner.toml ya no ignora el aviso de zod', !/mrhx|CVE-2023-54404/.test(osv));
+ok('.trivyignore ya no ignora el aviso de zod', !/mrhx|CVE-2023-54404/.test(trivy));
+ok('osv-scanner.toml ya no ignora el aviso retirado de picomatch', !/fc5q|CVE-2026-112366|picomatch/i.test(osv));
+const probe = (n) => { const t0 = process.hrtime.bigint(); const r = z.object({ keys: z.array(z.string().max(40)).max(50) }).strip().safeParse({ keys: Array(n).fill(0) });
+    return { issues: r.success ? 0 : r.error.issues.length, ms: Number(process.hrtime.bigint() - t0) / 1e6 }; };
+const big = probe(51000);
+ok('z.array(...).max(50) con 51 000 elementos inválidos: corta en el tope (≤ 2 issues, < 50 ms)', big.issues >= 1 && big.issues <= 2 && big.ms < 50, JSON.stringify(big));
+ok('dentro del tope se siguen validando los elementos', probe(3).issues === 3);
 
-// Informativo: si una versión futura corta en .max(), la excepción puede retirarse.
-const probe = z.object({ keys: z.array(z.string().max(40)).max(50) }).strip().safeParse({ keys: Array(51000).fill(0) });
-console.log(`  · zod ${lockZod}: z.array().max(50) con 51k elementos inválidos → ${probe.success ? 0 : probe.error.issues.length} issues (si fuera 1, .max() ya corta)`);
+console.log('\n[7] los esquemas de entrada conservan su comportamiento con zod 4');
+const msgs = (r) => (r.success ? [] : r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+ok('login: campo ausente → su mensaje propio', same(msgs(loginSchema.safeParse({})), ['email: email requerido', 'password: password requerido']), JSON.stringify(msgs(loginSchema.safeParse({}))));
+ok('login: recorta el email y descarta campos extra', same(loginSchema.safeParse({ email: '  a@b.c  ', password: ' p ', rol: 'administrador' }).data, { email: 'a@b.c', password: ' p ' }));
+ok('login: email corto y password vacío → mensajes propios', same(msgs(loginSchema.safeParse({ email: 'ab', password: '' })), ['email: email demasiado corto', 'password: password requerido']));
+ok('login: no exige formato de email ni complejidad (cuentas heredadas)', loginSchema.safeParse({ email: 'usuario_heredado', password: 'x' }).success);
+ok('login: tipo erróneo o cuerpo no objeto se rechaza', !loginSchema.safeParse({ email: 12345, password: ['a'] }).success && !loginSchema.safeParse(null).success && !loginSchema.safeParse('x').success);
+ok('reset-confirm: token ausente y password de 7 → sus mensajes', same(msgs(resetConfirmSchema.safeParse({ password: '1234567' })), ['token: token requerido', 'password: mínimo 8 caracteres']));
+ok('reset-confirm: token de 10 y password de 8 → válido', resetConfirmSchema.safeParse({ token: 't'.repeat(10), password: '12345678' }).success);
+ok('reset-request: email de 255 se rechaza y de 254 se acepta', !resetRequestSchema.safeParse({ email: 'x'.repeat(255) }).success && resetRequestSchema.safeParse({ email: 'x'.repeat(254) }).success);
+ok('offline: contentId ausente → su mensaje; solo espacios → vacío', same(msgs(assignBookSchema.safeParse({})), ['contentId: contentId requerido']) && same(msgs(assignBookSchema.safeParse({ contentId: '   ' })), ['contentId: contentId vacío']));
+const reg4 = await import('../analytics/eventRegistry.js');
+ok('registry: evento válido se acepta y descarta campos extra', same(reg4.validateEvent('session_heartbeat', { sessionId: 's', elapsedMs: 5, x: 1 }).payload, { sessionId: 's', elapsedMs: 5 }));
+const badEv = reg4.validateEvent('session_heartbeat', { sessionId: '', elapsedMs: -1 });
+ok('registry: evento inválido → invalid_payload con ruta y mensaje por campo', badEv.ok === false && badEv.code === 'invalid_payload' && same(badEv.issues.map((i) => i.path), ['sessionId', 'elapsedMs']) && badEv.issues.every((i) => typeof i.message === 'string' && i.message));
+ok('registry: marca de tiempo como número o como texto, nunca decimal', reg4.validateEvent('session_started', { sessionId: 's', source: 'lu', startedAt: 1790000000000 }).ok
+    && reg4.validateEvent('session_started', { sessionId: 's', source: 'lu', startedAt: '2026-11-22T00:00:00Z' }).ok && !reg4.validateEvent('session_started', { sessionId: 's', source: 'lu', startedAt: 1.5 }).ok);
+for (const name of ARRAY_EVENTS) {
+    const line = reg.split('\n').find((l) => l.trimStart().startsWith(`${name}:`)) || '';
+    const field = (line.match(/(\w+):\s*z\.array\(/) || [])[1];
+    const r = reg4.validateEvent(name, { [field]: Array(51000).fill(0) });
+    const t0 = process.hrtime.bigint(); reg4.validateEvent(name, { [field]: Array(51000).fill(0) }); const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    ok(`registry · ${name}.${field}: 51 000 elementos inválidos no multiplican los issues (< 50 ms)`, !!field && r.ok === false && r.issues.length <= 10 && ms < 50, `field=${field} issues=${r.issues?.length} ms=${ms.toFixed(1)}`);
+}
 
 console.log(`\nzodAdvisoryExposure — ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);

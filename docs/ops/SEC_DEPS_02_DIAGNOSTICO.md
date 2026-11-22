@@ -588,3 +588,36 @@ La clave web de Firebase de Studio Editor BI **no forma parte de este gate**: pe
   - el disco: cualquier despliegue de F3-A3 debe medir el espacio libre en su preflight;
   - la caducidad de zod del 2026-11-23: si F3-A3 añade esquemas zod con colecciones o rutas públicas nuevas con zod, hay que revisar la excepción en esa misma unidad.
 - **F3-A3 no se inicia aquí.** Necesita su propia instrucción, según el Plan General V1.1, que este cierre no modifica.
+
+## 13. V9 65-SEC — cierre de las excepciones de zod y picomatch (2026-11-22)
+
+Línea base `8856a35`. Las dos excepciones se retiran; ninguna se renueva.
+
+### 13.1 Zod — `GHSA-mrhx-c7xc-m3w5` / `CVE-2023-54404`: corregido
+
+- **Estado del aviso** (OSV, consultado el 2026-11-22): sin cambios desde el 2026-10-23; afecta a `< 4.6.6`; sigue sin existir una 3.x corregida (la última es 3.25.76).
+- **Corrección:** `zod` pasa de 3.25.76 a **4.6.7** (publicada el 2026-10-12; OSV no lista avisos para esa versión). En `package-lock.json` cambia solo esa entrada. `openai` la admite (`zod: ^3.25 || ^4.0`, opcional).
+- **Código:** los cuatro módulos que usan zod emplean solo objetos, cadenas, números, enumeraciones, uniones y arrays con tope, todo disponible en la API v4. El único cambio necesario es la opción `required_error`, retirada en v4: `auth.schema.js` y `offline.schema.js` la sustituyen por `error`, con el mismo efecto (texto propio solo cuando el campo falta). `eventRegistry.js`, `rum.js` y `middleware/validate.js` no cambian.
+- **El defecto queda corregido de verdad:** `z.array(z.string().max(40)).max(50)` con 51 000 elementos inválidos daba 51 001 issues y ~85 ms con zod 3; con 4.6.7 da 1 issue en menos de 1 ms. Los cuatro arrays del registro conservan su `.max()` (sin tope el parche no aplica) y la prueba lo exige.
+- **Comparación de comportamiento** (código de `8856a35` cargado con `zod/v3` frente al árbol nuevo, 10 787 entradas sobre los 4 esquemas HTTP, el de RUM y los 80 eventos del registro mediante `validateEvent`):
+  - mismo veredicto y mismos datos saneados en todos los casos salvo 126;
+  - los 126 son números que v4 rechaza y v3 aceptaba: 125 enteros fuera del rango seguro (`|n| > 2^53 − 1`) y un `Infinity`. Ninguno es un valor legítimo (milisegundos, índices y porcentajes) e `Infinity` no puede llegar por JSON;
+  - cambia el texto por defecto de los rechazos sin mensaje propio (p. ej. «Expected string, received array» pasa a «Invalid input: expected string, received array») y, ante un tipo erróneo, v4 puede añadir un segundo issue del mismo campo. Los mensajes propios (`email requerido`, `mínimo 8 caracteres`…) son idénticos. Ningún cliente ni prueba lee esos textos: el front, LU y la tienda solo usan el código 400.
+- **Excepciones retiradas:** la entrada de `osv-scanner.toml` y `CVE-2023-54404` de `.trivyignore`.
+- **Controles que se conservan** (defensa en profundidad, `server/__test__/zodAdvisoryExposure.test.mjs`, 53 comprobaciones, paso bloqueante de `identity-preflight`): inventario de los 4 módulos, colecciones solo en el registro y con tope, emisores, 100 kB por cuerpo tras descomprimir, versión `>= 4.6.6`, ausencia de excepciones y comportamiento de los esquemas.
+
+### 13.2 Picomatch — `GHSA-fc5q-39xc-vjpf` / `CVE-2026-112366`: aviso retirado
+
+- **Estado del aviso:** GitHub lo **retiró el 2026-11-18** («This advisory has been withdrawn because it is not a security issue»); OSV lo marca `withdrawn` y ya no lo informa.
+- **Dependencia:** sin cambios. `picomatch` 4.0.4, solo de desarrollo (vite 6.4.5, tinyglobby, fdir); ausente de la imagen de la API (`npm ci --omit=dev`) y de la del frontend (nginx con `dist/`). No hay nada que actualizar: no existe versión «corregida» porque no hay defecto reconocido.
+- **Excepción retirada** de `osv-scanner.toml`. No hubo entrada en `.trivyignore`.
+
+### 13.3 Verificación
+
+- **OSV-Scanner v2.0.0** (la versión de la CI) sobre el lock nuevo: sin hallazgos **con** `osv-scanner.toml` y también **sin ninguna configuración**. Sobre el lock de `8856a35` sin configuración, el único hallazgo era zod 3.25.76 (picomatch ya no aparecía).
+- **Trivy 0.70.0** (`fs`, vulnerabilidades HIGH y CRITICAL) sobre el lock nuevo: 0, con y sin `.trivyignore`.
+- La cobertura de los escáneres no se reduce: se eliminan dos supresiones y no se añade ninguna.
+
+### 13.4 Observación fuera de alcance
+
+Las cinco entradas que quedan en `osv-scanner.toml` tienen `ignoreUntil` vencido (2026-08-31, 2026-09-30 y 2026-10-21) y OSV no informa nada sin ellas: hoy no suprimen ningún hallazgo. No se tocan en esta unidad (alcance: zod y picomatch); su limpieza y la revisión de las fechas documentales de `.trivyignore` quedan como pendiente.
