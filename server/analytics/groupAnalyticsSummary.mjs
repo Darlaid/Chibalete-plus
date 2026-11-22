@@ -133,14 +133,20 @@ const LU_RECEIPT_SKEW_MS = 5 * 60_000;
 /** @returns {Map<string, object[]>} filas por lector, en orden de fecha */
 export function luReadingRows(legacyEvents, userIds) {
     const cohort = new Set(userIds);
-    const byUser = new Map();
+    // V9 65E-B: `uncertified` = obras con lectura de LU SIN constancia de recepción (anterior a 65A), por lector. No se
+    // cuenta ni se acredita después; sirve para que ese lector no se presente como «sin lectura».
+    const byUser = Object.assign(new Map(), { uncertified: new Map() });
     const seen = new Set();
     let n = 0;
     for (const e of Array.isArray(legacyEvents) ? legacyEvents : []) {
         if (!e || e.source !== LU_ANALYTICS_SOURCE || !cohort.has(e.userId)) continue;
         const event = LU_EVENT_TO_CANONICAL[e.event];
         if (!event || typeof e.contentId !== 'string' || !e.contentId) continue;
-        if (!Number.isFinite(e.receivedAt) || !Number.isFinite(e.timestamp) || e.timestamp > e.receivedAt + LU_RECEIPT_SKEW_MS) continue;
+        if (!Number.isFinite(e.receivedAt) || !Number.isFinite(e.timestamp) || e.timestamp > e.receivedAt + LU_RECEIPT_SKEW_MS) {
+            if (!byUser.uncertified.has(e.userId)) byUser.uncertified.set(e.userId, new Set());
+            byUser.uncertified.get(e.userId).add(e.contentId);
+            continue;
+        }
         if (typeof e.eventId === 'string' && e.eventId) {
             if (seen.has(e.eventId)) continue;
             seen.add(e.eventId);
@@ -168,7 +174,10 @@ export function accessibleReaderActivity(byUser, include = null) {
     const out = Object.assign(new Map(), { unattributed: new Set() });
     for (const [userId, rows] of byUser) {
         const all = rows.filter(r => r.mode === 'a11y' && typeof r.content_id === 'string' && r.content_id);
-        if (typeof include?.historical === 'function' && all.some(r => include.historical(r.content_id, r.server_ts, userId))) out.unattributed.add(userId);
+        // V9 65E-B: la marca mira la lectura de CUALQUIER visor (no solo el accesible). El resumen de Aula Viva ya decía
+        // «no atribuible» de quien tiene lectura web de obras del curso fuera de un periodo acreditado; el tablero, que
+        // solo miraba aquí las filas del Visor Accesible, lo presentaba como «sin actividad».
+        if (typeof include?.historical === 'function' && rows.some(r => typeof r.content_id === 'string' && r.content_id && include.historical(r.content_id, r.server_ts, userId))) out.unattributed.add(userId);
         const mine = all.filter(r => typeof include !== 'function' || include(r.content_id, r.server_ts, userId));
         if (mine.length === 0) continue;
         const t = computeEffectiveReadingMs(mine, nameOf);
@@ -178,6 +187,53 @@ export function accessibleReaderActivity(byUser, include = null) {
         out.set(userId, { sessions, readingTimeMs: t.ms, lastTs: Math.max(...mine.map(r => r.server_ts)) });
     }
     return out;
+}
+
+/**
+ * V9 65E-B — lectura que SOLO registra el progreso. El lector EPUB no emite eventos nativos ni telemetría heredada:
+ * guarda su progreso con la sesión (`mode: 'epub'`, inicio y duración). Ninguna otra fuente contiene esas sesiones, así
+ * que sumarlas no puede duplicar la lectura web, la de LU ni la del Visor Accesible de la misma obra. Las sesiones del
+ * progreso de los demás modos NO entran aquí: su tiempo ya está en events.db (web) o en la telemetría de LU.
+ */
+export const PROGRESS_ONLY_MODES = Object.freeze(['epub']);
+/** Tope del historial de sesiones de un progreso (`mergeHistoryWithLimit`): con él lleno pudo haber sesiones anteriores. */
+export const PROGRESS_HISTORY_CAP = 20;
+export const isProgressOnlySession = (h) => !!h && PROGRESS_ONLY_MODES.includes(h.mode)
+    && (typeof h.sessionId === 'string' || typeof h.sessionId === 'number') && String(h.sessionId) !== '';
+
+/**
+ * Sesiones de solo-progreso de cada lector. `sessionsOf(progreso, lector)` (opcional) entrega las sesiones acreditadas
+ * por el servidor en lugar del historial recortado; si devuelve null se usa el historial.
+ * @returns {Map<string, Array<{content_id:string, server_ts:number, ms:number}>> & {capped:Set<string>}}
+ *          `capped`: lectores con algún historial lleno leído tal cual (pudo haber sesiones anteriores que ya no constan).
+ */
+export function progressOnlyReadingRows(getProgressByUser, userIds, sessionsOf = null) {
+    const byUser = Object.assign(new Map(), { capped: new Set() });
+    for (const id of userIds) {
+        const rows = [];
+        for (const p of getProgressByUser(id) || []) {
+            if (!p || typeof p.contentId !== 'string' || !p.contentId) continue;
+            const credited = typeof sessionsOf === 'function' ? sessionsOf(p, id) : null;
+            const history = Array.isArray(p.history) ? p.history : [];
+            const mine = (Array.isArray(credited) ? credited : history).filter(isProgressOnlySession);
+            if (mine.length === 0) continue;
+            if (!Array.isArray(credited) && history.length >= PROGRESS_HISTORY_CAP) byUser.capped.add(id);
+            for (const h of mine) {
+                const ts = Date.parse(h.startedAt);
+                rows.push({ content_id: p.contentId, server_ts: Number.isFinite(ts) ? ts : NaN, ms: Math.max(0, Number(h.durationSec) || 0) * 1000 });
+            }
+        }
+        if (rows.length > 0) byUser.set(id, rows);
+    }
+    return byUser;
+}
+/** Tiempo de solo-progreso de cada lector (histórico y 28 d, por fecha de inicio de la sesión), en el orden de readerIds. */
+function progressOnlyPerReader(byUser, readerIds, nowTs) {
+    const since = nowTs - WINDOW_28D_MS;
+    return readerIds.map(id => {
+        const rows = byUser.get(id) || [];
+        return { allEffectiveMs: rows.reduce((a, r) => a + r.ms, 0), last28dEffectiveMs: rows.filter(r => r.server_ts >= since).reduce((a, r) => a + r.ms, 0) };
+    });
 }
 
 const windowStats = (msByReader, readerCount) => {
@@ -272,9 +328,15 @@ export function buildGroupAnalyticsSummary({
     nowTs = Date.now(), eventsPath, archivePath, includeContent = null, legacyEvents = null,
 }) {
     const readerIds = resolveGroupLectorCohort(group, users, allGroups);
+    // 65E-B: el progreso de cada lector se lee UNA vez (lo usan el tiempo de solo-progreso y los libros).
+    const readProgress = getProgressByUser, progressOf = new Map();
+    getProgressByUser = (id) => { if (!progressOf.has(id)) progressOf.set(id, readProgress(id) || []); return progressOf.get(id); };
     const { byUser, rowsConsidered } = readCohortHistoricalRows(readerIds, { eventsPath, archivePath });
     // V9 65D-2: lectura de LU (telemetría heredada con constancia de recepción). Se calcula aparte y se suma.
     const luByUser = luReadingRows(legacyEvents, readerIds);
+    // V9 65E-B: lectura del lector EPUB (solo consta en el progreso). Con predicado, las sesiones son las que el
+    // servidor puede acreditar (`includeContent.creditedSessions`), no el historial recortado.
+    const epubByUser = progressOnlyReadingRows(getProgressByUser, readerIds, typeof includeContent?.creditedSessions === 'function' ? includeContent.creditedSessions : null);
     const historicalReaders = new Set();
     // V9 F7-C2: `includeContent` (opcional) limita el resumen a la actividad de unas obras: tiempo de lectura,
     // interacciones de Leo y libros de las demás no entran ni en el detalle ni en los agregados.
@@ -290,9 +352,11 @@ export function buildGroupAnalyticsSummary({
         // Lectores con lectura fechada de obras del curso que el predicado no puede acreditar: se anota (no se cuenta
         // en ninguna cifra) para que un tiempo de lectura en cero no se lea como «no leyeron».
         if (typeof includeContent.historical === 'function') {
-            for (const src of [byUser, luByUser]) for (const [id, rows] of src) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id))) historicalReaders.add(id);
+            for (const src of [byUser, luByUser, epubByUser]) for (const [id, rows] of src) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id))) historicalReaders.add(id);
+            // 65E-B: lectura de LU sin constancia de recepción (anterior a 65A) de obras del ámbito: no atribuible, no «cero».
+            for (const [id, works] of luByUser.uncertified) if ([...works].some(c => includeContent.historical(c, NaN, id))) historicalReaders.add(id);
         }
-        for (const src of [byUser, luByUser]) for (const [id, rows] of src) src.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
+        for (const src of [byUser, luByUser, epubByUser]) for (const [id, rows] of src) src.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
         leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId, it?.timestamp, it?.userId));
         const allProgress = getProgressByUser;
         // V9 65A: si el predicado sabe acreditar la fecha de inicio (constancias de recepción del servidor), decide él.
@@ -300,10 +364,13 @@ export function buildGroupAnalyticsSummary({
         getProgressByUser = (id) => (allProgress(id) || []).filter(p => includeContent(p?.contentId, startOf(p, id), id));
     }
     const luReading = readingPerReader(luByUser, readerIds, nowTs);
+    const epubReading = progressOnlyPerReader(epubByUser, readerIds, nowTs);
     const reading = readingPerReader(byUser, readerIds, nowTs).map((r, i) => ({
-        allEffectiveMs: r.allEffectiveMs + luReading[i].allEffectiveMs,
-        last28dEffectiveMs: r.last28dEffectiveMs + luReading[i].last28dEffectiveMs,
+        allEffectiveMs: r.allEffectiveMs + luReading[i].allEffectiveMs + epubReading[i].allEffectiveMs,
+        last28dEffectiveMs: r.last28dEffectiveMs + luReading[i].last28dEffectiveMs + epubReading[i].last28dEffectiveMs,
     }));
+    // Lectores cuyo tiempo de solo-progreso sale de un historial lleno: su total es un mínimo, y se dice.
+    const capped = new Set(readerIds.filter(id => epubByUser.capped.has(id) && (epubByUser.get(id) || []).length > 0));
     const leo = leoPerReader(leoInteractions, readerIds);
     const progress = progressPerReader(getProgressByUser, readerIds);
     return {
@@ -318,6 +385,7 @@ export function buildGroupAnalyticsSummary({
             readers: readerIds.map((userId, i) => ({
                 userId, reading: reading[i], leo: leo[i], progress: progress[i],
                 ...(historicalReaders.has(userId) ? { historicalActivity: true } : {}),
+                ...(capped.has(userId) ? { sessionHistoryCapped: true } : {}),
             })),
         },
         rowsConsidered,

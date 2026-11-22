@@ -241,7 +241,9 @@ try {
     const admC = await both('/api/metrics/course/g-a', { cookie: C.adm });
     ok('…y del curso sigue recibiendo solo agregados, sin desglose', every(admC, (r) => r.status === 200 && r.json.aggregateOnly === true && !('studentBreakdown' in r.json)), st(admC));
     const admAn = await both('/api/groups/g-a/analytics-summary', { cookie: C.adm });
-    ok('…y su resumen del grupo es el de siempre (toda la lectura de la cohorte)', every(admAn, (r) => r.status === 200 && r.json.progress.booksStarted === 3), JSON.stringify(admAn[0].json?.progress));
+    // V9 65E-B: el resumen del grupo de la administración cuenta ya solo las obras ASOCIADAS al grupo (1 de las 3 que
+    // lee la cohorte); antes sumaba también la lectura personal y la de otros cursos como actividad del grupo.
+    ok('…y su resumen del grupo cuenta solo las obras del grupo (1 libro), no toda la lectura de la cohorte', every(admAn, (r) => r.status === 200 && r.json.progress.booksStarted === 1 && r.json.courseAttribution?.course_has_works === true), JSON.stringify(admAn[0].json?.progress));
 
     console.log('[10] sesiones falsas o contradictorias: rechazo');
     const paths = ['/api/progress/user/ra-1', '/api/progress/item/ra-1/c1', '/api/reading-progress/ra-1', '/api/reading-progress/ra-1/c1', '/api/students/ra-1/status', '/api/metrics/course/g-a', '/api/groups/g-a/analytics-summary', '/api/leo/mediator/student/ra-1'];

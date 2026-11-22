@@ -155,6 +155,10 @@ function stateNotice(result) {
             'Hay lectura de obras del curso anterior al momento en que se empezó a registrar su asignación o la membresía del estudiante; no puede atribuirse al curso.',
             `Los indicadores estarán disponibles${typeof from === 'number' ? ` a partir del ${new Date(from).toISOString().slice(0, 10)}` : ' más adelante'}. Esto no describe cómo lee el estudiante.`, 'low');
     }
+    if (result.reason === 'history_truncated') return card('context_history_truncated', 'insufficient_data',
+        'Información insuficiente por ahora.',
+        'El registro de actividad de este estudiante en el periodo es demasiado extenso para procesarlo completo, y los indicadores no se calculan con una parte.',
+        'No hay perfil, riesgo ni recomendaciones. Esto no describe cómo lee el estudiante: tiene mucha actividad registrada.', 'low');
     return card('context_few_signals', 'insufficient_data',
         'Aún no hay suficiente actividad del curso para observar patrones.',
         'La lectura registrada en las obras del curso es todavía muy poca.',
@@ -353,12 +357,19 @@ export function groupAggregateBody({ groupId, roster, results, min, period = '28
         metric('reader_cohort', roster),
         metric('eligible_readers', results.length),
         metric('active_users', results.filter((r) => (r.provenance?.events ?? 0) > 0).length),
+        // V9 65E-B: `active_users` cuenta lectores con lectura ACREDITADA del curso. Quien tiene lectura de sus obras que
+        // no puede atribuirse (o cuya historia no pudo leerse completa) no es un lector inactivo: se cuenta aparte.
+        metric('readers_with_unattributable_activity', results.filter(hasUnattributableActivity).length),
         metric('profiles_evaluated', ok.length),
         metric('avg_continuidad', disclosed(ok.map((r) => signalOf(r, 'continuidad_semanal')).filter((v) => typeof v === 'number'), min)),
         metric('avg_engagement', disclosed(ok.map((r) => r.profile_current.engagement_score).filter((v) => typeof v === 'number'), min)),
         metric('at_risk_users', risk.length >= min ? risk.filter((v) => v >= 0.7).length : null),
     ] };
 }
+
+/** Hay actividad sobre obras del curso, pero no es atribuible o no pudo leerse completa (65E-B). */
+const UNATTRIBUTABLE_REASONS = new Set(['unverifiable_history', 'provenance_not_recorded', 'history_truncated']);
+const hasUnattributableActivity = (r) => r.data_state === DATA_STATE.insufficient && UNATTRIBUTABLE_REASONS.has(r.reason);
 
 /** Serie semanal del agregado de un curso (los mismos cortes fijos de la evolución individual). */
 export function groupRollupsBody({ groupId, views, min }) {
@@ -372,6 +383,7 @@ export function groupRollupsBody({ groupId, views, min }) {
         const risk = ok.map((r) => r.profile_current.abandono_risk).filter((v) => typeof v === 'number');
         const row = (metric_key, metric_value) => ({ scope_type: 'group', scope_id: groupId, period_start: cut.ts - WEEK, period_end: cut.ts, metric_key, metric_value });
         weekly.push(row('active_users', at.filter((r) => (r.provenance?.events ?? 0) > 0).length),
+            row('readers_with_unattributable_activity', at.filter(hasUnattributableActivity).length),
             row('avg_continuidad', disclosed(cont, min)), row('at_risk_users', risk.length >= min ? risk.filter((v) => v >= 0.7).length : null));
     }
     return { daily: [], weekly, monthly: [], population: { eligible: views.length } };

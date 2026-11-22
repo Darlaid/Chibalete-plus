@@ -39,7 +39,9 @@ export const StudentRow: React.FC<StudentRowProps> = React.memo(({ student, anal
             </td>
             <td className="p-4 text-center font-mono text-sm">
                 {!analytics ? <NoData title="Sin datos" />
-                    : analytics.reading.allEffectiveMs === 0 && unattributedReading ? <Unattributed /> : formatReadingDuration(analytics.reading.allEffectiveMs)}
+                    : analytics.reading.allEffectiveMs === 0 && unattributedReading ? <Unattributed />
+                    : analytics.sessionHistoryCapped ? <span title="Tiempo mínimo: de cada obra se conservan las últimas 20 sesiones del lector EPUB" data-state="session_history_capped">≥ {formatReadingDuration(analytics.reading.allEffectiveMs)}</span>
+                    : formatReadingDuration(analytics.reading.allEffectiveMs)}
             </td>
             <td className="p-4 text-center">
                 <div className="flex items-center justify-center gap-1" title="Interacciones con Chatbot">

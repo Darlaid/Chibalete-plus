@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE, describeActivityCoverage, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../utils/institutionalErrors';
 import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import {
     ArrowLeft, AlertCircle, AlertTriangle, Info, Lightbulb,
@@ -71,6 +71,7 @@ interface StudentRow {
     hasData: boolean;
     // V9 65D-1 — lectura del curso registrada solo por el progreso: sesiones sin nivel calculable.
     readsWithoutTelemetry?: boolean;
+    sessionHistoryCapped?: boolean;   // V9 65E-B: total de sesiones mínimo (registro del lector EPUB lleno)
     // V9 F7-C2R-U3B — sin actividad acreditada del curso, pero con lectura que no puede atribuirse.
     dataState?: 'verified_context' | 'no_activity' | 'unverifiable_history';
     needsAttention: boolean;
@@ -641,6 +642,9 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                         {isCourse && !Array.isArray(cd!.studentBreakdown) && (
                             <p role="note" className="text-sm text-gray-500 dark:text-gray-400 pb-8">{AGGREGATE_VIEW_NOTE}</p>
                         )}
+                        {describeActivityCoverage((data as { dataCoverage?: ActivityDataCoverage }).dataCoverage) && (
+                            <p role="note" data-testid="report-data-coverage" className="text-sm text-gray-600 dark:text-gray-300 pt-6">{describeActivityCoverage((data as { dataCoverage?: ActivityDataCoverage }).dataCoverage)}</p>
+                        )}
                         {isCourse && cd!.courseAttribution?.course_has_works === false && (
                             <p role="note" data-testid="report-no-course-works" className="text-sm text-gray-600 dark:text-gray-300 pt-6">Este curso no tiene obras asociadas: no hay lectura del curso que mostrar. Las cifras en cero no significan que sus estudiantes no lean.</p>
                         )}
@@ -726,7 +730,7 @@ const StudentBreakdownTable: React.FC<{ students: StudentRow[] }> = ({ students 
                                 {s.hasData ? s.inferential : '—'}
                             </td>
                             <td className="py-2 px-3 text-right text-xs text-gray-400 dark:text-gray-500 tabular-nums">
-                                {s.dataState === 'unverifiable_history' ? '—' : s.totalSessions}
+                                {s.dataState === 'unverifiable_history' ? '—' : s.sessionHistoryCapped ? <span title={`Al menos ${s.totalSessions}: ${SESSION_HISTORY_CAPPED_NOTE}`}>{s.totalSessions}+</span> : s.totalSessions}
                             </td>
                             <td className="py-2">
                                 <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${

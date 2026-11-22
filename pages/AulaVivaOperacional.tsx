@@ -228,6 +228,9 @@ const AulaVivaOperacional: React.FC = () => {
 
     // Sparkline de active_users (proxy de continuidad institucional)
     const activeUsersDaily = (cohort?.metrics?.find(m => m.metric_key === 'active_users')?.metric_value);
+    // V9 65E-B — lectores con lectura de obras del curso que no puede atribuirse: no son lectores inactivos.
+    const unattributableReaders = (cohort?.metrics?.find(m => m.metric_key === 'readers_with_unattributable_activity')?.metric_value);
+    const unattributableCount = typeof unattributableReaders === 'number' ? Math.round(unattributableReaders) : 0;
     const cohortMetricsToShow = cohort?.metrics?.filter(m =>
         ['active_users', 'at_risk_users', 'avg_continuidad', 'profiles_evaluated'].includes(m.metric_key)
     ) ?? [];
@@ -301,8 +304,10 @@ const AulaVivaOperacional: React.FC = () => {
                     />
                     <KpiCard
                         icon={Activity} label="Lectores activos"
-                        value={typeof activeUsersDaily === 'number' ? Math.round(activeUsersDaily) : '—'}
-                        sublabel="profiles materializados"
+                        value={typeof activeUsersDaily !== 'number' ? '—' : Math.round(activeUsersDaily) === 0 && unattributableCount > 0 ? '—' : Math.round(activeUsersDaily)}
+                        sublabel={unattributableCount > 0
+                            ? `con lectura acreditada del curso · ${unattributableCount} más con lectura que no puede atribuirse al curso (no cuentan como inactivos)`
+                            : 'con lectura acreditada del curso'}
                     />
                 </section>
 

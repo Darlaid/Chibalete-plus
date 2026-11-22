@@ -91,6 +91,28 @@ export function describeNoEligibleReaders(rosterCount: number | null): { title: 
  * V9 F5-E4 — vista AGREGADA del curso (sesión de administración): el servidor entrega el curso entero en
  * totales y promedios, sin desglose por estudiante. Se dice; no se pinta una lista vacía.
  */
+/**
+ * V9 65E-B — desde cuándo es completa la actividad con la que se calcularon las cifras. El registro de sesiones de los
+ * visores web y de la aplicación de lectura sin conexión conserva una cantidad limitada de entradas; cuando está lleno,
+ * lo más antiguo ya no entra en el cálculo. Se dice con la fecha, para que una cifra menor no se lea como menos lectura.
+ */
+export type ActivityDataCoverage = { telemetry?: { rolling: boolean; from: number | null }; leo?: { rolling: boolean; from: number | null } };
+export function describeActivityCoverage(coverage: ActivityDataCoverage | null | undefined): string | null {
+    const day = (ms: number | null | undefined) => (typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toLocaleDateString('es', { dateStyle: 'medium' }) : null);
+    const parts: string[] = [];
+    if (coverage?.telemetry?.rolling) {
+        const d = day(coverage.telemetry.from);
+        parts.push(`Las sesiones y el tiempo de lectura registrados por los visores web y por la aplicación de lectura sin conexión se calculan con la actividad recibida ${d ? `desde el ${d}` : 'más recientemente'}: la anterior ya no está disponible para este cálculo.`);
+    }
+    if (coverage?.leo?.rolling) {
+        const d = day(coverage.leo.from);
+        parts.push(`Las interacciones con Leo se cuentan ${d ? `desde el ${d}` : 'solo en su tramo más reciente'}.`);
+    }
+    return parts.length > 0 ? `${parts.join(' ')} Una cifra menor que la de una consulta anterior no significa menos lectura.` : null;
+}
+/** 65E-B — de cada obra se conservan las últimas 20 sesiones del lector EPUB: con ese registro lleno, el total es un mínimo. */
+export const SESSION_HISTORY_CAPPED_NOTE = 'de cada obra se conservan las últimas 20 sesiones registradas por el lector EPUB, así que el total real puede ser mayor';
+
 export const AGGREGATE_VIEW_NOTE = 'Vista agregada del curso: la sesión de administración muestra totales y promedios, sin desglose por estudiante.';
 export function describeRosterCount(n: number): string {
     return `${n} ${n === 1 ? 'estudiante' : 'estudiantes'} en la nómina`;

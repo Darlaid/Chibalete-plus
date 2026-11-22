@@ -27,7 +27,8 @@ export const EMPTY_TEXT = Object.freeze({
  * @typedef {{ totalEffectiveMs:number, readersWithActivity:number, averageEffectiveMsPerReader:number }} ReadingWindow
  * @typedef {{ userId:string, reading:{ allEffectiveMs:number, last28dEffectiveMs:number },
  *   leo:{ interactions:number }, progress:{ booksStarted:number, booksCompleted:number, averagePercent:number },
- *   courseAttribution?:{ verified_context:number, unverifiable_history:number }, historicalActivity?:boolean }} ReaderAnalytics
+ *   courseAttribution?:{ verified_context:number, unverifiable_history:number }, historicalActivity?:boolean,
+ *   sessionHistoryCapped?:boolean }} ReaderAnalytics
  *   (V9 F7-C2R-U3B: `courseAttribution`/`historicalActivity` = lectura que existe pero no puede atribuirse al curso.)
  * @typedef {{ groupId:string, readerCount:number, reading:{ all:ReadingWindow, last28d:ReadingWindow },
  *   leo:{ interactions:number, readersWithInteractions:number, averageInteractionsPerReader:number },

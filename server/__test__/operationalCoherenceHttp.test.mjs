@@ -333,12 +333,12 @@ try {
         ok('una respuesta servida de la copia conserva la hora del cálculo original (no se presenta como recién calculada)', s1b.json?.computedAt === s[0].json.computedAt, `${s1b.json?.computedAt} vs ${s[0].json.computedAt}`);
         // Participación: ra-lu, ra-lu2, ra-mix, ra-sup (telemetría) + ra-a11y (solo accesible) = 5 de los 11 elegibles (ra-rev fuera).
         ok('participación del curso: quien solo usa el Visor Accesible cuenta como activo (5 de 11)', m.every((x) => x.json.summary.activeStudentCount === 5 && x.json.summary.studentCount === 11), JSON.stringify(m.map((x) => x.json.summary)));
-        // Administración (agregado, sin filtro de autorizaciones ni de fechas, como antes): ra-lu, ra-lu2, ra-mix, ra-hist,
-        // ra-rev, ra-sup y ra-b2c (su telemetría heredada no se filtra por obra: contrato previo de esa vista) + ra-a11y y
-        // ra-hist2 (accesible, obras del curso) + ra-pre (progreso) = 10 de 12. La lectura accesible PERSONAL de ra-b2c2
-        // no lo vuelve activo; ra-none tampoco lo es.
+        // Administración (agregado, sin filtro de autorizaciones ni de fechas): ra-lu, ra-lu2, ra-mix, ra-hist, ra-rev y
+        // ra-sup (telemetría de obras del curso) + ra-a11y y ra-hist2 (accesible, obras del curso) + ra-pre (progreso)
+        // = 9 de 12. V9 65E-B: ra-b2c ya NO cuenta (su telemetría es de una obra personal; antes esa vista no filtraba la
+        // telemetría heredada por obra y daba 10). La lectura accesible PERSONAL de ra-b2c2 tampoco; ra-none no es activo.
         const adm = await both('/api/metrics/course/g-a', C['adm']);
-        ok('vista agregada de la administración: la lectura accesible cuenta solo en obras del curso (10 de 12), sin desglose', adm.every((x) => x.status === 200 && x.json.summary?.activeStudentCount === 10 && x.json.summary?.studentCount === 12 && !x.json.studentBreakdown?.length), st(adm));
+        ok('vista agregada de la administración: solo cuenta la lectura de obras del curso, por cualquier fuente (9 de 12), sin desglose', adm.every((x) => x.status === 200 && x.json.summary?.activeStudentCount === 9 && x.json.summary?.studentCount === 12 && !x.json.studentBreakdown?.length), st(adm));
     }
 
     section('[10] /api/groups/:id/diagnosis');

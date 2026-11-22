@@ -109,7 +109,10 @@ fs.writeFileSync(P.groups, JSON.stringify(GROUPS, null, 2));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: ORG_A, name: 'Colegio Alfa' }, { id: ORG_B, name: 'Colegio Beta' }], null, 2));
 fs.writeFileSync(P.usersCorrupt, '{ esto no es json');
 // V9 F7-C2: la obra del fixture está ASOCIADA a cada curso (regla de grupo): sin esa asociación, su mediador no ve actividad por obra.
-fs.writeFileSync(P.access, JSON.stringify(GROUPS.map((g) => ({ id: `r-${g.id}`, scope: 'group', scopeId: g.id, titleIds: ['c-1', 'c-2'], collectionIds: [] }))));
+// V9 65E-B: también el resumen de la ADMINISTRACIÓN cuenta ya solo las obras del grupo (antes, toda la lectura de sus
+// miembros). Las siete obras que leen las cohortes de volumen (c-0…c-6) quedan asociadas, así que las igualdades de esta
+// suite siguen comprobando la suma completa; la exclusión de obras ajenas al curso se prueba en dataConsistencyHttp.
+fs.writeFileSync(P.access, JSON.stringify(GROUPS.map((g) => ({ id: `r-${g.id}`, scope: 'group', scopeId: g.id, titleIds: ['c-0', 'c-1', 'c-2', 'c-3', 'c-4', 'c-5', 'c-6'], collectionIds: [] }))));
 fs.writeFileSync(P.content, JSON.stringify([{ id: 'c-1', titulo: 'Uno', autor: 'A', tipo: 'libro', status: 'disponible' }], null, 2));
 
 // ── Eventos: hot + archive, con los índices de producción ─────────────────────
@@ -435,7 +438,7 @@ async function main() {
         ok('Cache-Control: no-store', r.headers.get('cache-control') === 'no-store', String(r.headers.get('cache-control')));
         ok('A readerCount = 80 (10 mediadores + admin con groupIds fuera)', body?.readerCount === 80, String(body?.readerCount));
         // V9 65B: `computedAt` declara cuándo se calcularon las cifras (el resumen se conserva hasta 5 minutos por réplica).
-        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess","computedAt"]', JSON.stringify(Object.keys(body ?? {})));
+        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess","computedAt","dataCoverage","courseAttribution"]', JSON.stringify(Object.keys(body ?? {})));
         ok('…y `computedAt` es un instante no posterior a ahora', Number.isFinite(body?.computedAt) && body.computedAt <= Date.now(), String(body?.computedAt));
         const all = body?.reading?.all, d28 = body?.reading?.last28d;
         ok('B all > 0 y == Σ autoridad por lector', all?.totalEffectiveMs > 0 && all.totalEffectiveMs === expectedAllMs, `${all?.totalEffectiveMs} vs ${expectedAllMs}`);

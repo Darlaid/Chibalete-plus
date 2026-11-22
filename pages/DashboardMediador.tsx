@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE, describeActivityCoverage, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../utils/institutionalErrors';
 import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import {
     ArrowLeft, AlertTriangle, Info, AlertCircle,
@@ -76,6 +76,10 @@ interface StudentRow {
     needsAttention: boolean;
     // V9 65D-1 — lee obras del curso, pero solo lo registró el progreso (EPUB, Álbum…): hay sesiones y tiempo, no nivel.
     readsWithoutTelemetry?: boolean;
+    // V9 65E-B — sus sesiones del lector EPUB salen de un registro lleno (últimas 20 por obra): el total es un mínimo.
+    sessionHistoryCapped?: boolean;
+    // V9 65E-B — sin sesiones en la actividad conservada, que solo alcanza desde esta fecha (la anterior ya no consta).
+    activityKnownSince?: number | null;
     progressOnlySessions?: number;
     // V9 F7-C2R-U3B — `unverifiable_history`: sin actividad ACREDITADA del curso, pero con lectura que no puede atribuirse.
     dataState?: 'verified_context' | 'no_activity' | 'unverifiable_history';
@@ -108,6 +112,8 @@ interface CourseMetrics {
     courseId: string;
     courseName: string;
     computedAt: number;
+    // V9 65E-B — desde cuándo es completa la actividad con la que se calcularon las cifras.
+    dataCoverage?: ActivityDataCoverage;
     summary: {
         studentCount: number;
         activeStudentCount: number;
@@ -460,10 +466,12 @@ function detectStudentPatterns(student: StudentRow): string[] {
 }
 
 function buildStudentProfileSummary(student: StudentRow, patterns: string[]): string {
-    if (readsWithoutLevel(student)) return `Lee obras del curso — ${student.totalSessions} ${student.totalSessions === 1 ? 'sesión' : 'sesiones'}, ${formatDuration(student.totalReadingTimeMs)} en total. Sin nivel calculado: ${NO_LEVEL_NOTE}.`;
+    if (readsWithoutLevel(student)) return `Lee obras del curso — ${student.sessionHistoryCapped ? 'al menos ' : ''}${student.totalSessions} ${student.totalSessions === 1 ? 'sesión' : 'sesiones'}, ${formatDuration(student.totalReadingTimeMs)} en total${student.sessionHistoryCapped ? ` (${SESSION_HISTORY_CAPPED_NOTE})` : ''}. Sin nivel calculado: ${NO_LEVEL_NOTE}.`;
     if (!student.hasData) return isUnattributed(student)
         ? `Tiene ${UNATTRIBUTED_NOTE}. No se interpreta como falta de lectura.`
-        : 'No ha registrado actividad lectora aún.';
+        : student.activityKnownSince !== undefined
+            ? `Sin actividad registrada${typeof student.activityKnownSince === 'number' ? ` desde el ${new Date(student.activityKnownSince).toLocaleDateString('es', { dateStyle: 'medium' })}` : ' en el registro reciente'}. La actividad anterior ya no está disponible para este cálculo: no se interpreta como que nunca haya leído.`
+            : 'No ha registrado actividad lectora aún.';
     if (patterns.length === 0) {
         const inProg = student.readingDetails.inProgress[0];
         if (inProg) return `Leyendo "${inProg.title}" (${inProg.progressPercentage}%) — ${student.totalSessions} sesiones.`;
@@ -2106,6 +2114,9 @@ const DashboardMediador: React.FC = () => {
                 (DashboardAdminLectura); el servidor ya no las entrega a mediadores. */}
 
             {/* ── FOOTER ── */}
+            {describeActivityCoverage(data.dataCoverage) && (
+                <p role="note" data-testid="dashboard-data-coverage" className="text-center text-xs text-gray-500 dark:text-gray-400 max-w-2xl mx-auto">{describeActivityCoverage(data.dataCoverage)}</p>
+            )}
             <p className="text-center text-xs text-gray-300 dark:text-gray-600">
                 Calculado el {new Date(data.computedAt).toLocaleString('es', {
                     dateStyle: 'medium', timeStyle: 'short'

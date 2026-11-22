@@ -258,7 +258,10 @@ try {
         // Referencia: el tablero administrativo en solitario (cuenta las interacciones de Leo de toda la nómina).
         const solo = await get(S1, '/api/metrics/course/g-a', C['adm']);
         const expected = solo.json?.summary?.totalLeoInteractions;
-        ok('referencia en solitario: el agregado administrativo cuenta las interacciones de Leo de la nómina (33)', solo.status === 200 && expected === GA.reduce((n, _, i) => n + 3 + i, 0), JSON.stringify(solo.json?.summary));
+        // V9 65E-B: ra-2 se suprimió en [7] (sus 4 interacciones ya no existen en el almacén). Antes esta referencia daba 33
+        // porque la réplica seguía sirviendo hasta 30 s su copia anterior del registro de Leo; ahora la copia se valida
+        // contra el archivo y la supresión rige en el cálculo siguiente: 33 − 4 = 29.
+        ok('referencia en solitario: el agregado administrativo cuenta las interacciones de Leo de la nómina, sin las del titular suprimido (29)', solo.status === 200 && expected === GA.reduce((n, u, i) => n + (u === 'ra-2' ? 0 : 3 + i), 0) && expected === 29, JSON.stringify(solo.json?.summary));
         // Ráfagas simultáneas en la MISMA réplica: tablero administrativo e ICDLI contextual del mediador.
         const wrong = [];
         let icdliOk = 0;

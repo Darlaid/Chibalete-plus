@@ -61,7 +61,9 @@ fs.writeFileSync(P.groups, JSON.stringify([
     { id: 'g-vacio', name: 'Club sin nómina', type: 'club', ...A, school: 'Colegio Alfa', mediatorIds: ['med-a'], memberIds: [], studentIds: [] },
 ]));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: 'org-a', name: 'Colegio Alfa' }, { id: 'org-b', name: 'Colegio Beta' }]));
-fs.writeFileSync(P.access, '[]'); fs.writeFileSync(P.content, '[]');
+// V9 65E-B: el agregado de la administración cuenta solo la actividad de las obras ASOCIADAS al curso (antes, toda la
+// lectura de la nómina). La obra que leen estos lectores queda asociada a sus cursos, como en una instalación real.
+fs.writeFileSync(P.access, JSON.stringify(['g-a', 'g-b'].map((g) => ({ id: `r-${g}`, scope: 'group', scopeId: g, titleIds: ['c1'], collectionIds: [] })))); fs.writeFileSync(P.content, '[]');
 const T0 = Date.now() - 3 * 86400000, events = [];
 for (const [i, userId] of [...RA, 'ra-noa2', ...RB].entries()) {
     const d = 60000 * (i + 1);

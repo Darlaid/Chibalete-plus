@@ -30,7 +30,9 @@ import {
 } from '../observability/metrics.js';
 
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
-const ANALYTICS_DB  = path.resolve(__dirname, '..', '..', 'data', 'analytics_db.json');
+// V9 65E-B: el mismo directorio de datos que server.js (CHP_DATA_DIR; sin definir ⇒ ../data, como antes). Con la ruta
+// fija, la comprobación de consistencia comparaba events.db con la telemetría del directorio del repositorio.
+const ANALYTICS_DB  = path.join(process.env.CHP_DATA_DIR || path.resolve(__dirname, '..', '..', 'data'), 'analytics_db.json');
 
 // CHP-MOOK-EVENTS-INVALID-PAYLOAD-MINIMIZATION-01C — recovery-first SANEADO.
 // Un evento que no valida sigue registrándose (no se pierde el hecho), pero

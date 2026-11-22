@@ -149,7 +149,8 @@ try {
     section('[6] lo que no cambia');
     const src = fs.readFileSync(path.join(REPO, 'server', 'server.js'), 'utf8');
     // V9 65B: el registro de intervenciones del tablero se suma a los validados por huella (una intervención nueva debe verse en la otra réplica).
-    ok('sin caché: solo usuarios; validados por huella: exactamente grupos, reglas de acceso e intervenciones del tablero', /const UNCACHED_JSON_FILES = new Set\(\[USERS_DB\]\);/.test(src) && /const STAT_VALIDATED_JSON_FILES = new Set\(\[GROUPS_DB, ACCESS_DB, INTERVENTIONS_DB\]\);/.test(src));
+    // V9 65E-B: se suman la telemetría heredada y el registro de interacciones de Leo (la otra réplica calculaba con su copia anterior).
+    ok('sin caché: solo usuarios; validados por huella: exactamente grupos, reglas de acceso, intervenciones del tablero, telemetría heredada e interacciones de Leo', /const UNCACHED_JSON_FILES = new Set\(\[USERS_DB\]\);/.test(src) && /const STAT_VALIDATED_JSON_FILES = new Set\(\[GROUPS_DB, ACCESS_DB, INTERVENTIONS_DB, ANALYTICS_DB, LEO_INTERACTIONS_DB\]\);/.test(src));
     ok('la huella incluye dispositivo, inodo, tamaño, mtime y ctime en nanosegundos', src.includes('`${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`'));
     ok('el catálogo y el resto de archivos conservan su TTL de 30 s', /const _JSON_TTL_DEFAULT = 30_000;/.test(src));
     // El catálogo ya cacheado no se relee en cada petición: una obra retirada por otro escritor sigue resolviéndose igual.

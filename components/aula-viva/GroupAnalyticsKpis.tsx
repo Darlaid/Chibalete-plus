@@ -7,7 +7,7 @@
  * PISA, evolución) se muestra como estado vacío explícito, nunca como 0 %.
  */
 import React from 'react';
-import { describeAccessWithdrawn, describeInstitutionalError } from '../../utils/institutionalErrors';
+import { describeAccessWithdrawn, describeInstitutionalError, describeActivityCoverage, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../../utils/institutionalErrors';
 import { MessageCircle, CheckCircle, Clock, BrainCircuit, TrendingUp } from 'lucide-react';
 import {
     EMPTY_TEXT, GROUP_ANALYTICS_ERROR, formatLeoAverage, formatReadingDuration, hasNoServerSource,
@@ -51,8 +51,17 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
     // V9 F7-C2R-U3B — cuántos lectores tienen lectura que no puede atribuirse al curso (no entra en estas cifras).
     const attribution = (s as { courseAttribution?: { readers_with_unverifiable_history?: number; course_has_works?: boolean } } | null)?.courseAttribution;
     const unattributed = attribution?.readers_with_unverifiable_history ?? 0;
+    // V9 65E-B — desde cuándo es completa la actividad contada, y cuántos lectores tienen un total que es un mínimo.
+    const coverage = describeActivityCoverage((s as { dataCoverage?: ActivityDataCoverage } | null)?.dataCoverage);
+    const capped = s ? s.readers.filter(r => (r as { sessionHistoryCapped?: boolean }).sessionHistoryCapped === true).length : 0;
     return (
         <>
+        {coverage && <p role="note" data-testid="group-data-coverage" className="mb-3 text-sm text-gray-600 dark:text-gray-300">{coverage}</p>}
+        {capped > 0 && (
+            <p role="note" data-testid="group-session-history-capped" className="mb-3 text-sm text-gray-600 dark:text-gray-300">
+                El tiempo de lectura de {capped} {capped === 1 ? 'lector es' : 'lectores es'} un mínimo: {SESSION_HISTORY_CAPPED_NOTE}.
+            </p>
+        )}
         {attribution?.course_has_works === false && (
             <p role="note" data-testid="group-no-course-works" className="mb-3 text-sm text-gray-600 dark:text-gray-300">Este curso no tiene obras asociadas: no hay lectura del curso que mostrar. Las cifras en cero no significan que sus estudiantes no lean.</p>
         )}

@@ -106,7 +106,8 @@ const avgMs = (r) => r.json?.productMetrics?.totalReadingTimeMs;
 const LEO = [(u) => `/api/leo/mediator/student/${u}`, (u) => `/api/leo/mediator/student/${u}/content/c1`, (u) => `/api/leo/activation/${u}`];
 const leo3 = async (s, who, u) => { const out = []; for (const f of LEO) out.push(await req(s, f(u), who)); return out; };
 const BASE_KEYS = ['alerts', 'computedAt', 'courseAttribution', 'courseId', 'courseName', 'distributions', 'icdli', 'needsAttention', 'productMetrics', 'readingLevels', 'studentBreakdown', 'summary', 'topPerformers'];
-const SHAPE = { '/api/metrics/course': [...BASE_KEYS, 'backboneMetrics'].sort().join(), '/api/reports/course': [...BASE_KEYS, 'reportMeta'].sort().join() };
+// V9 65E-B: la respuesta declara además desde cuándo es completa la actividad conservada (`dataCoverage`).
+const SHAPE = { '/api/metrics/course': [...BASE_KEYS, 'backboneMetrics', 'dataCoverage'].sort().join(), '/api/reports/course': [...BASE_KEYS, 'reportMeta', 'dataCoverage'].sort().join() };
 const PRIVATE = /pista-privada|Lector |Mediador |fixture\.invalid|nombre_completo|studentBreakdown|summary|history|outputs/;
 
 const S1 = start(ports[0], 1), S2 = start(ports[1], 2);

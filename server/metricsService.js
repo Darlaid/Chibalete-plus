@@ -926,13 +926,21 @@ export function computeSchoolMetrics(schoolId, options = {}) {
 
   const { ctx, owned } = contextForTopLevel(options);
   try {
-    return schoolMetricsFrom(schoolGroups, schoolId, ctx);
+    return schoolMetricsFrom(schoolGroups, schoolId, ctx, options.includeContent);
   } finally {
     if (owned && ctx) ctx.dispose();
   }
 }
 
-function schoolMetricsFrom(schoolGroups, schoolId, ctx) {
+// V9 65E-B: `includeContent` (opcional, con `forUser`) limita la actividad de cada estudiante a las obras de sus grupos
+// en el colegio. Con filtro no hay memo por contexto: se guarda aquí el cálculo de cada estudiante (una vez).
+function schoolMetricsFrom(schoolGroups, schoolId, ctx, includeContent = null) {
+  const scoped = typeof includeContent === 'function' ? new Map() : null;
+  const metricsOf = (id) => {
+    if (!scoped) return computeStudentMetrics(id, { context: ctx });
+    if (!scoped.has(id)) scoped.set(id, computeStudentMetrics(id, { context: ctx, includeContent }));
+    return scoped.get(id);
+  };
   const allStudentIds = new Set();
   for (const group of schoolGroups) {
     for (const id of resolveGroupMemberIds(group)) allStudentIds.add(id);
@@ -942,14 +950,14 @@ function schoolMetricsFrom(schoolGroups, schoolId, ctx) {
   // `allStudents` y OTRA dentro de `courseBreakdown`. Con contexto, la segunda
   // pasada es un acierto de memo; sin contexto, el comportamiento es el de
   // siempre.
-  const allStudents    = [...allStudentIds].map(id => computeStudentMetrics(id, { context: ctx }));
+  const allStudents    = [...allStudentIds].map(metricsOf);
   const activeStudents = allStudents.filter(s => s.behavioral.totalSessions > 0);
 
   const courseBreakdown = schoolGroups
     .filter(g => resolveGroupMemberIds(g).length > 0)
     .map(g => {
       const groupStudentIds = resolveGroupMemberIds(g);
-      const groupStudents   = groupStudentIds.map(id => computeStudentMetrics(id, { context: ctx }));
+      const groupStudents   = groupStudentIds.map(metricsOf);
       const active          = groupStudents.filter(s => s.behavioral.totalSessions > 0);
       const compScores      = active.map(s => s.readingLevels.composite);
       return {
@@ -977,6 +985,9 @@ function schoolMetricsFrom(schoolGroups, schoolId, ctx) {
     },
     distributions:  buildScoreDistributions(activeStudents),
     courseBreakdown,
+    // V9 65E-B: el cálculo por estudiante, para que quien arma la respuesta cuente como activos a quienes leen por
+    // fuentes que este motor no lee (progreso del lector EPUB, Visor Accesible). No forma parte de la respuesta.
+    students:       allStudents,
     computedAt:     Date.now(),
   };
 }

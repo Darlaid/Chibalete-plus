@@ -11,8 +11,12 @@ import { fileURLToPath } from 'node:url';
 let _cache = { at: 0, payload: null };
 const TTL_MS = 10_000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const EVENTS_DB = path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
-const ARCHIVE_DB = path.resolve(__dirname, '..', '..', 'data-critical', 'events.archive.db');
+// V9 65E-B: las MISMAS rutas que usan quienes escriben y leen estas bases (variables de entorno; sin definir, las de
+// siempre en data-critical/). Con rutas fijas, un proceso configurado con otro almacén informaba la presencia y el
+// tamaño de las bases del directorio del repositorio: salud «correcta» de una base que no era la suya.
+const EVENTS_DB = () => process.env.EVENTS_SQLITE_PATH || path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
+const ARCHIVE_DB = () => process.env.ARCHIVE_SQLITE_PATH || path.resolve(__dirname, '..', '..', 'data-critical', 'events.archive.db');
+const INSIGHTS_DB = () => process.env.INSIGHTS_SQLITE_PATH || path.resolve(__dirname, '..', '..', 'data-critical', 'insights.db');
 
 async function safe(fn) { try { return await fn(); } catch (e) { return { ok:false, error:String(e?.message||e) }; } }
 
@@ -28,7 +32,7 @@ export async function analyticsHealthHandler(_req, res) {
         const registry = await import('../analytics/eventRegistry.js');
 
         checks.events_db = await safe(async () => {
-            const present = fs.existsSync(EVENTS_DB);
+            const present = fs.existsSync(EVENTS_DB());
             const count = present ? events.getEventCount?.() ?? null : 0;
             return { ok: present, present, count };
         });
@@ -70,10 +74,8 @@ export async function analyticsHealthHandler(_req, res) {
                     return fs.existsSync(wal) ? fs.statSync(wal).size : 0;
                 } catch { return 0; }
             };
-            const eventsDb = path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
-            const insightsDb = path.resolve(__dirname, '..', '..', 'data-critical', 'insights.db');
-            const eventsWal   = sizeOf(eventsDb);
-            const insightsWal = sizeOf(insightsDb);
+            const eventsWal   = sizeOf(EVENTS_DB());
+            const insightsWal = sizeOf(INSIGHTS_DB());
             return {
                 ok: eventsWal < 100 * 1024 * 1024 && insightsWal < 100 * 1024 * 1024,
                 events_wal_bytes: eventsWal,
@@ -168,9 +170,9 @@ export async function analyticsHealthHandler(_req, res) {
             return { ok: !s.error, ...s };
         });
         checks.archive_db = await safe(async () => {
-            const present = fs.existsSync(ARCHIVE_DB);
+            const present = fs.existsSync(ARCHIVE_DB());
             let sizeMb = null;
-            if (present) sizeMb = +(fs.statSync(ARCHIVE_DB).size / 1048576).toFixed(2);
+            if (present) sizeMb = +(fs.statSync(ARCHIVE_DB()).size / 1048576).toFixed(2);
             return { ok: true, present, size_mb: sizeMb };
         });
         checks.throughput = await safe(async () => shadow.throughput(5));

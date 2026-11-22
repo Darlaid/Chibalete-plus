@@ -246,6 +246,9 @@ export function computeContextualIndicators({ context, events, nowTs = Date.now(
     const done = (data_state, reason, extra = {}) => ({ result: { ...base, data_state, reason, ...emptyIndicators(), ...extra }, audit });
 
     if (!context.hasWorks) return done(DATA_STATE.no_course_works, 'no_course_works', { provenance: null });
+    // V9 65E-B: la lectura de la historia alcanzó el techo técnico de filas y solo trae las más recientes. Con una
+    // ventana incompleta no se calcula un perfil como si fuera completo.
+    if (events?.truncated === true) return done(DATA_STATE.insufficient, 'history_truncated', { provenance: { limitation: 'history_truncated', verifiable_from: null } });
     if (audit.unverifiable > 0) {
         // Parte de la actividad sobre obras del contexto no es atribuible: calcular con el resto daría un perfil
         // artificialmente bajo. Se resuelve solo cuando esa actividad sale de la ventana.

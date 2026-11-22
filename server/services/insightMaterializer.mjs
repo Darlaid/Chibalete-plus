@@ -47,8 +47,9 @@ function getRawEventsDb() {
     _eventsRawDb.pragma('busy_timeout = 5000');
     _stmtBatch = _eventsRawDb.prepare(
         `SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`);
+    // V9 65E-B: de la más reciente a la más antigua (ver `readUserHistory`); sin LIMIT: lo acota quien itera.
     _stmtUserHistory = _eventsRawDb.prepare(
-        `SELECT * FROM events WHERE user_id = ? AND server_ts >= ? ORDER BY server_ts ASC LIMIT ?`);
+        `SELECT * FROM events WHERE user_id = ? AND server_ts >= ? ORDER BY server_ts DESC, id DESC`);
     // CHP-MOOK-CANONICAL-EVENTS-01C: las revisiones se proyectan al REVISOR
     // (payload.reviewerId), cuyo user_id no es el de la fila. Filtro textual
     // acotado al evento; signalCompute vuelve a comparar reviewerId exacto.
@@ -81,9 +82,34 @@ function bucketBySubject(byUser, row) {
     }
 }
 
+/**
+ * V9 65E-B — filas propias de un lector desde `sinceTs`, en orden ascendente (fecha del servidor, id).
+ *
+ * Antes: `ORDER BY server_ts ASC LIMIT 20000`. Con más de 20 000 filas en la ventana se quedaban las MÁS ANTIGUAS y se
+ * perdían las recientes sin aviso: los indicadores de un lector muy activo se calculaban como si hubiera dejado de leer.
+ * Ahora se lee toda la ventana (la ventana es el límite válido). Solo como protección de memoria hay un techo
+ * (`HISTORY_MAX_ROWS`): si se alcanza, se conservan las filas MÁS RECIENTES y el resultado lo declara
+ * (`rows.truncated === true`) para que quien calcula no entregue un indicador como si fuera completo.
+ */
+export const HISTORY_MAX_ROWS = 100_000;
+let _historyTruncations = 0;
+function readUserHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS) {
+    const rows = [];
+    let truncated = false;
+    for (const r of _stmtUserHistory.iterate(String(userId), sinceTs)) {
+        if (rows.length >= maxRows) { truncated = true; break; }
+        rows.push(r);
+    }
+    rows.reverse();
+    if (truncated) { rows.truncated = true; _historyTruncations += 1; }
+    return rows;
+}
+/** Cuántas lecturas de historia alcanzaron el techo en este proceso (salud analítica). */
+export const historyTruncations = () => _historyTruncations;
+
 /** Historia del sujeto: sus filas + las revisiones que firmó como reviewerId (sin duplicar). */
 function subjectHistory(userId, sinceTs) {
-    const own = _stmtUserHistory.all(String(userId), sinceTs, 20_000);
+    const own = readUserHistory(userId, sinceTs);
     const reviewed = _stmtReviewerHistory.all(sinceTs, `%"reviewerId":"${String(userId)}"%`, 20_000);
     if (reviewed.length === 0) return own;
     const seen = new Set(own.map(r => r.id));
@@ -93,7 +119,7 @@ function subjectHistory(userId, sinceTs) {
  * V9 F7-C2R-U1 — las filas PROPIAS del lector que este materializador usa para sus señales (misma consulta, misma
  * ventana, mismo orden), sin las revisiones que firmó como revisor: esas filas son de otro sujeto. Solo lectura.
  */
-export function readOwnEventHistory(userId, sinceTs) {
+export function readOwnEventHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS) {
     if (!_stmtUserHistory) {
         // Un servidor que todavía no recibió ningún evento no tiene creada la tabla: se crea vacía (es el mismo
         // almacén que este proceso escribe) en vez de fallar. Un intento anterior a medias se descarta.
@@ -101,7 +127,7 @@ export function readOwnEventHistory(userId, sinceTs) {
         closeMaterializerEventsDb();
         getRawEventsDb();
     }
-    return _stmtUserHistory.all(String(userId), sinceTs, 20_000);
+    return readUserHistory(userId, sinceTs, maxRows);
 }
 import { computeUserSignals, computeUserProfile } from './signalCompute.mjs';
 import { SIGNAL_IDS } from '../analytics/signals.js';
@@ -601,6 +627,9 @@ export function getStatus() {
             lag_seconds: wm?.last_ts ? Math.max(0, Math.floor((Date.now() - wm.last_ts) / 1000)) : null,
             degraded: !!wm?.degraded,
             last_error: wm?.last_error ?? null,
+            // V9 65E-B: lecturas de historia de un lector que alcanzaron el techo de filas (0 = ninguna recortada).
+            history_truncations: _historyTruncations,
+            history_max_rows: HISTORY_MAX_ROWS,
             tables: {
                 signal_snapshots:    s.countByTable.snaps.get().n,
                 user_reading_profiles: s.countByTable.profiles.get().n,
