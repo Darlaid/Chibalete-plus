@@ -393,7 +393,7 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
     // recomendaciones no son resultados pedagógicos. Se distingue la nómina del curso de los lectores
     // habilitados y se dice que no hay información consultable.
     if (cd && cd.summary.studentCount === 0) {
-        const rosterCount = id && dataService.getAllGroups().some(g => g.id === id) ? dataService.getGroupStudents(id).length : null;
+        const rosterCount = id && dataService.getAllGroups().some(g => g.id === id && !g.rosterWithheld) ? dataService.getGroupStudents(id).length : null;
         // V9 F5-E4: en la vista agregada el recuento ES la nómina (no depende de habilitaciones).
         const none = describeNoEligibleReaders(cd.aggregateOnly ? 0 : rosterCount);
         if (cd.aggregateOnly) none.title = 'Curso sin estudiantes en la nómina';

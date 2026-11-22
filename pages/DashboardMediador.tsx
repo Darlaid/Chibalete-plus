@@ -1697,7 +1697,7 @@ const DashboardMediador: React.FC = () => {
     // V9 F5-E2 — nómina del curso frente a lectores con seguimiento habilitado. El servidor calcula
     // todo solo sobre los habilitados; con cero, sus ceros y alertas («Nivel inferencial bajo», «poca
     // actividad») no son resultados pedagógicos y no se pintan.
-    const rosterCount = courseId && dataService.getAllGroups().some(g => g.id === courseId)
+    const rosterCount = courseId && dataService.getAllGroups().some(g => g.id === courseId && !g.rosterWithheld)
         ? dataService.getGroupStudents(courseId).length : null;
     if (summary.studentCount === 0) {
         // V9 F5-E4: en la vista agregada el recuento ES la nómina (no depende de habilitaciones).

@@ -12,7 +12,7 @@
  *   [7] después de podar, la evidencia que falta deja la lectura sin acreditar (nunca se da por buena)
  *   [8] supresión individual: sigue eliminando todo lo de la persona, caducado o no
  *   [9] calendario UTC: vencimiento exacto al milisegundo, fin de mes, 29 de febrero, sin depender de la zona horaria
- *   [10] constancias independientes: recibir otra sesión no renueva las anteriores
+ *   [10] constancias independientes: ni otra sesión ni un reintento de la misma renuevan una constancia; tras la poda no se recrea
  *   [11] membresía cerrada por la observación: doce meses desde ESE cierre
  * Nunca escribe en data/ ni data-critical/.
  *
@@ -229,12 +229,33 @@ section('[10] constancias independientes');
     ok('1 ms antes del vencimiento de la primera: las tres constancias existen', receiptsOf('ind') === 3);
     L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(T0) });
     ok('en el vencimiento de la primera: ella caduca aunque las otras sean recientes; las otras siguen', lastOf('A') === undefined && lastOf('B') === SIX && receiptsOf('ind') === 2);
-    // Volver a recibir LA MISMA sesión (reintento) sí mueve su última recepción: es la regla («desde la última recepción»).
-    rec('B', SIX + 30 * DAY);
+    // V9 65E-A — un reintento deduplicado de LA MISMA sesión (mismo cuerpo, o uno atrasado con menos duración) no
+    // mueve su última recepción: no renueva el plazo. Solo lo hace evidencia nueva: la sesión continúa (más duración).
+    rec('B', SIX + 30 * DAY);                 // reintento idéntico un mes después
+    rec('B', SIX + 60 * DAY, 300);            // reenvío atrasado con menos duración
+    const firstOf = (sid) => raw.prepare(`SELECT first_received_ts t FROM reading_session_receipts WHERE user_id = 'ind' AND session_id = ?`).get(sid)?.t;
+    ok('un reintento idéntico o atrasado no mueve ni la primera ni la última recepción', lastOf('B') === SIX && firstOf('B') === SIX && receiptsOf('ind') === 2, JSON.stringify([firstOf('B'), lastOf('B')]));
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(SIX) - 1 });
+    const aliveBefore = lastOf('B') === SIX;
     L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(SIX) });
-    const aliveAtOriginal = lastOf('B') === SIX + 30 * DAY;
-    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(SIX + 30 * DAY) });
-    ok('solo volver a recibir ESA sesión mueve su plazo: vive en su vencimiento original y caduca doce meses después de su última recepción', aliveAtOriginal && lastOf('B') === undefined);
+    ok('…así que caduca en su vencimiento ORIGINAL, como si los reintentos no hubieran existido', aliveBefore && lastOf('B') === undefined);
+    // Reintento DESPUÉS de la poda: la sesión (fechada hace más de doce meses) no vuelve a tener constancia.
+    const afterPrune = L.ledgerExpiryTs(SIX) + 5 * DAY;
+    const recreated = L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: 'B', declaredStartTs: SIX - 600_000, durationSec: 600, mode: 'text', nowTs: afterPrune });   // el MISMO cuerpo original
+    ok('reintento posterior a la poda: no recrea la constancia (y lo dice: sin anotar)', recreated === false && lastOf('B') === undefined && receiptsOf('ind') === 1, JSON.stringify([recreated, receiptsOf('ind')]));
+    // Evidencia nueva sí cuenta: una sesión que continúa avanza su última recepción; la primera no cambia.
+    const C0 = afterPrune + DAY;
+    rec('C', C0, 600); rec('C', C0 + 20 * 60_000, 1800);
+    ok('una sesión que continúa (más duración) sí avanza su última recepción; la primera no cambia', firstOf('C') === C0 && lastOf('C') === C0 + 20 * 60_000);
+    // Una sesión que llega por primera vez con fecha declarada dentro del plazo (lectura sin conexión) sí se anota.
+    const late = L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: 'D', declaredStartTs: C0 - 200 * DAY, durationSec: 600, mode: 'lu', nowTs: C0 });
+    const tooOld = L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: 'E', declaredStartTs: L.ledgerRetentionCutoff(C0), durationSec: 600, mode: 'lu', nowTs: C0 });
+    const justInside = L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: 'F', declaredStartTs: L.ledgerRetentionCutoff(C0) + 1, durationSec: 600, mode: 'lu', nowTs: C0 });
+    ok('primera llegada de una sesión sin conexión de hace 200 días: se anota; fechada en el límite de doce meses: no; 1 ms dentro: sí', late === true && tooOld === false && justInside === true && lastOf('E') === undefined && lastOf('F') === C0, JSON.stringify([late, tooOld, justInside]));
+    // El marcador de guardados sin sesión no es una sesión: cada guardado sin fecha es un hecho nuevo y lo actualiza.
+    const marker = () => lastOf('');
+    const m0 = marker(); L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: '', nowTs: C0 + DAY });
+    ok('el marcador de guardados sin sesión sí refleja el último guardado sin fecha (sigue impidiendo dar el progreso por completo)', m0 === SIX + 1000 && marker() === C0 + DAY, JSON.stringify([m0, marker()]));
 }
 
 section('[11] membresía cerrada por la observación');

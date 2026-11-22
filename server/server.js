@@ -639,6 +639,32 @@ const requireAdminAccess = async (req, res, next) => {
  * institucional y no cambian.
  */
 const a2Unavailable = (res) => { res.status(503).json({ error: 'individual_access_unavailable' }); return false; };
+/**
+ * V9 65E-A — compromiso C005 de quien llega a un grupo POR MEDIARLO. Lo comparten la nómina, los candidatos y el
+ * diagnóstico (y replica el del resumen del grupo, 65C-S): sin C005 vigente, 403; registro no verificable, 503. La
+ * administración (de máquina o de plataforma) no pasa por aquí: su acceso no depende de un compromiso de mediación.
+ * Se decide en cada petición, así que una revocación rige de inmediato en todas las réplicas.
+ * @returns {Promise<boolean>} false = ya respondió
+ */
+async function requireGroupMediatorCommitment(req, res, groupId) {
+    if (await isAdminRequest(req)) return true;
+    const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    let viaMediation = true;
+    try { viaMediation = evaluateScopeAccess(viewerId, 'group', groupId).via === 'mediator_of_group'; } catch { /* sin poder saberlo, se exige */ }
+    if (!viaMediation) return true;
+    let committed;
+    try { committed = decisionGate().effective('C005', viewerId); } catch { return a2Unavailable(res); }
+    if (!committed) { res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: groupId }); return false; }
+    return true;
+}
+/**
+ * V9 65E-A — ¿quien lista es un mediador (no administración) SIN C005 vigente? Para las listas generales (usuarios y
+ * grupos), que no pueden fallar enteras: sin compromiso, o sin poder comprobarlo, la nómina se retiene.
+ */
+function mediatorWithoutCommitment(scope) {
+    if (!scope || scope.global || !pedagogyRolesOf(scope.user).includes('mediador')) return false;
+    try { return !decisionGate().effective('C005', scope.callerId); } catch { return true; }
+}
 async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true, a2 = false } = {}) {
     if (await isAdminRequest(req)) return true;
     const sid = String(scopeId ?? '');
@@ -5880,6 +5906,11 @@ app.get('/api/users', requireAuth, async (req, res) => {
             // va completo; correo, último acceso, estado y tenant ajenos no salen.
             if (!pedagogyRolesOf(scope.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r))) {
                 normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
+            } else if (mediatorWithoutCommitment(scope)) {
+                // V9 65E-A: un mediador sin C005 vigente no consulta a los lectores de su institución, ni siquiera su
+                // perfil público: recibe su propia cuenta y el perfil público del resto del personal (no lectores).
+                normalizedUsers = normalizedUsers.filter(u => u?.id === scope.callerId || pedagogyRolesOf(u).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r)))
+                    .map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
             } else {
                 // V9 F5-C3: el mediador recibe el registro (con correo) SOLO de los lectores de grupos que media (CIS);
                 // del resto de su institución, el mismo perfil público que recibe un lector. Una cuenta B2C personal, nunca.
@@ -7044,6 +7075,11 @@ app.get('/api/groups', requireAuth, async (req, res) => {
             const mine = new Set(getMemberships(scope.callerId).map(m => m.groupId));
             groups = groups.filter(g => mine.has(g?.id) || (scope.orgId && g?.organizationId === scope.orgId));
         }
+        // V9 65E-A: un mediador sin C005 vigente sigue sabiendo qué grupos media, pero no recibe ninguna nómina. La
+        // retención va declarada (`rosterWithheld`) para que la interfaz la explique y no la lea como «grupo vacío».
+        if (mediatorWithoutCommitment(scope)) {
+            return res.json(groups.map(normalizeGroup).map(g => ({ ...g, studentIds: [], memberIds: [], rosterWithheld: true })));
+        }
         // Normalizar la salida para que el frontend siempre reciba datos consistentes
         res.json(groups.map(normalizeGroup));
     } catch (e) {
@@ -7792,6 +7828,8 @@ app.get('/api/groups/:groupId/candidates', requireAuth, async (req, res) => {
         // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: los candidatos son personas del
         // tenant del grupo; mismo alcance que su nómina.
         if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
+        // V9 65E-A: y, para quien media, su C005 vigente (nombra a personas de la institución).
+        if (!(await requireGroupMediatorCommitment(req, res, groupId))) return;
         const roster = await rosterDisclosure(req, res);
         if (!roster) return;
         const groups = readJSON(GROUPS_DB) || [];
@@ -7869,6 +7907,8 @@ app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
         // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: la nómina de un grupo es del
         // tenant del grupo; `allowSelf:false` — un grupo no es un sujeto propio.
         if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
+        // V9 65E-A: y, para quien media, su C005 vigente.
+        if (!(await requireGroupMediatorCommitment(req, res, groupId))) return;
         const roster = await rosterDisclosure(req, res);
         if (!roster) return;
         const groups = readJSON(GROUPS_DB) || [];
@@ -9451,16 +9491,7 @@ app.get('/api/groups/:id/diagnosis', requireAuth, async (req, res) => {
         // V9 65D-2: quien accede por mediar el grupo necesita además su C005 vigente (como el resumen del grupo,
         // 65C-S): el diagnóstico enumera a los miembros. Se decide en cada petición; registro no verificable ⇒ 503.
         // La administración conserva su acceso y no se exige A2: es información administrativa de la nómina.
-        if (!(await isAdminRequest(req))) {
-            const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
-            let viaMediation = true;
-            try { viaMediation = evaluateScopeAccess(viewerId, 'group', id).via === 'mediator_of_group'; } catch { /* sin poder saberlo, se exige */ }
-            if (viaMediation) {
-                let committed;
-                try { committed = decisionGate().effective('C005', viewerId); } catch { return a2Unavailable(res); }
-                if (!committed) return res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: id });
-            }
-        }
+        if (!(await requireGroupMediatorCommitment(req, res, id))) return;
         const groups = readJSON(GROUPS_DB) || [];
         const users  = readJSON(USERS_DB)  || [];
 
@@ -12609,7 +12640,7 @@ app.get('/api/metrics/schools', mountLegacyMetricsRoute('metrics.schools', legac
 // Requires: admin secret OR the student's own x-user-id.
 const legacyMetricsStudentHandler = async (req, res) => {
     const { userId }        = req.params;
-    const { users }         = loadAndInitMetrics();
+    const users             = readJSONMetricsLegacy(USERS_DB) || [];
     const requester         = await sessionRequesterOf(req, users);
     const selfAccess        = requester?.id === userId;
 
@@ -12618,6 +12649,7 @@ const legacyMetricsStudentHandler = async (req, res) => {
     }
 
     try {
+        loadAndInitMetrics();   // 65E-A: sin ninguna espera entre la carga y el cálculo (ver legacyMetricsCourseHandler)
         const raw = computeStudentMetrics(userId);
         const response = formatStudentResponse(raw);
         // Sprint Data Backbone Fase 3: augment additivo. Si events.db falla,
@@ -12713,13 +12745,18 @@ function collectSchoolUserIds(schoolName, groups) {
 // Requires: admin secret OR mediator assigned to that course (x-user-id).
 const legacyMetricsCourseHandler = async (req, res) => {
     const { courseId }      = req.params;
-    const { groups, users } = loadAndInitMetrics();
+    const users             = readJSONMetricsLegacy(USERS_DB) || [];
     const requester         = await sessionRequesterOf(req, users);
     // V9 F5-C2: mediador ⇒ solo lectores de un curso que media, con A2 y C005 vigentes (desglose Y agregados).
     const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId);
     if (!metricsOptions) return;
 
     try {
+        // V9 65E-A: el motor de métricas guarda sus datos en estado global del módulo. Antes se cargaba al entrar y se
+        // calculaba DESPUÉS de las esperas de autorización: otra petición atendida en ese hueco (el ICDLI contextual de
+        // Leo lo reinicializa sin la memoria ni las interacciones de Leo) dejaba este cálculo con datos ajenos. Ahora
+        // la carga y el cálculo van seguidos, sin ninguna espera entre ambos.
+        loadAndInitMetrics();
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         // V9 65D-1: lectura registrada solo por el progreso (mismo ámbito que los perfiles de abajo).
         const progressScope = courseProgressScope(metricsOptions);
@@ -13143,13 +13180,14 @@ function safeJsonParse(raw) {
 // Requires: admin OR mediator assigned to that course.
 app.get('/api/reports/course/:courseId', async (req, res) => {
     const { courseId }      = req.params;
-    const { groups, users } = loadAndInitMetrics();
+    const users             = readJSONMetricsLegacy(USERS_DB) || [];
     const requester         = await sessionRequesterOf(req, users);
     // V9 F5-C2: mismo alcance que /api/metrics/course (lectores elegibles; agregados solo sobre ellos).
     const metricsOptions    = await courseMetricsOptions(req, res, requester, courseId);
     if (!metricsOptions) return;
 
     try {
+        const { groups } = loadAndInitMetrics();   // 65E-A: carga y cálculo seguidos (ver legacyMetricsCourseHandler)
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         const group    = groups.find(g => g.id === courseId);
         // V9 65D-1: el informe cuenta la misma lectura que el tablero (también la que solo registró el progreso).

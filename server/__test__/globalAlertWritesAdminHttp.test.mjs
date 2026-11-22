@@ -27,9 +27,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { freePorts } from './helpers/freePort.mjs';
+import { grantC005 } from './helpers/testA2.mjs';
 import { ADMIN_SECRET_PATH } from '../lib/adminSecret.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+// V9 65E-A: la nómina de un grupo exige a su mediador el compromiso 005 vigente; el de esta suite lo tiene.
+grantC005(['med-a']);
 let pass = 0, fail = 0;
 const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.error('  ✗', l, h), fail++);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -62,6 +62,13 @@ export function describeAccessWithdrawn(subject: InstitutionalSubject, status?: 
 }
 
 /**
+ * V9 65E-A — el servidor retuvo la nómina de los grupos para esta cuenta (llegan sin estudiantes). No es un grupo
+ * vacío ni un error: se dice que la lista no está disponible y a quién acudir, sin nombrar qué permiso falta.
+ */
+export const ROSTER_WITHHELD_NOTICE = 'La lista de estudiantes de tus grupos no está disponible para tu cuenta en este momento, así que no se muestra. '
+    + 'Esto no significa que los grupos estén vacíos. Pide a la administración de tu institución que revise tu habilitación como mediador.';
+
+/**
  * Curso sin lectores con seguimiento habilitado: no es un resultado pedagógico. Distingue la nómina
  * del curso (cuántos estudiantes tiene), los lectores habilitados para seguimiento (ninguno) y la
  * consecuencia (no hay información consultable). No afirma nada sobre el desempeño del grupo.

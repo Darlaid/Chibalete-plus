@@ -690,6 +690,9 @@ class DataService {
      */
     async reloadUsers(): Promise<User[]> {
         const epoch = this.sessionEpoch;
+        // V9 65E-A: solo la recarga MÁS RECIENTE puede guardar. Una respuesta anterior que llega tarde (pedida antes
+        // de que el servidor retirara un permiso) no vuelve a poner en memoria lo que la siguiente ya retiró.
+        const seq = ++this.usersReloadSeq;
         try {
             // v4.0.4 hotfix: mismo motivo que initializeUsersAndGroupsFromApi —
             // sin headers, el GET-bypass cerrado en v4.0.3 retorna 401.
@@ -705,6 +708,7 @@ class DataService {
             }
             // V9 BI-65C-S: la sesión terminó mientras llegaba la respuesta: no se guarda.
             if (epoch !== this.sessionEpoch) return this.users;
+            if (seq !== this.usersReloadSeq) return this.users;   // 65E-A: ya se pidió otra después
             const fresh = raw.filter(u => u && u.id) as User[];
             const prevCount = this.users.length;
             this.users = fresh;
@@ -728,6 +732,8 @@ class DataService {
      * sincronizar, tareas locales, catálogo). No lanza.
      */
     private sessionEpoch = 0;
+    private usersReloadSeq = 0;
+    private groupsReloadSeq = 0;
     public clearSessionState(): void {
         this.sessionEpoch += 1;
         this.users = [];
@@ -753,12 +759,14 @@ class DataService {
      */
     async reloadGroups(): Promise<number> {
         const epoch = this.sessionEpoch;
+        const seq = ++this.groupsReloadSeq;   // 65E-A: solo la recarga más reciente guarda (ver reloadUsers)
         try {
             const res = await fetch(`${this.apiUrl}/groups`, { headers: this.adminWriteHeaders, cache: 'no-store' });
             if (!res.ok) return res.status;
             const apiGroups: Group[] = await res.json();
             // La sesión terminó mientras llegaba la respuesta: no se guarda.
             if (epoch !== this.sessionEpoch) return 0;
+            if (seq !== this.groupsReloadSeq) return 0;
             if (Array.isArray(apiGroups)) this.groups = apiGroups.map(this.normalizeGroupFrontend);
             return res.status;
         } catch { return 0; }

@@ -902,6 +902,8 @@ export interface VisualContext {
 export interface Group {
   id: string;
   name: string;
+  // V9 65E-A — el servidor retuvo la nómina de este grupo para quien consulta (llega sin estudiantes): no es un grupo vacío.
+  rosterWithheld?: boolean;
   type: 'course' | 'club';    // Tipo de grupo — default 'course' si ausente (normalizeGroup)
   // --- Campos legacy (conservados para compatibilidad) ---
   teacherId?: string;          // Legacy: mediador único. Usar mediatorIds en código nuevo.

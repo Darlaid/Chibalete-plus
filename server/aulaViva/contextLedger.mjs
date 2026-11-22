@@ -86,7 +86,12 @@ function db() {
                 OR ABS(declared_start_ts - excluded.declared_start_ts) > 1000)) THEN 1 ELSE 0 END,
               duration_sec = MAX(duration_sec, excluded.duration_sec),
               first_received_ts = MIN(first_received_ts, excluded.first_received_ts),
-              last_received_ts = MAX(last_received_ts, excluded.last_received_ts)`),
+              -- V9 65E-A: la última recepción solo avanza con evidencia NUEVA (la sesión continúa: más duración). Un
+              -- reintento idéntico o atrasado de la misma sesión no la mueve, así que no renueva su plazo de conservación.
+              -- El marcador de guardados sin sesión ('') no es una sesión: cada guardado sin fecha es un hecho nuevo.
+              last_received_ts = CASE WHEN session_id = '' OR excluded.duration_sec > duration_sec
+                THEN MAX(last_received_ts, excluded.last_received_ts) ELSE last_received_ts END`),
+        hasReceipt: _db.prepare(`SELECT 1 FROM reading_session_receipts WHERE user_id = ? AND work_id = ? AND session_id = ?`),
         receiptsOf: _db.prepare(`SELECT work_id, session_id, declared_start_ts, duration_sec, mode, first_received_ts, last_received_ts, from_origin, conflict
             FROM reading_session_receipts WHERE user_id = ? ORDER BY first_received_ts ASC, session_id ASC`),
     };
@@ -182,6 +187,11 @@ export function contextIntervals(groupIds) {
  *
  * Un reenvío de la misma sesión no crea filas ni cambia la primera recepción; si vuelve con otra fecha de inicio (más
  * de un segundo de diferencia) queda marcada (`conflict`) y deja de acreditarse. Un guardado sin sesión se anota bajo `session_id = ''`.
+ *
+ * V9 65E-A — reintentos. (1) Un reintento deduplicado (misma sesión, sin más duración) tampoco cambia la ÚLTIMA
+ * recepción: no renueva el plazo de conservación. (2) Una sesión cuya fecha declarada ya superó ese plazo no abre una
+ * constancia nueva: si existió, caducó, y volver a enviarla no la recrea; si nunca llegó, es evidencia más antigua que
+ * lo que el registro conserva. En ambos casos queda sin constancia ⇒ lectura no atribuible, nunca acreditada.
  * El lector va en `user_id`: la supresión de datos de una persona elimina estas filas como las demás de este almacén.
  *
  * @returns {boolean} false si el registro está apagado o no se pudo anotar (la sesión queda sin constancia: no acreditable)
@@ -190,6 +200,9 @@ export function recordSessionReceipt({ userId, workId, sessionId = '', declaredS
     if (!ENABLED() || !userId || !workId) return false;
     try {
         db();
+        const sid = String(sessionId ?? '');
+        if (sid !== '' && Number.isFinite(declaredStartTs) && ledgerExpiryTs(Math.trunc(declaredStartTs)) <= nowTs
+            && !_st.hasReceipt.get(String(userId), String(workId), sid)) return false;
         _st.receipt.run({ user_id: String(userId), work_id: String(workId), session_id: String(sessionId ?? ''),
             declared_start_ts: Number.isFinite(declaredStartTs) ? Math.trunc(declaredStartTs) : null,
             duration_sec: Number.isFinite(durationSec) && durationSec > 0 ? Math.trunc(durationSec) : 0,

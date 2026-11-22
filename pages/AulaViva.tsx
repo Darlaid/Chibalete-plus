@@ -24,7 +24,7 @@ import { LeoMediatorPanel } from '../components/aula-viva/LeoMediatorPanel';
 import { InterventionImpactPanel } from '../components/aula-viva/InterventionImpactPanel';
 import { StudentProgressBlock } from '../components/aula-viva/StudentProgressBlock';
 import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
-import { describeAccessWithdrawn } from '../utils/institutionalErrors';
+import { describeAccessWithdrawn, ROSTER_WITHHELD_NOTICE } from '../utils/institutionalErrors';
 import type { StudentStatus } from '../utils/studentStatus';
 import ClubFormModal from '../components/ClubFormModal';
 
@@ -1617,6 +1617,13 @@ const AulaViva: React.FC = () => {
                 </div>
             )}
 
+            {/* V9 65E-A: el servidor retuvo la nómina (grupos sin estudiantes para esta cuenta). Se explica; no se lee como «grupo vacío». */}
+            {canManageClassroom && !isAdmin && groups.some(g => g.rosterWithheld === true) && (
+                <div role="status" data-testid="aula-viva-roster-withheld"
+                    className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 text-sm text-amber-900 dark:text-amber-200">
+                    <p>{ROSTER_WITHHELD_NOTICE}</p>
+                </div>
+            )}
             {accessNotice && canManageClassroom && (
                 <div role="status" data-testid="aula-viva-access-notice"
                     className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 text-sm text-amber-900 dark:text-amber-200 flex items-start justify-between gap-3">

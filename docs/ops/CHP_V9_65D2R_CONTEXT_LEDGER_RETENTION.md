@@ -48,10 +48,14 @@ transcurren menos de doce meses.
 - **Distinto del archivo de eventos.** La política aprobada de eventos conserva el evento «a los 12 meses exactos»
   (`archiveRotation.mjs`); este registro lo elimina en ese instante. Son contratos separados y la poda del registro
   ya no usa la función del archivo.
-- **Constancias independientes.** El plazo de cada constancia corre desde su propia última recepción. Recibir otra
-  sesión, o guardar más progreso de la misma obra, no renueva las anteriores. Solo volver a recibir **esa misma**
-  sesión (un reintento del dispositivo) mueve su última recepción y, con ella, su plazo: es la consecuencia literal
-  de «desde la última recepción».
+- **Constancias independientes y reintentos (65E-A).** El plazo de cada constancia corre desde su propia última
+  recepción. Recibir otra sesión, o guardar más progreso de la misma obra, no renueva las anteriores. Un **reintento
+  deduplicado** de la misma sesión (el mismo cuerpo, o un envío atrasado con menos duración) tampoco: no mueve ni la
+  primera ni la última recepción, así que no extiende la conservación. La última recepción solo avanza con evidencia
+  nueva: la sesión continúa (más duración).
+- **Sin recreación.** Una sesión cuya fecha declarada ya superó los doce meses no abre una constancia nueva: si
+  existió, caducó, y reenviarla no la recrea; si nunca había llegado, es evidencia más antigua que lo que el registro
+  conserva. El guardado del lector se acepta igual (su progreso no se rechaza); esa lectura queda como no atribuible.
 - **Membresía cerrada.** El cierre lo anota el servidor con su reloj al observar que la persona ya no está en el
   grupo; los doce meses corren desde ese cierre, no desde el inicio de la membresía.
 - **Membresía abierta.** Solo cuenta como miembro una cuenta que existe en el padrón. Un identificador que la nómina

@@ -146,7 +146,8 @@ try {
     ok('…sin correos', m.every((r) => !/fixture\.invalid/.test(r.text) && r.json.members.every((x) => x.email === null)));
     ok('…y de los otros grupos de cada persona, solo los que él media (no el club ajeno)', m.every((r) => mrow(r, 'ra-yes').currentGroups.join() === 'g-a' && mrow(r, 'ra-yes').currentGroupsByType.club.length === 0 && !r.text.includes('g-club')), JSON.stringify(mrow(m[0], 'ra-yes')));
     ok('…con la misma forma de respuesta', Object.keys(m[0].json).sort().join() === 'count,groupId,groupType,members,school' && Object.keys(mrow(m[0], 'ra-yes')).sort().join() === 'colegio,currentGroups,currentGroupsByType,email,healthState,name,userId');
-    ok('mediador del grupo sin C005 → también gestiona la nómina, igual de mínima', (await both('/api/groups/g-a/members', 'med-noc')).every((r) => r.status === 200 && r.json.count === 3 && !/fixture\.invalid/.test(r.text)));
+    // V9 65E-A (contrato de Dirección): un mediador sin C005 vigente ya no consulta la nómina. Antes (F5-C3) la recibía, mínima.
+    ok('mediador del grupo sin C005 → no consulta la nómina: 403 sin ningún dato de sus lectores', (await both('/api/groups/g-a/members', 'med-noc')).every((r) => r.status === 403 && r.json?.error === 'scope_access_denied' && !/fixture\.invalid|"count"|"members"/.test(r.text)));
     const c = await both('/api/groups/g-a/candidates', 'med-a');
     ok('candidatos → lectores de su institución fuera del grupo, sin correos ni grupos ajenos', c.every((r) => r.status === 200 && r.json.candidates.map((x) => x.userId).join() === 'ra-otro' && r.json.candidates[0].email === null && r.json.candidates[0].currentGroups.length === 0 && !/fixture\.invalid|g-a2|g-club/.test(r.text)), c[0].text.slice(0, 200));
     ok('…nunca lectores de otra institución ni cuentas B2C', c.every((r) => !/rb-yes|b2c/.test(r.text)));
