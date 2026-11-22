@@ -11569,12 +11569,16 @@ function pedagogicalContextSnapshot() {
     const groups = readJSON(GROUPS_DB), users = readJSON(USERS_DB);
     // Un padrón vacío es un fallo de lectura, no un colegio sin lectores: no se observa (cerraría membresías reales).
     if (!Array.isArray(groups) || !Array.isArray(users) || users.length === 0) throw new Error('context_sources_unreadable');
+    // V9 65D-2F: solo cuentan como miembros las cuentas que EXISTEN en el padrón. Un id que la nómina del grupo todavía
+    // lista pero cuya cuenta ya no existe (baja, supresión, nómina restaurada de una copia) no tiene vinculación
+    // vigente: su membresía se cierra (y vence a los 12 meses) y nunca se le vuelve a abrir una fila.
+    const accounts = new Set(users.map(u => u?.id).filter(id => typeof id === 'string' && id));
     return groups.filter(g => g && typeof g.id === 'string' && g.id).map(g => {
         const scope = groupsContentScope([g.id]);
         return {
             groupId: g.id,
             works: scope.all ? [ALL_WORKS, ...scope.ids] : scope.ids,
-            members: getGroupMembers(g, users, { allGroups: groups, useLegacyColegioFallback: false, warnFn: () => {} }),
+            members: getGroupMembers(g, users, { allGroups: groups, useLegacyColegioFallback: false, warnFn: () => {} }).filter(id => accounts.has(id)),
         };
     });
 }

@@ -1,6 +1,7 @@
 # CHP V9 65D-2R — Conservación del registro de procedencia y de las constancias de sesión
 
-Fecha: 2026-11-22 · Unidad: V9 Bloque I, 65D-2R · Estado: **capacidad implementada, apagada por defecto**.
+Fecha: 2026-11-22 · Unidad: V9 Bloque I, 65D-2R; contrato temporal corregido en 65D-2F · Estado: **capacidad
+implementada, apagada por defecto**. La aprobación técnica de esta unidad no autoriza a encender la poda en producción.
 
 ## 1. Qué regula
 
@@ -24,11 +25,37 @@ Regla operativa indicada por Dirección para esta unidad (2026-11-22):
 |---|---|---|
 | Constancias de sesión | 12 meses | Última recepción (`last_received_ts`) |
 | Membresía cerrada | 12 meses | Cierre del intervalo (`until_ts`) |
-| Membresía abierta | Sin caducidad | Se conserva mientras exista la vinculación |
+| Membresía abierta | Sin caducidad mientras sea vigente | Se conserva mientras la cuenta exista y siga en la nómina del grupo |
 | Asociación obra–curso | Sin caducidad en este mecanismo | No contiene datos personales; se conserva mientras sirva al seguimiento |
 
-El plazo es de calendario UTC, con la misma función que el archivo de eventos (`subtractMonthsUtc`): una fila caduca
-cuando el reloj **supera** su fecha + 12 meses; a los 12 meses exactos todavía existe.
+### Contrato temporal (65D-2F)
+
+El **vencimiento** de una fila es la misma fecha y hora UTC doce meses de calendario después de su hecho inicial
+(`ledgerExpiryTs`). Si ese día no existe —una fila del 29 de febrero— vence al comienzo del 1 de marzo: nunca
+transcurren menos de doce meses.
+
+| Momento | Efecto |
+|---|---|
+| Antes del vencimiento (hasta 1 ms antes) | La fila se conserva |
+| En el vencimiento exacto | La fila es elegible y la poda la elimina |
+| Después | Igual: elegible, se elimina en la siguiente ejecución |
+
+- **Elegibilidad no es eliminación.** Una fila vencida sigue existiendo —y quien atribuye la sigue leyendo— hasta que
+  el proceso se ejecuta: cada 24 h, en una sola réplica, y solo con sus banderas encendidas. Con la poda apagada
+  nada se elimina nunca, por vencido que esté.
+- **UTC.** Todo el cálculo es sobre milisegundos de época en UTC. No depende de la zona horaria del servidor ni de los
+  cambios de hora (comprobado con el proceso en UTC, América/Bogotá, Asia/Tokio, Pacífico/Kiritimati y Europa/Madrid).
+- **Distinto del archivo de eventos.** La política aprobada de eventos conserva el evento «a los 12 meses exactos»
+  (`archiveRotation.mjs`); este registro lo elimina en ese instante. Son contratos separados y la poda del registro
+  ya no usa la función del archivo.
+- **Constancias independientes.** El plazo de cada constancia corre desde su propia última recepción. Recibir otra
+  sesión, o guardar más progreso de la misma obra, no renueva las anteriores. Solo volver a recibir **esa misma**
+  sesión (un reintento del dispositivo) mueve su última recepción y, con ella, su plazo: es la consecuencia literal
+  de «desde la última recepción».
+- **Membresía cerrada.** El cierre lo anota el servidor con su reloj al observar que la persona ya no está en el
+  grupo; los doce meses corren desde ese cierre, no desde el inicio de la membresía.
+- **Membresía abierta.** Solo cuenta como miembro una cuenta que existe en el padrón. Un identificador que la nómina
+  todavía lista pero cuya cuenta ya no existe se cierra en la siguiente observación y no vuelve a abrirse.
 
 ### Relación con la documentación vigente
 
@@ -63,7 +90,8 @@ enciende ni ejecuta ninguna poda sobre datos reales.
 Propiedades comprobadas (`server/__test__/contextLedgerRetention.test.mjs` y sección [13] de
 `operationalCoherenceHttp.test.mjs`):
 
-- Idempotente; una sola transacción; dos procesos a la vez retiran exactamente lo caducado.
+- Fechas límite al milisegundo, fin de mes, fin de año y 29 de febrero, contra la poda real.
+- Idempotente; una sola transacción; dos procesos a la vez retiran exactamente lo caducado y nada más.
 - `dryRun` cuenta lo que caducaría sin borrar.
 - Nunca toca una membresía abierta ni una asociación obra–curso.
 - Lo que borra se sobrescribe (`secure_delete`), como la supresión por titular.
@@ -107,11 +135,13 @@ despliegue por su procedimiento propio.
 Lo pendiente de entrega en el dispositivo sigue asociado a su cuenta y solo ella lo envía. La caducidad de lo
 pendiente de una cuenta que **no** es la activa pasa de 45 días a 12 meses (LU `59d7ada`, local), el mismo horizonte
 de esta regla; lo de la cuenta activa no caduca. La eliminación expresa es `LocalDataCleaner.clearPendingOf(userId)`.
-Límite conocido: no existe una señal remota que ejecute esa eliminación en un dispositivo cuando la cuenta se suprime
-en el servidor; lo pendiente de esa cuenta nunca se transmite (solo su dueña lo envía) y caduca a los 12 meses.
+**Requisito bloqueante de distribución (Bloque IV), no resuelto:** no existe una señal remota que ejecute esa
+eliminación en un dispositivo cuando la cuenta se suprime en el servidor. Hasta que exista, lo pendiente de esa cuenta
+permanece en el dispositivo —nunca se transmite, porque solo su dueña lo envía— y caduca a los 12 meses. LU no debe
+distribuirse sin cerrar este punto.
 
 ## 7. Pendiente de decisión
 
 1. Validación jurídica de los plazos de esta regla.
-2. Autorización para encender la caducidad en producción.
+2. Autorización para encender la caducidad en producción (esta unidad no la concede).
 3. Definición del «fin de la relación» (R18 / D4), si se quiere un plazo ligado al vínculo y no a los hechos registrados.

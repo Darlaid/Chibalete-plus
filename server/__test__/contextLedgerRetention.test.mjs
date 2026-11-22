@@ -4,13 +4,16 @@
  * Regla operativa: constancias de sesión, 12 meses desde su última recepción; membresía cerrada, 12 meses desde su
  * cierre; membresía abierta y asociaciones obra–curso no caducan. Se comprueba sobre un insights.db temporal:
  *   [1] apagada por defecto (dos banderas); `dryRun` cuenta sin borrar
- *   [2] fechas límite exactas (calendario UTC, también 29 de febrero)
+ *   [2] fechas límite: antes del vencimiento se conserva; en el vencimiento y después se elimina
  *   [3] nada necesario para una vinculación activa se elimina; las asociaciones obra–curso no llevan personas
  *   [4] idempotencia
  *   [5] dos procesos (réplicas) podando a la vez
  *   [6] lo podado no se reconstruye
  *   [7] después de podar, la evidencia que falta deja la lectura sin acreditar (nunca se da por buena)
  *   [8] supresión individual: sigue eliminando todo lo de la persona, caducado o no
+ *   [9] calendario UTC: vencimiento exacto al milisegundo, fin de mes, 29 de febrero, sin depender de la zona horaria
+ *   [10] constancias independientes: recibir otra sesión no renueva las anteriores
+ *   [11] membresía cerrada por la observación: doce meses desde ESE cierre
  * Nunca escribe en data/ ni data-critical/.
  *
  *   node server/__test__/contextLedgerRetention.test.mjs
@@ -46,11 +49,10 @@ const ok = (l, c, h = '') => c ? (console.log('  ✓', l), pass++) : (console.er
 const section = (t) => console.log(`\n${t}`);
 
 const L = await import('../aulaViva/contextLedger.mjs');
-const { subtractMonthsUtc } = await import('../aulaViva/archiveRotation.mjs');
 const { buildPedagogicalContext, creditSessions } = await import('../aulaViva/pedagogicalContext.mjs');
 const DAY = 86_400_000;
 const NOW = Date.UTC(2027, 10, 22, 15, 30, 0);            // reloj simulado de la poda
-const CUT = subtractMonthsUtc(NOW, 12);                   // 2026-11-22T15:30:00Z
+const CUT = L.ledgerRetentionCutoff(NOW);                 // 2026-11-22T15:30:00Z: lo fechado aquí vence exactamente en NOW
 
 L.ledgerStatus();                                         // crea el esquema
 const raw = new Database(DB);
@@ -62,7 +64,7 @@ const count = (q, ...a) => raw.prepare(q).get(...a).n;
 const receiptsOf = (u) => count(`SELECT COUNT(*) n FROM reading_session_receipts WHERE user_id = ?`, u);
 const memberRows = (u) => raw.prepare(`SELECT since_ts, until_ts, origin FROM pedagogical_context_intervals WHERE kind = 'member' AND user_id = ? ORDER BY since_ts`).all(u);
 
-// Constancias en el límite: 1 ms antes, exacto, 1 ms después; una primera recepción antigua con última recepción reciente.
+// Constancias en el límite: vencida hace 1 ms, vence exactamente ahora, vence dentro de 1 ms; una primera recepción antigua con última recepción reciente.
 receipt('r-old', 'w1', 's-before', CUT - 1);
 receipt('r-edge', 'w1', 's-exact', CUT);
 receipt('r-new', 'w1', 's-after', CUT + 1);
@@ -86,7 +88,7 @@ section('[1] apagada por defecto');
     ok('sin su bandera no elimina nada y lo dice', off.ok && off.skipped === 'retention_disabled_default_off' && count(`SELECT COUNT(*) n FROM reading_session_receipts`) === TOTAL.receipts && count(`SELECT COUNT(*) n FROM pedagogical_context_intervals`) === TOTAL.intervals, JSON.stringify(off));
     ok('la entrada del planificador tampoco', L.pruneOnce().skipped === 'retention_disabled_default_off');
     const dry = L.pruneContextLedger({ nowTs: NOW, dryRun: true });
-    ok('`dryRun` cuenta lo que caducaría (2 constancias, 2 membresías cerradas) sin borrar', dry.ok && dry.dry_run && dry.receipts_removed === 2 && dry.member_intervals_removed === 2 && dry.cutoff_ts === CUT && count(`SELECT COUNT(*) n FROM reading_session_receipts`) === TOTAL.receipts, JSON.stringify(dry));
+    ok('`dryRun` cuenta lo que caducaría (3 constancias, 3 membresías cerradas) sin borrar', dry.ok && dry.dry_run && dry.receipts_removed === 3 && dry.member_intervals_removed === 3 && dry.cutoff_ts === CUT && count(`SELECT COUNT(*) n FROM reading_session_receipts`) === TOTAL.receipts, JSON.stringify(dry));
     process.env.AULA_VIVA_CONTEXT_LEDGER_ENABLED = '0'; process.env.AULA_VIVA_CONTEXT_LEDGER_RETENTION_ENABLED = '1';
     ok('con el registro apagado la bandera de conservación sola no hace nada', L.pruneContextLedger({ nowTs: NOW }).skipped === 'ledger_disabled' && L.RETENTION_ENABLED() === false);
     process.env.AULA_VIVA_CONTEXT_LEDGER_ENABLED = '1';
@@ -95,13 +97,13 @@ section('[1] apagada por defecto');
 section('[2] fechas límite');
 const first = L.pruneContextLedger({ nowTs: NOW });
 {
-    ok('la poda retira 2 constancias y 2 membresías cerradas', first.ok && !first.skipped && first.receipts_removed === 2 && first.member_intervals_removed === 2, JSON.stringify(first));
-    ok('constancia recibida por última vez 1 ms antes de los 12 meses: eliminada (también su guardado sin sesión)', receiptsOf('r-old') === 0);
-    ok('…a los 12 meses exactos: todavía existe', receiptsOf('r-edge') === 1);
-    ok('…1 ms después: existe', receiptsOf('r-new') === 1);
+    ok('el corte es exacto: lo fechado en él vence en este instante y lo fechado 1 ms después, dentro de 1 ms', L.ledgerExpiryTs(CUT) === NOW && L.ledgerExpiryTs(CUT + 1) === NOW + 1 && L.ledgerExpiryTs(CUT - 1) === NOW - 1);
+    ok('la poda retira 3 constancias y 3 membresías cerradas', first.ok && !first.skipped && first.receipts_removed === 3 && first.member_intervals_removed === 3, JSON.stringify(first));
+    ok('constancia vencida hace 1 ms: eliminada (también su guardado sin sesión)', receiptsOf('r-old') === 0);
+    ok('constancia que vence exactamente AHORA (12 meses justos desde su última recepción): eliminada', receiptsOf('r-edge') === 0);
+    ok('constancia que vence dentro de 1 ms: se conserva', receiptsOf('r-new') === 1);
     ok('cuenta la ÚLTIMA recepción: una sesión antigua vuelta a recibir hace cinco días se conserva', receiptsOf('r-long') === 1);
-    ok('membresía cerrada 1 ms antes del límite: eliminada; en el límite y después: conservadas', memberRows('m-gone').length === 0 && memberRows('m-edge').length === 1 && memberRows('m-recent').length === 1);
-    ok('el límite es de calendario: desde un 29 de febrero se cuenta hasta el 28 del año anterior', subtractMonthsUtc(Date.UTC(2028, 1, 29, 12), 12) === Date.UTC(2027, 1, 28, 12));
+    ok('membresía cuyo plazo venció hace 1 ms o vence exactamente ahora: eliminadas; la que vence dentro de 1 ms: conservada', memberRows('m-gone').length === 0 && memberRows('m-edge').length === 0 && memberRows('m-recent').length === 1);
 }
 
 section('[3] vinculación activa y asociaciones obra–curso');
@@ -132,7 +134,8 @@ section('[5] dos procesos podando a la vez');
     ok('las dos terminan bien y entre ambas retiran exactamente lo caducado (400 constancias, 60 membresías), sin duplicar ni dejar restos',
         a.ok && b.ok && a.receipts_removed + b.receipts_removed === 400 && a.member_intervals_removed + b.member_intervals_removed === 60
         && count(`SELECT COUNT(*) n FROM reading_session_receipts WHERE last_received_ts < ?`, CUT) === 0, JSON.stringify([a, b]));
-    ok('lo vigente sigue ahí', receiptsOf('r-edge') === 1 && receiptsOf('r-new') === 1 && receiptsOf('r-long') === 1 && memberRows('m-active').length === 1);
+    const left = [count(`SELECT COUNT(*) n FROM reading_session_receipts`), count(`SELECT COUNT(*) n FROM pedagogical_context_intervals`)];
+    ok('lo vigente sigue ahí y nada más desaparece: quedan exactamente las 2 constancias y los 5 intervalos no vencidos', receiptsOf('r-new') === 1 && receiptsOf('r-long') === 1 && memberRows('m-active').length === 1 && left[0] === 2 && left[1] === 5, JSON.stringify(left));
 }
 
 section('[6] lo podado no se reconstruye');
@@ -172,7 +175,82 @@ section('[8] supresión individual');
         PROGRESS_SQLITE_PATH: path.join(tmp, 'no-progress.db'), INSIGHTS_SQLITE_PATH: DB }, tmp);
     const ack = await SUP.suppressResidualSources(paths, 'm-active');
     ok('elimina las constancias vigentes y la membresía ABIERTA de la persona (la conservación no la retiene)', receiptsOf('m-active') === 0 && memberRows('m-active').length === 0 && ack.insights?.rowsRemoved >= 2, JSON.stringify(ack.insights));
-    ok('…y no toca lo de las demás ni las asociaciones obra–curso', receiptsOf('r-edge') === 1 && memberRows('m-back').length === 1 && count(`SELECT COUNT(*) n FROM pedagogical_context_intervals WHERE kind = 'work'`) === 2);
+    ok('…y no toca lo de las demás ni las asociaciones obra–curso', receiptsOf('r-new') === 1 && memberRows('m-back').length === 1 && count(`SELECT COUNT(*) n FROM pedagogical_context_intervals WHERE kind = 'work'`) === 2);
+}
+
+section('[9] calendario UTC y vencimiento exacto');
+{
+    const I = (x) => Date.parse(x), iso = (t) => new Date(t).toISOString();
+    // [fecha de la última recepción o del cierre, vencimiento esperado]
+    const CASES = [
+        ['2027-03-15T09:20:30.123Z', '2028-03-15T09:20:30.123Z'],   // día cualquiera: misma fecha y hora, un año después
+        ['2027-01-31T08:00:00.000Z', '2028-01-31T08:00:00.000Z'],   // fin de mes
+        ['2027-12-31T23:59:59.999Z', '2028-12-31T23:59:59.999Z'],   // último milisegundo del año
+        ['2027-02-28T12:00:01.000Z', '2028-02-28T12:00:01.000Z'],   // 28 de febrero hacia un año bisiesto
+        ['2028-02-28T13:00:00.000Z', '2029-02-28T13:00:00.000Z'],   // 28 de febrero de un bisiesto
+        ['2028-02-29T12:00:00.000Z', '2029-03-01T00:00:00.000Z'],   // 29 de febrero: ese día no existe ⇒ comienzo del 1 de marzo
+        ['2028-03-01T00:00:00.000Z', '2029-03-01T00:00:00.000Z'],
+        ['2027-03-28T01:30:00.000Z', '2028-03-28T01:30:00.000Z'],   // noche de cambio de hora en Europa: UTC no lo nota
+        ['2027-11-07T06:30:00.000Z', '2028-11-07T06:30:00.000Z'],   // …y en América
+    ];
+    ok('el vencimiento es la misma fecha y hora UTC doce meses después (29 de febrero ⇒ 1 de marzo)', CASES.every(([d, e]) => iso(L.ledgerExpiryTs(I(d))) === e), JSON.stringify(CASES.map(([d]) => iso(L.ledgerExpiryTs(I(d))))));
+    ok('nunca transcurren menos de 365 días', CASES.every(([d]) => L.ledgerExpiryTs(I(d)) - I(d) >= 365 * DAY));
+    let badOrder = 0, prev = -Infinity; for (let t = I('2026-06-01T00:00:00Z'); t < I('2029-06-01T00:00:00Z'); t += 53 * 60_000 + 311) { const e = L.ledgerExpiryTs(t); if (e < prev) badOrder++; prev = e; }
+    ok('una fecha posterior nunca vence antes que una anterior (tres años recorridos)', badOrder === 0, String(badOrder));
+    let inexact = 0; for (let now = I('2027-02-25T00:00:00Z'); now < I('2029-03-05T00:00:00Z'); now += 5 * 3_600_000 + 7777) { const c = L.ledgerRetentionCutoff(now); if (!(L.ledgerExpiryTs(c) <= now && L.ledgerExpiryTs(c + 1) > now)) inexact++; }
+    ok('el corte de la poda equivale exactamente a «vencimiento <= ahora» (dos años recorridos, incluido el bisiesto)', inexact === 0, String(inexact));
+    // Cada caso contra la poda real, en orden de vencimiento: 1 ms antes se conserva; en su vencimiento se elimina.
+    const sorted = [...CASES].sort((a, b) => I(a[1]) - I(b[1]) || I(a[0]) - I(b[0]));
+    sorted.forEach(([d], i) => { receipt(`cal-${i}`, 'w1', `cal-s-${i}`, I(d)); interval('member', 'g9', `cal-${i}`, I(d) - 30 * DAY, I(d)); });
+    const present = (i) => receiptsOf(`cal-${i}`) === 1 && memberRows(`cal-${i}`).length === 1, absent = (i) => receiptsOf(`cal-${i}`) === 0 && memberRows(`cal-${i}`).length === 0;
+    const wrong = [];
+    sorted.forEach(([d, e], i) => {
+        const earlierTwin = sorted.findIndex((c) => c[1] === e) < i;      // otra fila con el MISMO vencimiento ya se podó en él
+        L.pruneContextLedger({ nowTs: I(e) - 1 });
+        if (!present(i) && !earlierTwin) wrong.push(`${d}: eliminada 1 ms ANTES de vencer`);
+        L.pruneContextLedger({ nowTs: I(e) });
+        if (!absent(i)) wrong.push(`${d}: sigue existiendo EN su vencimiento`);
+    });
+    ok('poda real, caso por caso: 1 ms antes del vencimiento constancia y membresía existen; en el vencimiento, ya no', wrong.length === 0, wrong.join(' | '));
+    ok(`el resultado no depende de la zona horaria del proceso (TZ=${process.env.TZ ?? 'sin definir'}; desfase local ${new Date(I('2027-07-01T00:00:00Z')).getTimezoneOffset()} min)`,
+        L.ledgerExpiryTs(I('2027-03-28T01:30:00.000Z')) === I('2028-03-28T01:30:00.000Z') && iso(L.ledgerRetentionCutoff(I('2028-03-28T01:30:00.000Z'))) === '2027-03-28T01:30:00.000Z');
+}
+
+section('[10] constancias independientes');
+{
+    const T0 = Date.UTC(2030, 0, 10, 10), SIX = Date.UTC(2030, 6, 10, 10);
+    const rec = (sid, at, dur = 600) => L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: sid, declaredStartTs: at - dur * 1000, durationSec: dur, mode: 'text', fromOrigin: sid === 'A', nowTs: at });
+    rec('A', T0);
+    rec('B', SIX);                                          // seis meses después llega OTRA sesión de la misma obra
+    L.recordSessionReceipt({ userId: 'ind', workId: 'w1', sessionId: '', nowTs: SIX + 1000 });   // …y un guardado sin sesión
+    const lastOf = (sid) => raw.prepare(`SELECT last_received_ts t FROM reading_session_receipts WHERE user_id = 'ind' AND session_id = ?`).get(sid)?.t;
+    ok('recibir otra sesión o guardar más progreso no cambia la última recepción de la primera', lastOf('A') === T0 && lastOf('B') === SIX, JSON.stringify([lastOf('A'), lastOf('B')]));
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(T0) - 1 });
+    ok('1 ms antes del vencimiento de la primera: las tres constancias existen', receiptsOf('ind') === 3);
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(T0) });
+    ok('en el vencimiento de la primera: ella caduca aunque las otras sean recientes; las otras siguen', lastOf('A') === undefined && lastOf('B') === SIX && receiptsOf('ind') === 2);
+    // Volver a recibir LA MISMA sesión (reintento) sí mueve su última recepción: es la regla («desde la última recepción»).
+    rec('B', SIX + 30 * DAY);
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(SIX) });
+    const aliveAtOriginal = lastOf('B') === SIX + 30 * DAY;
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(SIX + 30 * DAY) });
+    ok('solo volver a recibir ESA sesión mueve su plazo: vive en su vencimiento original y caduca doce meses después de su última recepción', aliveAtOriginal && lastOf('B') === undefined);
+}
+
+section('[11] membresía cerrada por la observación');
+{
+    const OPEN = Date.UTC(2031, 0, 5, 9), CLOSE = Date.UTC(2034, 4, 20, 14, 45);
+    L.observeContext([{ groupId: 'g1', works: ['w1'], members: ['m-back', 'leaver'] }], { nowTs: OPEN });
+    L.pruneContextLedger({ nowTs: OPEN + 3 * 365 * DAY });   // tres años después y aún abierta: no caduca
+    const open = memberRows('leaver');
+    L.observeContext([{ groupId: 'g1', works: ['w1'], members: ['m-back'] }], { nowTs: CLOSE });   // sale del curso
+    const closed = memberRows('leaver');
+    ok('mientras está abierta no caduca; al salir del curso el servidor anota el cierre con su reloj', open.length === 1 && open[0].until_ts === null && closed.length === 1 && closed[0].until_ts === CLOSE, JSON.stringify([open, closed]));
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(CLOSE) - 1 });
+    const before = memberRows('leaver').length;
+    L.pruneContextLedger({ nowTs: L.ledgerExpiryTs(CLOSE) });
+    ok('doce meses desde ESE cierre (no desde su inicio): 1 ms antes existe; en el vencimiento se elimina', before === 1 && memberRows('leaver').length === 0);
+    ok('…y quien sigue en el curso conserva su membresía abierta', memberRows('m-back').some((r) => r.until_ts === null));
 }
 
 raw.close(); L.closeContextLedger();

@@ -25,7 +25,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { subtractMonthsUtc } from './archiveRotation.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.INSIGHTS_SQLITE_PATH || path.resolve(__dirname, '..', '..', 'data-critical', 'insights.db');
@@ -222,9 +221,18 @@ export function sessionReceiptsOf(userId) {
  *   membresía abierta              no caduca: se conserva mientras exista la vinculación
  *   asociación obra–curso          no caduca aquí: solo lleva ids de grupo y de obra, ningún identificador de persona
  *
- * El límite es de calendario UTC, como el del archivo de eventos (`subtractMonthsUtc`): una fila caduca cuando `now`
- * SUPERA su fecha + 12 meses; a los 12 meses exactos todavía existe. La poda es idempotente y de una sola transacción
- * inmediata (dos réplicas a la vez dejan el mismo resultado; la que no obtiene el turno se omite y lo dice).
+ * CONTRATO TEMPORAL (V9 65D-2F). El vencimiento de una fila es `ledgerExpiryTs(fecha)`: la misma fecha y hora UTC
+ * doce meses de calendario después; si ese día no existe (29 de febrero), el comienzo del 1 de marzo. Antes de ese
+ * instante la fila se conserva; EN ese instante y después es elegible y la poda la elimina (`vencimiento <= ahora`).
+ * Todo es aritmética sobre milisegundos de época en UTC: no depende de la zona horaria del servidor ni del horario de
+ * verano. Distinto del archivo de eventos, cuya política aprobada conserva el evento a los 12 meses exactos.
+ *
+ * Elegibilidad no es eliminación: una fila vencida sigue existiendo hasta que el proceso se ejecuta (cada 24 h, y solo
+ * con sus banderas encendidas); mientras exista, quien atribuye la sigue leyendo. La poda es idempotente y de una sola
+ * transacción inmediata (dos réplicas a la vez dejan el mismo resultado; la que no obtiene el turno se omite y lo dice).
+ *
+ * Cada constancia es independiente: su plazo corre desde SU última recepción. Recibir otra sesión, o guardar más
+ * progreso de la misma obra, no renueva las anteriores. Solo la renueva volver a recibir ESA misma sesión.
  *
  * Lo podado NO se reconstruye: `observeContext` solo abre intervalos de asociaciones vigentes, con fecha de hoy. Quien
  * atribuye lee lo que queda: una sesión sin constancia o un periodo sin intervalo dejan de acreditarse (historial no
@@ -235,6 +243,34 @@ export function sessionReceiptsOf(userId) {
  * decisión operativa aparte. `dryRun` cuenta lo que caducaría sin borrar nada.
  */
 export const LEDGER_RETENTION_MONTHS = 12;
+
+/**
+ * `ts` + `months` meses de calendario en UTC: mismo día del mes y misma hora. Si ese día no existe en el mes destino
+ * (29 de febrero → año no bisiesto), el comienzo del día siguiente (1 de marzo, 00:00:00.000). Así nunca transcurre
+ * MENOS que el plazo y el resultado es no decreciente en `ts` (una fecha posterior nunca vence antes que una anterior).
+ */
+function addMonthsUtc(ts, months) {
+    const d = new Date(ts);
+    const y = d.getUTCFullYear(), m = d.getUTCMonth() + months, day = d.getUTCDate();
+    const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+    if (day > lastDay) return Date.UTC(y, m + 1, 1);
+    return Date.UTC(y, m, day, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds());
+}
+/** Instante en que vence una fila fechada en `ts` (última recepción de una constancia o cierre de una membresía). */
+export const ledgerExpiryTs = (ts) => addMonthsUtc(ts, LEDGER_RETENTION_MONTHS);
+/**
+ * Mayor fecha cuyo vencimiento ya llegó en `nowTs`: una fila es elegible si y solo si `fecha <= ledgerRetentionCutoff(now)`,
+ * que equivale exactamente a `ledgerExpiryTs(fecha) <= now` (el vencimiento es no decreciente en la fecha). Se busca
+ * por bisección: restar meses a `now` no es la inversa exacta alrededor del 29 de febrero.
+ */
+export function ledgerRetentionCutoff(nowTs) {
+    let lo = addMonthsUtc(nowTs, -LEDGER_RETENTION_MONTHS) - 3 * 86_400_000, hi = nowTs;   // vence(lo) <= now < vence(hi)
+    while (hi - lo > 1) {
+        const mid = lo + Math.floor((hi - lo) / 2);
+        if (ledgerExpiryTs(mid) <= nowTs) lo = mid; else hi = mid;
+    }
+    return lo;
+}
 export const RETENTION_ENABLED = () => ENABLED() && process.env.AULA_VIVA_CONTEXT_LEDGER_RETENTION_ENABLED === '1';
 
 /**
@@ -246,20 +282,20 @@ export function pruneContextLedger(opts = {}) {
     if (!ENABLED()) return { ...out, ok: true, skipped: 'ledger_disabled' };
     if (!out.dry_run && !RETENTION_ENABLED()) return { ...out, ok: true, skipped: 'retention_disabled_default_off' };
     const nowTs = opts.nowTs ?? Date.now();
-    const cutoff = subtractMonthsUtc(nowTs, LEDGER_RETENTION_MONTHS);
+    const cutoff = ledgerRetentionCutoff(nowTs);
     out.cutoff_ts = cutoff;
     try {
         db();
         if (out.dry_run) {
-            out.receipts_removed = _db.prepare(`SELECT COUNT(*) AS n FROM reading_session_receipts WHERE last_received_ts < ?`).get(cutoff).n;
-            out.member_intervals_removed = _db.prepare(`SELECT COUNT(*) AS n FROM pedagogical_context_intervals WHERE kind = 'member' AND until_ts IS NOT NULL AND until_ts < ?`).get(cutoff).n;
+            out.receipts_removed = _db.prepare(`SELECT COUNT(*) AS n FROM reading_session_receipts WHERE last_received_ts <= ?`).get(cutoff).n;
+            out.member_intervals_removed = _db.prepare(`SELECT COUNT(*) AS n FROM pedagogical_context_intervals WHERE kind = 'member' AND until_ts IS NOT NULL AND until_ts <= ?`).get(cutoff).n;
             return { ...out, ok: true };
         }
         // Lo que borra esta conexión se sobrescribe (no queda en páginas libres), igual que la supresión por titular.
         _db.pragma('secure_delete = ON');
         _db.transaction(() => {
-            out.receipts_removed = _db.prepare(`DELETE FROM reading_session_receipts WHERE last_received_ts < ?`).run(cutoff).changes;
-            out.member_intervals_removed = _db.prepare(`DELETE FROM pedagogical_context_intervals WHERE kind = 'member' AND until_ts IS NOT NULL AND until_ts < ?`).run(cutoff).changes;
+            out.receipts_removed = _db.prepare(`DELETE FROM reading_session_receipts WHERE last_received_ts <= ?`).run(cutoff).changes;
+            out.member_intervals_removed = _db.prepare(`DELETE FROM pedagogical_context_intervals WHERE kind = 'member' AND until_ts IS NOT NULL AND until_ts <= ?`).run(cutoff).changes;
             _st.setMeta.run('last_pruned_ts', String(nowTs));
         }).immediate();
         return { ...out, ok: true };

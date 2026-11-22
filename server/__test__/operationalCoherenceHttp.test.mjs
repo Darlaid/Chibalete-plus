@@ -394,10 +394,21 @@ try {
         ok('la conciliación tras restaurar reconoce esa fuente: un id solo presente en la telemetría queda entre los candidatos', SUP.residualSubjectIds(paths).has('ra-lu') && !SUP.residualSubjectIds(paths).has('ra-sup'));
     }
 
+    section('[12b] vigencia de la membresía: una cuenta que ya no existe no conserva ni recupera su fila (65D-2F)');
+    {
+        // La persona suprimida deja de existir en el padrón, pero la nómina del grupo todavía la lista (p. ej. una
+        // nómina restaurada de una copia). Las rutas del mediador observan el registro antes de leerlo.
+        fs.writeFileSync(P.users, JSON.stringify(JSON.parse(fs.readFileSync(P.users, 'utf8')).filter((u) => u.id !== 'ra-sup')));
+        grantC005(['med-a']);
+        const q = await both('/api/metrics/course/g-a', C['med-a']);
+        const rows = sql(P.insights, `SELECT COUNT(*) n FROM pedagogical_context_intervals WHERE user_id = 'ra-sup'`)[0].n;
+        ok('tras observar en las dos réplicas, el registro no vuelve a abrir ninguna fila para esa persona', okAll(q) && rows === 0, `${st(q).slice(0, 200)} filas=${rows}`);
+        ok('…y las membresías de quienes sí tienen cuenta siguen abiertas', sql(P.insights, `SELECT COUNT(*) n FROM pedagogical_context_intervals WHERE kind = 'member' AND group_id = 'g-a' AND until_ts IS NULL`)[0].n === GA.length - 1);
+    }
+
     section('[13] conservación: caducidad de constancias con las dos réplicas en marcha (65D-2R)');
     {
         // ra-none lee ahora 10 minutos por el progreso (lector EPUB): una sesión con su constancia.
-        grantC005(['med-a']);   // el compromiso vuelve a estar vigente para poder consultar el tablero
         const w = await post(S1, '/api/progress/ra-none/c1/sync', C['ra-none'], webBody('ret-1', Date.now() - 10 * MIN, 10, 'epub'));
         const m1 = await both('/api/metrics/course/g-a', C['med-a']);
         ok('antes: la sesión se acredita en las dos réplicas (1 sesión, 10 min, del curso)', w.status === 200 && m1.every((x) => { const q = row(x.json, 'ra-none'); return q?.totalSessions === 1 && MINS(q.totalReadingTimeMs) === 10 && q.dataState === 'verified_context'; }), st([w, ...m1]).slice(0, 600));
@@ -408,10 +419,13 @@ try {
         ok('sin su bandera, la poda no elimina nada', off.skipped === 'retention_disabled_default_off' && sql(P.insights, 'SELECT COUNT(*) n FROM reading_session_receipts')[0].n > 0, JSON.stringify(off));
         process.env.AULA_VIVA_CONTEXT_LEDGER_RETENTION_ENABLED = '1';
         const total = sql(P.insights, 'SELECT COUNT(*) n FROM reading_session_receipts')[0].n;
-        const kept = LedgerR.pruneContextLedger({ nowTs: Date.now() + 300 * DAY });   // a los diez meses nada ha caducado
-        const pruned = LedgerR.pruneContextLedger({ nowTs: Date.now() + 367 * DAY }); // pasados los doce meses, todas
+        const newest = sql(P.insights, 'SELECT MAX(last_received_ts) t FROM reading_session_receipts')[0].t;
+        const kept = LedgerR.pruneContextLedger({ nowTs: LedgerR.ledgerExpiryTs(newest) - 1 });   // 1 ms antes de que venza la más reciente: ella sigue
+        const stillThere = sql(P.insights, 'SELECT COUNT(*) n FROM reading_session_receipts WHERE last_received_ts = ?', newest)[0].n;
+        const pruned = LedgerR.pruneContextLedger({ nowTs: LedgerR.ledgerExpiryTs(newest) });     // en su vencimiento exacto: ninguna queda
         LedgerR.closeContextLedger();
-        ok('a los diez meses no caduca nada; pasados doce, todas las constancias (y ninguna membresía abierta ni asociación obra–curso)', kept.receipts_removed === 0 && pruned.ok && pruned.receipts_removed === total && pruned.member_intervals_removed === 0
+        ok('1 ms antes del vencimiento de la constancia más reciente, esta sigue; en su vencimiento exacto no queda ninguna (y ninguna membresía abierta ni asociación obra–curso se toca)', stillThere >= 1 && kept.receipts_removed + pruned.receipts_removed === total && pruned.receipts_removed >= 1 && pruned.ok
+            && sql(P.insights, 'SELECT COUNT(*) n FROM reading_session_receipts')[0].n === 0
             && sql(P.insights, `SELECT COUNT(*) n FROM pedagogical_context_intervals WHERE until_ts IS NULL`)[0].n === openBefore && sql(P.insights, `SELECT COUNT(*) n FROM pedagogical_context_intervals WHERE kind = 'work'`)[0].n === worksBefore, JSON.stringify([kept, pruned, total]));
         const m2 = await both('/api/metrics/course/g-a', C['med-a']);
         ok('después: la misma sesión ya no se acredita en ninguna réplica: «no atribuible», nunca «sin actividad» ni dada por buena', m2.every((x) => { const q = row(x.json, 'ra-none'); return q?.totalSessions === 0 && q.dataState === 'unverifiable_history' && q.readsWithoutTelemetry !== true; }), JSON.stringify(m2.map((x) => row(x.json, 'ra-none'))).slice(0, 600));
