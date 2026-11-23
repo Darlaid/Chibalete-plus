@@ -67,7 +67,7 @@ import { createB2cEntitlementGuard } from './b2c/b2cEntitlement.mjs';
 import { redactEmail } from './lib/logPrivacy.js';
 import { findLoginIndex, matchesLoginIdentifier } from './lib/loginIdentity.mjs';
 import { validatePasswordResetInput, planPasswordReset, resetTokenMatches } from './b2c/b2cPasswordReset.mjs';
-import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs, makeB2cLoginId } from './b2c/b2cProvisioning.mjs';
+import { B2cError, createB2cGuard, validateProvisionInput, validateRevokeInput, planUserPhase, planRulePhase, planRevoke, assertB2cDocumentsApproved, b2cTemplateRule, termsActDayMs, makeB2cLoginId, planStartPending, isPendingB2cRule, b2cAccessState } from './b2c/b2cProvisioning.mjs';
 // P2 — observabilidad (env-gated, default OFF → comportamiento idéntico).
 import { metricsMiddleware, metricsHandler } from './observability/metrics.js';
 import { readinessHandler } from './observability/health.js';
@@ -1634,6 +1634,9 @@ app.get('/api/access/by-user/:userId', requireAuth, async (req, res) => {
         if (!(e instanceof IdentityUnavailableError)) throw e;
         return res.status(503).json({ error: 'identity_unavailable' });
     }
+    // V9 F7-C3: la propia cuenta, ya activa, con una suscripción comprada que quedó pendiente (su inicio no llegó a
+    // escribirse al activar): se inicia ahora. Sin reglas pendientes no hace nada.
+    if (callerId === userId) await startPendingB2cAccess(userId, 'own-access');
     if (full) return res.json(resolveUserContentAccess(userId));
     if (isPersonalB2cAccount((readJSON(USERS_DB) || []).find(u => u?.id === userId))) {
         return res.status(403).json({ error: 'scope_access_denied', scope_type: 'user', scope_id: String(userId) });
@@ -6251,6 +6254,9 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
     if (conflict?.conflict === 'expired') return res.status(410).json({ error: 'El enlace de invitación expiró. Solicita uno nuevo a tu administrador.', code: 'TOKEN_EXPIRED' });
 
     log(`Account activated: user=${activated.id}`, 'ACCESS');
+    // V9 F7-C3: activación efectiva. Si esta cuenta tiene una suscripción comprada y pendiente, sus doce meses empiezan
+    // ahora. Un fallo aquí no deshace la activación de la cuenta: el inicio se reintenta cuando el lector consulta sus accesos o la tienda reenvía el pedido.
+    await startPendingB2cAccess(activated.id, 'accept-invite');
     return res.status(200).json({
         success: true,
         user:    sanitizeUserForClient(activated),
@@ -6308,6 +6314,31 @@ app.post('/api/resend-invite', requireAuth, async (req, res) => {
 // Lógica pura y pruebas: server/b2c/b2cProvisioning.mjs.
 // ---------------------------------------------------------------------------
 const b2cGuard = createB2cGuard({ readSecret: readB2cProvisioningSecret, log });
+/**
+ * V9 F7-C3 — inicia la vigencia de las suscripciones B2C pendientes de una cuenta ACTIVA (ver «ACTIVACIÓN EFECTIVA» en
+ * b2cProvisioning.mjs). Idempotente: sin reglas pendientes de esa cuenta no escribe nada. Nunca lanza.
+ * @returns {Promise<number>} cuántas reglas inició
+ */
+async function startPendingB2cAccess(userId, via) {
+    try {
+        const cached = readJSON(ACCESS_DB);
+        if (!(Array.isArray(cached) ? cached : []).some(r => isPendingB2cRule(r) && r.scope === 'user' && r.scopeId === userId)) return 0;
+        const nowMs = Date.now();
+        const started = await mutateAccessRules((rules) => {
+            const plan = planStartPending({ rules, userId, nowMs });
+            if (plan.started.length) {
+                for (const s of plan.started) rules[rules.findIndex(r => r && r.id === s.id)] = s;
+                writeJSON(ACCESS_DB, rules);
+            }
+            return plan.started;
+        });
+        for (const r of started) log(`[B2C] access started ${r.b2c.source}:${r.b2c.orderId} user=${userId} via=${via} expires=${new Date(r.expiresAt).toISOString()}`, 'ACCESS');
+        return started.length;
+    } catch (e) {
+        log(`[B2C] no se pudo iniciar la vigencia pendiente user=${userId} via=${via}: ${e?.code || e?.message || e}`, 'ERROR');
+        return 0;
+    }
+}
 const b2cFail = (res, e) => {
     if (e instanceof B2cError) return res.status(e.status).json({ status: 'error', code: e.code });
     log(`[B2C] unexpected error: ${e?.message || e}`, 'ERROR');
@@ -6360,19 +6391,28 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
         }
 
         // Fase 2 — regla personal con caducidad (lock de accesos).
+        // V9 F7-C3: la vigencia empieza con la activación efectiva. Cuenta ya activa ⇒ ahora, al conceder la regla;
+        // cuenta invitada ⇒ la regla queda pendiente (sin acceso ni plazo) hasta que la cuenta se active.
+        const accountActive = (userPhase.user?.accountStatus || 'active') === 'active';
         const rulePhase = await mutateAccessRules((rules) => {
-            const plan = planRulePhase({ rules, input, userId: userPhase.userId, nowMs });
+            const plan = planRulePhase({ rules, input, userId: userPhase.userId, nowMs, accountActive });
             if (!input.dryRun && plan.ruleOp === 'create') { rules.push(plan.rule); writeJSON(ACCESS_DB, rules); }
+            if (!input.dryRun && plan.ruleOp === 'start') { rules[rules.findIndex(r => r && r.id === plan.rule.id)] = plan.rule; writeJSON(ACCESS_DB, rules); }
             return plan;
         });
-        const status = rulePhase.ruleOp === 'none' ? 'already_activated' : 'activated';
-        log(`[B2C] provision ${input.source}:${input.orderId} → ${input.dryRun ? 'dry_run:' : ''}${status} user=${userPhase.userId} userOp=${userPhase.userOp}`, 'ACCESS');
+        const status = rulePhase.ruleOp === 'create' ? 'activated' : 'already_activated';
+        const accessState = b2cAccessState(rulePhase.rule, nowMs);
+        log(`[B2C] provision ${input.source}:${input.orderId} → ${input.dryRun ? 'dry_run:' : ''}${status} access=${accessState} user=${userPhase.userId} userOp=${userPhase.userOp}`, 'ACCESS');
         return res.status(200).json({
             status: input.dryRun ? `dry_run_${status}` : status,
             ruleId: rulePhase.rule.id,
             userId: userPhase.userId,
-            activationAt: rulePhase.rule.b2c?.activationAt ?? input.activationAt,
-            expiresAt: rulePhase.rule.expiresAt,
+            // V9 F7-C3: `accessState` dice si el acceso ya corre. Pendiente de activación ⇒ sin fechas (null): los doce
+            // meses empiezan cuando la cuenta se active. `requestedAt` es la fecha que envió la tienda.
+            accessState,
+            activationAt: accessState === 'pending_activation' ? null : (rulePhase.rule.b2c?.activationAt ?? null),
+            expiresAt: accessState === 'pending_activation' ? null : rulePhase.rule.expiresAt,
+            requestedAt: rulePhase.rule.b2c?.requestedAt ?? input.activationAt,
             accountStatus: userPhase.user?.accountStatus || 'active',
             activationUrl: userPhase.activationUrl,
             reusedAccount: userPhase.reusedAccount,

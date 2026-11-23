@@ -11,6 +11,9 @@
  *  - `titleIds` = copia de la regla plantilla `access-b2c-lectores` (lista maestra B2C);
  *  - `expiresAt` = mismo día 12 meses después, 23:59:59.999 en Bogotá. El motor de accesos
  *    ya ignora reglas vencidas en cada petición (accessService.js): no hace falta cron;
+ *  - V9 F7-C3 — los doce meses cuentan desde la ACTIVACIÓN EFECTIVA del acceso, no desde el pago ni desde el
+ *    primer intento de la tienda (ver «Activación efectiva» más abajo). Un pedido pagado cuya cuenta todavía no
+ *    está activa deja su regla PENDIENTE: no concede acceso y su plazo no corre;
  *  - el comprador NUNCA entra en `group-b2c-lectores`: las reglas se SUMAN y la del grupo
  *    no caduca, así que pertenecer al grupo anularía la caducidad personal;
  *  - reembolso → `expiresAt = ahora` SOLO en la regla de ese pedido (sin borrar nada).
@@ -206,9 +209,56 @@ export function validateRevokeInput(body) {
     return { orderId, source: b.source, idempotencyKey: b.idempotencyKey, reason, dryRun: b.dryRun === true };
 }
 
+/**
+ * V9 F7-C3 — ACTIVACIÓN EFECTIVA.
+ *
+ * Antes, `expiresAt` se calculaba con la fecha que enviaba la tienda (`activationAt` = su primer intento de
+ * aprovisionar, casi siempre el pago) y la regla quedaba vigente en ese instante. Consecuencias: el año empezaba a
+ * correr aunque nadie hubiera activado la cuenta (enlace sin abrir, representante que aún no decide), y los días que
+ * un pedido pasaba en revisión manual, bloqueo documental o reintentos se descontaban de los doce meses.
+ *
+ * Ahora la fecha de inicio la fija la APP, con su reloj, en el momento en que el acceso existe de verdad:
+ *   - cuenta YA ACTIVA (recompra, cuenta existente con sus términos vigentes): al conceder la regla;
+ *   - cuenta INVITADA (alta nueva, adulto o lector menor representado): cuando la cuenta se activa con las decisiones
+ *     exigidas (`/api/accept-invite`). Hasta entonces la regla es `pendingActivation`: `expiresAt = 0` (el motor de
+ *     accesos y las regalías ya ignoran una regla con esa fecha), sin `activationAt`, y no concede nada.
+ * La fecha de la tienda se conserva como `requestedAt` (cuándo lo pidió), sin efecto sobre la vigencia.
+ * Una regla ya iniciada no se reinicia: activar dos veces, reenviar el pedido o reintentar no mueve sus fechas.
+ * Una regla pendiente SÍ cuenta como suscripción en curso para rechazar una segunda compra de la misma cuenta.
+ */
+export const isPendingB2cRule = (rule) => !!rule && !!rule.b2c && rule.b2c.pendingActivation === true && !rule.b2c.revokedAt;
+/** Estado del acceso de la regla de un pedido: 'pending_activation' | 'active' | 'expired' | 'revoked'. */
+export function b2cAccessState(rule, nowMs) {
+    if (!rule || !rule.b2c) return null;
+    if (rule.b2c.revokedAt) return 'revoked';
+    if (isPendingB2cRule(rule)) return 'pending_activation';
+    return typeof rule.expiresAt === 'number' && rule.expiresAt <= nowMs ? 'expired' : 'active';
+}
 const isActiveB2cRuleFor = (rule, userId, nowMs) =>
     rule && rule.b2c && rule.scope === 'user' && rule.scopeId === userId &&
-    (typeof rule.expiresAt !== 'number' || rule.expiresAt > nowMs);
+    (isPendingB2cRule(rule) || typeof rule.expiresAt !== 'number' || rule.expiresAt > nowMs);
+
+/**
+ * V9 F7-C3 — inicia las reglas pendientes de una cuenta que acaba de quedar activa. Pura e idempotente: solo toca
+ * reglas `pendingActivation` de ESA cuenta y sin revocar; una regla ya iniciada, vencida o revocada no cambia.
+ * Los títulos se toman de la plantilla vigente (la lista pudo crecer mientras la regla esperaba).
+ * @returns {{ started: object[], rules: object[] }}
+ */
+export function planStartPending({ rules, userId, nowMs }) {
+    const list = Array.isArray(rules) ? rules : [];
+    const template = list.find(r => r && r.id === B2C_TEMPLATE_RULE_ID);
+    const titles = template && Array.isArray(template.titleIds) && template.titleIds.length > 0 ? template.titleIds.filter(id => typeof id === 'string') : null;
+    const started = [];
+    const next = list.map((r) => {
+        if (!isPendingB2cRule(r) || r.scope !== 'user' || r.scopeId !== userId) return r;
+        const expiresAt = computeExpiresAt(nowMs);
+        const { pendingActivation: _pending, ...b2c } = r.b2c;
+        const rule = { ...r, titleIds: titles ? [...titles] : r.titleIds, expiresAt, b2c: { ...b2c, activationAt: nowMs, expiresAt, activationBasis: 'account_activated' } };
+        started.push(rule);
+        return rule;
+    });
+    return { started, rules: next };
+}
 
 /**
  * Fase 1 (bajo el lock de usuarios): resuelve la identidad. Pura: devuelve la mutación.
@@ -339,24 +389,33 @@ function planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, 
  * Fase 2 (bajo el lock de accesos): crea la regla del pedido si no existe. Pura.
  * Vuelve a comprobar existencia y conflicto con el estado fresco (carreras entre contenedores).
  */
-export function planRulePhase({ rules, input, userId, nowMs }) {
+export function planRulePhase({ rules, input, userId, nowMs, accountActive = true }) {
     const ruleId = ruleIdFor(input.source, input.orderId);
     const existing = rules.find(r => r && r.id === ruleId);
     if (existing) {
         if (existing.b2c?.idempotencyKey !== input.idempotencyKey || existing.scopeId !== userId) throw new B2cError(409, 'idempotency_mismatch');
+        // V9 F7-C3: un reintento o reenvío nunca mueve fechas. Solo si la regla seguía pendiente y la cuenta ya está
+        // activa (la activación ocurrió pero su inicio no llegó a escribirse) se inicia ahora.
+        if (accountActive && isPendingB2cRule(existing)) {
+            const { started } = planStartPending({ rules, userId, nowMs });
+            const rule = started.find(r => r.id === ruleId);
+            if (rule) return { ruleOp: 'start', rule };
+        }
         return { ruleOp: 'none', rule: existing };
     }
     if (rules.some(r => r && isActiveB2cRuleFor(r, userId, nowMs))) throw new B2cError(409, 'conflict_active_subscription');
     const template = b2cTemplateRule(rules);
-    const expiresAt = computeExpiresAt(input.activationAt);
+    // V9 F7-C3: el inicio lo fija la APP (ver «ACTIVACIÓN EFECTIVA»). `input.activationAt` es cuándo lo pidió la tienda.
+    const expiresAt = accountActive ? computeExpiresAt(nowMs) : 0;
     const rule = {
         id: ruleId, scope: 'user', scopeId: userId,
         titleIds: template.titleIds.filter(id => typeof id === 'string'),
         collectionIds: [],
         expiresAt,
         b2c: { orderId: input.orderId, productId: input.productId, plan: input.plan, source: input.source,
-            idempotencyKey: input.idempotencyKey, activationAt: input.activationAt, expiresAt, createdAt: nowMs,
-            templateRuleId: B2C_TEMPLATE_RULE_ID },
+            idempotencyKey: input.idempotencyKey, requestedAt: input.activationAt,
+            ...(accountActive ? { activationAt: nowMs, activationBasis: 'rule_granted' } : { activationAt: null, pendingActivation: true }),
+            expiresAt, createdAt: nowMs, templateRuleId: B2C_TEMPLATE_RULE_ID },
     };
     return { ruleOp: 'create', rule };
 }
@@ -369,8 +428,10 @@ export function planRevoke({ rules, input, nowMs }) {
     if (rule.b2c?.idempotencyKey !== input.idempotencyKey) throw new B2cError(409, 'idempotency_mismatch');
     if (rule.b2c?.revokedAt) return { status: 'already_revoked', ruleOp: 'none', rule };
     const expiresAt = typeof rule.expiresAt === 'number' ? Math.min(rule.expiresAt, nowMs) : nowMs;
+    // V9 F7-C3: una regla pendiente que se revoca deja de estarlo: activar la cuenta después ya no la inicia.
+    const { pendingActivation: _pending, ...b2c } = rule.b2c;
     return { status: 'revoked', ruleOp: 'update',
-        rule: { ...rule, expiresAt, b2c: { ...rule.b2c, revokedAt: nowMs, revokeReason: input.reason } } };
+        rule: { ...rule, expiresAt, b2c: { ...b2c, revokedAt: nowMs, revokeReason: input.reason, ...(_pending ? { revokedBeforeActivation: true } : {}) } } };
 }
 
 /**
@@ -383,7 +444,8 @@ export function planTitleSync({ rules, nowMs }) {
     const target = JSON.stringify([...template.titleIds]);
     let updated = 0;
     const next = rules.map(r => {
-        if (!r || !r.b2c || r.scope !== 'user' || (typeof r.expiresAt === 'number' && r.expiresAt <= nowMs)) return r;
+        // (F7-C3: una regla pendiente de activación no está vencida: también recibe el catálogo vigente)
+        if (!r || !r.b2c || r.scope !== 'user' || (!isPendingB2cRule(r) && typeof r.expiresAt === 'number' && r.expiresAt <= nowMs)) return r;
         if (JSON.stringify(r.titleIds || []) === target) return r;
         updated++;
         return { ...r, titleIds: [...template.titleIds], b2c: { ...r.b2c, titlesSyncedAt: nowMs } };

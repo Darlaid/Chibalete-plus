@@ -108,6 +108,17 @@ const arrancado = async (at = base) => { for (let i = 0; i < 120; i++) { try { i
 // V8.1-PROD-05B: huella de todo lo que una provisión puede escribir (cuentas, reglas, decisiones).
 const stores = () => [P.users, P.access, process.env.CHP_A2_REGISTRY].map((f) => fs.readFileSync(f, 'utf8')).join('\u0000');
 const T_NOW = () => ({ version: ACCEPTANCE_DOCUMENTS.terms.version, acceptedAt: Date.now() - 5000 });
+// V9 F7-C3: la vigencia ya no empieza en la fecha que envía la tienda, así que una suscripción vencida no se puede
+// fabricar con un pedido «de hace 400 días». El paso del año se simula sobre el almacén sintético de la prueba: la
+// regla YA iniciada de ese pedido pasa a haber empezado hace 13 meses.
+const expireRule = (orderId) => {
+    const rules = J(P.access), r = rules.find((x) => x.id === `access-b2c-test-order-${orderId}`);
+    const past = Date.now() - 35 * 864e5;
+    r.expiresAt = past; r.b2c = { ...r.b2c, expiresAt: past, activationAt: past - 365 * 864e5 };
+    fs.writeFileSync(P.access + '.tmp', JSON.stringify(rules)); fs.renameSync(P.access + '.tmp', P.access);
+};
+/** La regla de un pedido sigue en curso: pendiente de activación o vigente (y sin revocar). */
+const inCourse = (r) => !!r && !r.b2c.revokedAt && (r.b2c.pendingActivation === true || r.expiresAt > Date.now());
 
 try {
     if (!await arrancado()) { console.error('El servidor no arrancó:\n' + boot.slice(-3000)); process.exit(1); }
@@ -124,7 +135,8 @@ try {
     console.log('[2] provisión Digital (usuario nuevo)');
     const r1 = await signed('/api/b2c/provision', A);
     ok('200 activated', r1.status === 200 && r1.body.status === 'activated', JSON.stringify(r1.body));
-    ok('expiresAt = activación + 12 meses (fin del día en Bogotá)', r1.body.expiresAt === computeExpiresAt(A.activationAt));
+    // V9 F7-C3: pedido pagado ≠ acceso activado. La cuenta es nueva (invitada): el acceso queda pendiente, sin fechas.
+    ok('pedido pagado, cuenta sin activar ⇒ acceso pendiente: sin fecha de inicio ni de vencimiento', r1.body.accessState === 'pending_activation' && r1.body.expiresAt === null && r1.body.activationAt === null && r1.body.requestedAt === A.activationAt, JSON.stringify(r1.body));
     ok('devuelve enlace de activación', /^\/#\/activar\?token=[0-9a-f]{64}$/.test(r1.body.activationUrl || ''));
     const u1 = J(P.users).find(u => u.id === r1.body.userId);
     ok('usuario creado invitado, lector, correo normalizado, marcado b2c', u1 && u1.accountStatus === 'invited' && u1.roles.includes('lector') && u1.email === 'comprador.uno@fixture.invalid' && u1.b2c === true);
@@ -132,18 +144,25 @@ try {
     ok('groups_db intacto: el comprador no entra en group-b2c-lectores', fs.readFileSync(P.groups, 'utf8') === groupsBefore);
     const rule1 = J(P.access).find(r => r.id === 'access-b2c-test-order-1001');
     ok('regla personal: ámbito usuario, titleIds de la plantilla, con caducidad', rule1 && rule1.scope === 'user' && rule1.scopeId === u1.id &&
-        JSON.stringify(rule1.titleIds) === '["obra-1","obra-2"]' && rule1.expiresAt === r1.body.expiresAt);
+        JSON.stringify(rule1.titleIds) === '["obra-1","obra-2"]' && rule1.expiresAt === 0 && rule1.b2c.pendingActivation === true && rule1.b2c.activationAt === null);
 
     console.log('[3] idempotencia (reintento del mismo pedido)');
     const r1b = await signed('/api/b2c/provision', { ...A, activationAt: Date.now() });
     ok('already_activated, mismo usuario y misma regla', r1b.status === 200 && r1b.body.status === 'already_activated' && r1b.body.userId === r1.body.userId && r1b.body.ruleId === r1.body.ruleId);
     ok('sin duplicados: 3 reglas, 4 usuarios (fixtures COLE, MIXTO, ADMIN + 1 nuevo)', J(P.access).length === 3 && J(P.users).length === 4);
-    ok('expiresAt NO se recalcula', J(P.access).find(r => r.id === 'access-b2c-test-order-1001').expiresAt === r1.body.expiresAt);
+    ok('el reintento no inicia la vigencia: la regla sigue pendiente', J(P.access).find(r => r.id === 'access-b2c-test-order-1001').b2c.pendingActivation === true && r1b.body.accessState === 'pending_activation' && r1b.body.expiresAt === null);
     ok('enlace nuevo (respuesta perdida recuperable) y el anterior deja de valer', r1b.body.activationUrl && r1b.body.activationUrl !== r1.body.activationUrl);
     ok('el enlace anterior ya no activa', (await activate(r1.body.activationUrl)) === 404);
 
     console.log('[4] activación y acceso reales');
+    const tAct = Date.now();
     ok('accept-invite con el enlace vigente → 200', (await activate(r1b.body.activationUrl)) === 200);
+    const started1 = J(P.access).find(r => r.id === 'access-b2c-test-order-1001');
+    ok('la vigencia empieza al activar la cuenta: inicio = ese momento, vencimiento = 12 meses después (fin del día en Bogotá)', started1.b2c.pendingActivation === undefined && started1.b2c.activationAt >= tAct && started1.b2c.activationAt <= Date.now()
+        && started1.expiresAt === computeExpiresAt(started1.b2c.activationAt) && started1.b2c.requestedAt === A.activationAt && started1.b2c.activationBasis === 'account_activated', JSON.stringify(started1.b2c));
+    const r1c = await signed('/api/b2c/provision', { ...A, activationAt: Date.now() });
+    ok('un reenvío posterior informa las fechas reales y no las mueve', r1c.status === 200 && r1c.body.status === 'already_activated' && r1c.body.accessState === 'active' && r1c.body.expiresAt === started1.expiresAt && r1c.body.activationAt === started1.b2c.activationAt
+        && J(P.access).find(r => r.id === 'access-b2c-test-order-1001').expiresAt === started1.expiresAt, JSON.stringify(r1c.body));
     const L1 = await login('comprador.uno@fixture.invalid');
     ok('login del comprador → 200', L1.status === 200 && !!L1.cookie);
     ok('puede abrir una obra de la lista B2C', await canRead(L1.cookie, u1.id, 'obra-1'));
@@ -152,8 +171,11 @@ try {
     console.log('[5] caducidad con fecha controlada (sin cron)');
     const E = order(1002, 'vencido@fixture.invalid', { activationAt: Date.now() - 400 * 864e5 });
     const r2 = await signed('/api/b2c/provision', E);
-    ok('provisión de un pedido activado hace 400 días → expiresAt en el pasado', r2.status === 200 && r2.body.expiresAt < Date.now(), JSON.stringify(r2.body));
+    // V9 F7-C3: un pedido que la tienda fecha hace 400 días NO nace vencido: su año no ha empezado.
+    ok('un pedido que la tienda fecha hace 400 días no nace vencido: queda pendiente de activación', r2.status === 200 && r2.body.accessState === 'pending_activation' && r2.body.expiresAt === null, JSON.stringify(r2.body));
     ok('activación de la cuenta', (await activate(r2.body.activationUrl)) === 200);
+    ok('…y al activarla recibe sus doce meses completos desde hoy', J(P.access).find(r => r.id === 'access-b2c-test-order-1002').expiresAt > Date.now() + 364 * 864e5);
+    expireRule(1002);   // pasa el año
     const L2 = await login('vencido@fixture.invalid');
     ok('el comprador vencido puede iniciar sesión…', L2.status === 200);
     ok('…pero la regla vencida NO concede acceso (lo aplica el autorizador en cada petición)', !(await canRead(L2.cookie, r2.body.userId, 'obra-1')));
@@ -197,7 +219,7 @@ try {
     console.log('[9] dry-run');
     const snapU = fs.readFileSync(P.users, 'utf8'), snapA = fs.readFileSync(P.access, 'utf8');
     const d1 = await signed('/api/b2c/provision', order(1005, 'nuevo@fixture.invalid', { dryRun: true }));
-    ok('dry_run_activated con expiresAt calculado', d1.status === 200 && d1.body.status === 'dry_run_activated' && d1.body.expiresAt > Date.now());
+    ok('dry_run_activated: cuenta nueva ⇒ el acceso quedaría pendiente de activación', d1.status === 200 && d1.body.status === 'dry_run_activated' && d1.body.accessState === 'pending_activation' && d1.body.expiresAt === null, JSON.stringify(d1.body));
     ok('dry-run no escribe usuarios ni reglas', fs.readFileSync(P.users, 'utf8') === snapU && fs.readFileSync(P.access, 'utf8') === snapA);
 
     console.log('[E] P2-ENTITLEMENT-EXPIRY-01 — Leo, Experiencias y TTS');
@@ -229,7 +251,11 @@ try {
     // C. B2C vencido + colegio vigente → conserva solo lo del colegio
     const actM = Date.now() - 400 * 864e5; // V8.1-PROD-05B (G3): cuenta activa ⇒ con la T del checkout de ese pedido
     const rM = await signed('/api/b2c/provision', order(1010, 'mixto@fixture.invalid', { activationAt: actM, termsAcceptance: { version: ACCEPTANCE_DOCUMENTS.terms.version, acceptedAt: actM } }));
-    ok('C. identidad B2C mixta con suscripción vencida', rM.status === 200 && rM.body.userId === 'MIXTO' && rM.body.expiresAt < Date.now());
+    // V9 F7-C3: cuenta YA activa ⇒ el acceso empieza al concederse la regla (ahora), no en la fecha antigua de la tienda.
+    ok('C. cuenta ya activa: la vigencia empieza al conceder la regla (hoy), no en la fecha de hace 400 días que envía la tienda', rM.status === 200 && rM.body.userId === 'MIXTO' && rM.body.accessState === 'active'
+        && rM.body.activationAt >= Date.now() - 60_000 && rM.body.expiresAt === computeExpiresAt(rM.body.activationAt) && rM.body.requestedAt === actM, JSON.stringify(rM.body));
+    expireRule(1010);   // pasa el año
+    ok('C. identidad B2C mixta con suscripción vencida', J(P.access).find(r => r.id === 'access-b2c-test-order-1010').expiresAt < Date.now());
     const LM = await login('mixto@fixture.invalid');
     ok('C. abre la obra del colegio y NO la obra B2C', await canRead(LM.cookie, 'MIXTO', 'obra-colegio') && !(await canRead(LM.cookie, 'MIXTO', 'obra-1')));
     const pC = await premium(LM.cookie, 'MIXTO');
@@ -428,7 +454,7 @@ try {
         // 9. revocación de un pedido
         const rv = await signed('/api/b2c/revoke', { orderId: 3001, source: 'test', idempotencyKey: 'test:order:3001', reason: 'refunded' });
         const rule = (id) => J(P.access).find((r) => r.id === id);
-        ok('[9] reembolso del pedido del primer menor → solo su regla vence; las del hermano y del adulto siguen vigentes; cuentas intactas', rv.status === 200 && rv.body.status === 'revoked' && rule('access-b2c-test-order-3001').expiresAt <= Date.now() && rule('access-b2c-test-order-3002').expiresAt > Date.now() && rule('access-b2c-test-order-3000').expiresAt > Date.now() && byId(k1.body.userId).accountStatus === 'active' && gate().state('A0', k1.body.userId)?.status === 'granted');
+        ok('[9] reembolso del pedido del primer menor → solo su regla vence; las del hermano y del adulto siguen vigentes; cuentas intactas', rv.status === 200 && rv.body.status === 'revoked' && rule('access-b2c-test-order-3001').expiresAt <= Date.now() && !inCourse(rule('access-b2c-test-order-3001')) && inCourse(rule('access-b2c-test-order-3002')) && inCourse(rule('access-b2c-test-order-3000')) && byId(k1.body.userId).accountStatus === 'active' && gate().state('A0', k1.body.userId)?.status === 'granted');
 
         // 5. recompra para un menor existente
         const before5 = stores();
