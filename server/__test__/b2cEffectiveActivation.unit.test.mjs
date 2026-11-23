@@ -52,7 +52,7 @@ section('[3] la activación de la cuenta inicia la vigencia, una sola vez');
     ok('una regla iniciada: inicio = momento de la activación, vencimiento = 12 meses después', s.started.length === 1 && r.b2c.activationAt === at && r.expiresAt === computeExpiresAt(at) && r.b2c.expiresAt === r.expiresAt && r.b2c.activationBasis === 'account_activated');
     ok('deja de estar pendiente y pasa a «active»', r.b2c.pendingActivation === undefined && !isPendingB2cRule(r) && b2cAccessState(r, at) === 'active');
     ok('recibe el catálogo vigente (la lista creció mientras esperaba)', JSON.stringify(r.titleIds) === '["obra-1","obra-2","obra-3"]');
-    ok('conserva pedido, plan, clave de idempotencia y fecha de la tienda', r.id === pending.id && r.b2c.idempotencyKey === pending.b2c.idempotencyKey && r.b2c.requestedAt === pending.b2c.requestedAt && r.b2c.plan === 'digital');
+    ok('conserva pedido, plan, clave de idempotencia y fecha de la tienda', ['idempotencyKey', 'requestedAt', 'orderId', 'plan'].every((f) => r.b2c[f] === pending.b2c[f]) && r.id === pending.id && r.b2c.plan === 'digital');
     const again = planStartPending({ rules: s.rules, userId: U, nowMs: at + 5 * DAY });
     ok('idempotente: una segunda activación no encuentra nada que iniciar ni mueve fechas', again.started.length === 0 && JSON.stringify(again.rules) === JSON.stringify(s.rules));
     ok('no toca reglas de otra cuenta, ni vencidas, ni la plantilla', planStartPending({ rules: [template(), pending, { ...pending, id: 'x', scopeId: 'user-2' }], userId: 'user-3', nowMs: at }).started.length === 0);
