@@ -2140,6 +2140,11 @@ app.delete('/api/library/editorial/references/:id', requireAdminAccess, async (r
 // F1-B (EDITORIALES-03): requireAdminRole (/api/content) deja la identidad de
 // la sesión en req.user, no en req.auth; sin este paso el actor caía en 'admin-secret'.
 const publisherActorOf = (req) => req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'] ?? 'admin-secret';
+// V9 BIII F5-D — quién hizo un cambio administrativo (altas, bajas, traslados, designaciones). Con sesiones, el navegador
+// no envía `x-user-id`: antes el registro quedaba con `actor: null`, y quien la enviara podía atribuirse a otra cuenta.
+// Estas rutas ya exigieron administración: sin identidad de sesión, quien actúa es la autoridad de máquina. La cabecera
+// solo se conserva en el modo heredado sin sesiones, donde ES la identidad.
+const adminActorOf = (req) => req.auth?.userId ?? req.user?.id ?? (sessionIssuanceEnabled() ? 'admin-secret' : (req.headers['x-user-id'] || 'admin-secret'));
 const sendPublisherError = (res, e, op) => {
     if (e instanceof publishersStore.PublisherError) return res.status(e.status).json({ error: e.message, code: e.code });
     log(`[PUBLISHERS] ${op} failed: ${e.message}`, 'ERROR');
@@ -6754,7 +6759,7 @@ app.post('/api/users', requireAdminAccess, async (req, res) => {
     writeAuditLog({
         action:       'create_user',
         targetUserId: userToSave.id,
-        actor:        req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details:      { email: userToSave.email, roles: userToSave.roles, colegio: userToSave.colegio || null },
     });
 
@@ -6987,7 +6992,7 @@ async function applyCredentialAction(req, res, action) {
     writeAuditLog({
         action:       reinvite ? 'reinvite_user' : 'disable_user',
         targetUserId: id,
-        actor:        actorId || req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details:      { previousStatus },
     });
 
@@ -7065,7 +7070,7 @@ app.post('/api/users/:id/representation', requireAdminAccess, async (req, res) =
     try { sessionAuth.revokeAllUserSessions(id); authSessionRevoked.labels('credential_change').inc(); }
     catch (e) { log(`[SESSION] revoke-on-representation error: ${e.message}`, 'WARN'); }
     log(`Representation ${action}: user=${id} ref=${requestRef}`, 'ACCESS');
-    writeAuditLog({ action: `representation_${action}`, targetUserId: id, actor: req.auth?.userId || req.headers['x-user-id'] || null, details: { requestRef } });
+    writeAuditLog({ action: `representation_${action}`, targetUserId: id, actor: adminActorOf(req), details: { requestRef } });
     res.set('Cache-Control', 'no-store');
     return res.status(200).json({ success: true, userId: id, action, accountStatus: 'invited', inviteExpiresAt, activationUrl: `/#/activar?token=${inviteToken}` });
 });
@@ -7108,7 +7113,7 @@ app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
     writeAuditLog({
         action:       'delete_user',
         targetUserId: id,
-        actor:        req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details:      { email: deletedUser.email, roles: deletedUser.roles, detachedFromGroupIds },
     });
     res.json({ success: true, detachedFromGroupIds });
@@ -7308,6 +7313,10 @@ app.post('/api/groups', requireAdminAccess, async (req, res) => {
     });
     if (conflict) return res.status(409).json({ error: 'El ID del grupo ya existe' });
     log(`Group created: ${newGroup.id} (type=${newGroup.type})`, 'ACCESS');
+    // V9 BIII F5-D: el alta de un grupo y sus mediadores iniciales queda en la auditoría.
+    writeAuditLog({ action: 'group.create', targetUserId: null, actor: adminActorOf(req),
+        details: { groupId: newGroup.id, mediators: Array.isArray(newGroup.mediatorIds) ? newGroup.mediatorIds : [] },
+        metadata: { toGroupId: newGroup.id, groupType: newGroup.type || null, organizationId: newGroup.organizationId || null, result: 'success' } });
     res.json(newGroup);
 });
 
@@ -7323,6 +7332,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
     let memberDelta  = { added: [], removed: [], missingUserIds: [] };
     let fallbackRisk = null;     // sobre el grupo PRE-mutation (Commit 5)
     let mergedMeta   = null;     // capturado para audit log
+    let mediatorDelta = { added: [], removed: [] }; // V9 BIII F5-D
     await withFileLock(GROUPS_DB, async () => {
         _jsonCache.delete(GROUPS_DB);
         await withUsersLock(USERS_DB, () => {
@@ -7339,6 +7349,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
 
             const { added, removed } = diffIds(oldMembers, newMembers);
             memberDelta = { added, removed, missingUserIds: [] };
+            mediatorDelta = diffIds(Array.isArray(groups[index].mediatorIds) ? groups[index].mediatorIds : [], Array.isArray(merged.mediatorIds) ? merged.mediatorIds : []);
 
             // ── Fallback extinction guard (Commit 5) ──────────────────────────
             // PUT bulk-replace puede setear studentIds/memberIds desde 0 → N.
@@ -7374,7 +7385,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
         writeAuditLog({
             action:       'membership.fallback_guard_blocked',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId: id, adding: memberDelta.added.length, reason: fallbackRisk?.reason || 'fallback_extinction', method: 'PUT' },
             metadata: {
                 ..._truncateUserIdsForAudit(memberDelta.added),
@@ -7414,7 +7425,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
         writeAuditLog({
             action:       'membership.fallback_extinction_allowed',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId: id, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'PUT' },
             metadata: {
                 ..._truncateUserIdsForAudit(memberDelta.added),
@@ -7437,6 +7448,18 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
         });
     }
 
+    // V9 BIII F5-D: designar, sustituir o retirar mediadores cambia quién puede consultar a los lectores del grupo.
+    // Antes no dejaba ninguna constancia (solo se auditaban las altas y bajas de lectores).
+    if (mediatorDelta.added.length > 0 || mediatorDelta.removed.length > 0) {
+        writeAuditLog({
+            action:       'group.mediators_change',
+            targetUserId: null,
+            actor:        adminActorOf(req),
+            details:      { groupId: id, added: mediatorDelta.added, removed: mediatorDelta.removed },
+            metadata:     { toGroupId: id, toSchool: mergedMeta?.school || null, groupType: mergedMeta?.type || null, organizationId: mergedMeta?.organizationId || null, result: 'success' },
+        });
+    }
+
     // Audit log — sólo si la mutación cambió memberships (PUT bulk-replace
     // puede usarse sólo para metadata del grupo, ej. renombrar; en ese caso
     // no genera audit). Cuando hay delta, registramos la lista combinada de
@@ -7446,7 +7469,7 @@ app.put('/api/groups/:id', requireAdminAccess, async (req, res) => {
         writeAuditLog({
             action:       'group.update',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details: {
                 groupId:        id,
                 added:          memberDelta.added.length,
@@ -7522,7 +7545,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
         writeAuditLog({
             action:       'membership.fallback_guard_blocked',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId: id, reason: fallbackRisk?.reason || 'group_deletion_extinguishes_fallback', method: 'DELETE_group' },
             metadata: {
                 ..._truncateUserIdsForAudit([]),
@@ -7560,7 +7583,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
         writeAuditLog({
             action:       'membership.fallback_extinction_allowed',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId: id, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'DELETE_group' },
             metadata: {
                 ..._truncateUserIdsForAudit(detachedFromUserIds),
@@ -7590,7 +7613,7 @@ app.delete('/api/groups/:id', requireAdminAccess, async (req, res) => {
     writeAuditLog({
         action:       'group.delete',
         targetUserId: null,
-        actor:        req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details: {
             groupId:       id,
             detachedCount: detachedFromUserIds.length,
@@ -8267,7 +8290,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         writeAuditLog({
             action:       'membership.fallback_guard_blocked',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId, requested: userIds.length, reason: fallbackRisk?.reason || 'fallback_extinction' },
             metadata: {
                 ..._truncateUserIdsForAudit(userIds),
@@ -8318,7 +8341,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
         writeAuditLog({
             action:       'membership.fallback_extinction_allowed',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore },
             metadata: {
                 ..._truncateUserIdsForAudit(userIds),
@@ -8344,7 +8367,7 @@ app.post('/api/groups/:groupId/members', requireAdminAccess, async (req, res) =>
     writeAuditLog({
         action:       'membership.assign',
         targetUserId: assigned.length === 1 && failed.length === 0 ? assigned[0].userId : null,
-        actor:        req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details:      { groupId, requested: userIds.length, assigned: assigned.length, failed: failed.length },
         metadata: {
             ..._truncateUserIdsForAudit(userIds),
@@ -8422,7 +8445,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
         writeAuditLog({
             action:       'membership.cross_school_blocked',
             targetUserId: userId,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId, reason: 'cross_school_assignment', method: 'DELETE' },
             metadata: {
                 ..._truncateUserIdsForAudit([userId]),
@@ -8458,7 +8481,7 @@ app.delete('/api/groups/:groupId/members/:userId', requireAdminAccess, async (re
         writeAuditLog({
             action:       'membership.remove',
             targetUserId: userId,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { groupId, removed: true },
             metadata: {
                 ..._truncateUserIdsForAudit([userId]),
@@ -8674,7 +8697,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         writeAuditLog({
             action:       'membership.fallback_guard_blocked',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { fromGroupId, toGroupId, requested: userIds.length, reason: fallbackRisk?.reason || 'fallback_extinction', method: 'move' },
             metadata: {
                 ..._truncateUserIdsForAudit(userIds),
@@ -8719,7 +8742,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         writeAuditLog({
             action:       'membership.move.rollback',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { fromGroupId, toGroupId, requested: userIds.length, failed: failed.length },
             metadata: {
                 ..._truncateUserIdsForAudit(userIds),
@@ -8751,7 +8774,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
         writeAuditLog({
             action:       'membership.fallback_extinction_allowed',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details:      { fromGroupId, toGroupId, reason: fallbackRisk.reason, visibleBefore: fallbackRisk.fallbackVisibleBefore, method: 'move' },
             metadata: {
                 ..._truncateUserIdsForAudit(userIds),
@@ -8780,7 +8803,7 @@ app.post('/api/groups/:toGroupId/members/move', requireAdminAccess, async (req, 
     writeAuditLog({
         action:       'membership.move',
         targetUserId: null,
-        actor:        req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details:      { fromGroupId, toGroupId, moved: moved.length },
         metadata: {
             ..._truncateUserIdsForAudit(userIds),
@@ -9116,7 +9139,7 @@ app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess
         writeAuditLog({
             action:       'membership.fallback_materialization_classifier_divergence',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details: {
                 groupId,
                 classifierState:     outcome.classifierState,
@@ -9182,7 +9205,7 @@ app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess
         writeAuditLog({
             action:       'membership.fallback_materialization_invariant_breach',
             targetUserId: null,
-            actor:        req.headers['x-user-id'] || null,
+            actor:        adminActorOf(req),
             details: {
                 groupId,
                 explicitMembersBefore: outcome.explicitMembersBefore,
@@ -9327,7 +9350,7 @@ app.post('/api/groups/:groupId/members/materialize-fallback', requireAdminAccess
     writeAuditLog({
         action:       'membership.fallback_materialized',
         targetUserId: materializableUserIds.length === 1 ? materializableUserIds[0] : null,
-        actor:        req.headers['x-user-id'] || null,
+        actor:        adminActorOf(req),
         details: {
             groupId,
             materializedCount:     materializableUserIds.length,
@@ -9796,7 +9819,7 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         const includeContent = viewerMediatorId ? temporalContentPredicate(contextOf) : courseWorksPredicate(works);
 
         const t0 = performance.now();
-        const r = await groupAnalyticsCache.get(viewerMediatorId ? `${id} obras` : id, () => buildGroupAnalyticsSummary({
+        const cached = await groupAnalyticsCache.get(viewerMediatorId ? `${id} obras` : id, () => buildGroupAnalyticsSummary({
             group, users, allGroups: groups,
             leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [],
             getProgressByUser,
@@ -9804,6 +9827,12 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
             legacyEvents: readJSON(ANALYTICS_DB) || [],
             ...(includeContent ? { includeContent } : {}),
         }));
+        // V9 BIII F5-D: el resumen se conserva hasta 5 minutos, pero QUIÉN está en el grupo se decide en cada petición.
+        // Un lector trasladado o dado de baja deja de aparecer (fila y agregados) de inmediato, en todas las réplicas;
+        // antes seguía en el resumen conservado del curso anterior. Quien entra aparece al renovarse el resumen.
+        const currentCohort = new Set(resolveGroupLectorCohort(group, users, groups));
+        const currentOnly = (summary) => ((summary.readers || []).every(x => currentCohort.has(x.userId)) ? summary : restrictSummaryToReaders(summary, currentCohort));
+        const r = { ...cached, data: currentOnly(cached.data) };
         const ms = Math.round(performance.now() - t0);
         log(r.cache === 'miss'
             ? `[GROUP_ANALYTICS] group=${id} cache=miss ms=${ms} computeMs=${Math.round(r.computeMs)} readers=${r.data.readerCount} rows=${r.rowsConsidered}`
@@ -9838,7 +9867,7 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
                 const c = await groupAnalyticsCache.get(`${id}|credited`, () => buildGroupAnalyticsSummary({ group, users, allGroups: groups,
                     leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [], getProgressByUser, legacyEvents: readJSON(ANALYTICS_DB) || [],
                     includeContent: temporalContentPredicate(creditedContextOf) }));
-                const mine = (c.data.readers || []).filter(x => population.has(x.userId));
+                const mine = (currentOnly(c.data).readers || []).filter(x => population.has(x.userId));
                 creditedReading = { rule: '65A', available: true, readersWithActivity: mine.filter(x => (x.reading?.allEffectiveMs ?? 0) > 0).length,
                     totalEffectiveMs: mine.reduce((a, x) => a + (x.reading?.allEffectiveMs ?? 0), 0),
                     readers_with_unattributable_reading: mine.filter(x => x.historicalActivity === true).length };
