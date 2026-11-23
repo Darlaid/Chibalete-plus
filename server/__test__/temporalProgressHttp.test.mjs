@@ -173,6 +173,10 @@ const start = (port, i, flags) => {
     child.stdout.on('data', (d) => { s.out += d; }); child.stderr.on('data', (d) => { s.out += d; });
     return s;
 };
+// El porcentaje de c2 (65) no debe entregarse. Se busca como VALOR de un campo: buscar «65» en todo el cuerpo fallaba a
+// veces sin motivo, cuando una marca de tiempo lo contenía (p. ej. `…15.659Z`).
+const LEAKS_PERCENT = /"[A-Za-z_]*(?:[Pp]ercent|porcentaje)[A-Za-z_]*":\s*65(?:\.0+)?[,}]/;
+const LEAKS_PERCENT_55 = /"[A-Za-z_]*(?:[Pp]ercent|porcentaje)[A-Za-z_]*":\s*55(?:\.0+)?[,}]/;   // ídem, el 55 % de cs
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ready = async (s) => { let last = ''; for (let i = 0; i < 400; i++) { if (s.child.exitCode !== null) throw new Error(`server rc=${s.child.exitCode}\n${s.out.slice(-1500)}`); try { if ((await fetch(`${s.base}/api/health`)).ok) return; } catch (e) { last = String(e?.cause?.code || e?.message || e); } await sleep(150); } throw new Error(`nunca healthy (${last})\n${s.out.slice(-1500)}`); };
 const get = async (s, p, cookie) => {
@@ -217,13 +221,13 @@ try {
         ok('progreso acreditado del curso: c1 y cs, con su porcentaje', ids(j.progressList) === 'c1,cs' && j.progressList.find((p) => p.contentId === 'c1').canonicalProgress.globalPercentage === 40);
         const c2 = hist(j, 'c2');
         ok('c2 (empezada antes de asignarse): identificada como historial no acreditable, SIN porcentaje', !!c2 && c2.attribution === 'unverifiable_history' && c2.reason === 'started_before_course'
-            && !('canonicalProgress' in c2) && !/65/.test(JSON.stringify(c2)), JSON.stringify(c2));
+            && !('canonicalProgress' in c2) && !LEAKS_PERCENT.test(JSON.stringify(c2)), JSON.stringify(c2));
         ok('…y con la sesión posterior a la asignación acreditada (1 sesión, 10 min, con fecha)', c2.verifiedSessions === 1 && c2.verifiedReadingTimeMs === 600_000 && typeof c2.lastVerifiedAt === 'string');
         ok('la compra personal (c3) y la obra del club (c4) no aparecen de ninguna forma', !/"c3"|"c4"/.test(rs[0].text) && j.historicalProgress.length === 1);
         ok('recuento de atribución', j.courseAttribution.verified_context === 2 && j.courseAttribution.unverifiable_history === 1);
         const i1 = await both(ITEM('ra-1', 'c1'), C['med-a']), i2 = await both(ITEM('ra-1', 'c2'), C['med-a']), i3 = await both(ITEM('ra-1', 'c3'), C['med-a']);
         ok('por obra: c1 acreditada con su avance', i1.every((r) => r.status === 200 && r.json.attribution === 'verified_context' && r.json.progress.canonicalProgress.globalPercentage === 40), st(i1));
-        ok('por obra: c2 sin avance entregado y con su estado (no «sin progreso»)', i2.every((r) => r.status === 200 && r.json.progress === null && r.json.attribution === 'unverifiable_history' && r.json.verifiedSessions === 1 && !/65/.test(r.text)), st(i2));
+        ok('por obra: c2 sin avance entregado y con su estado (no «sin progreso»)', i2.every((r) => r.status === 200 && r.json.progress === null && r.json.attribution === 'unverifiable_history' && r.json.verifiedSessions === 1 && !LEAKS_PERCENT.test(r.text)), st(i2));
         ok('por obra: la compra personal sigue denegada', i3.every((r) => r.status === 403));
         const rp = await both(RP('ra-1'), C['med-a']), rpi = await both(RPI('ra-1', 'c2'), C['med-a']);
         ok('reading-progress: resumen solo con lo acreditado y el historial aparte', all200(rp) && same(rp) && ids(rp[0].json.readingProgress) === 'c1,cs' && rp[0].json.summary.total === 2
@@ -235,7 +239,7 @@ try {
     {
         const r2 = await both(LIST('ra-2'), C['med-a']);
         ok('acumulado sin sesiones fechadas: conservado como historial no acreditable, sin certificar su 55 %', all200(r2) && ids(r2[0].json.progressList) === 'c1' && hist(r2[0].json, 'cs')?.reason === 'undated_progress'
-            && hist(r2[0].json, 'cs').verifiedSessions === 0 && !/55/.test(JSON.stringify(r2[0].json.historicalProgress)), st(r2));
+            && hist(r2[0].json, 'cs').verifiedSessions === 0 && !LEAKS_PERCENT_55.test(JSON.stringify(r2[0].json.historicalProgress)), st(r2));
         const r4 = await both(LIST('ra-4'), C['med-a']);
         ok('historial de sesiones recortado (20): el acumulado no se certifica; las 20 sesiones fechadas sí cuentan', all200(r4) && r4[0].json.progressList.length === 0 && hist(r4[0].json, 'c1')?.reason === 'session_history_truncated'
             && hist(r4[0].json, 'c1').verifiedSessions === 20, st(r4));
