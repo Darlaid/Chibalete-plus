@@ -33,10 +33,19 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         // Check both storages. localStorage takes precedence if both exist
         let storedUserId = localStorage.getItem('chibalete_user_id') || sessionStorage.getItem('chibalete_user_id');
 
+        // V9 65E-C1 — hubo un cierre de sesión que el servidor no llegó a recibir (sin conexión): la cookie de aquella
+        // cuenta sigue en el navegador. Se vuelve a pedir la revocación y, se logre o no, NO se restaura esa sesión.
+        let logoutPending = false;
+        if (!storedUserId && dataService.hasLogoutPending()) {
+          logoutPending = !(await dataService.settlePendingLogout());
+          dataService.clearSessionState();
+          if (!active) return;
+        }
+
         // CHP-IDDB-M1-A — la COOKIE de sesión firmada es la autoridad de bootstrap.
         // Si no hay id local pero sí hay sesión (cookie HttpOnly), rehidratamos por
         // /api/auth/me. El id local pasa a ser dato informativo/caché, no autoridad.
-        if (!storedUserId) {
+        if (!storedUserId && !logoutPending) {
           const me = await dataService.fetchSessionMe();
           if (me && me.id) {
             storedUserId = me.id;
@@ -105,6 +114,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     // FIX: Clear both storages first to prevent duplicated "revivable" sessions
     localStorage.removeItem('chibalete_user_id');
     sessionStorage.removeItem('chibalete_user_id');
+    // V9 65E-C1: este inicio de sesión reemplazó la cookie; ya no queda ningún cierre pendiente de otra cuenta, y de
+    // ella no debe quedar nada en memoria.
+    dataService.clearLogoutPending();
+    if (user?.id && user.id !== userToLogin.id) dataService.clearSessionState();
 
     // Desbloquear UI de inmediato — sin esperar la carga de acceso
     setUser(userToLogin);
@@ -130,7 +143,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const logout = () => {
     // CHP-IDDB-M1-A — revoca la sesión server-side (sid) y borra la cookie ANTES
     // de limpiar el estado local. Best-effort: no bloquea el redirect.
-    dataService.serverLogout().catch(() => {});
+    // V9 65E-C1: primero se envían los guardados pendientes de ESTA cuenta (con su sesión aún válida) y después se
+    // revoca. Si el servidor no confirma la revocación, queda la marca de cierre pendiente: la sesión no se restaura
+    // sola al reabrir y la revocación se reintenta. La marca se pone ya, por si la pestaña se cierra antes de terminar.
+    const leavingId = user?.id || dataService.getSessionUserId();
+    dataService.markLogoutPending();
+    dataService.flushPendingForLogout(leavingId)
+      .then(() => dataService.serverLogout())
+      .then((revoked) => { if (revoked) dataService.clearLogoutPending(); })
+      .catch(() => {});
     setUser(null);
     setAccessReady(false);
     localStorage.removeItem('chibalete_user_id');

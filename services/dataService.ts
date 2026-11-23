@@ -226,14 +226,35 @@ class DataService {
      * CHP-IDDB-M1-A — logout server-side: revoca la sesión actual (sid) y borra
      * la cookie. Best-effort; el caller limpia el estado local igualmente.
      */
-    public async serverLogout(all: boolean = false): Promise<void> {
+    public async serverLogout(all: boolean = false): Promise<boolean> {
         try {
-            await fetch(`${this.apiUrl}/auth/${all ? 'logout-all' : 'logout'}`, {
+            const res = await fetch(`${this.apiUrl}/auth/${all ? 'logout-all' : 'logout'}`, {
                 method: 'POST',
                 credentials: 'same-origin',
                 headers: { ...this.adminWriteHeaders },
             });
-        } catch { /* el logout local procede igual */ }
+            // 401: el servidor ya no reconoce la sesión; para este navegador el efecto es el mismo que revocarla.
+            return res.ok || res.status === 401;
+        } catch { return false; /* el logout local procede igual */ }
+    }
+
+    /**
+     * V9 65E-C1 — cierre de sesión PENDIENTE. Si al cerrar sesión el servidor no responde (sin conexión), la cookie de
+     * sesión sigue viva en el navegador: al volver a abrir la aplicación se restauraba sola la cuenta que había salido,
+     * para quien estuviera delante. Se deja una marca local; mientras exista, la aplicación no restaura ninguna sesión
+     * por la cookie y vuelve a pedir la revocación en cuanto hay servidor. La borra una revocación confirmada o un
+     * inicio de sesión nuevo (que reemplaza la cookie). No guarda ningún dato de la cuenta.
+     */
+    private static readonly LOGOUT_PENDING_KEY = 'chibalete_logout_pending';
+    public markLogoutPending(): void { try { localStorage.setItem(DataService.LOGOUT_PENDING_KEY, '1'); } catch { /* sin almacenamiento */ } }
+    public clearLogoutPending(): void { try { localStorage.removeItem(DataService.LOGOUT_PENDING_KEY); } catch { /* sin almacenamiento */ } }
+    public hasLogoutPending(): boolean { try { return localStorage.getItem(DataService.LOGOUT_PENDING_KEY) === '1'; } catch { return false; } }
+    /** Reintenta la revocación pendiente. `true` si ya no queda nada pendiente. */
+    public async settlePendingLogout(): Promise<boolean> {
+        if (!this.hasLogoutPending()) return true;
+        const ok = await this.serverLogout();
+        if (ok) this.clearLogoutPending();
+        return ok;
     }
 
     /**
@@ -414,6 +435,9 @@ class DataService {
             // V9 65D-1: en la cola de reintentos, una entrada por SESIÓN: un guardado posterior del mismo libro (otra
             // sesión) ya no reemplaza al anterior que no llegó, y ninguna sesión hecha sin conexión se pierde.
             const failKey = session?.sessionId ? `${key}__${session.sessionId}` : key;
+            // V9 65E-C1: un guardado solo se envía con la sesión de SU cuenta. Si la sesión cambió o terminó antes de
+            // enviarlo, queda en la cola de pendientes (no se pierde) hasta que esa cuenta vuelva.
+            if (usuario_id !== this.getSessionUserId()) { this.addToFailedSyncs(failKey, usuario_id, contenido_id, hash); return; }
 
             // keepalive: true survives page-unload; supports custom headers (unlike sendBeacon)
             fetch(`${this.apiUrl}/progress/${usuario_id}/${contenido_id}/sync`, {
@@ -471,10 +495,11 @@ class DataService {
         this.settledFailKeys.delete(key);
         this.failedSyncs.set(key, { userId, contentId, payload, addedAt: new Date().toISOString() });
         // Cap at FAILED_SYNCS_MAX — evict the oldest entry when over limit.
-        if (this.failedSyncs.size > DataService.FAILED_SYNCS_MAX) {
-            const oldest = this.failedSyncs.keys().next().value;
-            if (oldest) this.failedSyncs.delete(oldest);
-        }
+        // V9 65E-C1: el tope es POR CUENTA. La actividad de quien usa ahora el dispositivo no desaloja los pendientes
+        // de otra cuenta (esos solo caducan por antigüedad).
+        const mine = [...this.failedSyncs.entries()].filter(([, v]) => v.userId === userId);
+        // (se anota como resuelta: si no, al guardar se volvería a adoptar del almacenamiento y el tope no regiría)
+        if (mine.length > DataService.FAILED_SYNCS_MAX) { this.failedSyncs.delete(mine[0][0]); this.settledFailKeys.add(mine[0][0]); }
         this.saveFailedSyncs();
     }
 
@@ -483,6 +508,10 @@ class DataService {
         if (this.failedSyncs.size === 0) return;
         const cutoff = Date.now() - DataService.FAILED_SYNCS_TTL_MS;
         let pruned = false;
+        // V9 65E-C1: la cola es del dispositivo y puede tener pendientes de varias cuentas. Antes se reenviaban TODOS con
+        // la sesión que hubiera en ese momento: la sesión de B enviaba los guardados de A. Ahora cada cuenta reenvía
+        // solo los suyos; los de otra esperan a que vuelva (o caducan), y sin sesión no se envía nada.
+        const me = this.getSessionUserId();
 
         this.failedSyncs.forEach((entry, key) => {
             const age = new Date(entry.addedAt).getTime();
@@ -493,6 +522,7 @@ class DataService {
                 pruned = true;
                 return;
             }
+            if (!me || entry.userId !== me) return;
 
             // Attempt retry — fire-and-forget with success/failure callbacks.
             fetch(`${this.apiUrl}/progress/${entry.userId}/${entry.contentId}/sync`, {
@@ -506,8 +536,14 @@ class DataService {
                     this.settledFailKeys.add(key);
                     this.lastSyncedPayloads.set(`${entry.userId}__${entry.contentId}`, entry.payload);
                     this.saveFailedSyncs();
+                } else if ([400, 403, 404, 410, 422].includes(res.status)) {
+                    // 65E-C1: el servidor rechaza este guardado de forma definitiva (cuenta suprimida, obra retirada,
+                    // cuerpo inválido): no se reintenta ni se conserva.
+                    this.failedSyncs.delete(key);
+                    this.settledFailKeys.add(key);
+                    this.saveFailedSyncs();
                 }
-                // Non-ok response: stays in failedSyncs for next retry opportunity.
+                // Otra respuesta (401, 408, 429, 5xx): sigue en la cola para el próximo intento.
             }).catch(() => {
                 // Network still down: stays in failedSyncs.
             });
@@ -741,14 +777,56 @@ class DataService {
         this.schools = [];
         this.userContentAccessCache = {};
         this.schoolConfigsCache.clear();
+        // V9 65E-C1 — tampoco queda la COPIA del progreso de la cuenta saliente (ni en memoria ni en el navegador): es
+        // una copia de lo que el servidor ya tiene, y quedaba legible para quien usara después el dispositivo. Lo que
+        // todavía NO llegó al servidor no se toca: sigue en la cola de pendientes (`chibalete_failed_syncs`), que cada
+        // cuenta reenvía solo para sí misma. De la cola se vacía únicamente la copia en memoria.
+        this.progress = [];
+        this.pendingSyncs.clear();
+        this.lastSyncedPayloads.clear();
+        this.failedSyncs.clear();
+        this.settledFailKeys.clear();
         try {
             const doomed: string[] = [];
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i);
-                if (k && k.startsWith('chibalete:aulaviva')) doomed.push(k);
+                if (k && (k.startsWith('chibalete:aulaviva') || DataService.SESSION_COPIES.includes(k) || k.startsWith('gemini_cache_'))) doomed.push(k);
             }
             doomed.forEach(k => localStorage.removeItem(k));
         } catch { /* almacenamiento no disponible */ }
+        try {
+            const doomed: string[] = [];
+            for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); if (k && k.startsWith('leo_session_')) doomed.push(k); }
+            doomed.forEach(k => sessionStorage.removeItem(k));
+        } catch { /* almacenamiento no disponible */ }
+    }
+    /** Copias locales de datos que el servidor ya tiene (progreso, padrón, grupos, colegios): no sobreviven a la sesión. */
+    private static readonly SESSION_COPIES = ['chibalete_progress', 'chibalete_users', 'chibalete_groups', 'chibalete_schools'];
+
+    /**
+     * V9 65E-C1 — antes de terminar la sesión: lo que estaba a punto de enviarse pasa a la cola de pendientes (no se
+     * pierde) y, si hay servidor, los pendientes de ESA cuenta se envían con su sesión todavía válida, para que no
+     * quede nada suyo en el dispositivo. Espera como mucho `timeoutMs`; lo que no llegue sigue en la cola. No lanza.
+     */
+    public async flushPendingForLogout(userId: string, timeoutMs: number = 2500): Promise<void> {
+        try {
+            if (!userId) return;
+            this.pendingSyncs.forEach((prog, key) => {
+                const { usuario_id, contenido_id, canonicalProgress, fecha_actualizacion, session } = prog;
+                const body = JSON.stringify({ canonicalProgress, session, updatedAt: fecha_actualizacion });
+                if (this.lastSyncedPayloads.get(key) === body) return;
+                this.addToFailedSyncs(session?.sessionId ? `${key}__${session.sessionId}` : key, usuario_id, contenido_id, body);
+            });
+            this.pendingSyncs.clear();
+            this.adoptStoredFailedSyncs();
+            const mine = [...this.failedSyncs.entries()].filter(([, v]) => v.userId === userId);
+            if (mine.length === 0) return;
+            const sends = mine.map(([key, entry]) => fetch(`${this.apiUrl}/progress/${entry.userId}/${entry.contentId}/sync`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: entry.payload, keepalive: true,
+            }).then(res => { if (res.ok) { this.failedSyncs.delete(key); this.settledFailKeys.add(key); } }).catch(() => { /* sin conexión: sigue en la cola */ }));
+            await Promise.race([Promise.allSettled(sends), new Promise(r => setTimeout(r, timeoutMs))]);
+            this.saveFailedSyncs();
+        } catch { /* nunca impide cerrar la sesión */ }
     }
 
     /**
@@ -774,11 +852,15 @@ class DataService {
 
     // --- SYNC METHODS ---
     async syncUserProgress(userId: string) {
+        const epoch = this.sessionEpoch;
         try {
             const res = await fetch(`${this.apiUrl}/progress/user/${userId}`, { headers: {} });
             if (res.ok) {
                 const data = await res.json();
                 const apiProgress = data.progressList || [];
+                // V9 65E-C1: la sesión terminó o cambió mientras llegaba la respuesta: no se guarda (reaparecería en el
+                // navegador el progreso de la cuenta que ya salió).
+                if (epoch !== this.sessionEpoch || this.getSessionUserId() !== userId) return;
                 
                 if (Array.isArray(apiProgress)) {
                     const merged = [...this.progress];

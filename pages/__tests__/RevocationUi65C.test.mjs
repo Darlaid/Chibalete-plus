@@ -219,10 +219,15 @@ export default { useRef, useEffect };`);
     const logout = auth.slice(auth.indexOf('const logout = () => {'), auth.indexOf('return (', auth.indexOf('const logout = () => {')));
     ok('el cierre de sesión limpia el estado de la sesión antes de salir de la pantalla', /dataService\.clearSessionState\(\);/.test(logout) && logout.indexOf('dataService.clearSessionState()') > logout.indexOf('setUser(null)')
         && logout.indexOf('dataService.clearSessionState()') < logout.indexOf("window.location.replace('/#/bienvenida')"));
-    ok('…y sigue revocando la sesión en el servidor y quitando el id local (sin cambios de autenticación)', /dataService\.serverLogout\(\)\.catch/.test(logout) && /localStorage\.removeItem\('chibalete_user_id'\)/.test(logout) && /sessionStorage\.removeItem\('chibalete_user_id'\)/.test(logout));
-    const clear = ds.slice(ds.indexOf('public clearSessionState(): void {'), ds.indexOf('async reloadGroups()'));
+    ok('…y sigue revocando la sesión en el servidor y quitando el id local (sin cambios de autenticación)', /\.then\(\(\) => dataService\.serverLogout\(\)\)/.test(logout) && /localStorage\.removeItem\('chibalete_user_id'\)/.test(logout) && /sessionStorage\.removeItem\('chibalete_user_id'\)/.test(logout));
+    // V9 65E-C1: la limpieza es solo `clearSessionState` (el envío de pendientes antes de salir es otra función).
+    const clear = ds.slice(ds.indexOf('public clearSessionState(): void {'), ds.indexOf('public async flushPendingForLogout'));
     ok('la limpieza vacía padrón, grupos, colegios y las cachés de acceso y de colegio', ['this.users = [];', 'this.groups = [];', 'this.schools = [];', 'this.userContentAccessCache = {};', 'this.schoolConfigsCache.clear();'].every((x) => clear.includes(x)));
-    ok('…borra las copias locales de Aula Viva y solo esas', /k\.startsWith\('chibalete:aulaviva'\)/.test(clear) && !/clearAll\(|chibalete_progress|failed_syncs|assignments/.test(clear));
+    // V9 65E-C1 (decisión de Dirección): además de las copias de Aula Viva se retiran las copias de lo que el servidor ya
+    // tiene (progreso, padrón, grupos, colegios) y la caché de respuestas de Leo. La cola de pendientes y lo que solo
+    // existe en el dispositivo (tareas locales) NO se tocan.
+    ok('…borra las copias locales de Aula Viva y las copias de datos del servidor; nunca la cola de pendientes', /k\.startsWith\('chibalete:aulaviva'\)/.test(clear) && /DataService\.SESSION_COPIES\.includes\(k\)/.test(clear)
+        && /SESSION_COPIES = \['chibalete_progress', 'chibalete_users', 'chibalete_groups', 'chibalete_schools'\]/.test(clear) && !/clearAll\(|failed_syncs|FAILED_SYNCS_KEY|assignments|a11y_events_queue/.test(clear));
     ok('…y avanza la época de sesión', /this\.sessionEpoch \+= 1;/.test(clear));
     const guarded = (name, until) => { const body = ds.slice(ds.indexOf(name), ds.indexOf(until, ds.indexOf(name))); return /const epoch = this\.sessionEpoch;/.test(body) && /epoch !== this\.sessionEpoch/.test(body); };
     ok('una respuesta de grupos o de usuarios que venía en camino no repone lo borrado', guarded('async reloadGroups()', '// --- SYNC METHODS ---') && guarded('async reloadUsers()', 'async reloadGroups()'));

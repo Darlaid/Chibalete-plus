@@ -38,6 +38,7 @@ import { resolveGroupReaderCohort } from './readerCohort.mjs';
 import { computeEffectiveReadingMs, EFFECTIVE_READING_EVENT_NAMES } from './effectiveReadingTime.mjs';
 import { normalizeEventForSignals, LEGACY_EVENT_MAP } from './legacyEventNormalizer.mjs';
 import { DEFAULT_EVENTS_PATH, DEFAULT_ARCHIVE_PATH } from './historicalEvents.mjs';
+import { readLuMirror, withLuMirror } from './luSessionMirror.mjs';
 
 export const WINDOW_28D_MS = 28 * 86_400_000;
 const NO_SERVER_SOURCE = 'no_server_source';
@@ -333,6 +334,9 @@ export function buildGroupAnalyticsSummary({
     getProgressByUser = (id) => { if (!progressOf.has(id)) progressOf.set(id, readProgress(id) || []); return progressOf.get(id); };
     const { byUser, rowsConsidered } = readCohortHistoricalRows(readerIds, { eventsPath, archivePath });
     // V9 65D-2: lectura de LU (telemetría heredada con constancia de recepción). Se calcula aparte y se suma.
+    // V9 65E-C1: a la telemetría heredada se le unen los hechos de sesión de LU conservados en events.db que ya no están
+    // en la memoria rodante (por `eventId`: mientras el evento siga allí no cambia nada, y nunca cuenta dos veces).
+    legacyEvents = withLuMirror(legacyEvents, readLuMirror(readerIds, { eventsPath, archivePath }));
     const luByUser = luReadingRows(legacyEvents, readerIds);
     // V9 65E-B: lectura del lector EPUB (solo consta en el progreso). Con predicado, las sesiones son las que el
     // servidor puede acreditar (`includeContent.creditedSessions`), no el historial recortado.

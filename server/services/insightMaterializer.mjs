@@ -49,7 +49,8 @@ function getRawEventsDb() {
         `SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`);
     // V9 65E-B: de la más reciente a la más antigua (ver `readUserHistory`); sin LIMIT: lo acota quien itera.
     _stmtUserHistory = _eventsRawDb.prepare(
-        `SELECT * FROM events WHERE user_id = ? AND server_ts >= ? ORDER BY server_ts DESC, id DESC`);
+        `SELECT * FROM events WHERE user_id = ? AND server_ts >= ? AND event NOT IN ('lu.read_session_start', 'lu.read_session_heartbeat', 'lu.read_session_end')
+         ORDER BY server_ts DESC, id DESC`);   // 65E-C1: la copia de sesiones de LU no es entrada de las señales (ver luSessionMirror.mjs)
     // CHP-MOOK-CANONICAL-EVENTS-01C: las revisiones se proyectan al REVISOR
     // (payload.reviewerId), cuyo user_id no es el de la fila. Filtro textual
     // acotado al evento; signalCompute vuelve a comparar reviewerId exacto.

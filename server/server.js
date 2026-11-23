@@ -297,6 +297,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // del avance automático). Misma autoridad que `tiempo_efectivo_lectura`, pero
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
+import { toMirrorEvent as toLuMirrorEvent, readLuMirror, withLuMirror } from './analytics/luSessionMirror.mjs';
 import { LU_ANALYTICS_SOURCE, buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders, readCohortHistoricalRows, accessibleReaderActivity, isProgressOnlySession } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
@@ -11461,6 +11462,20 @@ app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWri
         const datable = validEvents.filter(e => e.timestamp <= receivedAt + PROGRESS_CLOCK_SKEW_MS).map(e => ({ ...e, receivedAt }));
         if (datable.length < validEvents.length) log(`Analytics: ${validEvents.length - datable.length} evento(s) con fecha posterior al reloj del servidor, no guardados`, 'WARN');
 
+        // V9 65E-C1: los hechos de sesión de LU (abrir, latido, cerrar) se copian al almacén canónico de eventos. Solo
+        // existían en esta memoria rodante y se perdían al rodar (ver analytics/luSessionMirror.mjs). La copia se
+        // deduplica por un identificador derivado del evento: un reenvío no crea otra fila. Nunca afecta a la respuesta.
+        try {
+            let kept = 0;
+            for (const e of datable) {
+                const m = toLuMirrorEvent(e);
+                if (m && validateBackboneEvent(m, headerUserId).ok && insertBackboneEvent(m)) kept += 1;
+            }
+            if (kept > 0) log(`[EVENTS_V1] sesiones de LU conservadas: ${kept} hecho(s)`, 'INFO');
+        } catch (e) {
+            log(`[EVENTS_V1] copia de sesiones de LU fallida: ${e.message}`, 'WARN');
+        }
+
         const { received, deduplicated } = await withFileLock(ANALYTICS_DB, () => {
             // V9 65B: lectura fresca dentro del candado (como los demás almacenes que se mutan). Con la copia en caché
             // de ESTE proceso, una réplica reescribía el archivo sin los eventos que la otra había guardado después.
@@ -11507,7 +11522,7 @@ app.post('/api/analytics/events', legacyAnalyticsAcceptAndDrop, requireEventsWri
  * Called fresh on each request — data is always current without a server restart.
  * Returns the raw loaded data so callers can use it for auth checks too.
  */
-function loadAndInitMetrics({ creditedLuOnly = false } = {}) {
+function loadAndInitMetrics({ creditedLuOnly = false, luMirrorIds = null } = {}) {
     const groups = readJSON(GROUPS_DB) || [];
     // CHP-IDDB-GAP2-01: MÉTRICAS LEGACY = JSON físico SIEMPRE. El universo de
     // usuarios de las métricas existentes no cambia con el cutover de
@@ -11515,7 +11530,14 @@ function loadAndInitMetrics({ creditedLuOnly = false } = {}) {
     const users  = readJSONMetricsLegacy(USERS_DB) || [];
     // V9 65E-B: la telemetría y las interacciones de Leo se leen UNA vez por petición y se devuelven, para que quien
     // arma la respuesta (cobertura declarada, lectura no atribuible) use exactamente lo mismo que el motor calculó.
-    const allEvents = readJSON(ANALYTICS_DB) || [], leoInteractions = readJSON(LEO_INTERACTIONS_DB) || [];
+    let allEvents = readJSON(ANALYTICS_DB) || [];
+    const leoInteractions = readJSON(LEO_INTERACTIONS_DB) || [];
+    // V9 65E-C1: `luMirrorIds(grupos)` da los lectores de quienes se calcula. A la telemetría heredada se le unen sus
+    // hechos de sesión de LU conservados en events.db que ya no estén en la memoria rodante (por `eventId`, sin repetir).
+    if (typeof luMirrorIds === 'function') {
+        try { allEvents = withLuMirror(allEvents, readLuMirror(luMirrorIds(groups))); }
+        catch (e) { log(`[METRICS] sesiones de LU conservadas no disponibles: ${e?.code || e?.message}`, 'WARN'); }
+    }
     // V9 65E-C (A1): `creditedLuOnly` (tablero, informe y agregados de curso y colegio) deja fuera del cálculo la
     // telemetría de LU SIN constancia de recepción (anterior a 65A). El resumen de Aula Viva nunca la sumó y quien media
     // tampoco la recibe; la administración sí la contaba en el tablero, y el mismo curso daba un lector «activo» en una
@@ -12937,6 +12959,17 @@ function schoolRawMetrics(schoolName, groups) {
     return { raw, scope };
 }
 
+/** Miembros de un curso / de los grupos de un colegio (65E-C1: de quiénes se lee la copia conservada de LU). */
+function courseMemberIds(groups, courseId) {
+    const g = (groups || []).find(x => x?.id === courseId);
+    return g ? [...new Set([...(Array.isArray(g.studentIds) ? g.studentIds : []), ...(Array.isArray(g.memberIds) ? g.memberIds : [])].filter(id => typeof id === 'string'))] : [];
+}
+function schoolMemberIdsOf(groups, rawSchoolId) {
+    let rec = null;
+    try { rec = resolveSchoolRecord(decodeURIComponent(rawSchoolId), groups); } catch { rec = null; }
+    return rec ? collectSchoolUserIds(rec.schoolName, groups) : [];
+}
+
 // Devuelve userIds únicos para un school dado los grupos cargados en cache.
 function collectSchoolUserIds(schoolName, groups) {
     const set = new Set();
@@ -12968,7 +13001,7 @@ const legacyMetricsCourseHandler = async (req, res) => {
         // calculaba DESPUÉS de las esperas de autorización: otra petición atendida en ese hueco (el ICDLI contextual de
         // Leo lo reinicializa sin la memoria ni las interacciones de Leo) dejaba este cálculo con datos ajenos. Ahora
         // la carga y el cálculo van seguidos, sin ninguna espera entre ambos.
-        const loaded   = loadAndInitMetrics({ creditedLuOnly: true });
+        const loaded   = loadAndInitMetrics({ creditedLuOnly: true, luMirrorIds: (gs) => courseMemberIds(gs, courseId) });
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         // V9 65D-1: lectura registrada solo por el progreso (mismo ámbito que los perfiles de abajo).
         const progressScope = courseProgressScope(metricsOptions);
@@ -13044,7 +13077,7 @@ app.get('/api/metrics/course/:courseId', mountLegacyMetricsRoute('metrics.course
 const legacyMetricsSchoolHandler = async (req, res) => {
     // V9 F5-E4: máquina o administrador de plataforma con sesión firmada y cuenta activa.
     if (!(await requireSchoolMetricsAdmin(req, res))) return;
-    const loaded         = loadAndInitMetrics({ creditedLuOnly: true });
+    const loaded         = loadAndInitMetrics({ creditedLuOnly: true, luMirrorIds: (gs) => schoolMemberIdsOf(gs, req.params.schoolId) });
     const { groups }     = loaded;
     const input          = decodeURIComponent(req.params.schoolId);
     const schoolRecord   = resolveSchoolRecord(input, groups);
@@ -13404,7 +13437,7 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
     if (!metricsOptions) return;
 
     try {
-        const loaded = loadAndInitMetrics({ creditedLuOnly: true });   // 65E-A: carga y cálculo seguidos (ver legacyMetricsCourseHandler)
+        const loaded = loadAndInitMetrics({ creditedLuOnly: true, luMirrorIds: (gs) => courseMemberIds(gs, courseId) });   // 65E-A: carga y cálculo seguidos (ver legacyMetricsCourseHandler)
         const { groups } = loaded;
         const raw      = computeCourseMetrics(courseId, metricsOptions);
         const group    = groups.find(g => g.id === courseId);
@@ -13448,7 +13481,7 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
 app.get('/api/reports/school/:schoolId', async (req, res) => {
     // V9 F5-E4: máquina o administrador de plataforma con sesión firmada y cuenta activa.
     if (!(await requireSchoolMetricsAdmin(req, res))) return;
-    const loaded       = loadAndInitMetrics({ creditedLuOnly: true });
+    const loaded       = loadAndInitMetrics({ creditedLuOnly: true, luMirrorIds: (gs) => schoolMemberIdsOf(gs, req.params.schoolId) });
     const { groups }   = loaded;
     const input        = decodeURIComponent(req.params.schoolId);
     const schoolRecord = resolveSchoolRecord(input, groups);

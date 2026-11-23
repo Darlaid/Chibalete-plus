@@ -91,6 +91,11 @@ const EpubReaderApp: React.FC = () => {
         const ctrl = new AbortController();
         (async () => {
             try {
+                // V9 65E-C1: con un cierre de sesión pendiente de confirmar, la cookie que queda en el navegador es de
+                // la cuenta que ya salió: este lector (página aparte) tampoco la usa.
+                let logoutPending = false;
+                try { logoutPending = window.localStorage.getItem('chibalete_logout_pending') === '1'; } catch { /* sin almacenamiento */ }
+                if (logoutPending) { setPhase({ kind: 'error', code: 'auth' }); return; }
                 const me = await fetch('/api/auth/me', { credentials: 'same-origin', signal: ctrl.signal });
                 if (!me.ok) { setPhase({ kind: 'error', code: 'auth' }); return; }
                 const meJson = await me.json().catch(() => null);
