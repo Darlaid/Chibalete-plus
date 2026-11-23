@@ -25,6 +25,7 @@ const DECISION_MESSAGES: Record<string, string> = {
     DECISIONS_REQUIRED: 'Faltan decisiones para activar la cuenta. Revisa los apartados señalados.',
     A1_DENIED: 'Sin la autorización de cuenta y lectura (A1) la cuenta no puede activarse. Puedes cambiar tu decisión o escribir a contacto@chibaleteeditores.com.',
     A0_DENIED: 'Sin autorizar los datos del representante (A0) no podemos registrar la representación.',
+    REPRESENTATIVE_REQUIRED: 'Esta cuenta es de un lector menor de edad: solo puede activarla su representante legal. Elige «Representante legal de un lector menor de edad».',
     A2_NOT_APPLICABLE: 'El seguimiento institucional (A2) solo aplica a cuentas de un colegio o club. Marca «No aplica».',
     VERSION_MISMATCH: 'Los documentos cambiaron. Recarga la página para ver la versión vigente.',
 };

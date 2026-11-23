@@ -3539,6 +3539,25 @@ async function authenticatedUserIdOf(req) {
 // /api/content/:id/epub compartan una única autoridad (sin duplicar reglas).
 // Devuelve { status, body } con exactamente las respuestas históricas de /access.
 // G4-05A-1: `via` es la procedencia, solo para el servidor: nunca va en `body`.
+/**
+ * V9 F7-C4 — ¿la autorización de cuenta y lectura (A1) de esta cuenta fue RETIRADA o NEGADA en el registro de decisiones?
+ * true | false | null (registro no verificable: no se concluye nada). El registro es de solo-añadir: la lectura se
+ * conserva mientras el archivo no cambie (tamaño y fecha), así la decisión rige en las dos réplicas sin reinicio.
+ * Pendiente o declarada sin verificar NO cuenta como retirada.
+ */
+let _a1WithdrawnCache = { key: null, gate: null };
+function b2cAuthorizationWithdrawn(userId) {
+    try {
+        const p = process.env.CHP_A2_REGISTRY;
+        if (!p) return null;
+        const st = fs.statSync(p);
+        const key = `${st.size}:${st.mtimeMs}`;
+        if (_a1WithdrawnCache.key !== key) _a1WithdrawnCache = { key, gate: decisionGate() };
+        const status = _a1WithdrawnCache.gate.status('A1', userId);
+        return status === 'revoked' || status === 'denied';
+    } catch { return null; }
+}
+
 async function decideContentAccess(userId, contentId, { logDecision = true, readStore = readJSON } = {}) {
     // CP-3A: `logDecision: false` silencia las líneas de decisión ([ACCESS],
     // [ACCESS_DECISION]) para la evaluación masiva del catálogo. Las líneas de
@@ -3557,6 +3576,13 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
         const user = users.find(u => u.id === userId);
         if (!user) {
             return { status: 403, via: 'USER_NOT_FOUND', body: { allowed: false, reason: 'Usuario no encontrado.' } };
+        }
+
+        // V9 F7-C4: cuenta personal B2C cuya autorización de cuenta y lectura (A1) fue retirada o negada ⇒ no se abre
+        // ningún contenido. No se borra nada: la cuenta, su suscripción y su historial se conservan.
+        if (isPersonalB2cAccount(user) && b2cAuthorizationWithdrawn(userId) === true) {
+            say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via AUTHORIZATION_WITHDRAWN`, 'ACCESS');
+            return { status: 403, via: 'AUTHORIZATION_WITHDRAWN', body: { allowed: false, errorCode: 'AUTHORIZATION_WITHDRAWN', reason: 'El acceso de esta cuenta está suspendido porque se retiró la autorización de tratamiento de datos. Escríbenos a contacto@chibaleteeditores.com.' } };
         }
 
         // Jerarquía de acceso (orden de evaluación):
@@ -6206,6 +6232,8 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
     // activa: la evidencia no se aplaza ni se presume.
     _jsonCache.delete(USERS_DB);
     const invited = (readJSON(USERS_DB) || []).find(u => u?.inviteToken === token);
+    // V9 F7-C4: constancia de la declaración del representante (referencia y día de las decisiones anotadas).
+    let representativeDeclaration = null;
     if (invited && invited.accountStatus === 'invited' && invited.inviteExpiresAt && Date.now() <= invited.inviteExpiresAt) {
         // V8.1-CLOSE-06B: solo con los documentos aplicables aprobados y publicados por Dirección.
         const docs = acceptanceDocumentsStatus();
@@ -6229,6 +6257,7 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
             return res.status(503).json({ error: 'No pudimos registrar tus decisiones. Intenta más tarde.', code: 'ACCEPTANCE_REGISTRY_UNAVAILABLE' });
         }
         log(`[ACCEPTANCE] user=${invited.id} ref=${acceptanceRef} profile=${plan.profile} kinds=${plan.decisions.map(d => `${d.kind}:${d.status}`).join(',')}`, 'ACCESS');
+        if (plan.profile === 'representative') representativeDeclaration = { ref: acceptanceRef, day: a2DayOf(Date.now()) };
     }
 
     // Lock: re-read -> validate token -> activate -> write (atomic across containers)
@@ -6244,6 +6273,11 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
         }
         const { inviteToken: _tok, inviteExpiresAt: _exp, ...rest } = user;
         activated = { ...rest, password: hashedPassword, accountStatus: 'active' };
+        // V9 F7-C4: la cuenta representada guarda con qué declaración se activó. Une, sin datos nuevos de nadie, el
+        // contacto del adulto del pedido (a quien se envió el enlace) con las decisiones del registro (misma referencia).
+        if (representativeDeclaration && activated.representedBy && activated.id === invited?.id) {
+            activated.representedBy = { ...activated.representedBy, declaration: representativeDeclaration };
+        }
         users[index] = activated;
         writeJSON(USERS_DB, users);
         return null;
@@ -6365,7 +6399,8 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
 
         // Fase 1 — identidad (lock de usuarios). Sin regla todavía = sin acceso (modo restringido).
         const userPhase = await mutateUsers((users) => {
-            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId: makeB2cLoginId, termsOnFileFor });
+            const plan = planUserPhase({ users, rules: readRulesFresh(), input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId: makeB2cLoginId, termsOnFileFor,
+                authorizationWithdrawnFor: b2cAuthorizationWithdrawn });
             if (input.dryRun || plan.userOp === 'none') return plan;
             if (plan.userOp === 'create') users.push(plan.user);
             else users[users.findIndex(u => u.id === plan.userId)] = plan.user;

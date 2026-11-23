@@ -26,6 +26,13 @@ export const isMediatorAccount = (user) => roleNames(user).some((r) => /mediador
 export const isAdminAccount = (user) => roleNames(user).some((r) => /administrador/i.test(r));
 /** Acompañamiento institucional: la cuenta pertenece a una organización registrada en su ficha. */
 export const isInstitutionalReader = (user) => typeof user?.organizationId === 'string' && user.organizationId.trim() !== '';
+/**
+ * V9 F7-C4 — cuenta de un lector MENOR representado: la creó una compra «para un menor» (usuario propio, sin correo,
+ * con el contacto del adulto del pedido). Su titular es el menor: nadie puede activarla declarándose «titular mayor de
+ * edad»; solo su representante legal, con A0 y A1 expresas.
+ */
+export const isRepresentedMinorAccount = (user) => !!user && typeof user.loginId === 'string' && user.loginId !== ''
+    && typeof user.representedBy?.email === 'string' && user.representedBy.email !== '';
 
 /**
  * @param {object} user      cuenta invitada (ficha del padrón)
@@ -38,6 +45,8 @@ export function planActivationDecisions(user, acceptance, { today, ref, termsAcc
     const staff = isMediatorAccount(user) || isAdminAccount(user);
     const mediator = isMediatorAccount(user);
     const institutional = !staff && isInstitutionalReader(user);
+    // V9 F7-C4: en una cuenta de menor representada, «titular mayor de edad» no es una opción (002 §2.3; 004 A0).
+    if (!staff && isRepresentedMinorAccount(user) && a.actingAs === 'titular') return { ok: false, code: 'REPRESENTATIVE_REQUIRED', required: ['actingAs'] };
     const missing = [];
     if (a.terms !== true && !termsAccepted) missing.push('T');
     if (!staff && !OPT.actingAs.includes(a.actingAs)) missing.push('actingAs');

@@ -40,6 +40,7 @@ ok('enlaces externos seguros', /target="_blank" rel="noopener noreferrer"/.test(
 ok('muestra 001, 002 y 004 (y 005 para mediadores)', ["docOf('001')", "docOf('002')", "docOf('004')", "docOf('005')"].every((x) => src.includes(x)));
 ok('sin 001 y 002 aprobados no se puede activar', /disabled=\{uiState === 'submitting' \|\| !baseDocsApproved\}/.test(src) && /\['001', '002'\]\.every/.test(src));
 ok('mensaje para DOCUMENTS_NOT_APPROVED', /DOCUMENTS_NOT_APPROVED:/.test(src));
+ok('V9 F7-C4: mensaje cuando la cuenta de un menor se intenta activar como titular adulto; el servidor es quien lo decide', /REPRESENTATIVE_REQUIRED:/.test(src) && /solo puede activarla su representante legal/.test(src) && /REPRESENTATIVE_REQUIRED/.test(server));
 ok('la política (001) está en la fuente única', ACCEPTANCE_DOCUMENTS.policy?.id === '001');
 
 console.log(`\nActivarCuenta decisiones (V8.1-CLOSE-05): ${pass} ✓, ${fail} ✗`);

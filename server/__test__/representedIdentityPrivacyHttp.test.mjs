@@ -172,7 +172,7 @@ try {
     ok('perfil público de un mediador ante un lector: igual que antes', (() => { const m = seenByLec.body.find((u) => u.id === 'MED'); return !!m && m.nombre_usuario === 'med' && m.mediatorKind === 'teacher' && !('email' in m); })());
     ok('adulta B2C y administrador: nombre de usuario y correo intactos', b2c.body?.user?.nombre_usuario === 'b2c' && b2c.body.user.email === 'b2c@x.test' && adm.body?.user?.nombre_usuario === 'adm');
     const after = stored(); const prev = JSON.parse(before);
-    ok('el padrón conserva contacto, usuario y nombre de usuario de todas las cuentas', after.every((u) => { const b = prev.find((x) => x.id === u.id); return JSON.stringify(u.representedBy) === JSON.stringify(b.representedBy) && u.loginId === b.loginId && u.nombre_usuario === b.nombre_usuario && u.email === b.email; }));
+    ok('el padrón conserva contacto, usuario y nombre de usuario de todas las cuentas', after.every((u) => { const b = prev.find((x) => x.id === u.id); /* V9 F7-C4: la cuenta activada por su representante añade la constancia de esa declaración; el contacto no cambia. */ return u.representedBy?.email === b.representedBy?.email && (u.representedBy?.declaration === undefined || (u.id === 'INV' && /^ACT-/.test(u.representedBy.declaration.ref))) && u.loginId === b.loginId && u.nombre_usuario === b.nombre_usuario && u.email === b.email; }));
     ok('los registros del servidor no contienen el correo del representante', !logs.includes(CONTACT));
 
     console.log('[8] F3-D5: clave interna del pedido');

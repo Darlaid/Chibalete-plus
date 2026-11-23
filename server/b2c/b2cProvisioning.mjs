@@ -265,11 +265,11 @@ export function planStartPending({ rules, userId, nowMs }) {
  *
  * @returns {{ status, userId, userOp: 'create'|'regenerate_token'|'none', user, activationUrl, reusedAccount }}
  */
-export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor }) {
+export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, authorizationWithdrawnFor }) {
     const ruleId = ruleIdFor(input.source, input.orderId);
     const existingRule = rules.find(r => r && r.id === ruleId);
     if (existingRule && existingRule.b2c?.idempotencyKey !== input.idempotencyKey) throw new B2cError(409, 'idempotency_mismatch');
-    if (input.reader) return planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, existingRule, ruleId });
+    if (input.reader) return planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, authorizationWithdrawnFor, existingRule, ruleId });
 
     const email = normalizeEmail(input.email);
     let user = existingRule
@@ -301,6 +301,9 @@ export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, norm
         return { status: existingRule ? 'already_activated' : 'activated', userId: newUserId, userOp: 'create', user: created,
             activationUrl: `/#/activar?token=${newToken}`, reusedAccount: false };
     }
+    // V9 F7-C4: la autorización de cuenta y lectura (A1) de esta cuenta fue retirada o negada ⇒ un pedido NUEVO no le
+    // concede acceso por sí solo: lo decide una persona. Un reintento del mismo pedido no cambia nada.
+    if (!existingRule && typeof authorizationWithdrawnFor === 'function' && authorizationWithdrawnFor(user.id) === true) throw new B2cError(422, 'authorization_withdrawn');
     if ((user.accountStatus || 'active') === 'invited') {
         // Invitación pendiente (cuenta nueva o respuesta perdida): enlace nuevo, el anterior deja de valer.
         return { status: existingRule ? 'already_activated' : 'activated', userId: user.id, userOp: 'regenerate_token', user: regen(user),
@@ -333,7 +336,7 @@ export function planUserPhase({ users, rules, input, nowMs, normalizeEmail, norm
  * GVA). Una T declarada y sin verificar no basta ⇒ 422 y revisión manual. Aquí no se anota ninguna
  * decisión: pagar no acredita representación ni consentimiento.
  */
-function planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, existingRule, ruleId }) {
+function planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, normalizeUser, newUserId, newToken, newLoginId, termsOnFileFor, authorizationWithdrawnFor, existingRule, ruleId }) {
     const contact = normalizeEmail(input.email);
     const linked = (u) => isRepresentedAccount(u) && normalizeEmail(u.representedBy.email) === contact;
     let user = null;
@@ -372,6 +375,9 @@ function planRepresentedUserPhase({ users, rules, input, nowMs, normalizeEmail, 
         return { status, userId: newUserId, userOp: 'create', user: created, loginId,
             activationUrl: `/#/activar?token=${newToken}`, reusedAccount: false };
     }
+    // V9 F7-C4: la autorización de cuenta y lectura (A1) de esta cuenta fue retirada o negada ⇒ un pedido NUEVO no le
+    // concede acceso por sí solo: lo decide una persona. Un reintento del mismo pedido no cambia nada.
+    if (!existingRule && typeof authorizationWithdrawnFor === 'function' && authorizationWithdrawnFor(user.id) === true) throw new B2cError(422, 'authorization_withdrawn');
     if ((user.accountStatus || 'active') === 'invited') {
         return { status, userId: user.id, userOp: 'regenerate_token', loginId: user.loginId,
             user: { ...user, inviteToken: newToken, inviteExpiresAt: nowMs + B2C_INVITE_TTL_MS },
