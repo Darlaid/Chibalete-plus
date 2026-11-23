@@ -300,7 +300,11 @@ class DataService {
         this.content = Array.isArray(rawContent) ? rawContent.filter((c: any) => c && c.id) : [];
 
         // Initialize API calls and store the promise
-        this.initializationPromise = Promise.all([
+        // V9 65E-C2: con un cierre de sesión pendiente (se cerró sin conexión) la cookie de la cuenta que salió sigue
+        // viva hasta que el servidor reciba la revocación. Con ella no se carga nada: antes, al reabrir con conexión se
+        // descargaban su catálogo, padrón y grupos, y el catálogo quedaba guardado otra vez en el dispositivo. Quien
+        // inicie sesión después carga lo suyo (`refreshAuthenticatedState`).
+        this.initializationPromise = Promise.all(this.hasLogoutPending() ? [this.syncServerTime()] : [
             this.initializeFromApi(),
             this.initializeUsersAndGroupsFromApi(),
             this.syncServerTime()             // Fase E3: precalentar árbitro temporal

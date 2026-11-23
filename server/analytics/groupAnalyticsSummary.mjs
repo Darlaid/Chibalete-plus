@@ -136,7 +136,9 @@ export function luReadingRows(legacyEvents, userIds) {
     const cohort = new Set(userIds);
     // V9 65E-B: `uncertified` = obras con lectura de LU SIN constancia de recepción (anterior a 65A), por lector. No se
     // cuenta ni se acredita después; sirve para que ese lector no se presente como «sin lectura».
-    const byUser = Object.assign(new Map(), { uncertified: new Map() });
+    // V9 65E-C2: `undated` = esos mismos hechos como filas SIN fecha acreditada (`date_unverified`), por lector, para el
+    // contexto pedagógico: allí cuentan como historial no comprobable de la obra, nunca como lectura fechada.
+    const byUser = Object.assign(new Map(), { uncertified: new Map(), undated: new Map() });
     const seen = new Set();
     let n = 0;
     for (const e of Array.isArray(legacyEvents) ? legacyEvents : []) {
@@ -146,6 +148,9 @@ export function luReadingRows(legacyEvents, userIds) {
         if (!Number.isFinite(e.receivedAt) || !Number.isFinite(e.timestamp) || e.timestamp > e.receivedAt + LU_RECEIPT_SKEW_MS) {
             if (!byUser.uncertified.has(e.userId)) byUser.uncertified.set(e.userId, new Set());
             byUser.uncertified.get(e.userId).add(e.contentId);
+            if (!byUser.undated.has(e.userId)) byUser.undated.set(e.userId, []);
+            byUser.undated.get(e.userId).push({ id: n++, event_id: null, event, mode: 'lu', user_id: e.userId, content_id: e.contentId,
+                server_ts: Number.isFinite(e.timestamp) ? e.timestamp : NaN, elapsed_ms: 0, payload_json: '{}', date_unverified: true });
             continue;
         }
         if (typeof e.eventId === 'string' && e.eventId) {

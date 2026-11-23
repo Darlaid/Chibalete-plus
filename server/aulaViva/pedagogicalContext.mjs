@@ -198,7 +198,9 @@ export function selectContextEvents(rows, context) {
     const audit = { in_context_works: 0, included: 0, unverifiable: 0, outside_period: 0, last_unverifiable_ts: null };
     for (const row of Array.isArray(rows) ? rows : []) {
         if (!row || String(row.user_id) !== context.readerId) continue;
-        const cls = context.classify(row.content_id, row.server_ts);
+        // 65E-C2: una fila cuya fecha no está acreditada (`date_unverified`: sesión de LU sin constancia de recepción) se
+        // clasifica sin fecha: si la obra es del contexto es historial no comprobable; nunca lectura fechada del curso.
+        const cls = context.classify(row.content_id, row.date_unverified === true ? NaN : row.server_ts);
         if (cls === 'no_work' || cls === 'outside_context') continue;
         audit.in_context_works++;
         if (cls === 'in') { included.push(row); audit.included++; }

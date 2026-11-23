@@ -298,7 +298,7 @@ import { createShadowExecutor } from './metrics/shadowExecutor.mjs';
 // leyendo SOLO las filas del usuario por índice (1B: sin escaneo completo).
 import { userEffectiveReadingMs } from './analytics/userEffectiveReadingTime.mjs';
 import { toMirrorEvent as toLuMirrorEvent, readLuMirror, withLuMirror } from './analytics/luSessionMirror.mjs';
-import { LU_ANALYTICS_SOURCE, buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders, readCohortHistoricalRows, accessibleReaderActivity, isProgressOnlySession } from './analytics/groupAnalyticsSummary.mjs';
+import { LU_ANALYTICS_SOURCE, luReadingRows, buildGroupAnalyticsSummary, createGroupAnalyticsCache, resolveGroupLectorCohort, restrictSummaryToReaders, readCohortHistoricalRows, accessibleReaderActivity, isProgressOnlySession } from './analytics/groupAnalyticsSummary.mjs';
 // CHP-MAINT-STORE-WOOCOMMERCE-CATALOG-01 — catálogo de libros de WooCommerce (solo lectura, caché por réplica).
 import { createWooCatalog, WooCatalogUnavailableError } from './lib/wooCatalog.mjs';
 
@@ -11973,6 +11973,39 @@ function courseAttributionOf(readerIds, contextOf) {
     return out;
 }
 /**
+ * V9 65E-C2 — sesiones de Lector Único (LU) para el contexto pedagógico.
+ *
+ * Los indicadores contextuales (trayectoria, cohortes, patrones, recomendaciones) se calculan con la historia de
+ * events.db del lector. La sesión de LU no está ahí como lectura: llega por la telemetría heredada y su copia conservada
+ * (`lu.read_session_*`) queda fuera de esa historia. Un lector que solo lee en LU salía «sin actividad».
+ *
+ * Aquí no hay otra fuente ni otra regla: son las MISMAS filas con las que el resumen de Aula Viva ya mide la lectura de
+ * LU (`luReadingRows` sobre telemetría heredada ∪ copia conservada, sin repetir por `eventId`): solo las que tienen
+ * constancia de recepción, con la fecha del dispositivo. Las que no la tienen entran sin fecha acreditada: si la obra es
+ * del curso el resultado es «información insuficiente», no inactividad. Ninguna de estas sesiones existe además como
+ * lectura en events.db (ver `luReadingRows`), así que no se cuenta dos veces. El contexto decide después, como con
+ * cualquier fila, si la obra es del curso y si la fecha cae en un periodo acreditado.
+ *
+ * @param {Iterable<string>} readerIds  lectores de quienes se va a calcular
+ * @returns {(readerId:string, own:object[], sinceTs:number, nowTs:number) => object[]}  historia del lector con sus sesiones de LU
+ */
+function luContextHistory(readerIds) {
+    const ids = [...new Set([...readerIds].map(String))];
+    const wanted = new Set(ids);
+    const legacy = (readJSON(ANALYTICS_DB) || []).filter(e => e?.source === LU_ANALYTICS_SOURCE && wanted.has(e.userId));
+    const lu = luReadingRows(withLuMirror(legacy, readLuMirror(ids)), ids);
+    return (readerId, own, sinceTs, nowTs) => {
+        const id = String(readerId);
+        // Sin fecha acreditada: la declarada solo sitúa la fila en la ventana (nunca después de ahora).
+        const undated = (lu.undated.get(id) || []).map(r => ({ ...r, server_ts: Math.min(Number.isFinite(r.server_ts) ? r.server_ts : nowTs, nowTs) }));
+        const extra = [...(lu.get(id) || []), ...undated].filter(r => r.server_ts >= sinceTs);
+        if (extra.length === 0) return own;
+        const merged = own.concat(extra).sort((a, b) => a.server_ts - b.server_ts);
+        if (own.truncated === true) merged.truncated = true;
+        return merged;
+    };
+}
+/**
  * Indicadores contextuales de un lector para quien lo acompaña por mediación (CIS + A2 + C005, nunca un B2C personal).
  * Es la entrada que U2 y U3 usarán desde las rutas de Aula Viva y Leo. `{ status, body }`; no escribe la respuesta.
  */
@@ -11989,7 +12022,8 @@ async function contextualIndicatorsFor(requester, users, readerId) {
     const { computeContextualIndicators, CONTEXT_WINDOW_DAYS } = await import('./aulaViva/pedagogicalContext.mjs');
     const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
     const nowTs = Date.now();
-    const { result } = computeContextualIndicators({ context, nowTs, events: readOwnEventHistory(readerId, nowTs - CONTEXT_WINDOW_DAYS * 86_400_000) });
+    const sinceTs = nowTs - CONTEXT_WINDOW_DAYS * 86_400_000;
+    const { result } = computeContextualIndicators({ context, nowTs, events: luContextHistory([readerId])(readerId, readOwnEventHistory(readerId, sinceTs), sinceTs, nowTs) });
     return { status: 200, body: { ok: true, ...result } };
 }
 /**
@@ -12011,9 +12045,9 @@ async function aulaVivaContextReader(callerId, readerId, opts = {}) {
     }
     const { HISTORY_DAYS } = await import('./aulaViva/contextualView.mjs');
     const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
-    const nowTs = Date.now();
+    const nowTs = Date.now(), sinceTs = nowTs - (opts.historyDays ?? HISTORY_DAYS) * 86_400_000;
     return { ok: true, context, nowTs, mediatorIds: groupMediatorIds(context.groupIds),
-        events: readOwnEventHistory(readerId, nowTs - (opts.historyDays ?? HISTORY_DAYS) * 86_400_000) };
+        events: luContextHistory([readerId])(readerId, readOwnEventHistory(readerId, sinceTs), sinceTs, nowTs) };
 }
 /** Quienes median unos grupos (para saber qué intervenciones pertenecen al contexto de esos cursos). */
 function groupMediatorIds(groupIds) {
@@ -12067,13 +12101,14 @@ async function aulaVivaContextReaders(callerId, { onlyGroup = null, historyDays 
     const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
     const works = new Map([...rosters.keys()].map(gid => [gid, groupsContentScope([gid])]));
     const intervals = contextIntervals(rosters.keys());
-    const nowTs = Date.now();
+    const nowTs = Date.now(), sinceTs = nowTs - (historyDays ?? CONTEXT_WINDOW_DAYS) * 86_400_000;
+    const withLu = luContextHistory([...shared].filter(([, gids]) => gids).map(([sid]) => sid));   // 65E-C2: una sola lectura para todos
     const readers = [];
     for (const [readerId, gids] of shared) {
         if (!gids) continue;
         readers.push({ readerId, groupIds: gids,
             context: buildPedagogicalContext({ readerId, groups: gids.map(gid => ({ groupId: gid, works: works.get(gid) })), intervals }),
-            events: readOwnEventHistory(readerId, nowTs - (historyDays ?? CONTEXT_WINDOW_DAYS) * 86_400_000) });
+            events: withLu(readerId, readOwnEventHistory(readerId, sinceTs), sinceTs, nowTs) });
     }
     // V9 F7-C2R-U3D: los cursos y clubes mediados (para las cohortes de nómina de quien media).
     const allGroups = readJSON(GROUPS_DB) || [];

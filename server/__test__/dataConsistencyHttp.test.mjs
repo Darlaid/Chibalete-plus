@@ -412,8 +412,19 @@ try {
 
     section('[8] /api/health/analytics lee las bases configuradas');
     {
-        const h = await both('/api/health/analytics');
+        // La respuesta de salud se conserva 10 s por réplica (analyticsHealth.js). S1 ya la calculó en [6], ANTES de la
+        // escritura de [7]: si [7] dura menos de 10 s devolvería aquel recuento (una fila menos) y no el actual. Se pide
+        // una respuesta calculada después de este punto: si la que llega es anterior, se espera lo que le queda de vigencia.
+        const t8 = Date.now();
+        const freshHealth = async (s) => {
+            let x = await get(s, '/api/health/analytics');
+            const at = Date.parse(x.json?.timestamp);
+            if (Number.isFinite(at) && at < t8) { await sleep(Math.max(0, at + 10_000 - Date.now()) + 100); x = await get(s, '/api/health/analytics'); }
+            return x;
+        };
+        const h = [await freshHealth(S1), await freshHealth(S2)];
         const count = sql(P.events, 'SELECT COUNT(*) n FROM events')[0].n;
+        ok('las dos respuestas de salud se calcularon después de la última escritura (no vienen de la memoria de 10 s)', h.every((x) => Date.parse(x.json?.timestamp) >= t8), JSON.stringify(h.map((x) => [x.json?.timestamp, t8])));
         TABLA['salud analítica · events.db presente / recuento'] = [h[0].json?.checks?.events_db?.present ?? null, h[0].json?.checks?.events_db?.count ?? null];
         ok('events.db: presente (la configurada) y con su recuento real', h.every((x) => x.json?.checks?.events_db?.present === true && x.json.checks.events_db.count === count), JSON.stringify(h.map((x) => x.json?.checks?.events_db)) + ` real=${count}`);
         ok('archivo de eventos: informa el configurado (todavía no existe), no otro', h.every((x) => x.json?.checks?.archive_db?.present === fs.existsSync(P.archive)), JSON.stringify(h.map((x) => x.json?.checks?.archive_db)));

@@ -39,6 +39,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         if (!storedUserId && dataService.hasLogoutPending()) {
           logoutPending = !(await dataService.settlePendingLogout());
           dataService.clearSessionState();
+          // V9 65E-C2: tampoco queda el catálogo ni lo editorial de la cuenta que salió (como en el cierre con conexión).
+          clearEditorialClientStorage();
           if (!active) return;
         }
 
