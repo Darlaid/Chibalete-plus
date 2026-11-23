@@ -30,6 +30,9 @@ const DECISION_MESSAGES: Record<string, string> = {
     VERSION_MISMATCH: 'Los documentos cambiaron. Recarga la página para ver la versión vigente.',
 };
 
+// V9 BII-CLOSE-1 — fecha civil de Bogotá de un instante del servidor (las fechas de la suscripción no dependen del equipo).
+const formatDay = (ms: number) => new Intl.DateTimeFormat('es-CO', { timeZone: 'America/Bogota', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(ms));
+
 // V9 F3-D4 — usuario de acceso de una cuenta representada (lo genera el servidor; aquí solo se muestra).
 const LOGIN_ID_RX = /^lec-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}$/;
 /** Página de la tienda donde el comprador pide un enlace de activación nuevo (V9 F3-B). */
@@ -76,6 +79,8 @@ const ActivarCuenta: React.FC = () => {
     // V9 F3-D4: usuario de acceso que devuelve la activación de una cuenta representada (nunca se pide ni se busca).
     const [loginId, setLoginId]         = useState('');
     const [copied, setCopied]           = useState(false);
+    // V9 BII-CLOSE-1: fechas de la suscripción que empieza con esta activación (las calcula el servidor).
+    const [subscription, setSubscription] = useState<{ startsAt: number; expiresAt: number } | null>(null);
     // V8.1-CLOSE-06B: estado de los documentos según Dirección (aprobado + enlace publicado).
     const [docs, setDocs]               = useState<DocStatus[] | null>(null);
     useEffect(() => {
@@ -165,6 +170,8 @@ const ActivarCuenta: React.FC = () => {
                 // Solo el usuario de la cuenta recién activada, y solo si esa cuenta no entra por correo.
                 const lid = typeof data?.user?.loginId === 'string' && !data.user.email && LOGIN_ID_RX.test(data.user.loginId) ? data.user.loginId : '';
                 setLoginId(lid);
+                const sub = data?.subscription;
+                setSubscription(sub && Number.isFinite(sub.startsAt) && Number.isFinite(sub.expiresAt) && sub.expiresAt > sub.startsAt ? { startsAt: sub.startsAt, expiresAt: sub.expiresAt } : null);
                 setUiState('success');
                 return;
             }
@@ -215,6 +222,12 @@ const ActivarCuenta: React.FC = () => {
                             ? 'La cuenta del lector está lista. Para entrar se usa este usuario (no un correo) y la contraseña que acabas de crear.'
                             : 'Tu cuenta está lista. Ya puedes ingresar con tu nueva contraseña.'}
                     </p>
+                    {subscription && (
+                        <p data-testid="subscription-dates" className="text-sm text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-700 rounded-md p-3">
+                            La suscripción empieza hoy, <strong>{formatDay(subscription.startsAt)}</strong>, y termina el <strong>{formatDay(subscription.expiresAt)}</strong>.
+                            {' '}Los doce meses se cuentan desde esta activación.
+                        </p>
+                    )}
                     {loginId && (
                         <div className="text-left border border-gray-200 dark:border-gray-700 rounded-md p-3 space-y-2">
                             <p id="login-id-label" className="text-xs font-semibold text-gray-600 dark:text-gray-300">Usuario de acceso del lector</p>

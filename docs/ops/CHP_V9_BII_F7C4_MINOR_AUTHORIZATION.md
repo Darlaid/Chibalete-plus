@@ -30,14 +30,14 @@ Estado: implementado y probado en laboratorio. **Sin desplegar.** Conserva F7-C3
 
 ## Límites conocidos
 
-- La puerta del punto 3 actúa al abrir contenido. No cierra la sesión ni desactiva la cuenta: eso sigue siendo `POST /api/users/:id/disable` por AT. Si el registro no es verificable no se concluye una retirada (la lectura no pasa a depender de la disponibilidad del registro).
+- La puerta del punto 3 actúa al abrir contenido. No cierra la sesión ni desactiva la cuenta: eso sigue siendo `POST /api/users/:id/disable` por AT. Registro no verificable: ver BII-CLOSE-1 (`CHP_V9_BII_B2C_OPERATING_PROCEDURES.md` §6): un fallo no reabre lo retirado.
 - La puerta se limita a cuentas personales B2C. Las cuentas institucionales siguen su procedimiento (GVA y la institución).
-- No se puede cambiar el contacto del adulto de una cuenta representada (`representedBy.email` es un campo del servidor). El cambio de representante o el cierre del vínculo requiere un procedimiento de GVA que hoy no está implementado.
+- El cambio de representante y la mayoría de edad se resolvieron en BII-CLOSE-1 (`POST /api/users/:id/representation`; procedimientos §5 y §7).
 
 ## Decisiones pendientes de Dirección o jurídica
 
-1. **Cambio de representante o de contacto** de una cuenta de menor: qué evidencia se exige y quién lo ejecuta.
-2. **Mayoría de edad del lector**: cómo pasa una cuenta representada a ser de su titular.
+1. ~~Cambio de representante o de contacto~~ — resuelto en BII-CLOSE-1.
+2. ~~Mayoría de edad del lector~~ — resuelto en BII-CLOSE-1.
 3. **Efecto de la A1 retirada sobre la sesión**: hoy bloquea el contenido; desactivar la cuenta sigue siendo un paso de AT. Decidir si debe ser automático.
 4. **Comunicación de fechas** (002 §3.4): la tienda no conoce el día de activación; falta definir quién informa al contratante el inicio y el fin reales.
 5. **Plazo de verificación de GVA** para una representación declarada, y qué ocurre si no se verifica.

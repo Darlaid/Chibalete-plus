@@ -43,7 +43,7 @@ import {
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
 import { a2Gate, appendDecisions, dayOf as a2DayOf, decisionGate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
-import { acceptanceDocumentsStatus, adminActivationAllowed, optionalProcessingFor, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
+import { acceptanceDocumentsStatus, adminActivationAllowed, isRepresentedMinorAccount, optionalProcessingFor, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -3545,17 +3545,24 @@ async function authenticatedUserIdOf(req) {
  * conserva mientras el archivo no cambie (tamaño y fecha), así la decisión rige en las dos réplicas sin reinicio.
  * Pendiente o declarada sin verificar NO cuenta como retirada.
  */
+// V9 BII-CLOSE-1 — un fallo técnico del registro no reabre lo retirado:
+//  - si el registro deja de poder leerse o verificarse, rige la ÚLTIMA lectura verificada de esta réplica;
+//  - si esta réplica nunca pudo verificarlo, devuelve 'unavailable' (el llamador cierra, con un aviso temporal);
+//  - solo un despliegue SIN registro configurado no concluye nada (null).
 let _a1WithdrawnCache = { key: null, gate: null };
 function b2cAuthorizationWithdrawn(userId) {
+    const p = process.env.CHP_A2_REGISTRY;
+    if (!p) return null;
     try {
-        const p = process.env.CHP_A2_REGISTRY;
-        if (!p) return null;
         const st = fs.statSync(p);
         const key = `${st.size}:${st.mtimeMs}`;
         if (_a1WithdrawnCache.key !== key) _a1WithdrawnCache = { key, gate: decisionGate() };
-        const status = _a1WithdrawnCache.gate.status('A1', userId);
-        return status === 'revoked' || status === 'denied';
-    } catch { return null; }
+    } catch (e) {
+        if (!_a1WithdrawnCache.gate) return 'unavailable';
+        if (!_a1WithdrawnCache.warned) { _a1WithdrawnCache.warned = true; log(`[ACCESS] registro de decisiones no verificable (${e?.code || 'ERROR'}): rige la última lectura verificada`, 'ERROR'); }
+    }
+    const status = _a1WithdrawnCache.gate.status('A1', userId);
+    return status === 'revoked' || status === 'denied';
 }
 
 async function decideContentAccess(userId, contentId, { logDecision = true, readStore = readJSON } = {}) {
@@ -3580,9 +3587,16 @@ async function decideContentAccess(userId, contentId, { logDecision = true, read
 
         // V9 F7-C4: cuenta personal B2C cuya autorización de cuenta y lectura (A1) fue retirada o negada ⇒ no se abre
         // ningún contenido. No se borra nada: la cuenta, su suscripción y su historial se conservan.
-        if (isPersonalB2cAccount(user) && b2cAuthorizationWithdrawn(userId) === true) {
+        const a1Withdrawn = isPersonalB2cAccount(user) ? b2cAuthorizationWithdrawn(userId) : false;
+        if (a1Withdrawn === true) {
             say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via AUTHORIZATION_WITHDRAWN`, 'ACCESS');
             return { status: 403, via: 'AUTHORIZATION_WITHDRAWN', body: { allowed: false, errorCode: 'AUTHORIZATION_WITHDRAWN', reason: 'El acceso de esta cuenta está suspendido porque se retiró la autorización de tratamiento de datos. Escríbenos a contacto@chibaleteeditores.com.' } };
+        }
+        // V9 BII-CLOSE-1: registro configurado pero nunca verificable en esta réplica ⇒ no se puede saber si la
+        // autorización sigue vigente: cierre temporal (no es una negativa definitiva ni borra nada).
+        if (a1Withdrawn === 'unavailable') {
+            say(`[ACCESS] user ${userId} → content ${contentId} → DENIED via AUTHORIZATION_REGISTRY_UNAVAILABLE`, 'ACCESS');
+            return { status: 503, via: 'AUTHORIZATION_REGISTRY_UNAVAILABLE', body: { allowed: false, errorCode: 'AUTHORIZATION_REGISTRY_UNAVAILABLE', reason: 'No pudimos comprobar las autorizaciones de esta cuenta. Intenta de nuevo en unos minutos.' } };
         }
 
         // Jerarquía de acceso (orden de evaluación):
@@ -6245,7 +6259,9 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
         try { gateNow = decisionGate(); } catch { gateNow = null; }
         const acceptanceRef = `ACT-${crypto.randomUUID()}`;
         const plan = planActivationDecisions(invited, req.body?.acceptance, { today: a2DayOf(Date.now()), ref: acceptanceRef,
-            termsAccepted: gateNow ? termsOnFile(gateNow, invited.id) : false });
+            // V9 BII-CLOSE-1: en la transición a titular adulto (mayoría de edad) los términos que aceptó su
+            // representante no se dan por suyos: los acepta él mismo.
+            termsAccepted: gateNow && !invited.titularTransition ? termsOnFile(gateNow, invited.id) : false });
         if (!plan.ok) {
             return res.status(422).json({ error: 'Faltan decisiones para activar la cuenta.', code: plan.code, ...(plan.required ? { required: plan.required } : {}) });
         }
@@ -6290,10 +6306,12 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
     log(`Account activated: user=${activated.id}`, 'ACCESS');
     // V9 F7-C3: activación efectiva. Si esta cuenta tiene una suscripción comprada y pendiente, sus doce meses empiezan
     // ahora. Un fallo aquí no deshace la activación de la cuenta: el inicio se reintenta cuando el lector consulta sus accesos o la tienda reenvía el pedido.
-    await startPendingB2cAccess(activated.id, 'accept-invite');
+    const startedNow = await startPendingB2cAccess(activated.id, 'accept-invite');
     return res.status(200).json({
         success: true,
         user:    sanitizeUserForClient(activated),
+        // V9 BII-CLOSE-1 (002 §3.4): fechas de inicio y terminación de la suscripción que empieza con esta activación.
+        ...(startedNow.length ? { subscription: { startsAt: startedNow[0].b2c.activationAt, expiresAt: startedNow[0].expiresAt, plan: startedNow[0].b2c.plan ?? null } } : {}),
     });
 });
 
@@ -6351,12 +6369,12 @@ const b2cGuard = createB2cGuard({ readSecret: readB2cProvisioningSecret, log });
 /**
  * V9 F7-C3 — inicia la vigencia de las suscripciones B2C pendientes de una cuenta ACTIVA (ver «ACTIVACIÓN EFECTIVA» en
  * b2cProvisioning.mjs). Idempotente: sin reglas pendientes de esa cuenta no escribe nada. Nunca lanza.
- * @returns {Promise<number>} cuántas reglas inició
+ * @returns {Promise<object[]>} las reglas que inició (vacío si ninguna)
  */
 async function startPendingB2cAccess(userId, via) {
     try {
         const cached = readJSON(ACCESS_DB);
-        if (!(Array.isArray(cached) ? cached : []).some(r => isPendingB2cRule(r) && r.scope === 'user' && r.scopeId === userId)) return 0;
+        if (!(Array.isArray(cached) ? cached : []).some(r => isPendingB2cRule(r) && r.scope === 'user' && r.scopeId === userId)) return [];
         const nowMs = Date.now();
         const started = await mutateAccessRules((rules) => {
             const plan = planStartPending({ rules, userId, nowMs });
@@ -6367,10 +6385,10 @@ async function startPendingB2cAccess(userId, via) {
             return plan.started;
         });
         for (const r of started) log(`[B2C] access started ${r.b2c.source}:${r.b2c.orderId} user=${userId} via=${via} expires=${new Date(r.expiresAt).toISOString()}`, 'ACCESS');
-        return started.length;
+        return started;
     } catch (e) {
         log(`[B2C] no se pudo iniciar la vigencia pendiente user=${userId} via=${via}: ${e?.code || e?.message || e}`, 'ERROR');
-        return 0;
+        return [];
     }
 }
 const b2cFail = (res, e) => {
@@ -6433,6 +6451,8 @@ app.post('/api/b2c/provision', b2cGuard, async (req, res) => {
             const plan = planRulePhase({ rules, input, userId: userPhase.userId, nowMs, accountActive });
             if (!input.dryRun && plan.ruleOp === 'create') { rules.push(plan.rule); writeJSON(ACCESS_DB, rules); }
             if (!input.dryRun && plan.ruleOp === 'start') { rules[rules.findIndex(r => r && r.id === plan.rule.id)] = plan.rule; writeJSON(ACCESS_DB, rules); }
+            // V9 BII-CLOSE-1: una consulta (`dryRun`) nunca informa un inicio que no quedó escrito: devuelve la regla tal como está.
+            if (input.dryRun && plan.ruleOp === 'start') return { ...plan, ruleOp: 'none', rule: rules.find(r => r && r.id === plan.rule.id) };
             return plan;
         });
         const status = rulePhase.ruleOp === 'create' ? 'activated' : 'already_activated';
@@ -6982,6 +7002,73 @@ async function applyCredentialAction(req, res, action) {
 }
 app.post('/api/users/:id/reinvite', requireAdminAccess, (req, res) => applyCredentialAction(req, res, 'reinvite'));
 app.post('/api/users/:id/disable',  requireAdminAccess, (req, res) => applyCredentialAction(req, res, 'disable'));
+
+/**
+ * V9 BII-CLOSE-1 — representación de una cuenta de lector menor (solo Administración/operador, tras un trámite verificado por GVA):
+ *   action 'change_contact' — cambio de representante: el contacto del adulto pasa a ser `email`;
+ *   action 'majority'       — mayoría de edad: la cuenta pasa a ser de su titular, con `email` propio.
+ * Nada se transfiere: exige que las autorizaciones dadas por el representante anterior (A0, A1 y, si existían, A3 y A5)
+ * consten ya RETIRADAS en el registro de decisiones (las anota GVA con su evidencia, `ops/a2/decision_operator.mjs`).
+ * La cuenta vuelve a «invitada», sin contraseña y con sus sesiones cerradas; el enlace nuevo se devuelve a quien opera
+ * para entregarlo por el canal verificado. Quien lo use decide de nuevo, de forma expresa. La suscripción y sus fechas,
+ * el historial y el progreso no cambian.
+ */
+const REPRESENTATION_REF_RX = /^[A-Za-z0-9._:-]{1,128}$/;
+app.post('/api/users/:id/representation', requireAdminAccess, async (req, res) => {
+    const { id } = req.params;
+    const action = req.body?.action, requestRef = req.body?.requestRef;
+    const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
+    if (!['change_contact', 'majority'].includes(action)) return res.status(400).json({ error: 'Acción no válida', code: 'INVALID_ACTION' });
+    if (typeof requestRef !== 'string' || !REPRESENTATION_REF_RX.test(requestRef)) return res.status(400).json({ error: 'Falta la referencia del trámite', code: 'INVALID_REQUEST_REF' });
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Correo no válido', code: 'INVALID_EMAIL' });
+    _jsonCache.delete(USERS_DB);
+    const target = (readJSON(USERS_DB) || []).find(u => u?.id === id);
+    if (!target) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (!isRepresentedMinorAccount(target)) return res.status(409).json({ error: 'No se puede aplicar a esta cuenta', code: 'NOT_REPRESENTED' });
+    let gate = null;
+    try { gate = decisionGate(); } catch { gate = null; }
+    if (!gate) return res.status(503).json({ error: 'El registro de decisiones no está disponible', code: 'ACCEPTANCE_REGISTRY_UNAVAILABLE' });
+    const standing = ['A0', 'A1', 'A3', 'A5'].filter((k) => ['effective', 'granted_unverified', 'expired'].includes(gate.status(k, id)));
+    if (standing.length) return res.status(409).json({ error: 'Las autorizaciones del representante anterior deben constar retiradas antes de este cambio.', code: 'AUTHORIZATIONS_NOT_WITHDRAWN', kinds: standing });
+
+    const inviteToken = crypto.randomBytes(32).toString('hex'), inviteExpiresAt = Date.now() + REINVITE_TTL_MS, day = a2DayOf(Date.now());
+    const conflict = await mutateUsers((users) => {
+        const index = users.findIndex(u => u?.id === id);
+        if (index === -1) return { conflict: 'not_found' };
+        const current = users[index];
+        if (!isRepresentedMinorAccount(current)) return { conflict: 'not_represented' };
+        if (!['active', 'invited'].includes(current.accountStatus || 'active')) return { conflict: 'not_available' };
+        if (action === 'change_contact' && normalizeEmail(current.representedBy.email) === email) return { conflict: 'same_contact' };
+        if (action === 'majority' && users.some(u => u && u.id !== id && (normalizeEmail(u.email) === email || u.loginId === email))) return { conflict: 'email_in_use' };
+        const { password: _pw, inviteToken: _it, inviteExpiresAt: _ie, resetToken: _rt, resetExpiresAt: _re, ...rest } = current;
+        // El contacto del adulto anterior no se conserva: solo las referencias de lo que declaró y del trámite que lo terminó.
+        const ended = { declaration: rest.representedBy.declaration ?? null, endedRef: requestRef, endedDay: day };
+        const previous = [...(Array.isArray(rest.representedBy.previous) ? rest.representedBy.previous : []), ended];
+        let next;
+        if (action === 'change_contact') {
+            next = { ...rest, representedBy: { email, previous, changedRef: requestRef, changedDay: day } };
+        } else {
+            const { representedBy: _rb, loginId: _lid, ...own } = rest;
+            next = { ...own, email, titularTransition: { ref: requestRef, day, previous } };
+        }
+        next.accountStatus = 'invited'; next.inviteToken = inviteToken; next.inviteExpiresAt = inviteExpiresAt;
+        next.accountStatusChangedAt = new Date().toISOString();
+        bumpCredentialVersion(next);
+        users[index] = next;
+        writeJSON(USERS_DB, users);
+        return null;
+    });
+    if (conflict?.conflict === 'not_found') return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (conflict) {
+        return res.status(409).json({ error: 'No se puede aplicar a esta cuenta', code: conflict.conflict.toUpperCase() });
+    }
+    try { sessionAuth.revokeAllUserSessions(id); authSessionRevoked.labels('credential_change').inc(); }
+    catch (e) { log(`[SESSION] revoke-on-representation error: ${e.message}`, 'WARN'); }
+    log(`Representation ${action}: user=${id} ref=${requestRef}`, 'ACCESS');
+    writeAuditLog({ action: `representation_${action}`, targetUserId: id, actor: req.auth?.userId || req.headers['x-user-id'] || null, details: { requestRef } });
+    res.set('Cache-Control', 'no-store');
+    return res.status(200).json({ success: true, userId: id, action, accountStatus: 'invited', inviteExpiresAt, activationUrl: `/#/activar?token=${inviteToken}` });
+});
 
 // DELETE USER
 app.delete('/api/users/:id', requireAdminAccess, async (req, res) => {
