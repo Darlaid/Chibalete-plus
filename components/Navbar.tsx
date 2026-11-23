@@ -4,6 +4,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { dataService } from '../services/dataService';
 import { isMediator, isAdmin, normalizeRoles } from '../utils/permissions';
+import { useLogoutFlow, PendingSyncNotice } from './LogoutDialog';
 import {
     Home, Library, Search, User, LifeBuoy, Upload, LogOut, Users,
     PlayCircle, ShoppingBag, GraduationCap, BarChart2,
@@ -177,11 +178,12 @@ const Navbar: React.FC = () => {
         ] : []),
     ];
 
+    // V9 65E-C3: antes de salir se avisa de lo que queda en este equipo y se deja elegir (ver LogoutDialog).
+    const logoutFlow = useLogoutFlow(() => navigate('/bienvenida', { replace: true }));
     const handleLogout = (e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
-        logout();
-        navigate('/bienvenida', { replace: true });
+        logoutFlow.requestLogout(e.currentTarget as HTMLElement);
     };
 
     return (
@@ -237,6 +239,7 @@ const Navbar: React.FC = () => {
                         </div>
 
                         <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
+                            <PendingSyncNotice />
                             <button
                                 onClick={handleLogout}
                                 className="w-full flex items-center justify-center space-x-2 py-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded-xl font-bold hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors shadow-sm min-h-[50px]"
@@ -296,6 +299,7 @@ const Navbar: React.FC = () => {
 
                 {/* Footer Section (Logout) - Fixed at bottom */}
                 <div className="p-4 border-t border-gray-100 dark:border-gray-800 bg-white/50 dark:bg-gray-900/50 flex-shrink-0">
+                    <PendingSyncNotice />
                     <button
                         type="button"
                         onClick={handleLogout}
@@ -306,6 +310,7 @@ const Navbar: React.FC = () => {
                     </button>
                 </div>
             </nav>
+            {logoutFlow.dialog}
         </>
     );
 };

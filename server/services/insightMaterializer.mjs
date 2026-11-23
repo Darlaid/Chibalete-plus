@@ -49,8 +49,8 @@ function getRawEventsDb() {
         `SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`);
     // V9 65E-B: de la más reciente a la más antigua (ver `readUserHistory`); sin LIMIT: lo acota quien itera.
     _stmtUserHistory = _eventsRawDb.prepare(
-        `SELECT * FROM events WHERE user_id = ? AND server_ts >= ? AND event NOT IN ('lu.read_session_start', 'lu.read_session_heartbeat', 'lu.read_session_end')
-         ORDER BY server_ts DESC, id DESC`);   // 65E-C1: la copia de sesiones de LU no es entrada de las señales (ver luSessionMirror.mjs)
+        `SELECT * FROM events WHERE user_id = ? AND server_ts >= ?
+         ORDER BY server_ts DESC, id DESC`);   // 65E-C3: los hechos de sesión de LU se resuelven al leer (ver `readUserHistory`)
     // CHP-MOOK-CANONICAL-EVENTS-01C: las revisiones se proyectan al REVISOR
     // (payload.reviewerId), cuyo user_id no es el de la fila. Filtro textual
     // acotado al evento; signalCompute vuelve a comparar reviewerId exacto.
@@ -94,14 +94,28 @@ function bucketBySubject(byUser, row) {
  */
 export const HISTORY_MAX_ROWS = 100_000;
 let _historyTruncations = 0;
-function readUserHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS) {
+/**
+ * V9 65E-C3 — `luSessions`: qué hacer con los hechos de sesión de LU conservados (`lu.read_session_*`).
+ *   'exclude'  no entran: es lo que necesita el contexto pedagógico, que une la lectura de LU por su cuenta (telemetría
+ *              heredada ∪ copia, con la atribución temporal del curso) y contaría dos veces;
+ *   'credit'   entran como lectura (`creditedReadingRow`): las señales GLOBALES miden la lectura de todos los modos, y un
+ *              lector que solo lee en LU salía sin perfil ni actividad. Se fechan cuando ocurrieron y se reordenan.
+ */
+function readUserHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS, luSessions = 'exclude') {
     const rows = [];
-    let truncated = false;
+    let truncated = false, lu = false;
     for (const r of _stmtUserHistory.iterate(String(userId), sinceTs)) {
+        let row = r;
+        if (isLuMirrorRow(r)) {
+            row = luSessions === 'credit' ? creditedReadingRow(r) : null;
+            if (!row || row.server_ts < sinceTs) continue;
+            lu = true;
+        }
         if (rows.length >= maxRows) { truncated = true; break; }
-        rows.push(r);
+        rows.push(row);
     }
     rows.reverse();
+    if (lu) rows.sort((a, b) => (a.server_ts - b.server_ts) || (a.id - b.id));
     if (truncated) { rows.truncated = true; _historyTruncations += 1; }
     return rows;
 }
@@ -110,7 +124,7 @@ export const historyTruncations = () => _historyTruncations;
 
 /** Historia del sujeto: sus filas + las revisiones que firmó como reviewerId (sin duplicar). */
 function subjectHistory(userId, sinceTs) {
-    const own = readUserHistory(userId, sinceTs);
+    const own = readUserHistory(userId, sinceTs, HISTORY_MAX_ROWS, 'credit');
     const reviewed = _stmtReviewerHistory.all(sinceTs, `%"reviewerId":"${String(userId)}"%`, 20_000);
     if (reviewed.length === 0) return own;
     const seen = new Set(own.map(r => r.id));
@@ -150,6 +164,7 @@ import { resolveGroupReaderCohort } from '../analytics/readerCohort.mjs';
 // historia lógica completa (hot ∪ archive). El camino INCREMENTAL no cambia:
 // `runOnce` sigue leyendo solo events.db por `id > watermark`.
 import { readHistoricalEvents } from '../analytics/historicalEvents.mjs';
+import { isLuMirrorRow, creditedReadingRow } from '../analytics/luSessionMirror.mjs';
 
 const MATERIALIZER_NAME = 'aula_viva_pedagogical_v1';
 const DEFAULT_BATCH = 5000;
@@ -310,7 +325,7 @@ export function runOnce(opts = {}) {
                     // RAW: necesita payload_json + server_ts + id sin transform.
                     getRawEventsDb();
                     history = subjectHistory(userId, sinceTs);
-                } catch { history = _evsInBatch; }
+                } catch { history = _evsInBatch.map(creditedReadingRow).filter(Boolean); }
                 const sig = computeUserSignals(history, { nowTs, windowDays: PERIOD_DAYS, userId: String(userId) });
                 // Persistir signal_snapshots (user scope)
                 for (const sid of SIGNAL_IDS) {
@@ -494,10 +509,14 @@ export function rebuildInsights(opts) {
         out.archive_present = hist.archivePresent;
         out.duplicates_deduped = hist.duplicates;
         const byUser = new Map();
-        for (const e of inRange) {
-            if (!e.user_id) continue;
+        for (const raw of inRange) {
+            if (!raw.user_id) continue;
+            // 65E-C3: los hechos de sesión de LU cuentan como lectura, con la misma regla que el camino incremental.
+            const e = creditedReadingRow(raw);
+            if (!e || e.server_ts < fromTs) continue;
             bucketBySubject(byUser, e);
         }
+        for (const list of byUser.values()) list.sort((a, b) => (a.server_ts - b.server_ts) || (a.id - b.id));
         if (dryRun) {
             out.wouldUpsert = byUser.size * SIGNAL_IDS.length + byUser.size; // signals + profile
             out.ok = true; out.durationMs = Date.now() - t0;

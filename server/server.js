@@ -11806,11 +11806,16 @@ function attributableActivity(pAll, leoAll, contextOf) {
 }
 /** Predicado con fecha para `metricsService` y el resumen de grupo: (obra, fecha, lector). */
 function temporalContentPredicate(contextOf) {
-    const forUser = (userId) => (contentId, ts) => contextOf(userId).includeContent(contentId, msOfStamp(ts));
+    // V9 65E-C3: `untilTs` (opcional) = cuándo recibió el servidor un dato fechado por el dispositivo. Con él, el dato
+    // solo es del curso si el contexto consta vigente desde la fecha declarada hasta esa recepción (regla de 65A, la
+    // misma en tablero, resumen de Aula Viva e indicadores contextuales); si cambió en medio, es historial no atribuible.
+    const span = (untilTs) => (untilTs === undefined || untilTs === null ? undefined : msOfStamp(untilTs));
+    const forUser = (userId) => (contentId, ts, untilTs) => contextOf(userId).includeContent(contentId, msOfStamp(ts), span(untilTs));
     // `historical`: el dato es de una obra del curso, pero su fecha no cae en un periodo acreditado (ni dentro ni fuera).
-    const historical = (contentId, ts, userId) => {
+    const historical = (contentId, ts, userId, untilTs) => {
         if (!userId) return false;
-        const cls = contextOf(userId).classify(contentId, msOfStamp(ts));
+        const at = msOfStamp(ts);
+        const cls = contextOf(userId).classify(contentId, at, span(untilTs) ?? at);
         return cls === 'unverifiable' || cls === 'outside_period';
     };
     // 65A: fecha de inicio ACREDITADA de un progreso (su primera sesión, si todas constan recibidas por el servidor
@@ -11832,7 +11837,7 @@ function temporalContentPredicate(contextOf) {
         if (!p || !uid) return null;
         return creditedSessionsOf({ ...p, userId: uid }, contextOf(uid), receipts)?.sessions ?? null;
     };
-    return Object.assign((contentId, ts, userId) => (userId ? forUser(userId)(contentId, ts) : false),
+    return Object.assign((contentId, ts, userId, untilTs) => (userId ? forUser(userId)(contentId, ts, untilTs) : false),
         { strict: true, forUser, historical, leoEntriesFor, ...(contextLedgerEnabled() ? { firstSessionTs, creditedSessions } : {}) });
 }
 /**
@@ -11875,7 +11880,7 @@ function withUnattributedTelemetry(raw, metricsOptions, events = null) {
     for (const e of events ?? readJSON(ANALYTICS_DB) ?? []) {
         if (!e || !ids.has(e.userId) || marked.has(e.userId) || !LEGACY_SESSION_EVENTS.has(e.event) || typeof e.contentId !== 'string') continue;
         const hit = adminWorks ? (e.source === LU_ANALYTICS_SOURCE && !Number.isFinite(e.receivedAt) && adminWorks.has(e.contentId))
-            : historical(e.contentId, Number.isFinite(e.receivedAt) ? e.timestamp : NaN, e.userId);
+            : historical(e.contentId, Number.isFinite(e.receivedAt) ? e.timestamp : NaN, e.userId, e.receivedAt);
         if (hit) marked.add(e.userId);
     }
     if (marked.size > 0) raw.studentBreakdown = raw.studentBreakdown.map(st => (marked.has(st.userId) ? { ...st, unattributedReading: true } : st));

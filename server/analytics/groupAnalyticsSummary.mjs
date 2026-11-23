@@ -161,7 +161,7 @@ export function luReadingRows(legacyEvents, userIds) {
         let list = byUser.get(e.userId);
         if (!list) { list = []; byUser.set(e.userId, list); }
         list.push({ id: n++, event_id: typeof e.eventId === 'string' && e.eventId ? `lu:${e.eventId}` : null, event, mode: 'lu',
-            user_id: e.userId, content_id: e.contentId, server_ts: e.timestamp, elapsed_ms: acc, payload_json: '{}' });
+            user_id: e.userId, content_id: e.contentId, server_ts: e.timestamp, received_ts: e.receivedAt, elapsed_ms: acc, payload_json: '{}' });
     }
     for (const list of byUser.values()) list.sort((a, b) => (a.server_ts - b.server_ts) || (a.id - b.id));
     return byUser;
@@ -361,11 +361,13 @@ export function buildGroupAnalyticsSummary({
         // Lectores con lectura fechada de obras del curso que el predicado no puede acreditar: se anota (no se cuenta
         // en ninguna cifra) para que un tiempo de lectura en cero no se lea como «no leyeron».
         if (typeof includeContent.historical === 'function') {
-            for (const src of [byUser, luByUser, epubByUser]) for (const [id, rows] of src) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id))) historicalReaders.add(id);
+            // 65E-C3: las filas de LU llevan además cuándo las recibió el servidor (`received_ts`); el predicado exige el
+            // contexto vigente durante todo ese tramo (65A). Las demás fuentes no lo llevan y se evalúan como antes.
+            for (const src of [byUser, luByUser, epubByUser]) for (const [id, rows] of src) if (rows.some(r => includeContent.historical(r.content_id, r.server_ts, id, r.received_ts))) historicalReaders.add(id);
             // 65E-B: lectura de LU sin constancia de recepción (anterior a 65A) de obras del ámbito: no atribuible, no «cero».
             for (const [id, works] of luByUser.uncertified) if ([...works].some(c => includeContent.historical(c, NaN, id))) historicalReaders.add(id);
         }
-        for (const src of [byUser, luByUser, epubByUser]) for (const [id, rows] of src) src.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id)));
+        for (const src of [byUser, luByUser, epubByUser]) for (const [id, rows] of src) src.set(id, rows.filter(r => includeContent(r.content_id, r.server_ts, id, r.received_ts)));
         leoInteractions = (Array.isArray(leoInteractions) ? leoInteractions : []).filter(it => includeContent(it?.contentId, it?.timestamp, it?.userId));
         const allProgress = getProgressByUser;
         // V9 65A: si el predicado sabe acreditar la fecha de inicio (constancias de recepción del servidor), decide él.

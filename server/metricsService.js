@@ -795,13 +795,16 @@ function computeStudentMetricsUncached(userId, ctx, includeContent = null, extra
   // mismas con las que Leo del mediador calcula el ICDLI. Sin él, la memoria acumulada (sin fecha) de siempre.
   const contextLeoEntries = typeof includeContent?.leoEntriesFor === 'function' && !Array.isArray(extra?.leoEntries) ? includeContent.leoEntriesFor(userId) : null;
   if (Array.isArray(contextLeoEntries)) extra = { ...(extra ?? {}), leoEntries: contextLeoEntries };
-  if (typeof includeContent?.forUser === 'function') includeContent = Object.assign(includeContent.forUser(userId), { strict: includeContent.strict === true,
+  const perReader = typeof includeContent?.forUser === 'function';
+  if (perReader) includeContent = Object.assign(includeContent.forUser(userId), { strict: includeContent.strict === true,
     ...(typeof includeContent.firstSessionTs === 'function' ? { firstSessionTs: includeContent.firstSessionTs } : {}) });
   const allEvents    = ctx ? ctx.eventsFor(userId)   : _events.filter(e => e.userId === userId);
   const allSessions  = ctx ? ctx.sessionsFor(userId) : parseSessions(_events).filter(s => s.userId === userId);
   // V9 65A: al predicado solo llega una fecha con constancia de recepción del servidor (`attributableTs`).
-  const userEvents   = includeContent ? allEvents.filter(e => (e.contentId == null ? includeContent.strict !== true : includeContent(e.contentId, attributableTs(e.timestamp, e.receivedAt)))) : allEvents;
-  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId, attributableTs(s.startTimestamp, SESSION_RECEIVED_AT.get(s)))) : allSessions;
+  // V9 65E-C3: al predicado de un lector (`forUser`) se le da además cuándo recibió el servidor el dato: lo acredita
+  // solo si el contexto consta vigente desde la fecha declarada hasta esa recepción (65A). Otros predicados lo ignoran.
+  const userEvents   = includeContent ? allEvents.filter(e => (e.contentId == null ? includeContent.strict !== true : includeContent(e.contentId, attributableTs(e.timestamp, e.receivedAt), ...(perReader ? [e.receivedAt] : [])))) : allEvents;
+  const sessions     = includeContent ? allSessions.filter(s => includeContent(s.contentId, attributableTs(s.startTimestamp, SESSION_RECEIVED_AT.get(s)), ...(perReader ? [SESSION_RECEIVED_AT.get(s)] : []))) : allSessions;
   const leoEntries   = Array.isArray(extra?.leoEntries) ? extra.leoEntries : getLeoEntriesForUser(userId, includeContent);
   const leoMetrics   = computeLeoMetrics(userId, (ctx || includeContent) ? userEvents : null, includeContent);
 

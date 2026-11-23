@@ -14,6 +14,8 @@
  *   [8] lectura personal (B2C) en LU: no entra
  *   [9] otra institución, A2 y C005: sin fugas
  *   [10] reinicio de una réplica
+ *   [11] (65E-C3) lectura sin conexión cuya fecha declarada antecede a un cambio del contexto: no se acredita en ninguna
+ *        superficie (tablero, Aula Viva, trayectoria, cohorte, recomendaciones), ni se acredita después
  * POSIX-only (secretos de sesión): en win32 se OMITE (no cuenta como aprobada) y en CI una omisión es un fallo.
  * Nunca escribe en data/ ni data-critical/. Imprime `TABLA {…}` con las cifras medidas.
  *
@@ -59,18 +61,20 @@ const acct = (id, roles, extra = {}) => ({ id, email: `${id}@fixture.invalid`, p
 const LU = [1, 2, 3, 4, 5].map((i) => `lu-${i}`), WEB = [1, 2, 3, 4, 5].map((i) => `web-${i}`);
 // lu-old: LU sin constancia de recepción (anterior a 65A) · lu-pre / web-pre: lectura anterior a su ingreso al curso
 // lu-b2c: LU sobre su obra personal · lu-rev: LU, A2 revocada · mix-1: lee en LU y en la web · r-none: no lee
-const GX = ['lu-old', 'lu-pre', 'web-pre', 'lu-b2c', 'lu-rev', 'mix-1', 'r-none'];
+// 65E-C3 — chg-work: leyó en LU, sin conexión, una obra que DESPUÉS se retiró del curso y se volvió a asociar, y sincroniza hoy
+// chg-mem: ídem, pero es él quien salió del curso y volvió · chg-ok: leyó sin conexión con el contexto ya estable
+const GX = ['lu-old', 'lu-pre', 'web-pre', 'lu-b2c', 'lu-rev', 'mix-1', 'r-none', 'chg-work', 'chg-mem', 'chg-ok'];
 const READERS_A = [...LU, ...WEB, ...GX];
 fs.writeFileSync(P.users, JSON.stringify([acct('adm', ['administrador']), acct('med-a', ['mediador'], { mediatorKind: 'teacher', ...A }), acct('med-b', ['mediador'], { mediatorKind: 'teacher', ...B }),
     ...READERS_A.map((id) => acct(id, ['lector'], A)), acct('lb-1', ['lector'], B)]));
 const course = (id, name, org, med, members) => ({ id, name, type: 'course', ...org, school: org.colegio, mediatorIds: [med], memberIds: members, studentIds: members });
 const GROUPS = [course('g-lu', 'Quinto LU', A, 'med-a', LU), course('g-web', 'Quinto Web', A, 'med-a', WEB), course('g-x', 'Sexto', A, 'med-a', GX), course('g-b', 'Otro colegio', B, 'med-b', ['lb-1'])];
-const RULES = [...['g-lu', 'g-web', 'g-x'].map((g) => ({ id: `r-${g}`, scope: 'group', scopeId: g, titleIds: ['c1', 'cs'], collectionIds: [] })),
+const RULES = [...['g-lu', 'g-web', 'g-x'].map((g) => ({ id: `r-${g}`, scope: 'group', scopeId: g, titleIds: g === 'g-x' ? ['c1', 'cs', 'cc'] : ['c1', 'cs'], collectionIds: [] })),
     { id: 'r-g-b', scope: 'group', scopeId: 'g-b', titleIds: ['cb'], collectionIds: [] },
     { id: 'r-b2c', scope: 'user', scopeId: 'lu-b2c', titleIds: ['cp'], collectionIds: [], expiresAt: Date.now() + 300 * 86400000, b2c: { orderRef: 'SINT-65EC2' } }];
 fs.writeFileSync(P.groups, JSON.stringify(GROUPS)); fs.writeFileSync(P.access, JSON.stringify(RULES));
 fs.writeFileSync(P.schools, JSON.stringify([{ id: 'org-a', name: 'Colegio Alfa' }, { id: 'org-b', name: 'Colegio Beta' }]));
-fs.writeFileSync(P.content, JSON.stringify([['c1', 'Obra del curso'], ['cs', 'Segunda obra'], ['cp', 'Lectura personal'], ['cb', 'Obra de la otra institución']].map(([id, titulo]) => ({ id, tipo: 'libro', titulo, etiquetas: [] }))));
+fs.writeFileSync(P.content, JSON.stringify([['c1', 'Obra del curso'], ['cs', 'Segunda obra'], ['cc', 'Obra retirada y vuelta a asociar'], ['cp', 'Lectura personal'], ['cb', 'Obra de la otra institución']].map(([id, titulo]) => ({ id, tipo: 'libro', titulo, etiquetas: [] }))));
 fs.writeFileSync(P.key, crypto.randomBytes(48).toString('hex')); fs.chmodSync(P.key, 0o400);
 fs.writeFileSync(path.join(P.data, 'leo_interactions_db.json'), '[]');
 fs.writeFileSync(path.join(P.data, 'interventions_db.json'), JSON.stringify({ interventions: [] }));
@@ -100,6 +104,19 @@ Ledger.closeContextLedger();
     const n = db.prepare(`UPDATE pedagogical_context_intervals SET since_ts = ? WHERE kind = 'member' AND group_id = 'g-x' AND user_id IN ('lu-pre', 'web-pre')`).run(NOW - 2 * DAY).changes;
     db.close();
     if (n !== 2) throw new Error(`fixture: membresías fechadas ${n}`);
+}
+{   // 65E-C3 — el contexto CAMBIÓ hace dos días y se restableció ayer: la obra `cc` se retiró del curso y se volvió a
+    // asociar; `chg-mem` salió del curso y volvió. Lo leído hace tres días ocurrió con el contexto vigente, pero no
+    // consta vigente de forma continua hasta hoy.
+    const db = new Database(P.insights);
+    const reopen = (kind, col, id) => {
+        const c = db.prepare(`UPDATE pedagogical_context_intervals SET until_ts = ? WHERE kind = ? AND group_id = 'g-x' AND ${col} = ? AND until_ts IS NULL`).run(NOW - 2 * DAY, kind, id).changes;
+        db.prepare(`INSERT INTO pedagogical_context_intervals (kind, group_id, ${col}, since_ts, until_ts, origin) VALUES (?, 'g-x', ?, ?, NULL, 'observed')`).run(kind, id, NOW - 1 * DAY);
+        return c;
+    };
+    const n = reopen('work', 'work_id', 'cc') + reopen('member', 'user_id', 'chg-mem');
+    db.close();
+    if (n !== 2) throw new Error(`fixture: contexto cambiado ${n}`);
 }
 
 const ports = await freePorts(2);
@@ -184,6 +201,12 @@ try {
     // mix-1: la primera y la tercera sesión en LU; la segunda, en la web.
     await sendLu('mix-1', PLAN[0]); await sendLu('mix-1', PLAN[2]); insertWebSessions('mix-1', [PLAN[1]]);
     await sendLu('lb-1', { startMs: NOW - 1 * DAY, contentId: 'cb', minutes: 11 });
+    // 65E-C3 — 12 min leídos sin conexión hace tres días (antes del cambio de contexto), sincronizados hoy.
+    const OLD = { startMs: NOW - 3 * DAY, minutes: 12 };
+    await sendLu('chg-work', { ...OLD, contentId: 'cc' });
+    await sendLu('chg-mem', { ...OLD, contentId: 'c1' });
+    // chg-ok: 12 min leídos sin conexión hace doce horas (después del cambio), sincronizados hoy.
+    await sendLu('chg-ok', { startMs: NOW - 12 * 60 * MIN, contentId: 'cc', minutes: 12 });
     ok('todas las escrituras de LU aceptadas', w.every((x) => x.status === 200), w.filter((x) => x.status !== 200).map((x) => `${x.status} ${x.text.slice(0, 120)}`).join(' | '));
 
     section('[1] lector que solo lee en LU frente a lector con la misma lectura en la web');
@@ -337,6 +360,40 @@ try {
         grantC005(['med-a']);
         const back = await tl('lu-1', C['med-a']);
         ok('…y con el compromiso vigente de nuevo, los mismos indicadores que antes', back.every((x) => x.status === 200 && shape(x.json) === shape(tWeb[0].json)), st(back).slice(0, 300));
+    }
+
+    section('[11] fecha declarada anterior a un cambio del contexto (65A en todas las superficies)');
+    {
+        const row = (j, u) => (j?.studentBreakdown || []).find((q) => q.userId === u), rdr = (j, u) => (j?.readers || []).find((q) => q.userId === u);
+        const surfaces = async (u) => {
+            const m = await both('/api/metrics/course/g-x', C['med-a']), s = await both('/api/groups/g-x/analytics-summary', C['med-a']), t = await tl(u, C['med-a']);
+            const rc = await both(`/api/aula-viva/recommendations/scope/user/${u}`, C['med-a']);
+            return { m, s, t, rc, brief: [row(m[0].json, u)?.totalSessions ?? null, MINS(row(m[0].json, u)?.totalReadingTimeMs), row(m[0].json, u)?.dataState ?? null, MINS(rdr(s[0].json, u)?.reading.allEffectiveMs), rdr(s[0].json, u)?.historicalActivity === true, t[0].json?.data_state ?? null, t[0].json?.reason ?? null] };
+        };
+        const uncredited = (x, u) => x.m.every((q) => row(q.json, u)?.totalSessions === 0 && row(q.json, u)?.dataState === 'unverifiable_history' && row(q.json, u)?.needsAttention === false)
+            && x.s.every((q) => rdr(q.json, u)?.reading.allEffectiveMs === 0 && rdr(q.json, u)?.historicalActivity === true)
+            && x.t.every((q) => q.status === 200 && q.json.data_state === 'insufficient' && q.json.reason === 'unverifiable_history' && q.json.profile_current === null && (q.json.recommendations || []).length === 0)
+            && x.rc.every((q) => q.status === 200 && JSON.stringify(q.json?.recommendations ?? q.json ?? []) === '[]');
+        const w = await surfaces('chg-work'), mm = await surfaces('chg-mem'), okr = await surfaces('chg-ok');
+        TABLA['obra retirada y reasociada tras la lectura [sesiones, min, estado tablero, min Aula Viva, no atribuible, estado contexto, motivo]'] = w.brief;
+        TABLA['lector que salió y volvió tras la lectura  [sesiones, min, estado tablero, min Aula Viva, no atribuible, estado contexto, motivo]'] = mm.brief;
+        TABLA['lectura sin conexión con contexto estable    [sesiones, min, estado tablero, min Aula Viva, no atribuible, estado contexto, motivo]'] = okr.brief;
+        ok('obra retirada del curso y vuelta a asociar DESPUÉS de la lectura: sin acreditar en tablero, Aula Viva, trayectoria y recomendaciones («no atribuible», nunca «sin actividad» ni minutos), en las dos réplicas', uncredited(w, 'chg-work'), JSON.stringify(w.brief));
+        ok('lector que salió del curso y volvió DESPUÉS de la lectura: el mismo resultado en las cuatro superficies', uncredited(mm, 'chg-mem'), JSON.stringify(mm.brief));
+        ok('la lectura sin conexión con el contexto estable hasta la recepción SÍ se acredita, igual en todas: 1 sesión, 12 min', okr.m.every((q) => row(q.json, 'chg-ok')?.totalSessions === 1 && MINS(row(q.json, 'chg-ok')?.totalReadingTimeMs) === 12 && row(q.json, 'chg-ok')?.dataState === 'verified_context')
+            && okr.s.every((q) => MINS(rdr(q.json, 'chg-ok')?.reading.allEffectiveMs) === 12) && okr.t.every((q) => q.json.data_state === 'ok' && sig(q.json, 'tiempo_efectivo_lectura') === 12), JSON.stringify(okr.brief));
+        const c = await both('/api/aula-viva/cohorts/group/g-x', C['med-a']);
+        ok('agregado del curso: esos dos lectores cuentan como «no atribuible», aparte de los activos', c.every((x) => x.status === 200 && x.json.suppressed === false && metric(x, 'readers_with_unattributable_activity') >= 2), JSON.stringify(c.map((x) => [x.json?.by_state, x.json?.metrics])).slice(0, 500));
+        ok('la lectura queda conservada como del lector (su copia en events.db), solo sin atribución al curso', sql(P.events, `SELECT COUNT(*) n FROM events WHERE user_id = 'chg-work' AND event LIKE 'lu.read_session_%'`)[0].n === 13);
+        // Sin acreditación posterior: ni reenviando lo mismo ni enviándolo como si fuera otra sesión con las mismas fechas.
+        const again = await post(S1, '/api/analytics/events', C['chg-work'], sent['chg-work'][0]);
+        const fresh = await post(S2, '/api/analytics/events', C['chg-work'], luSession('chg-work', 'cc', NOW - 3 * DAY, 12));
+        const w2 = await surfaces('chg-work');
+        ok('reenviarla, o enviarla de nuevo con otros identificadores y las mismas fechas, no la acredita después', again.json?.received === 0 && fresh.status === 200 && uncredited(w2, 'chg-work'), `${again.text} ${fresh.text} ${JSON.stringify(w2.brief)}`);
+        const adm = await both('/api/metrics/course/g-x', C.adm);
+        const medActive = w2.m[0].json?.summary?.activeStudentCount ?? null;
+        TABLA['curso g-x · lectores activos [mediación, administración]'] = [medActive, adm[0].json?.summary?.activeStudentCount ?? null];
+        ok('la administración (obras del curso, sin atribución por fechas) sigue contando esa lectura como actividad: al menos dos activos más que la mediación', adm.every((x) => x.status === 200 && Number.isFinite(medActive) && x.json.summary?.activeStudentCount >= medActive + 2), JSON.stringify(adm.map((x) => [x.status, x.json?.summary])).slice(0, 400));
     }
 
     section('[10] reinicio de una réplica');

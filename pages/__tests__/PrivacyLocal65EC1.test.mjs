@@ -106,7 +106,14 @@ try {
     reset(); setQueue([entry('A', 'c3', 's-old', new Date(Date.now() - 8 * 86400000).toISOString()), entry('A', 'c4', 's-new')]);
     respond = () => 'network';
     ds.retryFailedSyncs(); await tick(5);
-    ok('un pendiente de más de 7 días caduca (también el de una cuenta que no vuelve)', queue().join() === 'A/c4', queue().join());
+    // V9 65E-C3: el plazo de 7 días rige para la cuenta que YA NO usa el equipo. Con su sesión abierta, lo pendiente de A
+    // no caduca sin haberse enviado (antes se borraba en silencio tras una semana sin conexión).
+    ok('con su sesión abierta, un pendiente de más de 7 días NO se borra sin enviarse: sigue en la cola', queue().join() === 'A/c3,A/c4', queue().join());
+    reset(); LS.setItem('chibalete_user_id', 'B');
+    setQueue([entry('A', 'c3', 's-old', new Date(Date.now() - 8 * 86400000).toISOString()), entry('A', 'c4', 's-new')]);
+    ds.retryFailedSyncs(); await tick(5);
+    ok('un pendiente de más de 7 días de una cuenta que no volvió sí caduca (y no se envía con la sesión de otra)', queue().join() === 'A/c4' && sentTo('A') === 0, `${queue().join()} ${sentTo('A')}`);
+    LS.setItem('chibalete_user_id', 'A');
 
     section('[T] respuesta tardía');
     reset(); LS.setItem('chibalete_user_id', 'A'); LS.removeItem('chibalete_progress'); LS.removeItem(QUEUE);

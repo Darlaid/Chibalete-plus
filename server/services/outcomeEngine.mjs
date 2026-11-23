@@ -30,6 +30,8 @@ import {
     interventionFollowupDue,
 } from '../observability/metrics.js';
 
+import { creditedReadingRow } from '../analytics/luSessionMirror.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
     || path.resolve(__dirname, '..', '..', 'data-critical', 'events.db');
@@ -57,14 +59,19 @@ export const ENABLED = () => process.env.AULA_VIVA_OUTCOME_ENGINE_ENABLED === '1
  * directamente (recovery sin snapshot_history; si snapshot_history existe
  * y la ventana está cubierta, podríamos enriquecer — futuro).
  */
-function computeWindowMetrics(userId, from, to) {
+export function computeWindowMetrics(userId, from, to) {
     const db = getEventsRaw();
+    // V9 65E-C3: la ventana mide la lectura de todos los modos. Los hechos de sesión de LU conservados cuentan como
+    // lectura fechada cuando ocurrió (no cuando se sincronizó): se leen desde el inicio de la ventana por su recepción
+    // y se sitúan por su fecha (`creditedReadingRow`); antes entraban a medias (días y obras sí, sesiones no) y con la
+    // fecha de sincronización.
     const events = db.prepare(
-        `SELECT event, server_ts, elapsed_ms, content_id, payload_json
+        `SELECT event, server_ts, client_ts, elapsed_ms, content_id, payload_json
          FROM events
-         WHERE user_id = ? AND server_ts >= ? AND server_ts < ?
+         WHERE user_id = ? AND server_ts >= ? AND (server_ts < ? OR event LIKE 'lu.read_session_%')
          ORDER BY server_ts ASC`
-    ).all(String(userId), from, to);
+    ).all(String(userId), from, to).map(creditedReadingRow).filter((e) => e && e.server_ts >= from && e.server_ts < to)
+        .sort((a, b) => a.server_ts - b.server_ts);
     return windowMetricsFromEvents(events);
 }
 

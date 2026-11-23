@@ -104,6 +104,20 @@ import type { StudentStatus } from '../utils/studentStatus';
 import { describeInstitutionalError } from '../utils/institutionalErrors';
 
 // Fase F: Entry in the persistent failed-sync queue.
+/** V9 65E-C3 — lo que queda en el equipo de una cuenta (recuentos). Ver `DataService.localDataSummary`. */
+export interface LocalDataSummary {
+    pendingReadings: number;         // lecturas que todavía no se pudieron enviar
+    pendingExpiresAt: number | null; // cuándo se eliminarían si la cuenta no vuelve a este equipo
+    journal: number;                 // entradas de la bitácora (diario y borradores de tareas)
+    reviews: number;
+    submissions: number;             // entregas de tareas guardadas en el equipo
+    posts: number;
+    orality: number;                 // prácticas de lectura en voz alta
+    vocabulary: number;              // palabras guardadas
+    other: number;                   // notas de lectura: relecturas, perfil de acompañamiento, pedidos
+    total: number;
+}
+
 interface FailedSyncEntry {
     userId: string;
     contentId: string;
@@ -519,14 +533,19 @@ class DataService {
 
         this.failedSyncs.forEach((entry, key) => {
             const age = new Date(entry.addedAt).getTime();
-            if (age < cutoff) {
-                // Prune stale entries — progress this old is unlikely to be useful.
+            const mine = !!me && entry.userId === me;
+            // V9 65E-C3 — la antigüedad no es una entrega. El plazo (FAILED_SYNCS_TTL_MS) limita cuánto tiempo queda en
+            // un equipo lo pendiente de una cuenta que YA NO lo está usando. Lo pendiente de la cuenta que tiene la
+            // sesión abierta no caduca: antes, tras más de siete días sin conexión (o al volver después de ese plazo), su
+            // lectura se borraba sin haberse enviado y sin aviso. Solo sale de la cola cuando el servidor la confirma,
+            // la rechaza de forma definitiva o su titular la elimina.
+            if (age < cutoff && !mine) {
                 this.failedSyncs.delete(key);
                 this.settledFailKeys.add(key);
                 pruned = true;
                 return;
             }
-            if (!me || entry.userId !== me) return;
+            if (!mine) return;
 
             // Attempt retry — fire-and-forget with success/failure callbacks.
             fetch(`${this.apiUrl}/progress/${entry.userId}/${entry.contentId}/sync`, {
@@ -831,6 +850,121 @@ class DataService {
             await Promise.race([Promise.allSettled(sends), new Promise(r => setTimeout(r, timeoutMs))]);
             this.saveFailedSyncs();
         } catch { /* nunca impide cerrar la sesión */ }
+    }
+
+    /** Días que lo pendiente de una cuenta que ya no usa el equipo se conserva en él antes de eliminarse. */
+    public get pendingRetentionDays(): number { return Math.round(DataService.FAILED_SYNCS_TTL_MS / 86_400_000); }
+
+    /**
+     * V9 65E-C3 — lecturas de esa cuenta que este equipo todavía no pudo enviar. `expiresAt`: cuándo se eliminarían si
+     * la cuenta deja de usar el equipo (con su sesión abierta no caducan). Solo cuenta; no envía ni borra.
+     */
+    public pendingSyncStatus(userId: string): { count: number; oldestAddedAt: number | null; expiresAt: number | null } {
+        const none = { count: 0, oldestAddedAt: null, expiresAt: null };
+        try {
+            if (!userId) return none;
+            this.adoptStoredFailedSyncs();
+            const keys = new Set<string>();
+            let oldest: number | null = null;
+            this.failedSyncs.forEach((entry, key) => {
+                if (entry.userId !== userId) return;
+                keys.add(key);
+                const at = new Date(entry.addedAt).getTime();
+                if (Number.isFinite(at) && (oldest === null || at < oldest)) oldest = at;
+            });
+            this.pendingSyncs.forEach((prog, key) => {
+                if (prog.usuario_id !== userId) return;
+                const body = JSON.stringify({ canonicalProgress: prog.canonicalProgress, session: prog.session, updatedAt: prog.fecha_actualizacion });
+                if (this.lastSyncedPayloads.get(key) !== body) keys.add(prog.session?.sessionId ? `${key}__${prog.session.sessionId}` : key);
+            });
+            if (keys.size === 0) return none;
+            return { count: keys.size, oldestAddedAt: oldest, expiresAt: oldest === null ? null : oldest + DataService.FAILED_SYNCS_TTL_MS };
+        } catch { return none; }
+    }
+
+    /** Claves del navegador que llevan el id de la cuenta en su nombre (solo existen en el equipo). */
+    private static ownedStorageKeys(userId: string): string[] {
+        const out: string[] = [];
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k) continue;
+                if (k === `chibalete_vocab_${userId}` || k === `chibalete_rewards_${userId}` || k.startsWith(`reread_${userId}_`)
+                    || (k.startsWith('crr_snap__') && k.split('__')[2] === userId)) out.push(k);
+            }
+        } catch { /* almacenamiento no disponible */ }
+        return out;
+    }
+    private static readA11yQueue(): any[] {
+        try { const q = JSON.parse(localStorage.getItem('a11y_events_queue') || '[]'); return Array.isArray(q) ? q : []; } catch { return []; }
+    }
+
+    /**
+     * V9 65E-C3 — qué queda en ESTE equipo de esa cuenta al cerrar sesión: lo que todavía no se pudo enviar y lo que
+     * solo existe aquí (no tiene copia en el servidor). Son recuentos, para decírselo a su titular antes de salir.
+     * Lo de otras cuentas no se cuenta. Las preferencias de lectura (tema, tamaño de letra) no son de ninguna cuenta.
+     */
+    public localDataSummary(userId: string): LocalDataSummary {
+        const empty: LocalDataSummary = { pendingReadings: 0, pendingExpiresAt: null, journal: 0, reviews: 0, submissions: 0, posts: 0, orality: 0, vocabulary: 0, other: 0, total: 0 };
+        try {
+            if (!userId) return empty;
+            const pending = this.pendingSyncStatus(userId);
+            let vocabulary = 0;
+            try { const v = JSON.parse(localStorage.getItem(`chibalete_vocab_${userId}`) || '[]'); vocabulary = Array.isArray(v) ? v.length : 0; } catch { /* */ }
+            const s: LocalDataSummary = {
+                pendingReadings: pending.count + (DataService.readA11yQueue().some(e => e?.userId === userId) ? 1 : 0),
+                pendingExpiresAt: pending.expiresAt,
+                journal: this.journalEntries.filter(e => e.userId === userId).length,
+                reviews: this.reviews.filter(r => r.usuario_id === userId).length,
+                submissions: this.assignments.reduce((n, a) => n + (a.studentSubmissions || []).filter(x => x.studentId === userId).length, 0),
+                posts: this.communityPosts.filter(p => p.autor_id === userId).length,
+                orality: this.oralityAttempts.filter(a => a.userId === userId).length,
+                vocabulary,
+                other: this.leoReaderProfiles.filter(p => p.userId === userId).length + this.storeOrders.filter(o => o.userId === userId).length
+                    + DataService.ownedStorageKeys(userId).filter(k => k !== `chibalete_vocab_${userId}`).length,
+                total: 0,
+            };
+            s.total = s.pendingReadings + s.journal + s.reviews + s.submissions + s.posts + s.orality + s.vocabulary + s.other;
+            return s;
+        } catch { return empty; }
+    }
+
+    /**
+     * V9 65E-C3 — eliminación VOLUNTARIA de los datos locales de una cuenta, a petición de su titular al cerrar sesión.
+     * Quita de este equipo solo lo de `userId`: sus lecturas sin enviar, su bitácora, reseñas, entregas, publicaciones,
+     * prácticas de voz, vocabulario y demás notas de lectura. Lo de cualquier otra cuenta, las preferencias de lectura
+     * compartidas y lo que el servidor ya tiene no se tocan. No hay vuelta atrás: quien llama debe haberlo confirmado.
+     */
+    public purgeLocalDataOf(userId: string): void {
+        if (!userId) return;
+        try {
+            // Cola de pendientes: memoria y navegador (también lo que dejó el lector EPUB).
+            this.pendingSyncs.forEach((prog, key) => { if (prog.usuario_id === userId) this.pendingSyncs.delete(key); });
+            this.adoptStoredFailedSyncs();
+            this.failedSyncs.forEach((entry, key) => { if (entry.userId === userId) { this.failedSyncs.delete(key); this.settledFailKeys.add(key); } });
+            this.saveFailedSyncs();
+            const queue = DataService.readA11yQueue();
+            if (queue.some(e => e?.userId === userId)) localStorage.setItem('a11y_events_queue', JSON.stringify(queue.filter(e => e?.userId !== userId)));
+        } catch { /* almacenamiento no disponible */ }
+        try {
+            this.journalEntries = this.journalEntries.filter(e => e.userId !== userId);
+            this.saveState('journalEntries', this.journalEntries);
+            this.reviews = this.reviews.filter(r => r.usuario_id !== userId);
+            this.saveState('reviews', this.reviews);
+            if (this.assignments.some(a => (a.studentSubmissions || []).some(x => x.studentId === userId))) {
+                this.assignments = this.assignments.map(a => (Array.isArray(a.studentSubmissions) ? { ...a, studentSubmissions: a.studentSubmissions.filter(x => x.studentId !== userId) } : a));
+                this.saveState('assignments', this.assignments);
+            }
+            this.communityPosts = this.communityPosts.filter(p => p.autor_id !== userId);
+            this.saveState('communityPosts', this.communityPosts);
+            this.oralityAttempts = this.oralityAttempts.filter(a => a.userId !== userId);
+            persistenceService.save('oralityAttempts', this.oralityAttempts);
+            this.leoReaderProfiles = this.leoReaderProfiles.filter(p => p.userId !== userId);
+            this.saveState('leoReaderProfiles', this.leoReaderProfiles);
+            this.storeOrders = this.storeOrders.filter(o => o.userId !== userId);
+            this.saveState('storeOrders', this.storeOrders);
+        } catch { /* almacenamiento no disponible */ }
+        try { DataService.ownedStorageKeys(userId).forEach(k => localStorage.removeItem(k)); } catch { /* */ }
     }
 
     /**

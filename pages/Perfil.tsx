@@ -10,6 +10,7 @@ import BookmarkManager from '../components/BookmarkManager';
 import StarRating from '../components/StarRating';
 import ClubFormModal from '../components/ClubFormModal';
 import PasswordChangeSection from '../components/PasswordChangeSection';
+import { useLogoutFlow } from '../components/LogoutDialog';
 
 const StatItem: React.FC<{ icon: React.ReactNode; value: number | string; label: string }> = ({ icon, value, label }) => (
     <div className="flex flex-col items-center text-center">
@@ -127,12 +128,11 @@ const Perfil: React.FC = () => {
         }
     }, [id, currentUser, refreshKey]);
 
+    // V9 65E-C3: el mismo aviso y las mismas opciones que el botón del menú (ver LogoutDialog).
+    const logoutFlow = useLogoutFlow(() => navigate('/bienvenida', { replace: true }));
     const handleLogout = (e: React.MouseEvent) => {
         e.preventDefault();
-        if (window.confirm('¿Estás seguro de que quieres cerrar sesión?')) {
-            logout();
-            navigate('/bienvenida', { replace: true });
-        }
+        logoutFlow.requestLogout(e.currentTarget as HTMLElement, { always: true });
     };
 
     const handleSocialToggle = (platform: 'facebook' | 'instagram' | 'linkedin', isConnected: boolean) => {
@@ -292,6 +292,7 @@ const Perfil: React.FC = () => {
                         <div className="mt-4 flex items-center justify-center md:justify-start space-x-2">
                             <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors">Editar perfil</button>
                             <button type="button" onClick={handleLogout} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors">Cerrar Sesión</button>
+                            {logoutFlow.dialog}
                         </div>
                     )}
                 </div>

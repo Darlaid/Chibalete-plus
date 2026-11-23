@@ -80,6 +80,26 @@ export function fromMirrorRow(row) {
         ...(typeof p.progressPercentage === 'number' ? { progressPercentage: p.progressPercentage } : {}) };
 }
 
+/** Tolerancia entre el reloj de un dispositivo y el del servidor (la misma de la atribución de 65A). */
+const RECEIPT_SKEW_MS = 5 * 60_000;
+const MIRROR_TO_READING = Object.freeze({ 'lu.read_session_start': 'reading_started', 'lu.read_session_heartbeat': 'session_heartbeat', 'lu.read_session_end': 'session_ended' });
+/** true si la fila de events.db es un hecho de sesión de LU conservado. */
+export const isLuMirrorRow = (row) => !!row && Object.prototype.hasOwnProperty.call(MIRROR_TO_READING, row.event);
+/**
+ * V9 65E-C3 — una fila de events.db tal como debe leerla un indicador GLOBAL de lectura (el que mide la lectura de todos
+ * los modos y no atribuye a un curso). Una fila que no es de LU se devuelve tal cual. Un hecho de sesión de LU conservado
+ * se devuelve como el hecho de lectura equivalente (abrir, latido, cerrar), fechado cuando ocurrió —la fecha del
+ * dispositivo, nunca posterior a la recepción— y con cuándo lo recibió el servidor (`received_ts`). Si la fecha declarada
+ * es posterior a la recepción no es creíble: `null` (no se acredita con ninguna fecha).
+ * No inventa hechos que LU no emite: abandono, reanudación, término de la obra, audio o Leo siguen sin existir para LU.
+ */
+export function creditedReadingRow(row) {
+    if (!isLuMirrorRow(row)) return row;
+    const declared = row.client_ts, received = row.server_ts;
+    if (!Number.isFinite(declared) || !Number.isFinite(received) || declared > received + RECEIPT_SKEW_MS) return null;
+    return { ...row, event: MIRROR_TO_READING[row.event], server_ts: Math.min(declared, received), received_ts: received };
+}
+
 function readFrom(dbPath, userIds) {
     if (!userIds.length || !dbPath || !fs.existsSync(dbPath)) return [];
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });

@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { getRollupsExtDb, getRollupsStatements } from '../db/rollupsDbExt.mjs';
 import { rollupUpdates } from '../observability/metrics.js';
+import { creditedReadingRow } from '../analytics/luSessionMirror.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
@@ -155,11 +156,13 @@ export function runOnce(opts = {}) {
         const maxEvents = opts.maxEvents ?? 200_000;
 
         const db = getEventsRaw();
+        // V9 65E-C3: los hechos de sesión de LU conservados cuentan como lectura, en el día en que ocurrió (antes sumaban
+        // usuarios activos y minutos en el día de la sincronización y ninguna sesión iniciada). `creditedReadingRow`.
         const events = db.prepare(
-            `SELECT id, event, user_id, content_id, session_id, server_ts,
+            `SELECT id, event, user_id, content_id, session_id, server_ts, client_ts,
                     elapsed_ms, payload_json
              FROM events WHERE server_ts >= ? AND server_ts <= ? ORDER BY id ASC LIMIT ?`
-        ).all(fromTs, toTs, maxEvents);
+        ).all(fromTs, toTs, maxEvents).map(creditedReadingRow).filter((e) => e && e.server_ts >= fromTs);
         result.eventsScanned = events.length;
 
         const tx = getRollupsExtDb().transaction(() => {

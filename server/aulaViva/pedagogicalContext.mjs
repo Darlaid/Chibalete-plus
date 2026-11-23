@@ -115,8 +115,13 @@ export function buildPedagogicalContext({ readerId, groups, intervals = null }) 
         groupIds: gs.map((g) => g.groupId),
         hasWorks,
         classify,
-        /** Predicado para fuentes con obra y fecha (`includeContent(contentId, ts)`); sin fecha comprobable, false. */
-        includeContent: (contentId, ts) => classify(contentId, ts) === 'in',
+        /**
+         * Predicado para fuentes con obra y fecha (`includeContent(contentId, ts)`); sin fecha comprobable, false.
+         * 65E-C3: con `untilTs` (cuándo recibió el servidor el dato) la asociación y la membresía deben constar vigentes
+         * durante todo el tramo entre la fecha declarada y esa recepción: la regla de 65A para cualquier dato fechado
+         * por el dispositivo. Si el contexto cambió en ese tramo, la fecha declarada no basta para atribuirlo.
+         */
+        includeContent: (contentId, ts, untilTs = ts) => classify(contentId, ts, untilTs) === 'in',
         /** Predicado para filas crudas de events.db. */
         includeEvent: (row) => !!row && String(row.user_id) === rid && classify(row.content_id, row.server_ts) === 'in',
         describe: () => ({ groups: gs.map((g) => ({ group_id: g.groupId, works: g.all ? null : g.ids.size, all_works: g.all })) }),
@@ -200,7 +205,9 @@ export function selectContextEvents(rows, context) {
         if (!row || String(row.user_id) !== context.readerId) continue;
         // 65E-C2: una fila cuya fecha no está acreditada (`date_unverified`: sesión de LU sin constancia de recepción) se
         // clasifica sin fecha: si la obra es del contexto es historial no comprobable; nunca lectura fechada del curso.
-        const cls = context.classify(row.content_id, row.date_unverified === true ? NaN : row.server_ts);
+        // 65E-C3: una fila fechada por el dispositivo (`received_ts`: cuándo la recibió el servidor) solo es del curso si
+        // el contexto consta vigente desde esa fecha hasta la recepción (65A); si cambió en medio, no es atribuible.
+        const cls = context.classify(row.content_id, row.date_unverified === true ? NaN : row.server_ts, Number.isFinite(row.received_ts) ? row.received_ts : row.server_ts);
         if (cls === 'no_work' || cls === 'outside_context') continue;
         audit.in_context_works++;
         if (cls === 'in') { included.push(row); audit.included++; }
