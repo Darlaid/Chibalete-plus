@@ -224,7 +224,19 @@ jobs:
       - name: A2, Aula Viva y O8 (V8.1)
         env:
           O8_APP_ROOT: ${{ github.workspace }}
-        run: npm run test:v81
+        # V9 65E-C1: mismo comando y mismo criterio de fallo. Si falla, las aserciones fallidas se publican además
+        # como anotaciones del job (el registro completo solo lo ve quien administra el repositorio): así un fallo
+        # que solo ocurre en este ejecutor se puede diagnosticar sin permisos especiales.
+        run: |
+          set +e
+          npm run test:v81 > v81.log 2>&1; rc=$?
+          cat v81.log
+          if [ $rc -ne 0 ]; then
+            grep -a -v "^[[:space:]]*$" v81.log | tail -n 2 | cut -c1-300 | sed 's/^/::error title=test-v81 (final)::/'
+            grep -a "✗\|excepci" v81.log | grep -a -v " 0 ✗\|0 fail\|0 fallid" | tail -n 7 | cut -c1-900 | sed 's/^/::error title=test-v81::/'
+          fi
+          rm -f v81.log
+          exit $rc
 
       - name: Build de producción
         run: npm run build
