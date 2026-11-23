@@ -16,6 +16,8 @@
  *   [10] reinicio de una réplica
  *   [11] (65E-C3) lectura sin conexión cuya fecha declarada antecede a un cambio del contexto: no se acredita en ninguna
  *        superficie (tablero, Aula Viva, trayectoria, cohorte, recomendaciones), ni se acredita después
+ *   [12] (65E-C4) administración frente a mediación: las cifras de la administración son ACTIVIDAD OBSERVADA y lo dicen;
+ *        la lectura ACREDITADA (65A) va aparte y coincide con la de la mediación, con contexto estable y cambiado
  * POSIX-only (secretos de sesión): en win32 se OMITE (no cuenta como aprobada) y en CI una omisión es un fallo.
  * Nunca escribe en data/ ni data-critical/. Imprime `TABLA {…}` con las cifras medidas.
  *
@@ -394,6 +396,46 @@ try {
         const medActive = w2.m[0].json?.summary?.activeStudentCount ?? null;
         TABLA['curso g-x · lectores activos [mediación, administración]'] = [medActive, adm[0].json?.summary?.activeStudentCount ?? null];
         ok('la administración (obras del curso, sin atribución por fechas) sigue contando esa lectura como actividad: al menos dos activos más que la mediación', adm.every((x) => x.status === 200 && Number.isFinite(medActive) && x.json.summary?.activeStudentCount >= medActive + 2), JSON.stringify(adm.map((x) => [x.status, x.json?.summary])).slice(0, 400));
+    }
+
+    section('[12] administración frente a mediación: actividad observada y lectura acreditada');
+    {
+        const rdr = (j, u) => (j?.readers || []).find((q) => q.userId === u);
+        const shape = (x) => JSON.stringify([x.json?.activityBasis ?? null, x.json?.creditedReading ?? null]);
+        // Curso con el contexto CAMBIADO para dos lectores (g-x).
+        const adm = await both('/api/metrics/course/g-x', C.adm), med = await both('/api/metrics/course/g-x', C['med-a']);
+        const cr = adm[0].json?.creditedReading, ms = med[0].json?.summary, ma = med[0].json?.courseAttribution;
+        TABLA['g-x (contexto cambiado) · tablero [activos observados (adm), activos acreditados (adm), activos (mediación), no atribuibles adm / mediación]'] = [adm[0].json?.summary?.activeStudentCount ?? null, cr?.activeStudentCount ?? null, ms?.activeStudentCount ?? null, cr?.readers_with_unattributable_reading ?? null, ma?.readers_with_unverifiable_history ?? null];
+        ok('la administración recibe sus cifras con nombre y procedencia: actividad observada en las obras del curso, sin acreditar', adm.every((x) => x.status === 200 && x.json.activityBasis?.kind === 'observed_activity' && x.json.activityBasis.credited === false && x.json.activityBasis.scope === 'course_works' && x.json.activityBasis.dated === false), shape(adm[0]));
+        ok('…y, aparte, la lectura acreditada con la regla 65A', adm.every((x) => x.json.creditedReading?.rule === '65A' && x.json.creditedReading.available === true), shape(adm[0]));
+        ok('con el contexto cambiado las dos cifras DIFIEREN: más actividad observada que lectura acreditada', adm.every((x) => x.json.summary.activeStudentCount > x.json.creditedReading.activeStudentCount), JSON.stringify(adm.map((x) => [x.json.summary.activeStudentCount, x.json.creditedReading.activeStudentCount])));
+        // La administración agrega el curso completo; la mediación no ve a lu-rev (A2 revocada en [9]), que tiene lectura
+        // acreditada. Misma regla, una persona de diferencia en la población: se comprueba esa diferencia exacta.
+        ok('la lectura acreditada de la administración sigue la MISMA regla que la mediación: mismos lectores con lectura no atribuible, y sus activos = los de la mediación + el lector que la mediación no ve por A2 revocada', adm.every((x) => x.json.creditedReading.activeStudentCount === ms.activeStudentCount + 1 && x.json.creditedReading.readers_with_unattributable_reading === ma.readers_with_unverifiable_history) && !med[0].text.includes('lu-rev'), `${JSON.stringify(cr)} ${JSON.stringify([ms?.activeStudentCount, ma])}`);
+        ok('igual en las dos réplicas', shape(adm[0]) === shape(adm[1]));
+        ok('la respuesta de la mediación no lleva la marca de actividad observada: sus cifras ya son las acreditadas', med.every((x) => x.status === 200 && x.json.activityBasis === undefined && x.json.creditedReading === undefined));
+        ok('la administración sigue sin recibir el desglose por lector', adm.every((x) => x.json.aggregateOnly === true && x.json.studentBreakdown === undefined && !/chg-work|chg-mem/.test(x.text)));
+        // Resumen de Aula Viva.
+        const sa = await both('/api/groups/g-x/analytics-summary', C.adm), sm = await both('/api/groups/g-x/analytics-summary', C['med-a']);
+        const medActive = (sm[0].json?.readers || []).filter((q) => (q.reading?.allEffectiveMs ?? 0) > 0).length, medMs = (sm[0].json?.readers || []).reduce((n, q) => n + (q.reading?.allEffectiveMs ?? 0), 0);
+        const scr = sa[0].json?.creditedReading;
+        TABLA['g-x · resumen de Aula Viva [lectores con lectura observados (adm), acreditados (adm), mediación; minutos observados, acreditados]'] = [sa[0].json?.reading?.all?.readersWithActivity ?? null, scr?.readersWithActivity ?? null, medActive, MINS(sa[0].json?.reading?.all?.totalEffectiveMs), MINS(scr?.totalEffectiveMs)];
+        ok('resumen de Aula Viva de la administración: actividad observada, con la lectura acreditada aparte', sa.every((x) => x.status === 200 && x.json.activityBasis?.kind === 'observed_activity' && x.json.creditedReading?.available === true), shape(sa[0]));
+        ok('…acreditada = la de la mediación (mismos lectores con lectura y mismos minutos)', sa.every((x) => x.json.creditedReading.readersWithActivity === medActive && x.json.creditedReading.totalEffectiveMs === medMs), `${JSON.stringify(scr)} ${medActive} ${medMs}`);
+        ok('…los 24 minutos de las dos lecturas con contexto cambiado están en lo observado y NO en lo acreditado', sa.every((x) => MINS(x.json.reading.all.totalEffectiveMs) - MINS(x.json.creditedReading.totalEffectiveMs) >= 24 && x.json.creditedReading.readers_with_unattributable_reading >= 2), JSON.stringify([MINS(sa[0].json?.reading?.all?.totalEffectiveMs), scr]));
+        ok('…sin doble conteo: el lector de contexto estable cuenta lo mismo en las dos (12 min)', MINS(rdr(sa[0].json, 'chg-ok')?.reading.allEffectiveMs ?? rdr(sm[0].json, 'chg-ok')?.reading.allEffectiveMs) === 12 && MINS(rdr(sm[0].json, 'chg-ok')?.reading.allEffectiveMs) === 12);
+        // Curso con el contexto ESTABLE (g-lu): observado y acreditado coinciden.
+        const al = await both('/api/metrics/course/g-lu', C.adm), sl = await both('/api/groups/g-lu/analytics-summary', C.adm);
+        TABLA['g-lu (contexto estable) · [activos observados, activos acreditados; lectores observados, acreditados]'] = [al[0].json?.summary?.activeStudentCount ?? null, al[0].json?.creditedReading?.activeStudentCount ?? null, sl[0].json?.reading?.all?.readersWithActivity ?? null, sl[0].json?.creditedReading?.readersWithActivity ?? null];
+        ok('con el contexto estable, lo observado y lo acreditado coinciden (5 y 5) en tablero y resumen', al.every((x) => x.json.summary.activeStudentCount === 5 && x.json.creditedReading.activeStudentCount === 5 && x.json.creditedReading.readers_with_unattributable_reading === 0)
+            && sl.every((x) => x.json.reading.all.readersWithActivity === 5 && x.json.creditedReading.readersWithActivity === 5 && x.json.creditedReading.totalEffectiveMs === x.json.reading.all.totalEffectiveMs), JSON.stringify([al[0].json?.creditedReading, sl[0].json?.creditedReading]));
+        // Informe del curso y agregado del colegio.
+        const rep = await both('/api/reports/course/g-x', C.adm);
+        ok('el informe del curso lleva la misma distinción que el tablero', rep.every((x) => x.status === 200 && x.json.activityBasis?.kind === 'observed_activity' && x.json.creditedReading?.activeStudentCount === cr?.activeStudentCount), st(rep).slice(0, 300));
+        const sch = await both('/api/metrics/school/' + encodeURIComponent('Colegio Alfa'), C.adm);
+        ok('el agregado del colegio se declara actividad observada; la lectura acreditada se remite a cada curso', sch.every((x) => x.status === 200 && x.json.activityBasis?.kind === 'observed_activity' && x.json.creditedReading?.available === false && x.json.creditedReading.reason === 'per_course_only'), st(sch).slice(0, 300));
+        const cross = [...await both('/api/metrics/course/g-b', C['med-a']), ...await both('/api/groups/g-b/analytics-summary', C['med-a'])];
+        ok('el aislamiento por institución no cambia: el mediador de una no consulta el curso de la otra', cross.every((x) => x.status === 403));
     }
 
     section('[10] reinicio de una réplica');

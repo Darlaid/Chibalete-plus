@@ -118,7 +118,8 @@ try {
     const resent = progressCalls().map((c) => c.body.session?.sessionId);
     ok('al volver la red se envían las tres sesiones y la cola queda vacía', [sA[0].sessionId, sA[1].sessionId, sB[0].sessionId].every((id) => resent.includes(id)) && Object.keys(JSON.parse(globalThis.localStorage.getItem('chibalete_failed_syncs') || '{}')).length === 0, JSON.stringify({ resent, q: globalThis.localStorage.getItem('chibalete_failed_syncs') }));
     const dsCode = code('services/dataService.ts');
-    ok('la cola conserva siete días (antes 24 h) y adopta lo que dejaron otras páginas antes de escribir', /FAILED_SYNCS_TTL_MS = 7 \* 24 \* 60 \* 60 \* 1000;/.test(dsCode) && /private saveFailedSyncs\(\): void \{\s*this\.adoptStoredFailedSyncs\(\);/.test(dsCode) && /retryFailedSyncs\(\): void \{\s*this\.adoptStoredFailedSyncs\(\);/.test(dsCode));
+    // V9 65E-C4: el plazo para la cuenta ausente pasa de siete días a doce meses (el de Lector Único) y guardar devuelve si cupo.
+    ok('la cola conserva doce meses lo de una cuenta ausente (antes 7 días; antes 24 h) y adopta lo que dejaron otras páginas antes de escribir', /FAILED_SYNCS_TTL_MS = 365 \* 24 \* 60 \* 60 \* 1000;/.test(dsCode) && /private saveFailedSyncs\(\): boolean \{\s*this\.adoptStoredFailedSyncs\(\);/.test(dsCode) && /retryFailedSyncs\(\): void \{\s*this\.adoptStoredFailedSyncs\(\);/.test(dsCode));
     ok('ya no existe la sesión única por carga de la página', !/currentSessionId|sessionStartTimeMs/.test(dsCode));
 
     // ── T — textos ────────────────────────────────────────────────────────────────────────────────────────────────

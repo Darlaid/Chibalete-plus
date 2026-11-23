@@ -1,4 +1,4 @@
-# CHP V9 65E-C3 — Privacidad del dispositivo e integridad de la lectura (Bloque I)
+# CHP V9 65E-C3 / 65E-C4 — Privacidad del dispositivo e integridad de la lectura (Bloque I)
 
 Estado: implementado y probado en laboratorio. Sin desplegar. Este documento describe qué queda en un navegador al
 cerrar sesión, qué puede hacer su titular, qué riesgo no elimina la aplicación y las reglas de atribución y de
@@ -21,7 +21,7 @@ por defecto: avisa y deja elegir.
 Al pulsar «Cerrar sesión» (menú de escritorio, menú móvil y perfil), si en el equipo queda algo de esa cuenta se abre
 un diálogo que:
 
-- dice qué queda, con cantidades, y hasta qué fecha se conservarán las lecturas sin enviar;
+- dice qué queda, con cantidades, y hasta qué fecha se conservarán las lecturas sin enviar (12 meses);
 - advierte que alguien con acceso al navegador podría verlo y recomienda un perfil de navegador propio en equipos
   compartidos;
 - ofrece **conservarlo y cerrar sesión** (opción por defecto y con el foco), **eliminar mis datos de este equipo** o
@@ -55,21 +55,44 @@ Recomendación operativa para colegios y hogares con equipos compartidos:
 Reducir más este riesgo exige llevar al servidor los datos que hoy solo existen en el equipo (bitácora, reseñas,
 entregas, vocabulario). Es un cambio de alcance mayor que este contrato y queda como propuesta para Dirección.
 
-## 4. Cola de lecturas pendientes: política
+## 4. Colas de lecturas pendientes: política (65E-C3, completada en 65E-C4)
 
 - Una lectura sale de la cola solo cuando el servidor la **confirma**, la **rechaza de forma definitiva** (cuenta
   suprimida, obra retirada, cuerpo inválido) o su titular la **elimina**. La antigüedad no es una entrega.
-- Lo pendiente de la cuenta **con la sesión abierta** no caduca: se reintenta hasta que llegue. Antes, tras más de siete
-  días sin conexión o al volver después de ese plazo, se borraba sin haberse enviado.
-- Lo pendiente de una cuenta que **ya no usa el equipo** se conserva 7 días desde que se guardó y después se elimina. El
-  plazo se le dice a su titular, con fecha, al cerrar sesión. Es un límite de privacidad en equipos compartidos, no una
-  afirmación de entrega.
-- Cada cuenta envía solo lo suyo; el tope es de 50 pendientes por cuenta.
-- Mientras haya lecturas sin sincronizar más de un minuto, o sin conexión, el menú lo indica.
+- **Sin desalojo por capacidad.** La cola no tiene tope por número de lecturas (antes, al llegar a 50 por cuenta se
+  descartaba la más antigua sin enviarla y sin aviso; la cola del Visor Accesible descartaba a partir de 200 eventos en
+  total, también los de otra cuenta). El límite es el espacio: un presupuesto de 1,5 millones de caracteres para la cola
+  principal (unas 2 500 sesiones; 121 sesiones ocupan 37 000) y 1 millón para la del Visor Accesible.
+- **Almacenamiento agotado.** Si una lectura nueva no cabe —o el navegador rechaza la escritura—, lo ya guardado no se
+  toca, la nueva queda solo en la memoria de la página (se sigue reintentando) y el menú lo dice: cuántas lecturas solo
+  se conservan mientras la ventana siga abierta. Nunca se da por guardado lo que no lo está.
+- Lo pendiente de la cuenta **con la sesión abierta** no caduca: se reintenta hasta que llegue.
+- Lo pendiente de una cuenta que **ya no usa el equipo** se conserva **12 meses** desde que se guardó y después se
+  elimina. El plazo y la fecha se le dicen a su titular al cerrar sesión y en el aviso del menú.
+- **Caducar no es entregar.** Cuando algo caduca queda una constancia sin contenido (cuántas lecturas y cuándo). Si su
+  titular vuelve a ese equipo, se le informa de que se eliminaron sin enviarse y que no cuentan en su progreso; al darse
+  por enterado, la constancia se retira. La eliminación voluntaria la retira también.
+- Cada cuenta envía solo lo suyo; sin sesión no se envía nada.
 
-Decisión pendiente de Dirección: el plazo para cuentas ausentes es de 7 días en la web y de 45 días en Lector Único
-(valor de 65D-1S, también por confirmar). Propuesta: fijar un único plazo para los dos clientes. La implementación no
-depende del número.
+### Plazo: web y Lector Único
+
+| | Web (APP) | Lector Único (`59d7ada`) |
+|---|---|---|
+| Plazo para la cuenta ausente | 12 meses (`FAILED_SYNCS_TTL_MS`) | 12 meses (`ORPHAN_RETENTION_MS`, 65D-2R) |
+| Desde cuándo cuenta | Desde que la lectura se guardó en la cola | Desde que se creó el evento o se actualizó el progreso |
+| Cuenta activa | No caduca | No caduca |
+| Entrega confirmada | Se retira | Se retira |
+| Eliminación explícita | «Eliminar mis datos de este equipo» | `LocalDataCleaner.clearPendingOf` |
+
+Los doce meses coinciden con la conservación de las constancias de sesión del servidor: más allá, tampoco el servidor
+conservaría la evidencia. Es una **propuesta operativa pendiente de ratificación jurídica**; el valor es una constante
+en cada cliente.
+
+Corrección: una versión anterior de este documento decía que Lector Único conservaba 45 días. Era el valor de 65D-1S;
+65D-2R lo cambió a 12 meses y es lo que contiene `59d7ada`.
+
+Observación sin cambio en esta fase: Lector Único guarda como máximo 200 sesiones sin enviar por obra y descarta las
+más antiguas al superarlo. Corregirlo exige intervenir Android y queda para su gate de distribución.
 
 ## 5. Atribución temporal de la lectura hecha sin conexión
 
@@ -80,8 +103,19 @@ cambió en ese tramo (la obra se retiró y se volvió a asociar, el lector sali�
 del lector, aparece como «lectura no atribuible» —nunca como inactividad— y no se acredita después, tampoco si se
 reenvía.
 
-La vista de la administración cuenta la actividad de las obras del curso sin condición de fecha (65E-B): no atribuye a
-un periodo de mediación y no cambia.
+### Administración: actividad observada y lectura acreditada (65E-C4)
+
+La vista de la administración cuenta la actividad de las obras del curso sin condición de fecha (65E-B). Eso es
+**actividad observada**, no lectura acreditada, y desde 65E-C4 la respuesta lo dice:
+
+- `activityBasis` (`observed_activity`): las cifras del tablero, del informe, del resumen de Aula Viva y del agregado
+  del colegio son actividad observada en las obras del curso.
+- `creditedReading`: aparte, la **lectura acreditada** del curso con la regla 65A, calculada con las mismas funciones
+  que recibe la mediación (lectores con lectura acreditada y lectores con lectura no atribuible). Con el registro de
+  procedencia apagado se declara no disponible; en el agregado del colegio se remite a cada curso.
+
+Las pantallas de administración muestran una nota con las dos cosas. Ninguna presenta una lectura no acreditable como
+participación certificada del curso. La mediación no cambia: sus cifras ya son las acreditadas.
 
 ## 6. Cobertura de Lector Único en los indicadores globales
 
@@ -104,4 +138,5 @@ atribuyen a Lector Único interacciones que no genera.
 ## 7. Pruebas
 
 `server/__test__/luContextHttp.test.mjs`, `server/__test__/luGlobalCoverage.test.mjs`,
-`pages/__tests__/PrivacyLocal65EC3.test.mjs` y las de 65E-C1 y 65E-C2, todas en `npm run test:v81`.
+`pages/__tests__/PrivacyLocal65EC3.test.mjs`, `pages/__tests__/PendingQueue65EC4.test.mjs`,
+`pages/__tests__/ActivityBasis65EC4.test.mjs` y las de 65E-C1 y 65E-C2, todas en `npm run test:v81`.

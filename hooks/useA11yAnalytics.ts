@@ -99,7 +99,11 @@ const PARAGRAPH_THRESHOLD  = 0.6;
 // prioridad sobre los recientes. 200 entries × ~300 bytes ≈ 60KB, muy por
 // debajo de la quota típica de localStorage (5MB).
 const STORAGE_KEY = 'a11y_events_queue';
-const MAX_QUEUE   = 200;
+// V9 65E-C4: la cola ya no tiene tope por número. Con 200 eventos EN TOTAL (no por cuenta) se descartaban los más
+// antiguos sin enviarlos: la lectura de una cuenta podía desalojar la de otra, y una sesión larga sin conexión, su
+// propio inicio. El límite es el espacio (unos 3 000 eventos); si lo nuevo no cabe, lo ya guardado no se toca y lo
+// nuevo sigue en la memoria de la página (ver `saveQueue`).
+const MAX_QUEUE_BYTES = 1_000_000;
 
 // ── Persistencia local de eventos pendientes ─────────────────────────────────
 
@@ -123,21 +127,17 @@ function loadQueue(): BackboneEvent[] {
     }
 }
 
-function saveQueue(events: BackboneEvent[]): void {
-    if (typeof localStorage === 'undefined') return;
+/** Guarda la cola. `false` si no se pudo (sin espacio o almacenamiento rechazado): lo ya guardado queda como estaba. */
+function saveQueue(events: BackboneEvent[]): boolean {
+    if (typeof localStorage === 'undefined') return false;
     try {
-        // Cap: si excede MAX_QUEUE, descartamos los más antiguos.
-        const capped = events.length > MAX_QUEUE
-            ? events.slice(events.length - MAX_QUEUE)
-            : events;
-        if (capped.length === 0) {
-            localStorage.removeItem(STORAGE_KEY);
-        } else {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(capped));
-        }
+        if (events.length === 0) { localStorage.removeItem(STORAGE_KEY); return true; }
+        const json = JSON.stringify(events);
+        if (json.length > MAX_QUEUE_BYTES) return false;   // nada se descarta para hacer sitio
+        localStorage.setItem(STORAGE_KEY, json);
+        return true;
     } catch {
-        // QuotaExceededError u otro fallo de storage: silencioso.
-        // La cola en memoria sigue intentando.
+        return false;   // QuotaExceededError u otro fallo: quien llama conserva los eventos en memoria
     }
 }
 
@@ -207,9 +207,13 @@ export function useA11yAnalytics(config: UseA11yAnalyticsConfig): UseA11yAnalyti
         // Persistir en queue ANTES de fetch/beacon — atomicidad: si la
         // pestaña se cierra mid-flush, los eventos sobreviven en la queue.
         // En éxito limpiamos abajo.
-        saveQueue([...otherQueued, ...eventsToSend]);
+        const persisted = saveQueue([...otherQueued, ...eventsToSend]);
+        // V9 65E-C4: si no se pudieron guardar (sin espacio), los eventos nuevos solo existen en esta página: si el envío
+        // falla vuelven al buffer para el siguiente intento, en vez de darse por guardados y perderse.
+        const fresh = persisted ? [] : eventsToSend.slice(myQueued.length);
 
         const onTransportFailure = (reason: unknown): void => {
+            if (fresh.length > 0) bufferRef.current.unshift(...fresh);
             // Los eventos ya están en la queue (persistidos arriba). Sólo
             // log dev para ayudar a debug en colegio con red mala.
             if (import.meta.env.DEV) {

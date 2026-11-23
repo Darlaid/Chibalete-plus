@@ -438,7 +438,9 @@ async function main() {
         ok('Cache-Control: no-store', r.headers.get('cache-control') === 'no-store', String(r.headers.get('cache-control')));
         ok('A readerCount = 80 (10 mediadores + admin con groupIds fuera)', body?.readerCount === 80, String(body?.readerCount));
         // V9 65B: `computedAt` declara cuándo se calcularon las cifras (el resumen se conserva hasta 5 minutos por réplica).
-        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess","computedAt","dataCoverage","courseAttribution"]', JSON.stringify(Object.keys(body ?? {})));
+        ok('forma exacta', JSON.stringify(Object.keys(body ?? {})) === '["groupId","readerCount","reading","leo","progress","tasks","pisa","readers","individualAccess","computedAt","dataCoverage","courseAttribution","activityBasis","creditedReading"]', JSON.stringify(Object.keys(body ?? {})));
+        // V9 65E-C4: el resumen de la administración se declara actividad observada y lleva aparte la lectura acreditada.
+        ok('administración: actividad observada, con la lectura acreditada aparte (65A)', body?.activityBasis?.kind === 'observed_activity' && body.activityBasis.credited === false && body.creditedReading?.rule === '65A', JSON.stringify([body?.activityBasis, body?.creditedReading]));
         ok('…y `computedAt` es un instante no posterior a ahora', Number.isFinite(body?.computedAt) && body.computedAt <= Date.now(), String(body?.computedAt));
         const all = body?.reading?.all, d28 = body?.reading?.last28d;
         ok('B all > 0 y == Σ autoridad por lector', all?.totalEffectiveMs > 0 && all.totalEffectiveMs === expectedAllMs, `${all?.totalEffectiveMs} vs ${expectedAllMs}`);

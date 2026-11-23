@@ -9,6 +9,7 @@ import {
 // Sprint Data Backbone — Fase 4: sección aditiva con merge multi-escuela.
 import BackboneModeUsageSection, { type BackboneMetrics } from '../components/BackboneModeUsageSection';
 import { mergeBackboneMetrics } from '../utils/mergeBackboneMetrics';
+import { describeActivityBasis, type ActivityBasisInfo } from '../utils/institutionalErrors';
 // Sprint Data Backbone — Fase 6A: embudos con merge multi-escuela aparte.
 import BackboneFunnelsSection, { type BackboneFunnels } from '../components/BackboneFunnelsSection';
 import { mergeBackboneFunnels } from '../utils/mergeBackboneFunnels';
@@ -732,6 +733,12 @@ const DashboardAdminLectura: React.FC = () => {
                 <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                     Vista consolidada de actividad lectora · {schools.length} {schools.length === 1 ? 'colegio' : 'colegios'}
                 </p>
+                {/* V9 65E-C4 — estas cifras son actividad observada, no lectura acreditada de cada curso: se dice. */}
+                {describeActivityBasis(Object.values(schoolMetrics)[0] as ActivityBasisInfo | undefined) && (
+                    <p role="note" data-testid="admin-activity-basis" className="text-sm text-gray-600 dark:text-gray-300 mt-2 max-w-3xl">
+                        {describeActivityBasis(Object.values(schoolMetrics)[0] as ActivityBasisInfo | undefined)}
+                    </p>
+                )}
                 {/* V9 F5-E2 — panel parcial o sin métricas: se dice, y no se presenta como completo. */}
                 {unavailable.length > 0 && (
                     <div role="status" className="mt-4 px-4 py-3 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-800 dark:bg-amber-900/20 dark:border-amber-800 dark:text-amber-200">

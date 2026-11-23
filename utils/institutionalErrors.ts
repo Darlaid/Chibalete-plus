@@ -96,6 +96,28 @@ export function describeNoEligibleReaders(rosterCount: number | null): { title: 
  * visores web y de la aplicación de lectura sin conexión conserva una cantidad limitada de entradas; cuando está lleno,
  * lo más antiguo ya no entra en el cálculo. Se dice con la fecha, para que una cifra menor no se lea como menos lectura.
  */
+/**
+ * V9 65E-C4 — qué miden las cifras de una vista de administración. El servidor las marca como ACTIVIDAD OBSERVADA
+ * (lectura de las obras del curso, sin comprobar fechas) y entrega aparte la LECTURA ACREDITADA del curso (regla 65A:
+ * obra asociada y estudiante miembro de forma continua desde la fecha de la lectura hasta que el servidor la recibió).
+ * Se dice junto a las cifras para que la actividad observada no se lea como participación certificada del curso.
+ * `null` si la respuesta no es de actividad observada (la de la mediación ya es lectura acreditada).
+ */
+export type ActivityBasisInfo = {
+    activityBasis?: { kind?: string; credited?: boolean };
+    creditedReading?: { available?: boolean; reason?: string; activeStudentCount?: number; readersWithActivity?: number; readers_with_unattributable_reading?: number };
+};
+export function describeActivityBasis(data: ActivityBasisInfo | null | undefined): string | null {
+    if (data?.activityBasis?.kind !== 'observed_activity') return null;
+    const head = 'Estas cifras son actividad observada: lectura registrada en las obras del curso, sin comprobar que la obra y el estudiante pertenecieran al curso cuando se leyó. No certifican participación del curso.';
+    const c = data.creditedReading;
+    if (!c || c.available !== true) {
+        return `${head} ${c?.reason === 'per_course_only' ? 'La lectura acreditada se consulta en cada curso.' : 'La lectura acreditada del curso no está disponible todavía: aún no se registra desde cuándo valen las asignaciones y las membresías.'}`;
+    }
+    const n = c.activeStudentCount ?? c.readersWithActivity ?? 0, u = c.readers_with_unattributable_reading ?? 0;
+    return `${head} Lectura acreditada del curso: ${n} ${n === 1 ? 'estudiante con lectura acreditada' : 'estudiantes con lectura acreditada'}${u > 0 ? `; ${u} ${u === 1 ? 'tiene' : 'tienen'} lectura que no puede atribuirse al curso` : ''}.`;
+}
+
 export type ActivityDataCoverage = { telemetry?: { rolling: boolean; from: number | null }; leo?: { rolling: boolean; from: number | null } };
 export function describeActivityCoverage(coverage: ActivityDataCoverage | null | undefined): string | null {
     const day = (ms: number | null | undefined) => (typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toLocaleDateString('es', { dateStyle: 'medium' }) : null);

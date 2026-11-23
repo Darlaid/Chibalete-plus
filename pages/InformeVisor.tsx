@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE, describeActivityCoverage, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE, describeActivityCoverage, describeActivityBasis, type ActivityBasisInfo, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../utils/institutionalErrors';
 import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import {
     ArrowLeft, AlertCircle, AlertTriangle, Info, Lightbulb,
@@ -642,6 +642,9 @@ const InformeVisor: React.FC<Props> = ({ type }) => {
                         {/* V9 F5-E4: sin desglose (vista agregada de administración) se dice. */}
                         {isCourse && !Array.isArray(cd!.studentBreakdown) && (
                             <p role="note" className="text-sm text-gray-500 dark:text-gray-400 pb-8">{AGGREGATE_VIEW_NOTE}</p>
+                        )}
+                        {describeActivityBasis(data as ActivityBasisInfo) && (
+                            <p role="note" data-testid="report-activity-basis" className="text-sm text-gray-600 dark:text-gray-300 pt-6">{describeActivityBasis(data as ActivityBasisInfo)}</p>
                         )}
                         {describeActivityCoverage((data as { dataCoverage?: ActivityDataCoverage }).dataCoverage) && (
                             <p role="note" data-testid="report-data-coverage" className="text-sm text-gray-600 dark:text-gray-300 pt-6">{describeActivityCoverage((data as { dataCoverage?: ActivityDataCoverage }).dataCoverage)}</p>

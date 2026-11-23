@@ -178,10 +178,22 @@ class DataService {
     // Max 50 entries; entries older than 24h are pruned (stale progress unlikely to help).
     private failedSyncs: Map<string, FailedSyncEntry> = new Map();
     private static readonly FAILED_SYNCS_KEY = 'chibalete_failed_syncs';
-    private static readonly FAILED_SYNCS_MAX = 50;
-    // V9 65D-1: 7 días (antes 24 h). Una lectura hecha sin conexión se perdía si la aplicación no volvía a abrirse con
-    // red al día siguiente; el servidor acepta guardados atrasados y acredita la sesión con la fecha que declara (65A).
-    private static readonly FAILED_SYNCS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    // V9 65E-C4 — la cola ya NO tiene tope por número de entradas: al llegar a 50 se desalojaba la lectura pendiente más
+    // antigua de la cuenta, sin enviarla y sin aviso. El límite es el espacio: un presupuesto para la cola dentro del
+    // almacenamiento del navegador (~1,5 millones de caracteres, unas 2 500 sesiones). Si lo nuevo no cabe —o el navegador
+    // rechaza la escritura—, lo que ya estaba guardado NO se toca, lo nuevo queda solo en la memoria de la página y se
+    // informa (`pendingSyncStatus().unsaved`): nunca se da por guardado lo que no lo está.
+    private static readonly FAILED_SYNCS_MAX_BYTES = 1_500_000;
+    // V9 65E-C4: 12 meses (antes 7 días) para lo pendiente de una cuenta que YA NO usa el equipo: el mismo plazo que
+    // Lector Único (ORPHAN_RETENTION_MS, 65D-2R) y que la conservación de las constancias de sesión del servidor. Con
+    // siete días bastaba una semana de vacaciones para perder, sin enviarla, lectura única hecha sin conexión. El plazo
+    // cuenta desde que la lectura se guardó en la cola. Propuesta operativa, pendiente de ratificación jurídica.
+    private static readonly FAILED_SYNCS_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+    /** Clave reservada dentro de la cola: cuántas lecturas de cada cuenta caducaron sin enviarse (sin contenido). */
+    private static readonly EXPIRED_NOTES_KEY = '__expired__';
+    private expiredNotes: Record<string, { count: number; at: string }> = {};
+    /** Entradas que no se pudieron guardar en el navegador (sin espacio): solo existen en la memoria de esta página. */
+    private unpersistedKeys: Set<string> = new Set();
     // Claves de la cola ya resueltas en esta página: no se vuelven a adoptar del almacenamiento compartido.
     private settledFailKeys: Set<string> = new Set();
 
@@ -504,20 +516,24 @@ class DataService {
             Object.entries(obj).forEach(([k, v]) => {
                 if (!this.failedSyncs.has(k) && !this.settledFailKeys.has(k) && v?.userId && v?.contentId && v?.payload) this.failedSyncs.set(k, v);
             });
+            // 65E-C4: constancias de caducidad que dejó esta u otra página (se conserva la cuenta mayor de cada titular).
+            const notes = (obj as Record<string, any>)[DataService.EXPIRED_NOTES_KEY];
+            if (notes && typeof notes === 'object') {
+                Object.entries(notes as Record<string, { count: number; at: string }>).forEach(([uid, n]) => {
+                    if (n && Number.isFinite(n.count) && n.count > (this.expiredNotes[uid]?.count ?? 0) && !this.acknowledgedExpired.has(uid)) this.expiredNotes[uid] = { count: n.count, at: String(n.at) };
+                });
+            }
         } catch { /* almacenamiento no disponible o corrupto */ }
     }
+    private acknowledgedExpired: Set<string> = new Set();
 
     private addToFailedSyncs(key: string, userId: string, contentId: string, payload: string): void {
         this.adoptStoredFailedSyncs();
         // Same key (same session) ⇒ the new payload is more recent and replaces it.
         this.settledFailKeys.delete(key);
         this.failedSyncs.set(key, { userId, contentId, payload, addedAt: new Date().toISOString() });
-        // Cap at FAILED_SYNCS_MAX — evict the oldest entry when over limit.
-        // V9 65E-C1: el tope es POR CUENTA. La actividad de quien usa ahora el dispositivo no desaloja los pendientes
-        // de otra cuenta (esos solo caducan por antigüedad).
-        const mine = [...this.failedSyncs.entries()].filter(([, v]) => v.userId === userId);
-        // (se anota como resuelta: si no, al guardar se volvería a adoptar del almacenamiento y el tope no regiría)
-        if (mine.length > DataService.FAILED_SYNCS_MAX) { this.failedSyncs.delete(mine[0][0]); this.settledFailKeys.add(mine[0][0]); }
+        // V9 65E-C4: nada se desaloja por capacidad (ni lo propio ni lo de otra cuenta). Si no cabe, `saveFailedSyncs`
+        // deja lo nuevo en memoria y lo declara.
         this.saveFailedSyncs();
     }
 
@@ -542,6 +558,11 @@ class DataService {
             if (age < cutoff && !mine) {
                 this.failedSyncs.delete(key);
                 this.settledFailKeys.add(key);
+                // 65E-C4: caducar no es entregar. Queda una constancia sin contenido (cuántas y cuándo) para decírselo a
+                // su titular si vuelve a este equipo.
+                const note = this.expiredNotes[entry.userId];
+                this.expiredNotes[entry.userId] = { count: (note?.count ?? 0) + 1, at: new Date().toISOString() };
+                this.acknowledgedExpired.delete(entry.userId);
                 pruned = true;
                 return;
             }
@@ -575,13 +596,34 @@ class DataService {
         if (pruned) this.saveFailedSyncs();
     }
 
-    private saveFailedSyncs(): void {
+    /**
+     * Guarda la cola en el navegador. `false` si no cupo entera. V9 65E-C4: antes un fallo de escritura (almacenamiento
+     * lleno) se tragaba y la lectura se daba por guardada. Ahora, si la cola no cabe en su presupuesto o el navegador
+     * rechaza la escritura, se vuelve a guardar SIN las entradas que todavía no estaban en el navegador: lo ya guardado
+     * se conserva intacto, lo nuevo queda en la memoria de la página (se sigue reintentando) y queda anotado como no
+     * guardado para que la interfaz lo diga.
+     */
+    private saveFailedSyncs(): boolean {
         this.adoptStoredFailedSyncs();
-        try {
-            const obj: Record<string, FailedSyncEntry> = {};
-            this.failedSyncs.forEach((v, k) => { obj[k] = v; });
-            localStorage.setItem(DataService.FAILED_SYNCS_KEY, JSON.stringify(obj));
-        } catch { /* QuotaExceededError — silent; retry on next opportunity */ }
+        const write = (skip: Set<string>): boolean => {
+            try {
+                const obj: Record<string, unknown> = {};
+                this.failedSyncs.forEach((v, k) => { if (!skip.has(k)) obj[k] = v; });
+                if (Object.keys(this.expiredNotes).length > 0) obj[DataService.EXPIRED_NOTES_KEY] = this.expiredNotes;
+                const json = JSON.stringify(obj);
+                if (json.length > DataService.FAILED_SYNCS_MAX_BYTES) return false;
+                localStorage.setItem(DataService.FAILED_SYNCS_KEY, json);
+                return true;
+            } catch { return false; /* QuotaExceededError u otro rechazo del navegador */ }
+        };
+        if (write(new Set())) { this.unpersistedKeys.clear(); return true; }
+        let stored: Record<string, unknown> = {};
+        try { stored = JSON.parse(localStorage.getItem(DataService.FAILED_SYNCS_KEY) || '{}') || {}; } catch { stored = {}; }
+        const skip = new Set<string>();
+        this.failedSyncs.forEach((_v, k) => { if (!(k in stored)) skip.add(k); });
+        this.unpersistedKeys = skip;
+        write(skip);   // conserva lo que ya estaba (con las entregas ya confirmadas retiradas); si tampoco cabe, queda como estaba
+        return false;
     }
 
 
@@ -859,8 +901,8 @@ class DataService {
      * V9 65E-C3 — lecturas de esa cuenta que este equipo todavía no pudo enviar. `expiresAt`: cuándo se eliminarían si
      * la cuenta deja de usar el equipo (con su sesión abierta no caducan). Solo cuenta; no envía ni borra.
      */
-    public pendingSyncStatus(userId: string): { count: number; oldestAddedAt: number | null; expiresAt: number | null } {
-        const none = { count: 0, oldestAddedAt: null, expiresAt: null };
+    public pendingSyncStatus(userId: string): { count: number; oldestAddedAt: number | null; expiresAt: number | null; unsaved: number; expired: { count: number; at: number } | null } {
+        const none = { count: 0, oldestAddedAt: null, expiresAt: null, unsaved: 0, expired: null as { count: number; at: number } | null };
         try {
             if (!userId) return none;
             this.adoptStoredFailedSyncs();
@@ -877,9 +919,28 @@ class DataService {
                 const body = JSON.stringify({ canonicalProgress: prog.canonicalProgress, session: prog.session, updatedAt: prog.fecha_actualizacion });
                 if (this.lastSyncedPayloads.get(key) !== body) keys.add(prog.session?.sessionId ? `${key}__${prog.session.sessionId}` : key);
             });
-            if (keys.size === 0) return none;
-            return { count: keys.size, oldestAddedAt: oldest, expiresAt: oldest === null ? null : oldest + DataService.FAILED_SYNCS_TTL_MS };
+            // 65E-C4: lo que no se pudo guardar en el navegador (sin espacio) y lo que caducó sin enviarse mientras la
+            // cuenta no usaba este equipo.
+            let unsaved = 0;
+            this.unpersistedKeys.forEach((k) => { if (this.failedSyncs.get(k)?.userId === userId) unsaved += 1; });
+            const note = this.expiredNotes[userId];
+            const expired = note && note.count > 0 ? { count: note.count, at: new Date(note.at).getTime() } : null;
+            if (keys.size === 0) return { ...none, expired };
+            return { count: keys.size, oldestAddedAt: oldest, expiresAt: oldest === null ? null : oldest + DataService.FAILED_SYNCS_TTL_MS, unsaved, expired };
         } catch { return none; }
+    }
+
+    /** El titular ya fue informado de las lecturas que caducaron sin enviarse: la constancia se retira. */
+    public acknowledgeExpiredPending(userId: string): void {
+        if (!userId || !this.expiredNotes[userId]) return;
+        delete this.expiredNotes[userId];
+        this.acknowledgedExpired.add(userId);
+        this.saveFailedSyncs();
+    }
+    /** Plazo de conservación de lo pendiente de una cuenta ausente, en palabras («12 meses», «7 días»). */
+    public get pendingRetentionLabel(): string {
+        const days = this.pendingRetentionDays;
+        return days >= 60 ? `${Math.round(days / 30.4)} meses` : `${days} días`;
     }
 
     /** Claves del navegador que llevan el id de la cuenta en su nombre (solo existen en el equipo). */
@@ -941,7 +1002,9 @@ class DataService {
             // Cola de pendientes: memoria y navegador (también lo que dejó el lector EPUB).
             this.pendingSyncs.forEach((prog, key) => { if (prog.usuario_id === userId) this.pendingSyncs.delete(key); });
             this.adoptStoredFailedSyncs();
-            this.failedSyncs.forEach((entry, key) => { if (entry.userId === userId) { this.failedSyncs.delete(key); this.settledFailKeys.add(key); } });
+            this.failedSyncs.forEach((entry, key) => { if (entry.userId === userId) { this.failedSyncs.delete(key); this.settledFailKeys.add(key); this.unpersistedKeys.delete(key); } });
+            delete this.expiredNotes[userId];
+            this.acknowledgedExpired.add(userId);
             this.saveFailedSyncs();
             const queue = DataService.readA11yQueue();
             if (queue.some(e => e?.userId === userId)) localStorage.setItem('a11y_events_queue', JSON.stringify(queue.filter(e => e?.userId !== userId)));

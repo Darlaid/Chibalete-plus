@@ -170,30 +170,48 @@ export function useLogoutFlow(onAfter?: () => void): { requestLogout: (trigger?:
  */
 export const PendingSyncNotice: React.FC = () => {
     const { user } = useAuth();
-    const [state, setState] = useState<{ count: number; offline: boolean }>({ count: 0, offline: false });
+    const [state, setState] = useState<{ count: number; offline: boolean; unsaved: number; expired: { count: number; at: number } | null }>({ count: 0, offline: false, unsaved: 0, expired: null });
     useEffect(() => {
-        if (!user?.id) { setState({ count: 0, offline: false }); return; }
+        if (!user?.id) { setState({ count: 0, offline: false, unsaved: 0, expired: null }); return; }
         const read = () => {
             const s = dataService.pendingSyncStatus(user.id);
             const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
             const stale = s.oldestAddedAt !== null && Date.now() - s.oldestAddedAt > 60_000;
-            setState({ count: s.count > 0 && (offline || stale) ? s.count : 0, offline });
+            setState({ count: s.count > 0 && (offline || stale || s.unsaved > 0) ? s.count : 0, offline, unsaved: s.unsaved, expired: s.expired });
         };
         read();
         const t = window.setInterval(read, 15_000);
         window.addEventListener('online', read); window.addEventListener('offline', read); window.addEventListener('focus', read);
         return () => { window.clearInterval(t); window.removeEventListener('online', read); window.removeEventListener('offline', read); window.removeEventListener('focus', read); };
     }, [user?.id]);
-    if (state.count === 0) return null;
+    if (state.count === 0 && !state.expired) return null;
+    const box = 'mb-3 flex items-start gap-2 rounded-lg p-3 text-xs';
     return (
-        <p role="status" data-testid="pending-sync-notice" className="mb-3 flex items-start gap-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 p-3 text-xs text-amber-900 dark:text-amber-100">
-            <CloudOff size={16} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
-            <span>
-                {plural(state.count, 'lectura sin sincronizar', 'lecturas sin sincronizar')} en este equipo.{' '}
-                {state.offline ? 'El envío se hará cuando vuelva la conexión.' : 'El envío se hará en cuanto el servidor responda.'}{' '}
-                Si cierras sesión antes, quedan guardadas aquí {dataService.pendingRetentionDays} días.
-            </span>
-        </p>
+        <>
+            {/* V9 65E-C4 — lo que caducó sin enviarse mientras la cuenta no usaba este equipo: se dice, no se calla. */}
+            {state.expired && user?.id && (
+                <div role="status" data-testid="pending-expired-notice" className={`${box} bg-red-50 dark:bg-red-900/20 text-red-900 dark:text-red-100`}>
+                    <CloudOff size={16} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
+                    <span>
+                        {plural(state.expired.count, 'lectura guardada en este equipo se eliminó', 'lecturas guardadas en este equipo se eliminaron')} sin enviarse
+                        {Number.isFinite(state.expired.at) ? ` el ${dateOf(state.expired.at)}` : ''}, al cumplirse {dataService.pendingRetentionLabel} sin que entraras aquí con tu cuenta. Eso no se sumó a tu progreso.{' '}
+                        <button type="button" data-testid="pending-expired-ack" className="underline font-semibold" onClick={() => { dataService.acknowledgeExpiredPending(user.id); setState((s) => ({ ...s, expired: null })); }}>Entendido</button>
+                    </span>
+                </div>
+            )}
+            {state.count > 0 && (
+                <p role="status" data-testid="pending-sync-notice" className={`${box} bg-amber-50 dark:bg-amber-900/20 text-amber-900 dark:text-amber-100`}>
+                    <CloudOff size={16} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
+                    <span>
+                        {plural(state.count, 'lectura sin sincronizar', 'lecturas sin sincronizar')} en este equipo.{' '}
+                        {state.offline ? 'El envío se hará cuando vuelva la conexión.' : 'El envío se hará en cuanto el servidor responda.'}{' '}
+                        {state.unsaved > 0
+                            ? <strong data-testid="pending-unsaved">No queda espacio en este equipo para guardar más: {plural(state.unsaved, 'lectura solo se conserva', 'lecturas solo se conservan')} mientras esta ventana siga abierta. Conéctate para enviarlas antes de cerrarla.</strong>
+                            : <>Si cierras sesión antes, quedan guardadas aquí {dataService.pendingRetentionLabel}.</>}
+                    </span>
+                </p>
+            )}
+        </>
     );
 };
 

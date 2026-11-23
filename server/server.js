@@ -9668,6 +9668,20 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
             const population = new Set(a2.aggregateOver === 'allowed' ? [...a2.allowed] : cohortIds);
             data = { ...data, courseAttribution: { course_has_works: works.all || works.ids.length > 0,
                 readers_with_unverifiable_history: (r.data.readers || []).filter(x => x.historicalActivity === true && population.has(x.userId)).length } };
+            // V9 65E-C4: el resumen de la administración es actividad observada; la lectura acreditada (65A) va aparte,
+            // con el mismo cálculo que recibe quien media (se conserva igual, 5 minutos por réplica).
+            let creditedReading = { rule: '65A', available: false, reason: 'provenance_not_recorded' };
+            if (contextLedgerEnabled()) {
+                const creditedContextOf = await courseContextResolver([id]);
+                const c = await groupAnalyticsCache.get(`${id}|credited`, () => buildGroupAnalyticsSummary({ group, users, allGroups: groups,
+                    leoInteractions: readJSON(LEO_INTERACTIONS_DB) || [], getProgressByUser, legacyEvents: readJSON(ANALYTICS_DB) || [],
+                    includeContent: temporalContentPredicate(creditedContextOf) }));
+                const mine = (c.data.readers || []).filter(x => population.has(x.userId));
+                creditedReading = { rule: '65A', available: true, readersWithActivity: mine.filter(x => (x.reading?.allEffectiveMs ?? 0) > 0).length,
+                    totalEffectiveMs: mine.reduce((a, x) => a + (x.reading?.allEffectiveMs ?? 0), 0),
+                    readers_with_unattributable_reading: mine.filter(x => x.historicalActivity === true).length };
+            }
+            data = { ...data, activityBasis: OBSERVED_ACTIVITY_BASIS, creditedReading };
         }
         if (contextOf) {
             // El recuento se hace sobre la MISMA población que los agregados (solo cifras); el detalle, sobre los visibles.
@@ -11852,11 +11866,43 @@ function courseWorksPredicate(works) {
     return Object.assign((contentId) => works.has(contentId),
         { strict: true, historical: (contentId, ts) => works.has(contentId) && !Number.isFinite(msOfStamp(ts)) });
 }
+/**
+ * V9 65E-C4 — qué mide cada cifra de un curso, dicho en la propia respuesta.
+ *
+ * La administración ve la actividad de las obras del curso SIN condición de fecha (65E-B): es ACTIVIDAD OBSERVADA. No es
+ * lectura acreditada del curso: una lectura hecha sin conexión cuya obra o membresía cambió antes de que el servidor la
+ * recibiera cuenta ahí y no se acredita (65A). Antes las dos cosas llegaban con los mismos nombres de campo y una
+ * pantalla de administración podía leerse como participación certificada. Ahora:
+ *   - `activityBasis`   dice que las cifras son actividad observada, y con qué criterio;
+ *   - `creditedReading` da, aparte, la lectura ACREDITADA con la misma regla 65A que recibe quien media (mismo cálculo,
+ *                       mismas funciones): lectores activos acreditados y lectores con lectura no atribuible. Con el
+ *                       registro de procedencia apagado no hay acreditación posible y se dice (`available: false`).
+ * Ninguna fórmula cambia y nada se cuenta dos veces: son dos cálculos del mismo motor sobre predicados distintos.
+ */
+const OBSERVED_ACTIVITY_BASIS = Object.freeze({ kind: 'observed_activity', credited: false, scope: 'course_works', dated: false });
+async function withCreditedContext(options, courseId) {
+    return { ...options, creditedContextOf: contextLedgerEnabled() ? await courseContextResolver([String(courseId)]) : null };
+}
+/** Lectura acreditada (65A) de TODO el curso, con el cálculo de la mediación. Síncrono: usa el motor ya cargado. */
+function creditedCourseReading(courseId, contextOf, loaded, users) {
+    if (!contextOf) return { rule: '65A', available: false, reason: 'provenance_not_recorded' };
+    const works = groupsContentScope([String(courseId)]);
+    const opts = { includeContent: temporalContentPredicate(contextOf), contentScope: works, contextOf };
+    const raw = computeCourseMetrics(courseId, opts);
+    withProgressOnlyActivity(raw, courseProgressScope(opts).pDb, works);
+    withAccessibleReaderActivity(raw, opts, works);
+    withUnattributedTelemetry(raw, opts, loaded?.allEvents ?? null);
+    const credited = formatCourseResponse(raw, users);
+    applyCourseAttribution(credited, courseAttributionOf(raw.studentBreakdown.map(s => s.userId).filter(id => typeof id === 'string'), contextOf));
+    return { rule: '65A', available: true, activeStudentCount: credited.summary?.activeStudentCount ?? 0,
+        readers_with_unattributable_reading: credited.courseAttribution?.readers_with_unverifiable_history ?? 0 };
+}
+
 /** Opciones de cálculo de un curso para la administración (65E-B): solo las obras del curso. */
 function adminCourseOptions(courseId) {
     const works = groupsContentScope([String(courseId)]);
     const includeContent = courseWorksPredicate(works);
-    return { adminWorks: works, ...(includeContent ? { includeContent, contentScope: works } : {}) };
+    return { adminWorks: works, adminCourseId: String(courseId), ...(includeContent ? { includeContent, contentScope: works } : {}) };
 }
 /** Desde cuándo es completo lo que conservan las dos memorias rodantes de actividad (65E-B). Solo fechas. */
 function activityDataCoverage(loaded = null) {
@@ -11901,9 +11947,12 @@ function applyActivityCoverage(response, loaded = null) {
     return response;
 }
 /** Curso sin obras asociadas visto por la administración: se dice (las cifras en cero no son inactividad). */
-function applyAdminCourseScope(response, metricsOptions) {
+function applyAdminCourseScope(response, metricsOptions, loaded = null, users = null) {
     const works = metricsOptions.adminWorks;
     if (!works) return response;
+    // V9 65E-C4: estas cifras son actividad observada; la lectura acreditada (65A) va aparte y con su nombre.
+    response.activityBasis = OBSERVED_ACTIVITY_BASIS;
+    response.creditedReading = creditedCourseReading(metricsOptions.adminCourseId, metricsOptions.creditedContextOf ?? null, loaded, users ?? readJSONMetricsLegacy(USERS_DB) ?? []);
     const noWorks = !works.all && works.ids.length === 0;
     // 65E-C (A1): lectores con lectura de obras del curso que no se acredita (LU sin constancia de recepción). No son
     // «sin actividad»: la fila lo dice y el curso anuncia cuántos son, igual que el resumen de Aula Viva.
@@ -12209,7 +12258,7 @@ function mediatorCourseReaders(requester, courseId) {
  */
 async function courseMetricsOptions(req, res, requester, courseId) {
     // V9 65E-B: la administración ve el curso completo, pero solo la actividad de las obras del curso.
-    if (await isAdminRequest(req)) return adminCourseOptions(courseId);
+    if (await isAdminRequest(req)) return withCreditedContext(adminCourseOptions(courseId), courseId);
     const scope = mediatorCourseReaders(requester, courseId);
     // V9 F7-C2: además, solo la actividad de las obras asociadas a ESE curso (ni otras obras institucionales ni compras).
     if (scope.decision === 'allow') {
@@ -12230,7 +12279,7 @@ async function courseMetricsOptions(req, res, requester, courseId) {
         res.status(503).json({ error: 'identity_unavailable' });
         return null;
     }
-    if (admin) return { aggregateOnly: true, ...adminCourseOptions(courseId) };
+    if (admin) return { aggregateOnly: true, ...(await withCreditedContext(adminCourseOptions(courseId), courseId)) };
     if (scope.decision === 'unavailable') { res.status(503).json({ error: 'individual_access_unavailable' }); return null; }
     res.status(403).json({ error: 'Acceso denegado' });
     return null;
@@ -12962,6 +13011,10 @@ function schoolWorksScope(schoolName, groups) {
  * nada) no se afirman y la respuesta lo declara (`noActivity`), con el motivo si ninguno de sus cursos tiene obras.
  */
 function applySchoolEvidence(response) {
+    // V9 65E-C4: el agregado del colegio es actividad observada en las obras de sus cursos; la lectura acreditada se
+    // consulta por curso (la acreditación depende del periodo de cada curso).
+    response.activityBasis = OBSERVED_ACTIVITY_BASIS;
+    response.creditedReading = { rule: '65A', available: false, reason: 'per_course_only' };
     if ((response.summary?.activeStudentCount ?? 0) > 0) return response;
     response.alerts = [];
     response.noActivity = true;
@@ -13050,7 +13103,7 @@ const legacyMetricsCourseHandler = async (req, res) => {
         withUnattributedTelemetry(raw, metricsOptions, loaded.allEvents);
         const response = formatCourseResponse(raw, users);
         applyActivityCoverage(response, loaded);   // 65E-B
-        applyAdminCourseScope(response, metricsOptions);
+        applyAdminCourseScope(response, metricsOptions, loaded, users);
 
         // V9 F5-E4: administración humana ⇒ solo agregados. Ni se calculan perfiles individuales ni se entrega
         // el desglose; el backbone se acota a los miembros del curso (los ids no salen en la respuesta).
@@ -13487,7 +13540,7 @@ app.get('/api/reports/course/:courseId', async (req, res) => {
         withUnattributedTelemetry(raw, metricsOptions, loaded.allEvents);
         const response = formatCourseResponse(raw, users);
         applyActivityCoverage(response, loaded);   // 65E-B
-        applyAdminCourseScope(response, metricsOptions);
+        applyAdminCourseScope(response, metricsOptions, loaded, users);
 
         // Compute dataWindow from engine's StudentMetrics[] (before formatting strips it)
         const dataWindow = computeCourseDataWindow(raw.studentBreakdown);

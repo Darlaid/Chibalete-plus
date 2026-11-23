@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 // V9 F5-E2 — estados institucionales: textos para la persona y nómina del curso.
 import { dataService } from '../services/dataService';
-import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE, describeActivityCoverage, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../utils/institutionalErrors';
+import { describeInstitutionalError, describeNoEligibleReaders, describeReaderCoverage, describeRosterCount, describeAccessWithdrawn, AGGREGATE_VIEW_NOTE, describeActivityCoverage, describeActivityBasis, type ActivityBasisInfo, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../utils/institutionalErrors';
 import { useAuthorizationRevalidation, useSessionRevalidation } from '../hooks/useAuthorizationRevalidation';
 import {
     ArrowLeft, AlertTriangle, Info, AlertCircle,
@@ -2114,6 +2114,9 @@ const DashboardMediador: React.FC = () => {
                 (DashboardAdminLectura); el servidor ya no las entrega a mediadores. */}
 
             {/* ── FOOTER ── */}
+            {describeActivityBasis(data as ActivityBasisInfo) && (
+                <p role="note" data-testid="dashboard-activity-basis" className="text-center text-xs text-gray-600 dark:text-gray-300 max-w-2xl mx-auto">{describeActivityBasis(data as ActivityBasisInfo)}</p>
+            )}
             {describeActivityCoverage(data.dataCoverage) && (
                 <p role="note" data-testid="dashboard-data-coverage" className="text-center text-xs text-gray-500 dark:text-gray-400 max-w-2xl mx-auto">{describeActivityCoverage(data.dataCoverage)}</p>
             )}

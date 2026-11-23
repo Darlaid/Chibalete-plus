@@ -52,7 +52,8 @@ try {
     const QUEUE = 'chibalete_failed_syncs';
     const entry = (userId, contentId, sid, addedAt = new Date().toISOString()) => ({ userId, contentId, payload: JSON.stringify({ canonicalProgress: { globalPercentage: 40 }, session: { sessionId: sid, startedAt: addedAt, durationSec: 60, mode: 'text' }, updatedAt: addedAt }), addedAt });
     const setQueue = (list) => LS.setItem(QUEUE, JSON.stringify(Object.fromEntries(list.map((e) => [`${e.userId}__${e.contentId}__${JSON.parse(e.payload).session.sessionId}`, e]))));
-    const queue = () => Object.values(JSON.parse(LS.getItem(QUEUE) || '{}')).map((e) => `${e.userId}/${e.contentId}`).sort();
+    // (65E-C4: la cola puede llevar además la constancia de caducidades, que no es una lectura pendiente)
+    const queue = () => Object.values(JSON.parse(LS.getItem(QUEUE) || '{}')).filter((e) => e && e.payload).map((e) => `${e.userId}/${e.contentId}`).sort();
     const J = (k) => JSON.parse(LS.getItem(k) || '[]');
     const seed = () => {
         LS.clear();
@@ -75,7 +76,7 @@ try {
     const { dataService: ds } = await import(pathToFileURL(out).href);
     globalThis.setInterval = realSetInterval;
     await ds.waitForInitialization(); await tick(5);
-    const reset = () => { calls.length = 0; ds.failedSyncs.clear(); ds.settledFailKeys.clear(); ds.pendingSyncs.clear(); ds.lastSyncedPayloads.clear(); };
+    const reset = () => { calls.length = 0; ds.failedSyncs.clear(); ds.settledFailKeys.clear(); ds.pendingSyncs.clear(); ds.lastSyncedPayloads.clear(); ds.expiredNotes = {}; ds.unpersistedKeys?.clear(); };
     const sentTo = (id) => calls.filter(([m, u]) => m === 'POST' && u.includes(`/progress/${id}/`)).length;
 
     section('[R] qué queda en el equipo de cada cuenta');
@@ -84,7 +85,7 @@ try {
         ok('cuenta A: 3 lecturas sin enviar (2 de la cola + lectura accesible), 2 entradas de bitácora, 1 reseña, 1 entrega, 1 publicación, 1 práctica de voz, 2 palabras, 3 notas de lectura', a.pendingReadings === 3 && a.journal === 2 && a.reviews === 1 && a.submissions === 1 && a.posts === 1 && a.orality === 1 && a.vocabulary === 2 && a.other === 3 && a.total === 14, JSON.stringify(a));
         ok('cuenta B: solo lo suyo (2 sin enviar, 1 entrada, 1 palabra)', b.pendingReadings === 2 && b.journal === 1 && b.vocabulary === 1 && b.total === 11, JSON.stringify(b));
         ok('una cuenta sin nada en el equipo: todo en cero (el diálogo no se abre)', z.total === 0 && z.pendingReadings === 0, JSON.stringify(z));
-        ok('el resumen dice hasta cuándo se conservarían los pendientes si la cuenta no vuelve (7 días desde el más antiguo)', Math.abs(a.pendingExpiresAt - (Date.now() + 7 * DAY)) < 60_000 && ds.pendingRetentionDays === 7, String(a.pendingExpiresAt));
+        ok('el resumen dice hasta cuándo se conservarían los pendientes si la cuenta no vuelve (12 meses desde el más antiguo; 65E-C4)', Math.abs(a.pendingExpiresAt - (Date.now() + 365 * DAY)) < 60_000 && ds.pendingRetentionDays === 365 && ds.pendingRetentionLabel === '12 meses', String(a.pendingExpiresAt));
         ok('consultar el resumen no envía ni borra nada', calls.filter(([m]) => m === 'POST').length === 0 && queue().join() === 'A/c1,A/c3,B/c1');
     }
 
@@ -110,18 +111,18 @@ try {
     {
         const old = (d) => new Date(Date.now() - d * DAY).toISOString();
         reset(); LS.setItem('chibalete_user_id', 'A'); respond = () => 'network';
-        setQueue([entry('A', 'c1', 's-10d', old(10)), entry('A', 'c3', 's-2d', old(2)), entry('B', 'c1', 's-b-10d', old(10)), entry('B', 'c3', 's-b-6d', old(6))]);
+        setQueue([entry('A', 'c1', 's-10d', old(10)), entry('A', 'c3', 's-2d', old(2)), entry('B', 'c1', 's-b-400d', old(400)), entry('B', 'c3', 's-b-60d', old(60))]);
         ds.retryFailedSyncs(); await tick(5);
         ok('A con la sesión abierta y sin conexión diez días: su lectura de hace 10 días sigue en la cola (antes se borraba al séptimo)', queue().includes('A/c1') && queue().includes('A/c3'), queue().join());
         ok('…se intentó enviar (2 intentos de A) y nada de B', sentTo('A') === 2 && sentTo('B') === 0, `${sentTo('A')} ${sentTo('B')}`);
-        ok('lo de B, que ya no usa el equipo: lo de 10 días caduca, lo de 6 se conserva', queue().join() === 'A/c1,A/c3,B/c3', queue().join());
+        ok('lo de B, que ya no usa el equipo: lo de más de 12 meses caduca, lo de 60 días se conserva', queue().join() === 'A/c1,A/c3,B/c3', queue().join());
         const st = ds.pendingSyncStatus('A');
         ok('estado de pendientes de A: 2, con la fecha del más antiguo', st.count === 2 && Math.abs(st.oldestAddedAt - (Date.now() - 10 * DAY)) < 60_000, JSON.stringify(st));
         ok('…y el de una cuenta sin pendientes: 0', ds.pendingSyncStatus('Z').count === 0);
         reset(); LS.removeItem('chibalete_user_id');
-        setQueue([entry('A', 'c1', 's-10d', old(10)), entry('A', 'c3', 's-2d', old(2))]);
+        setQueue([entry('A', 'c1', 's-400d', old(400)), entry('A', 'c3', 's-10d', old(10))]);
         ds.retryFailedSyncs(); await tick(5);
-        ok('sin ninguna sesión abierta rige el plazo: lo de más de 7 días se elimina y nada se envía', queue().join() === 'A/c3' && calls.filter(([m]) => m === 'POST').length === 0, queue().join());
+        ok('sin ninguna sesión abierta rige el plazo: lo de más de 12 meses se elimina, lo de 10 días se conserva y nada se envía', queue().join() === 'A/c3' && calls.filter(([m]) => m === 'POST').length === 0, queue().join());
     }
 
     section('[V] regreso tras un periodo prolongado');

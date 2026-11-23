@@ -53,9 +53,10 @@ try {
     const QUEUE = 'chibalete_failed_syncs';
     const entry = (userId, contentId, sid, addedAt = new Date().toISOString()) => ({ userId, contentId, payload: JSON.stringify({ canonicalProgress: { globalPercentage: 40 }, session: { sessionId: sid, startedAt: addedAt, durationSec: 60, mode: 'text' }, updatedAt: addedAt }), addedAt });
     const setQueue = (list) => LS.setItem(QUEUE, JSON.stringify(Object.fromEntries(list.map((e) => [`${e.userId}__${e.contentId}__${JSON.parse(e.payload).session.sessionId}`, e]))));
-    const queue = () => Object.values(JSON.parse(LS.getItem(QUEUE) || '{}')).map((e) => `${e.userId}/${e.contentId}`).sort();
+    // (65E-C4: la cola puede llevar además la constancia de caducidades, que no es una lectura pendiente)
+    const queue = () => Object.values(JSON.parse(LS.getItem(QUEUE) || '{}')).filter((e) => e && e.payload).map((e) => `${e.userId}/${e.contentId}`).sort();
     const sentTo = (id) => calls.filter(([m, u]) => m === 'POST' && u.includes(`/progress/${id}/`)).length;
-    const reset = () => { calls.length = 0; ds.failedSyncs.clear(); ds.settledFailKeys.clear(); ds.pendingSyncs.clear(); ds.lastSyncedPayloads.clear(); };
+    const reset = () => { calls.length = 0; ds.failedSyncs.clear(); ds.settledFailKeys.clear(); ds.pendingSyncs.clear(); ds.lastSyncedPayloads.clear(); ds.expiredNotes = {}; ds.unpersistedKeys?.clear(); };
 
     section('[C] cierre de sesión: copias fuera, pendientes dentro');
     LS.setItem('chibalete_user_id', 'A');
@@ -97,7 +98,8 @@ try {
     setQueue([entry('A', 'c3', 's-a1')]);
     for (let i = 0; i < 60; i++) ds.addToFailedSyncs(`B__c${i}__s${i}`, 'B', `c${i}`, entry('B', `c${i}`, `s${i}`).payload);
     const q = queue();
-    ok('60 pendientes de B no desalojan el de A (el tope es por cuenta: 50 de B + 1 de A)', q.includes('A/c3') && q.filter((x) => x.startsWith('B/')).length === 50, `${q.length} ${q.includes('A/c3')}`);
+    // V9 65E-C4: ya no hay tope por número; tampoco se desaloja lo propio (antes quedaban 50 de B y 10 se perdían sin aviso).
+    ok('60 pendientes de B no desalojan el de A ni se desalojan entre sí (60 de B + 1 de A)', q.includes('A/c3') && q.filter((x) => x.startsWith('B/')).length === 60, `${q.length} ${q.includes('A/c3')}`);
     reset(); LS.setItem('chibalete_user_id', 'A');
     setQueue([entry('A', 'c3', 's-a1'), entry('A', 'c4', 's-a2'), entry('A', 'c5', 's-a3')]);
     respond = (u) => ({ status: u.includes('/c3/') ? 403 : u.includes('/c4/') ? 500 : 401 });
@@ -110,9 +112,10 @@ try {
     // no caduca sin haberse enviado (antes se borraba en silencio tras una semana sin conexión).
     ok('con su sesión abierta, un pendiente de más de 7 días NO se borra sin enviarse: sigue en la cola', queue().join() === 'A/c3,A/c4', queue().join());
     reset(); LS.setItem('chibalete_user_id', 'B');
-    setQueue([entry('A', 'c3', 's-old', new Date(Date.now() - 8 * 86400000).toISOString()), entry('A', 'c4', 's-new')]);
+    // V9 65E-C4: el plazo de la cuenta ausente es de doce meses (el de Lector Único); a los 8 días sigue en la cola.
+    setQueue([entry('A', 'c3', 's-old', new Date(Date.now() - 366 * 86400000).toISOString()), entry('A', 'c4', 's-8d', new Date(Date.now() - 8 * 86400000).toISOString())]);
     ds.retryFailedSyncs(); await tick(5);
-    ok('un pendiente de más de 7 días de una cuenta que no volvió sí caduca (y no se envía con la sesión de otra)', queue().join() === 'A/c4' && sentTo('A') === 0, `${queue().join()} ${sentTo('A')}`);
+    ok('un pendiente de más de 12 meses de una cuenta que no volvió sí caduca; el de 8 días se conserva; nada se envía con la sesión de otra', queue().join() === 'A/c4' && sentTo('A') === 0, `${queue().join()} ${sentTo('A')}`);
     LS.setItem('chibalete_user_id', 'A');
 
     section('[T] respuesta tardía');

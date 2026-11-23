@@ -7,7 +7,7 @@
  * PISA, evolución) se muestra como estado vacío explícito, nunca como 0 %.
  */
 import React from 'react';
-import { describeAccessWithdrawn, describeInstitutionalError, describeActivityCoverage, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage } from '../../utils/institutionalErrors';
+import { describeAccessWithdrawn, describeInstitutionalError, describeActivityCoverage, describeActivityBasis, SESSION_HISTORY_CAPPED_NOTE, type ActivityDataCoverage, type ActivityBasisInfo } from '../../utils/institutionalErrors';
 import { MessageCircle, CheckCircle, Clock, BrainCircuit, TrendingUp } from 'lucide-react';
 import {
     EMPTY_TEXT, GROUP_ANALYTICS_ERROR, formatLeoAverage, formatReadingDuration, hasNoServerSource,
@@ -58,6 +58,7 @@ export const GroupAnalyticsKpis: React.FC<{ state: GroupAnalyticsState }> = ({ s
     const capped = s ? s.readers.filter(r => (r as { sessionHistoryCapped?: boolean }).sessionHistoryCapped === true).length : 0;
     return (
         <>
+        {describeActivityBasis(s as ActivityBasisInfo | null) && <p role="note" data-testid="group-activity-basis" className="mb-3 text-sm text-gray-600 dark:text-gray-300">{describeActivityBasis(s as ActivityBasisInfo | null)}</p>}
         {coverage && <p role="note" data-testid="group-data-coverage" className="mb-3 text-sm text-gray-600 dark:text-gray-300">{coverage}</p>}
         {capped > 0 && (
             <p role="note" data-testid="group-session-history-capped" className="mb-3 text-sm text-gray-600 dark:text-gray-300">
