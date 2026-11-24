@@ -31,6 +31,7 @@ import {
 } from '../observability/metrics.js';
 
 import { creditedReadingRow } from '../analytics/luSessionMirror.mjs';
+import { institutionalRows } from '../privacy/personalReading.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
@@ -66,13 +67,14 @@ export function computeWindowMetrics(userId, from, to) {
     // y se sitúan por su fecha (`creditedReadingRow`); antes entraban a medias (días y obras sí, sesiones no) y con la
     // fecha de sincronización.
     const events = db.prepare(
-        `SELECT event, server_ts, client_ts, elapsed_ms, content_id, payload_json
+        `SELECT event, user_id, server_ts, client_ts, elapsed_ms, content_id, payload_json
          FROM events
          WHERE user_id = ? AND server_ts >= ? AND (server_ts < ? OR event LIKE 'lu.read_session_%')
          ORDER BY server_ts ASC`
     ).all(String(userId), from, to).map(creditedReadingRow).filter((e) => e && e.server_ts >= from && e.server_ts < to)
         .sort((a, b) => a.server_ts - b.server_ts);
-    return windowMetricsFromEvents(events);
+    // V9 BIII F5-DP2: el impacto de una intervención se mide con la lectura institucional del lector, no con la personal.
+    return windowMetricsFromEvents(institutionalRows(events));
 }
 
 /**

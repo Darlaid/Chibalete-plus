@@ -23,6 +23,7 @@ import {
 import { IDLE_MS, SESSION_CAP_MS, classifyEvent, EVENT_CLASS } from '../../engines/metrics/eventContract.mjs';
 import { classifyGroup } from '../identity/organizationScope.mjs';
 import { evaluateScopeAccess } from '../aulaViva/scopeAccess.mjs';
+import { personalRowTest } from '../privacy/personalReading.mjs';
 
 /** Modo del motor. Producción arranca en `legacy`: el motor nuevo no responde. */
 export const METRICS_ENGINE_MODES = Object.freeze(['legacy', 'canonical', 'shadow']);
@@ -163,7 +164,9 @@ export function createMetricsRouterV2({ requireUserAuth, provider, now, log = ()
     /** Carga padrones + eventos del periodo y arma el índice. */
     async function loadContext(period) {
         const { users, groups, schools } = provider.loadDirectory();
-        const events = await provider.loadEvents(period);
+        // V9 BIII F5-DP2: las métricas de organización, grupo y usuario son institucionales; la lectura personal no cuenta.
+        const isPersonal = personalRowTest();
+        const events = (await provider.loadEvents(period)).filter((e) => !isPersonal({ user_id: e.userId, content_id: e.contentId }));
         const index = buildIndex({ users, groups, schools, classifyGroup });
         return { users, groups, schools, events, index };
     }

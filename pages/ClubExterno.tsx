@@ -47,7 +47,11 @@ const ClubExterno: React.FC = () => {
         const member = !!(found.memberIds?.includes(user!.id) || found.mediatorIds?.includes(user!.id));
         setIsMember(member);
 
-        if (member) setClubContent(dataService.getClubContent(found));
+        // V9 BIII F5-DP2: un club sin obras asociadas no tiene «lecturas del club». Sin esta condición, el cliente leía
+        // «sin definir» como «todo el catálogo» y listaba bajo ese rótulo la biblioteca entera del lector (también lo
+        // suyo). El servidor ya lo trata así: un grupo sin obras definidas no aporta ninguna.
+        const clubHasWorks = found.availableContentIds !== undefined || (found.collectionIds?.length ?? 0) > 0;
+        if (member) setClubContent(clubHasWorks ? dataService.getClubContent(found) : []);
 
         if (found.activeExperienceId) {
             const b = dataService.getBundles().find(b => b.id === found.activeExperienceId);

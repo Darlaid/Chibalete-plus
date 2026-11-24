@@ -321,6 +321,20 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                 return res.json(impactSummaryBody({ type: 'group', id: req.params.id }, rows, { population: { roster: g.roster, eligible: g.readers.length } }));
             } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
         }
+        // V9 BIII F5-DP2: ante la administración, el impacto de un lector con lectura personal se compara solo con su
+        // lectura institucional (el guardado se etiquetó con toda su actividad).
+        if (String(req.params.type) === 'user' && req.aulaVivaPlatformAdmin && contextAccess?.administration) {
+            try {
+                const a = await contextAccess.administration(String(req.params.id), { historyDays: IMPACT_HISTORY_DAYS });
+                if (a && !a.ok) return withholdIndividualIndicators(res);
+                if (a) {
+                    const rows = contextualImpactRows({ context: a.context, events: a.events, nowTs: a.nowTs,
+                        interventions: interventionsOf(req.params.id, a.mediatorIds, limit) });
+                    try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
+                    return res.json(impactSummaryBody({ type: 'user', id: req.params.id }, rows, { context: a.context.describe() }));
+                }
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
         try { outcomesViewsTotal.labels('by_scope').inc(); } catch {}
         const gate = cohortGate(req, req.params.type, req.params.id);
         if (!gate.allowed) return res.json(suppressedAggregate({ scope: { type: req.params.type, id: req.params.id }, total_outcomes: 0, distribution: {}, outcomes: [] }, gate.reason));
@@ -646,6 +660,21 @@ export function createInstitutionalRouter({ requireUserAuth, contextAccess = nul
                     interventions: interventionsOf(req.params.userId, wide.mediatorIds) });
                 return res.json({ user_id: req.params.userId, timeline: timelineBody(view), feature_vector: featureVectorBody(view),
                     impact_history: impactSummaryBody({ type: 'user', id: req.params.userId }, rows) });
+            } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
+        }
+        // V9 BIII F5-DP2: la administración ante un lector con lectura personal recibe el perfil de su lectura institucional.
+        if (req.aulaVivaPlatformAdmin && callerId !== req.params.userId && contextAccess?.administration) {
+            try {
+                const a = await contextAccess.administration(String(req.params.userId));
+                if (a && !a.ok) return withholdIndividualIndicators(res);
+                if (a) {
+                    const view = buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs, withSeries: true });
+                    const wide = await contextAccess.administration(String(req.params.userId), { historyDays: IMPACT_HISTORY_DAYS });
+                    const rows = wide?.ok ? contextualImpactRows({ context: wide.context, events: wide.events, nowTs: wide.nowTs,
+                        interventions: interventionsOf(req.params.userId, wide.mediatorIds) }) : [];
+                    return res.json({ user_id: req.params.userId, timeline: timelineBody(view), feature_vector: featureVectorBody(view),
+                        impact_history: impactSummaryBody({ type: 'user', id: req.params.userId }, rows) });
+                }
             } catch { return res.status(500).json({ ok: false, error: 'context_indicators_failed' }); }
         }
         try { outcomesViewsTotal.labels('profile').inc(); } catch {}

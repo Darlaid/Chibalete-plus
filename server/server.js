@@ -43,6 +43,7 @@ import {
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
 import { a2Gate, appendDecisions, dayOf as a2DayOf, decisionGate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
+import { setPersonalReadingResolver } from './privacy/personalReading.mjs';
 import { acceptanceDocumentsStatus, adminActivationAllowed, isRepresentedMinorAccount, optionalProcessingFor, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
@@ -685,14 +686,27 @@ function mediatorWithoutCommitment(scope) {
  */
 function personalReadingBoundary(users, userId) {
     const subject = (Array.isArray(users) ? users : []).find(u => u?.id === userId);
-    if (isPersonalB2cAccount(subject)) return { account: true, work: () => true };
+    if (isPersonalB2cAccount(subject)) return { account: true, personal: true, work: () => true };
     const bought = new Set();
     for (const rule of readJSON(ACCESS_DB) || []) {
         if (rule?.scope === 'user' && String(rule.scopeId) === String(userId) && rule.b2c && Array.isArray(rule.titleIds)) rule.titleIds.forEach(id => bought.add(String(id)));
     }
-    if (bought.size === 0) return { account: false, work: () => false };
+    if (bought.size === 0) return { account: false, personal: false, work: () => false };
     const institutional = groupsContentScope((readJSON(GROUPS_DB) || []).filter(g => g && unionGroupMemberIds(g).includes(userId)).map(g => g.id));
-    return { account: false, work: (contentId) => bought.has(String(contentId)) && !institutional.has(contentId) };
+    // `personal` (F5-DP2): la cuenta tiene alguna obra que es solo suya. Sin ninguna no hay nada que separar.
+    return { account: false, personal: [...bought].some(id => !institutional.has(id)), work: (contentId) => bought.has(String(contentId)) && !institutional.has(contentId) };
+}
+// V9 BIII F5-DP2 — el mismo clasificador para los motores que calculan indicadores derivados a partir de eventos
+// crudos (materializador, series, impacto, cohortes): la lectura personal no entra en ellos. Se resuelve en cada corrida.
+setPersonalReadingResolver((userId) => personalReadingBoundary(readJSON(USERS_DB) || [], userId).work);
+/**
+ * V9 BIII F5-DP2 — predicado de obras para un indicador derivado de un lector que consulta OTRA persona por
+ * administración (rol con sesión o autoridad de máquina): deja fuera lo que ese lector tiene solo por una compra propia.
+ * null si no hay nada que separar. El titular no pasa por aquí; quien media ya tiene su ámbito de curso.
+ */
+function administrationContentPredicate(users, userId) {
+    const boundary = personalReadingBoundary(users, String(userId));
+    return boundary.personal ? (contentId) => !boundary.work(contentId) : null;
 }
 const PERSONAL_READING_WITHHELD = Object.freeze({ error: 'personal_reading_withheld' });
 async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true, a2 = false } = {}) {
@@ -1837,7 +1851,7 @@ registerRumRoute(app);
 // (inyectada). El scheduler queda OFF salvo AULA_VIVA_SCHEDULER_ENABLED=1.
 try {
     const { createOperationalRouter } = await import('./aulaViva/operationalRouter.mjs');
-    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o) } }));
+    app.use('/api/aula-viva', createOperationalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o), administration: (r, o) => aulaVivaAdministrationReader(r, o) } }));
     log('[PASO5] /api/aula-viva router mounted', 'INFO');
 } catch (e) {
     log(`[PASO5] aula-viva router mount failed: ${e.message}`, 'WARN');
@@ -1846,7 +1860,7 @@ try {
 // /institutional/* no solapan con PASO 5).
 try {
     const { createInstitutionalRouter } = await import('./aulaViva/institutionalRouter.mjs');
-    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o), readers: (c, o) => aulaVivaContextReaders(c, o),
+    app.use('/api/aula-viva', createInstitutionalRouter({ requireUserAuth, contextAccess: { reader: (c, r, o) => aulaVivaContextReader(c, r, o), overview: (c) => aulaVivaContextOverview(c), group: (c, g, o) => aulaVivaContextGroup(c, g, o), readers: (c, o) => aulaVivaContextReaders(c, o), administration: (r, o) => aulaVivaAdministrationReader(r, o),
         dashboardInterventions: (readerId, mediatorIds) => dashboardInterventionsOf(readerId, mediatorIds) } }));
     log('[PASO7] /api/aula-viva/institutional/* router mounted', 'INFO');
 } catch (e) {
@@ -10080,7 +10094,11 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
         if (inAnyGroup) {
             try {
                 const access = getAccessibleContentIds(id) || {};
-                const titlesOk      = Array.isArray(access.titleIds)      && access.titleIds.length      > 0;
+                // V9 BIII F5-DP2: ante otra persona, «tiene contenido habilitado» es el acceso institucional. Una compra
+                // propia no lo sustituye (ni se deja ver): sin obras del colegio, el estado es el de un lector sin acceso.
+                const ownOnly = (req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']) === id ? null : personalReadingBoundary(users, id);
+                const titleIds = ownOnly?.personal && Array.isArray(access.titleIds) ? access.titleIds.filter(t => !ownOnly.work(t)) : access.titleIds;
+                const titlesOk      = Array.isArray(titleIds)             && titleIds.length             > 0;
                 const collectionsOk = Array.isArray(access.collectionIds) && access.collectionIds.length > 0;
                 const broadAccess   = access.titleIds === 'all' || access.hasBroadAccess === true;
                 hasContentAccess = broadAccess || titlesOk || collectionsOk;
@@ -10092,7 +10110,9 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
 
         // ── progress: agregamos sobre las entries del user.
         // V9 F7-C2: quien consulta por mediación ve los totales de las obras de los grupos que comparte con el lector;
-        // el propio lector y la administración, los de toda su lectura.
+        // el propio lector, los de toda su lectura.
+        // V9 BIII F5-DP2: la administración, los de su lectura institucional. Antes sumaba también la de las obras que el
+        // lector compró por su cuenta: libros iniciados, porcentaje y última lectura cambiaban con su lectura personal.
         const statusCallerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
         let statusScope = null;
         try {
@@ -10101,7 +10121,8 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
             if (!(e instanceof IdentityUnavailableError)) throw e;
             return res.status(503).json({ error: 'identity_unavailable' });
         }
-        let progressList = (getProgressByUser(id) || []).filter(p => !statusScope || statusScope.has(p?.contentId));
+        const statusAdminWorks = (!statusScope && statusCallerId !== id) ? administrationContentPredicate(users, id) : null;
+        let progressList = (getProgressByUser(id) || []).filter(p => (!statusScope || statusScope.has(p?.contentId)) && (!statusAdminWorks || statusAdminWorks(p?.contentId)));
         // V9 F7-C2R-U3B: por mediación, los totales salen del progreso con pertenencia temporal acreditada. La lectura que
         // no puede atribuirse al curso se cuenta aparte: no entra en el porcentaje y tampoco se presenta como «sin avance».
         let statusAttribution = null;
@@ -10110,6 +10131,9 @@ app.get('/api/students/:id/status', requireAuth, async (req, res) => {
             statusAttribution = attributeProgress(progressList, statusContext);
             statusAttribution.summary.course_has_works = statusContext.hasWorks === true;
             progressList = statusAttribution.verified;
+            // V9 BIII F5-DP2: ante quien media, si los cursos compartidos no tienen obras ese es el estado, tenga o no el
+            // lector una compra propia. Antes solo se llegaba a él cuando la compra contaba como «contenido habilitado».
+            if (!statusAttribution.summary.course_has_works && hasContentAccess === false) hasContentAccess = undefined;
         }
         const booksStarted   = progressList.length;
         const booksCompleted = progressList.filter(p =>
@@ -12461,6 +12485,35 @@ async function aulaVivaContextReaders(callerId, { onlyGroup = null, historyDays 
     return { ok: true, nowTs, readers, roster: shared.size, mediatorIds: groupMediatorIds(rosters.keys()), groups };
 }
 const aulaVivaContextOverview = (callerId) => aulaVivaContextReaders(callerId);
+/**
+ * V9 BIII F5-DP2 — lo que la ADMINISTRACIÓN recibe de un lector de colegio que además lee obras compradas por su cuenta.
+ *
+ * El almacén derivado (perfil, señales, riesgo, vector, recomendaciones, impacto) se calculó con toda su actividad y no
+ * dice de qué obra salió cada cifra. Para ese lector la administración no lo recibe: recibe los mismos indicadores,
+ * calculados al consultar con las funciones de Aula Viva sobre su lectura INSTITUCIONAL (las mismas filas que usa el
+ * motor global, sin las de sus obras personales; el clasificador es `personalReadingBoundary`). No hay condición de
+ * fecha: es la misma base de «actividad observada» de los tableros de la administración (65E-B).
+ *   null                       no hay lectura personal que separar: se conserva el almacén derivado, sin cambios;
+ *   { ok:false, personal }     cuenta personal: nada suyo es institucional;
+ *   { ok:true, context, … }    entradas para `buildContextualView` / `contextualImpactRows`.
+ * No autoriza: se llama después del control de alcance de cada ruta.
+ */
+async function aulaVivaAdministrationReader(readerId, opts = {}) {
+    const rid = String(readerId ?? '');
+    const boundary = personalReadingBoundary(readJSON(USERS_DB) || [], rid);
+    if (boundary.account) return { ok: false, personal: true };
+    if (!boundary.personal) return null;
+    const groupIds = (readJSON(GROUPS_DB) || []).filter(g => g && unionGroupMemberIds(g).includes(rid)).map(g => String(g.id));
+    const classify = (contentId) => (boundary.work(contentId) ? 'outside_context' : 'in');
+    const context = { readerId: rid, groupIds, hasWorks: true, classify, includeContent: (contentId) => classify(contentId) === 'in',
+        includeEvent: (row) => !!row && String(row.user_id) === rid && classify(row.content_id) === 'in',
+        describe: () => ({ basis: 'institutional_reading', groups: groupIds.map(gid => ({ group_id: gid, works: null, all_works: false })) }) };
+    const { HISTORY_DAYS } = await import('./aulaViva/contextualView.mjs');
+    const { readOwnEventHistory } = await import('./services/insightMaterializer.mjs');
+    const nowTs = Date.now(), sinceTs = nowTs - (opts.historyDays ?? HISTORY_DAYS) * 86_400_000;
+    // 'credit': la lectura de LU conservada cuenta como lectura, igual que en el cálculo global que esto sustituye.
+    return { ok: true, context, nowTs, mediatorIds: groupMediatorIds(groupIds), events: readOwnEventHistory(rid, sinceTs, undefined, 'credit') };
+}
 const aulaVivaContextGroup = (callerId, groupId, opts = {}) => aulaVivaContextReaders(callerId, { onlyGroup: groupId, ...opts });
 /**
  * V9 F7-C2R-U3 — entradas CONTEXTUALES de Leo para quien media a un lector: evidencias fechadas del curso, y con ellas
@@ -13196,14 +13249,20 @@ const legacyMetricsStudentHandler = async (req, res) => {
     }
 
     try {
+        // V9 BIII F5-DP2: el titular recibe sus métricas completas. La administración, las de su lectura institucional:
+        // sesiones, tiempo, obras y embudos dejaban ver cuánto leía de lo que compró por su cuenta.
+        // Una cuenta personal no tiene métricas institucionales: tampoco para la autoridad de máquina (como su progreso).
+        if (!selfAccess && personalReadingBoundary(users, userId).account) return res.status(403).json(PERSONAL_READING_WITHHELD);
+        const adminWorks = selfAccess ? null : administrationContentPredicate(users, userId);
         loadAndInitMetrics();   // 65E-A: sin ninguna espera entre la carga y el cálculo (ver legacyMetricsCourseHandler)
-        const raw = computeStudentMetrics(userId);
+        const raw = adminWorks ? computeStudentMetrics(userId, { includeContent: (contentId) => adminWorks(contentId) }) : computeStudentMetrics(userId);
         const response = formatStudentResponse(raw);
         // Sprint Data Backbone Fase 3: augment additivo. Si events.db falla,
         // backboneMetrics es shape vacío válido (nunca rompe legacy).
         response.backboneMetrics = safeLoadBackboneMetrics({
             userIds: [userId],
             windowDays: 30,
+            ...(adminWorks ? { includeEvent: (e) => adminWorks(e?.contentId) } : {}),
         });
         res.json(response);
     } catch (e) {

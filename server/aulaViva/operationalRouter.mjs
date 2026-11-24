@@ -275,6 +275,25 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
             return null;
         }
     }
+    /**
+     * V9 BIII F5-DP2 — vista de un lector para la ADMINISTRACIÓN cuando su almacén derivado mezcla lectura personal (un
+     * lector de colegio con obras compradas por su cuenta): los mismos indicadores, calculados solo con su lectura
+     * institucional. `null` = no aplica (no es la administración, o no hay nada que separar: se conserva el almacén);
+     * `undefined` = ya respondió. Si no puede decidirse, no se entrega el almacén en su lugar.
+     */
+    async function administrationViewFor(req, res, readerId, { withSeries = false } = {}) {
+        if (req.aulaVivaRole !== 'admin' || !contextAccess?.administration) return null;
+        try {
+            const a = await contextAccess.administration(String(readerId));
+            if (a === null) return null;
+            if (!a.ok) { withholdIndividualIndicators(res); return undefined; }
+            return buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs, withSeries });
+        } catch (e) {
+            console.error(`[AULA_VIVA] context_indicators_failed: ${String(e?.code || e?.name || 'Error')}: ${String(e?.message || '').slice(0, 160)}`);
+            res.status(500).json({ ok: false, error: 'context_indicators_failed' });
+            return undefined;
+        }
+    }
     /** Vistas de todos los lectores que ese mediador puede acompañar; null si ya respondió. */
     async function contextualViewsOfCaller(req, res) {
         if (!contextAccess) { withholdIndividualIndicators(res); return null; }
@@ -314,6 +333,17 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
             try { emitTeacherViewedStudent({ callerId: callerIdOf(req), studentId: req.params.userId }); } catch { /* nunca bloquea */ }
             return res.json(payload);
         }
+        {   // V9 BIII F5-DP2: administración ante un lector con lectura personal: solo su lectura institucional.
+            const view = await administrationViewFor(req, res, req.params.userId, { withSeries: true });
+            if (view === undefined) return;
+            if (view) {
+                const payload = timelineBody(view);
+                payload.experience_insights = projectExperienceInsights(payload.signals_current);
+                try { dashboardViewsTotal.labels('student_timeline').inc(); } catch {}
+                try { emitTeacherViewedStudent({ callerId: callerIdOf(req), studentId: req.params.userId }); } catch { /* nunca bloquea */ }
+                return res.json(payload);
+            }
+        }
         instrument('aulaViva.student_timeline', () => {
             const data = reader.getProfileTimeline(req.params.userId);
             try { studentTimelineRenderMs.observe(0); } catch {}
@@ -351,6 +381,9 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
             const view = await contextualViewFor(req, res, req.params.userId);
             return view ? res.json(featureVectorBody(view)) : undefined;
         }
+        const adminView = await administrationViewFor(req, res, req.params.userId);   // F5-DP2
+        if (adminView === undefined) return;
+        if (adminView) return res.json(featureVectorBody(adminView));
         safeJson(res, () => reader.getLatestFeatureVector(req.params.userId)
             ?? { user_id: req.params.userId, features: null, stale: true });
     });
@@ -362,6 +395,9 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
             const view = await contextualViewFor(req, res, req.params.userId, { withSeries: true });
             return view ? res.json(riskHistoryBody(view, limit)) : undefined;
         }
+        const adminView = await administrationViewFor(req, res, req.params.userId, { withSeries: true });   // F5-DP2
+        if (adminView === undefined) return;
+        if (adminView) return res.json(riskHistoryBody(adminView, limit));
         safeJson(res, () => reader.getRiskHistory(req.params.userId, { limit }), []);
     });
 
@@ -372,6 +408,9 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
             const view = await contextualViewFor(req, res, req.params.userId, { withSeries: true });
             return view ? res.json(signalSeriesBody(view, req.params.signalId, sinceTs)) : undefined;
         }
+        const adminView = await administrationViewFor(req, res, req.params.userId, { withSeries: true });   // F5-DP2
+        if (adminView === undefined) return;
+        if (adminView) return res.json(signalSeriesBody(adminView, req.params.signalId, sinceTs));
         safeJson(res, () => reader.getSignalTimeline('user', req.params.userId,
             req.params.signalId, sinceTs), []);
     });
@@ -395,6 +434,12 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
             const view = await contextualViewFor(req, res, req.params.id);
             return view ? res.json(recommendationsBody(view, { includeAcknowledged: req.query.includeAcknowledged === '1',
                 limit: Math.min(200, Number(req.query.limit) || 50) })) : undefined;
+        }
+        if (String(req.params.type) === 'user') {   // F5-DP2: las de su lectura institucional
+            const adminView = await administrationViewFor(req, res, req.params.id);
+            if (adminView === undefined) return;
+            if (adminView) return res.json(recommendationsBody(adminView, { includeAcknowledged: req.query.includeAcknowledged === '1',
+                limit: Math.min(200, Number(req.query.limit) || 50) }));
         }
         if (!cohortGate(req, req.params.type, req.params.id).allowed) return res.json([]); // misma forma, sin pistas
         safeJson(res, () => reader.getRecommendations(req.params.type, req.params.id,
@@ -422,9 +467,12 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
         const d = individualAccess(callerIdOf(req), parsed.readerId);
         if (d.decision === 'unavailable') return res.status(503).json(d.cause === 'individual_access_unavailable'
             ? { ok: false, error: 'individual_access_unavailable' } : { ok: false, error: 'identity_unavailable', cause: d.cause });
-        if (d.decision !== 'allow' || d.via !== 'mediator_of_member_group') return deny();
-        const a = await contextAccess.reader(callerIdOf(req), parsed.readerId);
-        if (!a.ok) return a.status === 503 ? res.status(503).json(a.body) : deny();
+        // V9 BIII F5-DP2: la administración atiende las recomendaciones de la vista institucional que recibe de un lector
+        // con lectura personal (las guardadas, que antes atendía, ya no se le entregan).
+        const asAdmin = req.aulaVivaRole === 'admin' && d.decision === 'allow' && d.via !== 'mediator_of_member_group' && !!contextAccess.administration;
+        if (d.decision !== 'allow' || (d.via !== 'mediator_of_member_group' && !asAdmin)) return deny();
+        const a = asAdmin ? await contextAccess.administration(parsed.readerId) : await contextAccess.reader(callerIdOf(req), parsed.readerId);
+        if (!a?.ok) return a?.status === 503 ? res.status(503).json(a.body) : deny();
         const view = buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs });
         const r = acknowledgeContextual(view, req.params.recId, { by: callerIdOf(req), applied, nowTs: a.nowTs });
         if (!r) return deny();
@@ -626,6 +674,23 @@ export function createOperationalRouter({ requireUserAuth, contextAccess = null 
         };
         let queue = null;
         try { queue = buildAttentionQueue(inScope); } catch { queue = null; }
+        // V9 BIII F5-DP2: la fila guardada de un lector con lectura personal se calculó con toda su actividad. En la cola
+        // de la administración entra con el riesgo de su lectura institucional (o no entra, si no es calculable); una
+        // cuenta personal no es de la cola institucional.
+        if (queue && contextAccess?.administration) {
+            try {
+                const out = [];
+                let replaced = false;
+                for (const item of queue) {
+                    const a = await contextAccess.administration(String(item.user_id));
+                    if (a === null) { out.push(item); continue; }
+                    replaced = true;
+                    const own = a.ok ? attentionItem(buildContextualView({ context: a.context, events: a.events, nowTs: a.nowTs }), a.nowTs) : null;
+                    if (own) out.push(own);
+                }
+                queue = replaced ? sortAttention(out) : out;
+            } catch { queue = null; }
+        }
         if (unavailable === 'individual_access_unavailable') return res.status(503).json({ ok: false, error: 'individual_access_unavailable' });
         if (unavailable) return res.status(503).json({ ok: false, error: 'identity_unavailable', cause: unavailable });
         safeJson(res, () => {

@@ -238,7 +238,7 @@ try {
     ok('…y su propio estado cuenta sus tres libros', every(await both('/api/students/ra-1/status', { cookie: C['ra-1'] }), (r) => r.status === 200 && r.json.progress.booksStarted === 3));
     const admP = await both('/api/progress/user/ra-1', { cookie: C.adm }), admS = await both('/api/students/ra-1/status', { cookie: C.adm });
     // V9 BIII F5-DP: por administración no sale la lectura de la obra que el lector compró por su cuenta (c3).
-    ok('la administración de plataforma: progreso de las obras del colegio (sin la compra personal) y estado', every(admP, (r) => r.status === 200 && r.json.progressList.length === 2 && !r.json.progressList.some((p) => p.contentId === 'c3')) && every(admS, (r) => r.status === 200 && r.json.progress.booksStarted === 3), `${st(admP)} ${st(admS)}`);
+    ok('la administración de plataforma: progreso de las obras del colegio (sin la compra personal) y estado', every(admP, (r) => r.status === 200 && r.json.progressList.length === 2 && !r.json.progressList.some((p) => p.contentId === 'c3')) && every(admS, (r) => r.status === 200 && r.json.progress.booksStarted === 2), `${st(admP)} ${st(admS)}`);   // V9 BIII F5-DP2: el estado cuenta las mismas dos obras (antes 3: la diferencia delataba la compra)
     const admC = await both('/api/metrics/course/g-a', { cookie: C.adm });
     ok('…y del curso sigue recibiendo solo agregados, sin desglose', every(admC, (r) => r.status === 200 && r.json.aggregateOnly === true && !('studentBreakdown' in r.json)), st(admC));
     const admAn = await both('/api/groups/g-a/analytics-summary', { cookie: C.adm });

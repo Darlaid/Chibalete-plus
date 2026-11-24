@@ -28,6 +28,7 @@ import { getInsightsExtDb } from '../db/insightsDbExt.mjs';
 import { getPedagogyExtDb } from '../db/pedagogyDbExt.mjs';
 import { cohortsBuilt } from '../observability/metrics.js';
 import { GROUPS_DB } from '../config.js';
+import { institutionalRows } from '../privacy/personalReading.mjs';
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const EVENTS_PATH = process.env.EVENTS_SQLITE_PATH
@@ -132,15 +133,17 @@ function resolveTrajectoryRecovered() {
 function resolveModalityAudioImmersive() {
     try {
         const db = getEventsRaw();
-        const rows = db.prepare(
-            `SELECT DISTINCT user_id FROM events
-             WHERE user_id IN (
-               SELECT DISTINCT user_id FROM events WHERE mode='immersive')
-               AND user_id IN (
-                 SELECT DISTINCT user_id FROM events
-                 WHERE event='audio_started' OR event='tts_started' OR mode='audio')`
-        ).all();
-        return { users: rows.map(r => r.user_id), note: 'audio + immersive' };
+        // V9 BIII F5-DP2: la modalidad se observa en la lectura institucional. Antes bastaba haber usado el modo inmersivo
+        // o el audio en una obra comprada por cuenta propia para entrar en la cohorte.
+        const rows = institutionalRows(db.prepare(
+            `SELECT DISTINCT user_id, content_id, (mode='immersive') AS immersive,
+                    (event='audio_started' OR event='tts_started' OR mode='audio') AS audio
+             FROM events
+             WHERE mode='immersive' OR event='audio_started' OR event='tts_started' OR mode='audio'`
+        ).all());
+        const immersive = new Set(rows.filter(r => r.immersive).map(r => r.user_id));
+        const audio = new Set(rows.filter(r => r.audio).map(r => r.user_id));
+        return { users: [...immersive].filter(id => id && audio.has(id)), note: 'audio + immersive' };
     } catch { return { users: [], note: 'modality_query_failed' }; }
 }
 

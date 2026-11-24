@@ -134,7 +134,7 @@ function subjectHistory(userId, sinceTs) {
  * V9 F7-C2R-U1 — las filas PROPIAS del lector que este materializador usa para sus señales (misma consulta, misma
  * ventana, mismo orden), sin las revisiones que firmó como revisor: esas filas son de otro sujeto. Solo lectura.
  */
-export function readOwnEventHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS) {
+export function readOwnEventHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS, luSessions = 'exclude') {
     if (!_stmtUserHistory) {
         // Un servidor que todavía no recibió ningún evento no tiene creada la tabla: se crea vacía (es el mismo
         // almacén que este proceso escribe) en vez de fallar. Un intento anterior a medias se descarta.
@@ -142,7 +142,7 @@ export function readOwnEventHistory(userId, sinceTs, maxRows = HISTORY_MAX_ROWS)
         closeMaterializerEventsDb();
         getRawEventsDb();
     }
-    return readUserHistory(userId, sinceTs, maxRows);
+    return readUserHistory(userId, sinceTs, maxRows, luSessions);
 }
 import { computeUserSignals, computeUserProfile } from './signalCompute.mjs';
 import { SIGNAL_IDS } from '../analytics/signals.js';
@@ -165,6 +165,9 @@ import { resolveGroupReaderCohort } from '../analytics/readerCohort.mjs';
 // `runOnce` sigue leyendo solo events.db por `id > watermark`.
 import { readHistoricalEvents } from '../analytics/historicalEvents.mjs';
 import { isLuMirrorRow, creditedReadingRow } from '../analytics/luSessionMirror.mjs';
+// V9 BIII F5-DP2 — la lectura personal (cuenta personal B2C, u obra que un lector de colegio compró por su cuenta) no
+// entra en el almacén derivado: perfiles, señales, riesgo y cohortes son indicadores institucionales.
+import { personalRowTest, institutionalRows } from '../privacy/personalReading.mjs';
 
 const MATERIALIZER_NAME = 'aula_viva_pedagogical_v1';
 const DEFAULT_BATCH = 5000;
@@ -298,10 +301,14 @@ export function runOnce(opts = {}) {
         // Agrupar por user_id para profiles/signals; capturar last id procesado.
         const byUser = new Map();
         let maxId = wm;
+        // V9 BIII F5-DP2: una fila de lectura personal avanza la marca de agua, pero no despierta el cálculo de su
+        // sujeto ni entra en su historia. El almacén queda como si esa lectura no hubiera ocurrido.
+        const isPersonal = personalRowTest();
         for (const ev of batch) {
             if (ev.id > maxId) maxId = ev.id;
             // Tolerancia a evento corrupto: si falta user_id O event → skip + count.
             if (!ev || !ev.user_id || !ev.event) { result.skippedCorrupted++; continue; }
+            if (isPersonal(ev)) continue;
             bucketBySubject(byUser, ev);
         }
 
@@ -324,7 +331,7 @@ export function runOnce(opts = {}) {
                     const sinceTs = nowTs - PERIOD_DAYS * 86400_000;
                     // RAW: necesita payload_json + server_ts + id sin transform.
                     getRawEventsDb();
-                    history = subjectHistory(userId, sinceTs);
+                    history = institutionalRows(subjectHistory(userId, sinceTs), isPersonal);
                 } catch { history = _evsInBatch.map(creditedReadingRow).filter(Boolean); }
                 const sig = computeUserSignals(history, { nowTs, windowDays: PERIOD_DAYS, userId: String(userId) });
                 // Persistir signal_snapshots (user scope)
@@ -509,11 +516,12 @@ export function rebuildInsights(opts) {
         out.archive_present = hist.archivePresent;
         out.duplicates_deduped = hist.duplicates;
         const byUser = new Map();
+        const isPersonal = personalRowTest();
         for (const raw of inRange) {
             if (!raw.user_id) continue;
             // 65E-C3: los hechos de sesión de LU cuentan como lectura, con la misma regla que el camino incremental.
             const e = creditedReadingRow(raw);
-            if (!e || e.server_ts < fromTs) continue;
+            if (!e || e.server_ts < fromTs || isPersonal(e)) continue;   // F5-DP2: sin lectura personal
             bucketBySubject(byUser, e);
         }
         for (const list of byUser.values()) list.sort((a, b) => (a.server_ts - b.server_ts) || (a.id - b.id));
