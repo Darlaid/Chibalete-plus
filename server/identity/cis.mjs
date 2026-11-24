@@ -296,6 +296,17 @@ export function authorizeScope(principalId, scope_type, scope_id) {
     }
 
     if (principal.platformAdmin) {
+        // V9 BIII F5-DP: el grant es de lectura de scopes INSTITUCIONALES. Una cuenta personal (compra B2C, sin
+        // institución) no pertenece a ninguno: el rol administrador, por sí solo, no alcanza su seguimiento individual.
+        // La gestión de la cuenta (usuarios, suscripciones) no pasa por aquí.
+        if (scope_type === 'user' && String(scope_id ?? '') !== principal.id) {
+            let target = null;
+            try { target = readIdentityArray(USERS_DB, 'users').find(u => u && u.id === String(scope_id ?? '')) ?? null; }
+            catch (e) { if (e instanceof IdentityUnavailableError) return { decision: 'unavailable', cause: e.causeTag }; throw e; }
+            if (target && target.b2c === true && !(typeof target.organizationId === 'string' && target.organizationId.trim() !== '')) {
+                return { decision: 'forbidden', cause: 'personal_account_not_institutional' };
+            }
+        }
         return { decision: 'allow', via: 'policy:platform_admin_full_institutional_read' };
     }
 

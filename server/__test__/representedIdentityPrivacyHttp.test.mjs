@@ -200,7 +200,8 @@ try {
     ok('…ni su progreso (listado y por título), tampoco el de una adulta B2C', prK1.status === 403 && itK1.status === 403 && (await get('/api/progress/user/B2C', med.cookie)).status === 403, `${prK1.status} ${itK1.status}`);
     // V9 F5-A: además de mediar el grupo del lector, hacen falta la A2 del lector y el C005 del mediador (LEC la tiene; K4 no).
     ok('…el mediador conserva la lectura de progreso de SUS lectores con A2 vigente; sin A2 del lector, no', (await get('/api/progress/user/LEC', med.cookie)).status === 200 && (await get('/api/progress/user/K4', med.cookie)).status === 403);
-    ok('el propio lector y la administración siguen leyendo ese progreso', (await get('/api/progress/user/K1', k1.cookie)).status === 200 && (await get('/api/progress/user/K1', adm.cookie)).status === 200 && (await get('/api/progress/item/K1/obra-1', k1.cookie)).status === 200);
+    // V9 BIII F5-DP: la lectura de una cuenta personal (aquí, un menor representado) solo la lee su titular.
+    ok('el propio lector sigue leyendo ese progreso; la administración, ya no', (await get('/api/progress/user/K1', k1.cookie)).status === 200 && (await get('/api/progress/user/K1', adm.cookie)).status === 403 && (await get('/api/progress/item/K1/obra-1', k1.cookie)).status === 200);
     ok('un lector no lee el progreso ni el acceso de otro', (await get('/api/progress/user/K1', k2.cookie)).status === 403 && (await get('/api/progress/user/K1', lec.cookie)).status === 403 && (await access(lec.cookie, 'K1')) !== true);
     ok('el mediador conserva el estado de sus propios lectores', (await get('/api/students/LEC/status', med.cookie)).status === 200);
     ok('menor sin A3 efectiva: Leo no autorizado en su sesión', meK1.body?.optionalProcessing?.leo === false && (await get('/api/auth/me', inv.cookie)).body?.optionalProcessing?.leo === false);

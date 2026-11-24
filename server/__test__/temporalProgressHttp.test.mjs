@@ -318,7 +318,8 @@ try {
             && own[0].json.progressList.find((p) => p.contentId === 'c2').canonicalProgress.globalPercentage === 65, st(own));
         ok('…su estado propio cuenta todo', (await both(STATUS('ra-1'), C['ra-1'])).every((r) => r.status === 200 && r.json.progress.booksStarted === 5 && !('courseAttribution' in r.json)));
         ok('la cuenta B2C conserva su progreso', (await both(LIST('b2c-1'), C['b2c-1'])).every((r) => r.status === 200 && ids(r.json.progressList) === 'c3'));
-        ok('la administración conserva la vista completa del lector', (await both(LIST('ra-1'), C.adm)).every((r) => r.status === 200 && r.json.progressList.length === 5));
+        // V9 BIII F5-DP: sin la obra que el lector compró por su cuenta (c3).
+        ok('la administración conserva la vista del lector en las obras del colegio', (await both(LIST('ra-1'), C.adm)).every((r) => r.status === 200 && r.json.progressList.length === 4 && !r.json.progressList.some((p) => p.contentId === 'c3')));
         ok('el almacén de progreso no se modificó', Progress.getProgressByUser('ra-1').length === 5 && Progress.getProgressItem('ra-1', 'c2').canonicalProgress.globalPercentage === 65);
     }
 

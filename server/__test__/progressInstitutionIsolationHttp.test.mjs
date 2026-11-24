@@ -122,7 +122,8 @@ try {
     ok('un mediador sigue leyendo su propio progreso (vacío) sin relación con nadie', (await req(S1, '/api/progress/user/med-b', 'med-b')).status === 200 && (await req(S1, '/api/reading-progress/med-b', 'med-b')).status === 200);
 
     console.log('[4] administración y falta de identidad');
-    ok('administración de plataforma: lee a lectores de A, de B y B2C', (await four(S1, 'adm', 'ra-yes')) === ALLOW && (await four(S1, 'adm', 'rb-yes')) === ALLOW && (await four(S1, 'adm', 'b2c')) === ALLOW && (await four(S1, 'adm', 'ra-no')) === ALLOW);
+    // V9 BIII F5-DP: el rol administrador no alcanza la lectura de una cuenta personal B2C.
+    ok('administración de plataforma: lee a lectores de A y de B; a una cuenta personal B2C, no', (await four(S1, 'adm', 'ra-yes')) === ALLOW && (await four(S1, 'adm', 'rb-yes')) === ALLOW && (await four(S1, 'adm', 'b2c')) === DENY && (await four(S1, 'adm', 'ra-no')) === ALLOW);
     ok('sin identidad → rechazado', (await four(S1, null, 'ra-yes')) === DENY);
 
     console.log('[5] dos réplicas: revocaciones y bajas');

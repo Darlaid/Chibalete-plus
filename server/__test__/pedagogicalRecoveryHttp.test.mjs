@@ -257,7 +257,8 @@ try {
     for (const id of ['adm', 'med-a', 'med-a2', 'med-noc', 'med-z', 'med-b', 'ra-1', 'b2c-1']) C[id] = await login(id.length % 2 ? S1 : S2, id);
     ok('preparación: línea base sembrada', seeded.ok && seeded.baseline);
     const admLeo = await get(S1, LEO('ra-1'), C.adm);
-    ok('preparación: la administración ve el perfil GLOBAL de Leo (apoyo «vocabulary», 140 interacciones acumuladas)', admLeo.status === 200 && sum(admLeo).preferredSupportType === 'vocabulary' && sum(admLeo).totalInteractions === 140, admLeo.text.slice(0, 300));
+    // V9 BIII F5-DP: ra-1 tiene una compra propia: la administración ve el Leo de sus obras del colegio, no el global.
+    ok('preparación: la administración ve el Leo de ra-1 en sus obras del colegio (sin la compra propia)', admLeo.status === 200 && sum(admLeo).totalInteractions > 0 && sum(admLeo).totalInteractions < 140 && !admLeo.text.includes('"c3"'), admLeo.text.slice(0, 300));
 
     section('[1] Leo usa contexto pedagógico válido · [3] sin procedencia → insuficiencia');
     let leo1;
@@ -302,7 +303,7 @@ try {
         ok('25 sesiones, 30 conversaciones y 60 abandonos PERSONALES más: el resumen de Leo no cambia', all200(again) && stableSum(sum(again[0])) === before && stableSum(sum(again[1])) === before, st(again));
         const actAfter = JSON.stringify((await get(S2, ACT('ra-1'), C['med-a'])).json.outputs.map((o) => [o.type, o.message]));
         ok('…ni las salidas de activación', actAfter === actBefore, `${actBefore} | ${actAfter}`);
-        ok('…y la administración sigue viendo el perfil GLOBAL', sum(await get(S1, LEO('ra-1'), C.adm)).preferredSupportType === 'vocabulary');
+        ok('…y la vista de la administración no cambió', sum(await get(S1, LEO('ra-1'), C.adm)).totalInteractions === sum(admLeo).totalInteractions);
     }
 
     section('[1b] activación y comunicación con familias');

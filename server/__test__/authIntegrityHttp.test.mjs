@@ -192,7 +192,8 @@ try {
         const mb = await both('/api/groups/g-b/members', C['med-b']);
         ok('el mediador de la otra institución: sin cambios', mb.every((x) => x.status === 200 && x.text.includes('"rb-1"') && !/"ra-/.test(x.text)), st(mb));
         const ru = await both('/api/users', C['ra-1']), rg = await both('/api/groups', C['ra-1']);
-        ok('un lector: su perfil completo y el perfil público de sus compañeros, como antes', ru.every((r) => r.status === 200 && r.json.find((x) => x.id === 'ra-1')?.email === 'ra-1@fixture.invalid' && names(r).length === READERS_A.length && !r.json.find((x) => x.id === 'ra-2')?.email) && rg.every((r) => r.status === 200), st(ru));
+        // V9 BIII F5-DP: un lector recibe a sus compañeros de grupo, no a toda la institución.
+        ok('un lector: su perfil completo y el perfil público de sus compañeros de curso', ru.every((r) => r.status === 200 && r.json.find((x) => x.id === 'ra-1')?.email === 'ra-1@fixture.invalid' && names(r).length === GA.length && !r.json.find((x) => x.id === 'ra-2')?.email && !r.json.some((x) => x.id === 'rx-1')) && rg.every((r) => r.status === 200), st(ru));
     }
 
     section('[5] el compromiso vuelve a estar vigente');

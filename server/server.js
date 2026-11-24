@@ -344,6 +344,17 @@ app.use(cors({
 }));
 // CHP-B2C-PROVISIONING-01: se conserva el cuerpo crudo SOLO en /api/b2c/ (HMAC sobre los bytes exactos).
 app.use(express.json({ verify: (req, _res, buf) => { if (req.originalUrl && req.originalUrl.startsWith('/api/b2c/')) req.rawBody = buf.toString('utf8'); } }));
+// V9 BIII F5-DP — política de caché por defecto de la API: nada de lo que responde `/api` se guarda ni se reutiliza
+// (ni el navegador ni un intermediario). Antes la mayoría de las respuestas con datos personales o institucionales
+// salían sin `Cache-Control`. Una ruta que deba poder guardarse lo declara ella misma después (p. ej. el audio de
+// síntesis, `public, max-age`). Los recursos editoriales (`/uploads`) y el modo sin conexión no pasan por aquí.
+// El catálogo editorial general (`GET /api/content`) y las secciones conservan su política de siempre (revalidación por
+// ETag): son recursos editoriales, no datos de personas (LIBRARY_VIEW_CACHE_POLICY).
+const EDITORIAL_API_PATHS = new Set(['/content', '/sections']);
+app.use('/api', (req, res, next) => {
+    if (!(req.method === 'GET' && EDITORIAL_API_PATHS.has(req.path))) res.setHeader('Cache-Control', 'private, no-store');
+    next();
+});
 
 // CHP-ACCESS-PEDAGOGY-01D-B — ruta del autorizador de assets que el edge
 // consulta por `auth_request`. El edge la consulta UNA VEZ POR ASSET, así que
@@ -666,8 +677,32 @@ function mediatorWithoutCommitment(scope) {
     if (!scope || scope.global || !pedagogyRolesOf(scope.user).includes('mediador')) return false;
     try { return !decisionGate().effective('C005', scope.callerId); } catch { return true; }
 }
+/**
+ * V9 BIII F5-DP — lectura personal: la de una cuenta personal (compra B2C, sin institución) y la de las obras que un
+ * lector de un colegio tiene SOLO por una compra propia. No es institucional: ni el rol administrador ni la autoridad
+ * de máquina la consultan por las rutas de seguimiento individual. No existe un mecanismo de soporte individual con
+ * finalidad y constancia; mientras no exista, ese acceso se niega. El titular conserva todo lo suyo.
+ */
+function personalReadingBoundary(users, userId) {
+    const subject = (Array.isArray(users) ? users : []).find(u => u?.id === userId);
+    if (isPersonalB2cAccount(subject)) return { account: true, work: () => true };
+    const bought = new Set();
+    for (const rule of readJSON(ACCESS_DB) || []) {
+        if (rule?.scope === 'user' && String(rule.scopeId) === String(userId) && rule.b2c && Array.isArray(rule.titleIds)) rule.titleIds.forEach(id => bought.add(String(id)));
+    }
+    if (bought.size === 0) return { account: false, work: () => false };
+    const institutional = groupsContentScope((readJSON(GROUPS_DB) || []).filter(g => g && unionGroupMemberIds(g).includes(userId)).map(g => g.id));
+    return { account: false, work: (contentId) => bought.has(String(contentId)) && !institutional.has(contentId) };
+}
+const PERSONAL_READING_WITHHELD = Object.freeze({ error: 'personal_reading_withheld' });
 async function requireSubjectScope(req, res, scopeType, scopeId, { allowSelf = true, a2 = false } = {}) {
-    if (await isAdminRequest(req)) return true;
+    if (await isAdminRequest(req)) {
+        if (scopeType === 'user' && isPersonalB2cAccount((readJSON(USERS_DB) || []).find(u => u?.id === String(scopeId ?? '')))) {
+            res.status(403).json({ error: 'scope_access_denied', scope_type: scopeType, scope_id: String(scopeId ?? '') });
+            return false;
+        }
+        return true;
+    }
     const sid = String(scopeId ?? '');
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     const denied = (status, body) => { res.status(status).json(body); return false; };
@@ -1623,7 +1658,12 @@ app.get('/api/access/by-user/:userId', requireAuth, async (req, res) => {
     const { userId } = req.params;
     // CHP-SEC-AUTHZ-AUTHENTICATED-GETS-01: el entitlement de una persona solo lo
     // ve ella misma, quien la media o la autoridad de administración.
-    if (!(await requireSubjectScope(req, res, 'user', userId))) return;
+    // V9 BIII F5-DP: qué acceso tiene una cuenta (reglas y suscripciones) es gestión, no seguimiento de lectura: la
+    // administración lo conserva también para las cuentas personales, aunque ya no alcance su seguimiento individual.
+    let managing = false;
+    try { managing = await isPlatformAdminCaller(req, req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id']); }
+    catch (e) { if (!(e instanceof IdentityUnavailableError)) throw e; return res.status(503).json({ error: 'identity_unavailable' }); }
+    if (!managing && !(await requireSubjectScope(req, res, 'user', userId))) return;
     // V9 F5-C3: la propia cuenta y la administración ven su resolución completa. Quien llega por mediación consulta
     // solo la asignación operativa: nunca una cuenta B2C personal, y sin las reglas de compra (dato comercial:
     // su identificador deriva del pedido y sus títulos delatan lo comprado).
@@ -5572,6 +5612,9 @@ app.get('/api/progress/user/:userId', async (req, res) => {
             log(`GET progress/user denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
         }
+        // V9 BIII F5-DP: por administración, nunca la lectura personal (ver personalReadingBoundary).
+        const adminView = (!isOwner && isAdmin) ? personalReadingBoundary(users, userId) : null;
+        if (adminView?.account) return res.status(403).json(PERSONAL_READING_WITHHELD);
 
         if (!users.find(u => u.id === userId)) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -5584,6 +5627,7 @@ app.get('/api/progress/user/:userId', async (req, res) => {
             const a = attributeProgress(userProgressList, await mediatorPedagogicalContext(requester.id, userId));
             return res.json({ success: true, progressList: a.verified, historicalProgress: a.historical, courseAttribution: a.summary });
         }
+        if (adminView) userProgressList = userProgressList.filter(p => !adminView.work(p.contentId));
         res.json({ success: true, progressList: userProgressList });
     } catch (e) {
         log(`GET User Progress Error: ${e.message}`, 'ERROR');
@@ -5609,6 +5653,11 @@ app.get('/api/progress/item/:userId/:contentId', async (req, res) => {
         if (!isOwner && !isAdmin && mediatorAccess !== 'allow') {
             log(`GET progress/item denied: param=${userId} requester=${requester?.id ?? 'none'}`, 'WARN');
             return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        // V9 BIII F5-DP: por administración, nunca la lectura personal (ni la cuenta personal ni la obra comprada).
+        if (!isOwner && isAdmin) {
+            const adminView = personalReadingBoundary(users, userId);
+            if (adminView.account || adminView.work(contentId)) return res.status(403).json(PERSONAL_READING_WITHHELD);
         }
         // V9 F7-C2: por mediación, una obra ajena a los grupos compartidos responde igual que un lector fuera de alcance.
         if (mediatorAccess === 'allow' && !mediatorContentScope(requester.id, userId).has(contentId)) {
@@ -5970,7 +6019,18 @@ app.get('/api/users', requireAuth, async (req, res) => {
             // avatar, rol/mediatorKind en club, visor y Perfil). Su propio registro
             // va completo; correo, último acceso, estado y tenant ajenos no salen.
             if (!pedagogyRolesOf(scope.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r))) {
-                normalizedUsers = normalizedUsers.map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
+                // V9 BIII F5-DP: alcance mínimo. Antes un lector recibía el perfil público de TODOS los lectores de su
+                // institución. Ahora: su cuenta, las personas con quienes comparte un grupo (curso o club) y quienes
+                // median esos grupos. Las nóminas de otras clases no le llegan.
+                const near = new Set([scope.callerId]);
+                for (const g of readJSON(GROUPS_DB) || []) {
+                    if (!g) continue;
+                    const members = unionGroupMemberIds(g);
+                    if (!members.includes(scope.callerId)) continue;
+                    for (const id of members) near.add(id);
+                    for (const id of (Array.isArray(g.mediatorIds) ? g.mediatorIds : [])) near.add(id);
+                }
+                normalizedUsers = normalizedUsers.filter(u => near.has(u?.id)).map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
             } else if (mediatorWithoutCommitment(scope)) {
                 // V9 65E-A: un mediador sin C005 vigente no consulta a los lectores de su institución, ni siquiera su
                 // perfil público: recibe su propia cuenta y el perfil público del resto del personal (no lectores).
@@ -7263,6 +7323,15 @@ app.get('/api/groups', requireAuth, async (req, res) => {
         // retención va declarada (`rosterWithheld`) para que la interfaz la explique y no la lea como «grupo vacío».
         if (mediatorWithoutCommitment(scope)) {
             return res.json(groups.map(normalizeGroup).map(g => ({ ...g, studentIds: [], memberIds: [], rosterWithheld: true })));
+        }
+        // V9 BIII F5-DP: un lector recibe sus grupos completos y, de su institución, solo los clubes abiertos, con lo
+        // mínimo para descubrirlos y unirse: sin participantes (solo cuántos son). Los demás cursos no se listan.
+        if (!scope.global && !pedagogyRolesOf(scope.user).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r))) {
+            const mine = new Set(getMemberships(scope.callerId).map(m => m.groupId));
+            return res.json(groups.map(normalizeGroup)
+                .filter(g => mine.has(g.id) || unionGroupMemberIds(g).includes(scope.callerId) || (g.type === 'club' && g.kind === 'open'))
+                .map(g => ((mine.has(g.id) || unionGroupMemberIds(g).includes(scope.callerId)) ? g
+                    : { ...g, studentIds: [], memberIds: [], memberCount: unionGroupMemberIds(g).length, membersWithheld: true })));
         }
         // Normalizar la salida para que el frontend siempre reciba datos consistentes
         res.json(groups.map(normalizeGroup));
@@ -11036,7 +11105,14 @@ app.post('/api/leo/recap', requireUserAuth, b2cEntitlementGuard, requireLeoAutho
 // (salvo `allowSelf` para su propia activación). Nada del cliente amplía el alcance.
 // La autoridad de máquina (admin-secret file-only) conserva su gate canónico existente.
 async function requireLeoMediatorScope(req, res, studentId, { allowSelf = false } = {}) {
-    if (await isAdminRequest(req)) return true;
+    if (await isAdminRequest(req)) {
+        // V9 BIII F5-DP: la autoridad de máquina tampoco consulta el Leo de una cuenta personal.
+        if (isPersonalB2cAccount((readJSON(USERS_DB) || []).find(u => u?.id === String(studentId)))) {
+            res.status(403).json({ success: false, error: 'scope_access_denied', scope_type: 'user', scope_id: String(studentId) });
+            return false;
+        }
+        return true;
+    }
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     // V9 F5-C2: por mediación se exige además A2 vigente del lector y C005 vigente del mediador
     // (`individualAccess`, el criterio de status/exportaciones/progreso); un B2C personal, nunca.
@@ -11062,6 +11138,20 @@ async function requireLeoMediatorScope(req, res, studentId, { allowSelf = false 
  * V9 F7-C2 — ámbito de obras de quien consulta a un lector por MEDIACIÓN, o null si no aplica (el propio lector, la
  * administración de plataforma o la autoridad de máquina). Se llama después de `requireLeoMediatorScope`.
  */
+/**
+ * V9 BIII F5-DP — quien consulta el Leo de OTRA persona por administración: predicado que deja fuera las obras que ese
+ * lector tiene solo por una compra propia, o null si no hay nada que excluir (o si consulta el propio lector o su
+ * mediador, que ya tiene su ámbito).
+ */
+async function leoAdminExclusion(req, studentId) {
+    const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
+    if (callerId === String(studentId)) return null;
+    let admin = false;
+    try { admin = await isPlatformAdminCaller(req, callerId); } catch (e) { if (!(e instanceof IdentityUnavailableError)) throw e; }
+    if (!admin) return null;
+    const boundary = personalReadingBoundary(readJSON(USERS_DB) || [], String(studentId));
+    return { work: boundary.work, includeContent: (contentId) => !boundary.work(contentId) };
+}
 async function leoMediationScope(req, studentId) {
     const callerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     if (callerId === String(studentId)) return null;
@@ -11083,7 +11173,10 @@ app.get('/api/leo/mediator/student/:userId', requireAuth, async (req, res) => {
             if (!c.ok) return res.status(c.status).json({ success: false, ...c.body });
             return res.json({ success: true, summary: getMediatorStudentSummary(userId, { leoContext: c.leoContext }) });
         }
-        const summary = getMediatorStudentSummary(userId);
+        const adminView = await leoAdminExclusion(req, userId);
+        const summary = adminView && (readJSON(ACCESS_DB) || []).some(r => r?.b2c && r.scope === 'user' && String(r.scopeId) === String(userId))
+            ? getMediatorStudentSummary(userId, { includeContent: adminView.includeContent })
+            : getMediatorStudentSummary(userId);
         res.json({ success: true, summary });
     } catch (e) {
         log(`Leo mediator summary error: ${e.message}`, 'ERROR');
@@ -11108,6 +11201,8 @@ app.get('/api/leo/mediator/student/:userId/content/:contentId', requireAuth, asy
             if (!c.ok) return res.status(c.status).json({ success: false, ...c.body });
             return res.json({ success: true, history: getMediatorContentHistory(userId, contentId, { leoContext: c.leoContext }) });
         }
+        const adminView = await leoAdminExclusion(req, userId);
+        if (adminView?.work(contentId)) return res.status(403).json({ success: false, error: 'personal_reading_withheld' });
         const history = getMediatorContentHistory(userId, contentId);
         res.json({ success: true, history });
     } catch (e) {
@@ -11143,7 +11238,10 @@ app.get('/api/leo/activation/:userId', requireAuth, async (req, res) => {
             const L = c.leoContext;
             return res.json({ success: true, outputs: getActivationOutputsForUser(userId, { leoContext: L }), data_state: L.data_state, reason: L.reason, context: L.context });
         }
-        const outputs = getActivationOutputsForUser(userId);
+        const adminView = await leoAdminExclusion(req, userId);
+        const outputs = adminView && (readJSON(ACCESS_DB) || []).some(r => r?.b2c && r.scope === 'user' && String(r.scopeId) === String(userId))
+            ? getActivationOutputsForUser(userId, { includeContent: adminView.includeContent })
+            : getActivationOutputsForUser(userId);
         res.json({ success: true, outputs });
     } catch (e) {
         log(`Leo activation error userId=${req.params.userId}: ${e.message}`, 'ERROR');
@@ -11433,6 +11531,8 @@ app.get('/api/students/:studentId/export-submissions', requireUserAuth, async (r
         if (!scope) return;
         const own = studentId === req.user.id;
         if (!scope.admin && !own && ![...scope.rosters.values()].some((members) => members.has(studentId))) return exportDenied(res);
+        // V9 BIII F5-DP: las producciones de una cuenta personal solo las exporta su titular.
+        if (!own && isPersonalB2cAccount((readJSON(USERS_DB) || []).find(u => u?.id === studentId))) return exportDenied(res);
 
         // CHP-IDDB-GAP2-01: export = superficie ADMIN/HISTÓRICA.
         const users       = readUsersAdminHistorical();
@@ -14161,7 +14261,11 @@ function writeInterventionsDb(data) {
 const INTERVENTION_DENIED = { error: 'Acceso denegado' };
 function interventionScope(req, res) {
     const requester = req.user;
-    if ((requester.roles ?? []).includes('administrador')) return { admin: true, mediates: () => true, reader: () => 'allow' };
+    // V9 BIII F5-DP: la administración no registra ni consulta seguimiento de una cuenta personal.
+    if ((requester.roles ?? []).includes('administrador')) {
+        const all = readJSON(USERS_DB) || [];
+        return { admin: true, mediates: () => true, reader: (_courseId, studentId) => (isPersonalB2cAccount(all.find(u => u?.id === String(studentId ?? ''))) ? 'deny' : 'allow') };
+    }
     if (!isMediatorRole(requester)) { res.status(403).json(INTERVENTION_DENIED); return null; }
     let rosters;
     try { rosters = mediatedGroupRosters(requester.id); }
@@ -14224,6 +14328,8 @@ app.post('/api/interventions', requireUserAuth, async (req, res) => {
             const d = scope.reader(courseId, studentId);
             if (d === 'unavailable') return res.status(503).json({ error: 'individual_access_unavailable' });
             if (d !== 'allow') return res.status(403).json(INTERVENTION_DENIED);
+        } else if (scope.reader(courseId, studentId) !== 'allow') {
+            return res.status(403).json(INTERVENTION_DENIED);   // V9 BIII F5-DP: cuenta personal
         }
         const intervention = {
             id:                          crypto.randomUUID(),
@@ -14299,6 +14405,7 @@ app.get('/api/interventions/student/:studentId', requireUserAuth, async (req, re
         // de los grupos que media. Lector ajeno, B2C o inexistente: el mismo rechazo.
         const scope = interventionScope(req, res);
         if (!scope) return;
+        if (scope.admin && scope.reader(null, studentId) !== 'allow') return res.status(403).json(INTERVENTION_DENIED); // V9 BIII F5-DP
         const iDb      = readInterventionsDb();
         const visible  = visibleInterventions(scope, iDb.interventions.filter(i => i.studentId === studentId), res);
         if (!visible) return;
@@ -14448,7 +14555,10 @@ app.get('/api/reading-progress/:userId', async (req, res) => {
         const cMap = buildContentMap();
         // V9 F7-C2: por mediación, solo las obras asociadas a los grupos compartidos (también el resumen).
         const scope = mediatorAccess === 'allow' ? mediatorContentScope(requester.id, userId) : null;
-        let entries = Object.values(db.progressMap).filter(p => p.userId === userId && (!scope || scope.has(p.contentId)));
+        // V9 BIII F5-DP: por administración, nunca la lectura personal.
+        const adminView = (!isOwner && isAdmin) ? personalReadingBoundary(users, userId) : null;
+        if (adminView?.account) return res.status(403).json(PERSONAL_READING_WITHHELD);
+        let entries = Object.values(db.progressMap).filter(p => p.userId === userId && (!scope || scope.has(p.contentId)) && !(adminView && adminView.work(p.contentId)));
         // V9 F7-C2R-U3B: por mediación, solo el progreso con pertenencia temporal acreditada; el resto, identificado aparte.
         const attribution = mediatorAccess === 'allow' ? attributeProgress(entries, await mediatorPedagogicalContext(requester.id, userId)) : null;
         if (attribution) entries = attribution.verified;
@@ -14493,6 +14603,11 @@ app.get('/api/reading-progress/:userId/:contentId', async (req, res) => {
         // V9 F7-C2: misma respuesta que fuera de alcance para una obra ajena a los grupos compartidos.
         if (mediatorAccess === 'allow' && !mediatorContentScope(requester.id, userId).has(contentId)) {
             return res.status(403).json({ error: 'Acceso denegado' });
+        }
+        // V9 BIII F5-DP: por administración, nunca la lectura personal.
+        if (!isOwner && isAdmin) {
+            const adminView = personalReadingBoundary(users, userId);
+            if (adminView.account || adminView.work(contentId)) return res.status(403).json(PERSONAL_READING_WITHHELD);
         }
         const key = makeProgressKey(userId, contentId);
         const db  = getAllProgressAsMap();

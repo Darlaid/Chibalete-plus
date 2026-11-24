@@ -178,8 +178,9 @@ try {
     ok('…y ni la administración ni el lector propio se ven afectados', admBlind.every((r) => r.status === 200), admBlind.map((r) => r.status).join(' '));
 
     console.log('[6] administración, lector propio y usos legítimos');
-    const admLeo = [...await leo3(S1, 'adm', 'ra-no'), ...await leo3(S2, 'adm', 'b2c'), ...await leo3(S2, 'adm', 'rb-yes')];
-    ok('administración: Leo de cualquier lector, como antes', admLeo.every((r) => r.status === 200), admLeo.map((r) => r.status).join(' '));
+    // V9 BIII F5-DP: la administración no consulta el Leo de una cuenta personal B2C.
+    const admLeo = [...await leo3(S1, 'adm', 'ra-no'), ...await leo3(S2, 'adm', 'rb-yes')], admLeoPersonal = await leo3(S2, 'adm', 'b2c');
+    ok('administración: Leo de cualquier lector de colegio, como antes; de una cuenta personal, no', admLeo.every((r) => r.status === 200) && admLeoPersonal.every((r) => r.status === 403), [...admLeo, ...admLeoPersonal].map((r) => r.status).join(' '));
     ok('el lector conserva sus propias métricas', (await req(S1, '/api/metrics/student/ra-yes2', 'ra-yes2')).status === 200);
     const legit = [await req(S2, '/api/metrics/course/g-a', 'med-a'), await req(S1, '/api/reports/course/g-a', 'med-a'), ...await leo3(S2, 'med-a', 'ra-yes2')];
     ok('mediador con todo en regla: métricas, reporte y Leo de su lector siguen funcionando', legit.every((r) => r.status === 200) && ids(legit[0]) === 'ra-yes2' && legit[0].json.studentBreakdown[0].pedagogicalProfile !== undefined && legit[1].json.reportMeta?.entityId === 'g-a' && typeof legit[2].json.summary.data_state === 'string');

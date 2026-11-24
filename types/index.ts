@@ -904,6 +904,9 @@ export interface Group {
   name: string;
   // V9 65E-A — el servidor retuvo la nómina de este grupo para quien consulta (llega sin estudiantes): no es un grupo vacío.
   rosterWithheld?: boolean;
+  // V9 BIII F5-DP — club abierto que quien consulta aún no integra: llega sin participantes, solo con cuántos son.
+  membersWithheld?: boolean;
+  memberCount?: number;
   type: 'course' | 'club';    // Tipo de grupo — default 'course' si ausente (normalizeGroup)
   // --- Campos legacy (conservados para compatibilidad) ---
   teacherId?: string;          // Legacy: mediador único. Usar mediatorIds en código nuevo.

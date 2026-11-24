@@ -380,7 +380,7 @@ try {
     const rdrAsset = await authz('/uploads/ped-0.pdf', 'RDR');
     ok('lector → pedagogía = 403', rdrAsset.status === 403, `→ ${rdrAsset.status}`);
     ok('el 403 no devuelve bytes', (await rdrAsset.text()) === '');
-    ok('el 403 no emite caché pública', !rdrAsset.headers.get('cache-control'));
+    ok('el 403 no emite caché pública', !/public|max-age=[1-9]|immutable/.test(rdrAsset.headers.get('cache-control') || '')); // V9 BIII F5-DP: la API responde «private, no-store»
 
     const medAsset = await authz('/uploads/ped-txt-0.txt', 'MED');
     ok('mediador → pedagogía = 204', medAsset.status === 204, `→ ${medAsset.status}`);

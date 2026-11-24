@@ -220,7 +220,8 @@ try {
     {   // El almacén derivado SÍ tiene datos: la administración los ve (si no, las retenciones no probarían nada).
         const t = await get(S1, '/api/aula-viva/students/ra-1/timeline', C.adm), s = await get(S2, '/api/leo/mediator/student/ra-1', C.adm);
         ok('preparación: la administración ve el perfil derivado de ra-1 (marca 0.8125) y su perfil de Leo (apoyo «vocabulary», campos ICDLI y acción sugerida)',
-            t.status === 200 && t.json?.profile_current?.abandono_risk === MARK && s.status === 200 && s.json?.summary?.preferredSupportType === 'vocabulary' && 'icdliHasData' in (s.json?.summary ?? {}) && typeof s.json.summary.suggestedMediatorAction === 'string',
+            // V9 BIII F5-DP: ra-1 tiene una compra propia: el Leo que ve la administración se limita a sus obras del colegio.
+            t.status === 200 && t.json?.profile_current?.abandono_risk === MARK && s.status === 200 && s.json?.summary?.dataAvailable === true && s.json.summary.totalInteractions > 0 && !s.text.includes('"c3"'),
             `${t.status} ${t.text.slice(0, 160)} | ${s.status} ${s.text.slice(0, 260)}`);
     }
 
@@ -337,7 +338,7 @@ try {
         const q = await both('/api/aula-viva/students-needing-attention', C.adm);
         ok('…y la cola de atención', q.every((r) => r.status === 200 && Array.isArray(r.json) && r.json.some((x) => x.user_id === 'ra-1')), st(q));
         const leoAdm = await both('/api/leo/mediator/student/ra-1', C.adm);
-        ok('…y el resumen completo de Leo (44 interacciones, alertas y acción sugerida)', leoAdm.every((r) => r.status === 200 && r.json.summary.totalInteractions === 44 && Array.isArray(r.json.summary.alerts) && typeof r.json.summary.suggestedMediatorAction === 'string'), st(leoAdm));
+        ok('…y el resumen de Leo de sus obras del colegio (sin la compra propia)', leoAdm.every((r) => r.status === 200 && r.json.summary.dataAvailable === true && r.json.summary.totalInteractions > 0 && !r.text.includes('"c3"')), st(leoAdm));
         ok('ningún cálculo ni dato almacenado cambió: almacén derivado y perfil de Leo idénticos', derivedDigest().replace(/"acknowledged":\d/g, '') === BEFORE.derived.replace(/"acknowledged":\d/g, '') && leoDigest() === BEFORE.leo);
     }
 

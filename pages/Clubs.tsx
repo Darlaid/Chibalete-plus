@@ -71,7 +71,7 @@ const Clubs: React.FC = () => {
                     {openClubs.map(club => {
                         const isMember = joinedIds.has(club.id);
                         const bundleName = getBundleName(club.activeExperienceId);
-                        const memberCount = club.memberIds?.length ?? 0;
+                        const memberCount = club.memberCount ?? club.memberIds?.length ?? 0; // F5-DP: sin participantes hasta unirse
 
                         return (
                             <div

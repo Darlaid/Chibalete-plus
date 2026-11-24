@@ -63,7 +63,7 @@ const SCHOOLS = [
 
 const GROUPS = [
     { id: 'g-a1', type: 'course', organizationId: ORG_A, school: 'Colegio Alfa',
-      mediatorIds: ['med-a'], memberIds: ['lec-a1', 'lec-a2'], studentIds: ['lec-a1', 'lec-a2'] },
+      mediatorIds: ['med-a'], memberIds: ['lec-a1', 'lec-a2', 'lec-a3'], studentIds: ['lec-a1', 'lec-a2', 'lec-a3'] }, // V9 BIII F5-DP: lec-a3 es compañera de curso (un lector solo recibe a los de sus grupos)
     { id: 'g-b1', type: 'course', organizationId: ORG_B, school: 'Colegio Beta',
       mediatorIds: ['med-b'], memberIds: ['lec-b1'], studentIds: ['lec-b1'] },
     // Club abierto de B: decisión de producto 2026-09-23 — también se acota.

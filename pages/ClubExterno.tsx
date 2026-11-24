@@ -108,7 +108,7 @@ const ClubExterno: React.FC = () => {
     const coordCollections: Content[] = isCoordinator && Array.isArray(club.collectionIds) && club.collectionIds.length > 0
         ? dataService.getCollections().filter(c => (club.collectionIds as string[]).includes(c.id))
         : [];
-    const memberCount = club.memberIds?.length ?? 0;
+    const memberCount = club.memberCount ?? club.memberIds?.length ?? 0; // F5-DP: sin participantes hasta unirse
     const hasRhythm = club.readingNow || club.weeklyFocus || club.nextMilestone;
 
     const handleSaveMediation = async () => {

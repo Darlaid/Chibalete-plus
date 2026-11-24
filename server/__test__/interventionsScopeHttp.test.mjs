@@ -162,7 +162,8 @@ try {
     ok('administración: curso completo, también el lector sin A2', ac.status === 200 && students(ac) === 'ra-no,ra-yes,ra-yes2', students(ac));
     // La otra réplica puede servir el almacén de intervenciones desde su caché de lectura unos segundos: se espera a que lo vea.
     let admTotal = -1; for (let i = 0; i < 180 && admTotal !== stored().length; i++) { admTotal = (await req(S1, '/api/interventions/effectiveness', 'adm')).json?.totalInterventions; if (admTotal !== stored().length) await sleep(250); }
-    ok('administración: historial de cualquier lector y agregado global', (await req(S2, '/api/interventions/student/rb-yes', 'adm')).status === 200 && (await req(S2, '/api/interventions/student/b2c', 'adm')).status === 200 && admTotal === stored().length, `${admTotal}/${stored().length}`);
+    // V9 BIII F5-DP: la administración no consulta el seguimiento de una cuenta personal B2C.
+    ok('administración: historial de cualquier lector de colegio y agregado global; de una cuenta personal, no', (await req(S2, '/api/interventions/student/rb-yes', 'adm')).status === 200 && (await req(S2, '/api/interventions/student/b2c', 'adm')).status === 403 && admTotal === stored().length, `${admTotal}/${stored().length}`);
     ok('administración: puede registrar una intervención', (await post(S1, 'adm', 'rb-yes', 'g-b', 'nota-adm')).status === 201);
     const legit = await req(S2, '/api/interventions/student/ra-yes2', 'med-a');
     ok('mediador con todo en regla: sigue viendo el historial de su lector y registrando', legit.status === 200 && notes(legit, 'ra-yes2') && (await post(S1, 'med-a', 'ra-yes2', 'g-a', 'nota-2')).status === 201);
