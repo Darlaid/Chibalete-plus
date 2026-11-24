@@ -6,28 +6,9 @@
 # Ejemplo (NO activo):
 # CVE-2024-XXXXX  # base node:* sin fix upstream; mitigado por non-root. rev:2026-06-30
 
-# ── CVE-2026-44902 — OpenTelemetry Prometheus exporter crash (HIGH) ──────────
-# Misma vulnerabilidad que GHSA-q7rr-3cgh-j5r3, ya ignorada en osv-scanner.toml.
-# NO ALCANZABLE en Chibalete+: el PrometheusExporter de OpenTelemetry nunca se
-# inicializa (server/observability/otel.mjs solo usa OTLPTraceExporter; /metrics
-# se sirve con prom-client, paquete distinto). Fix = bump major del stack OTEL.
-# Evidencia completa: docs/V4-SECURITY-AUDIT.md §3.6 y §10.
-# resp:Release Security Reviewer  rev:2026-08-31
-CVE-2026-44902
-
-# ── CVE-2026-59892 / GHSA-45rx-2jwx-cxfr — @opentelemetry/propagator-jaeger DoS (HIGH) ─
-# Paquete afectado: @opentelemetry/propagator-jaeger (≤2.8.0), transitivo de sdk-node.
-# DoS: un uber-trace-id / uberctx-* con percent-encoding malformado lanza URIError
-# no capturado y termina el proceso Node.
-# NO ALCANZABLE en Chibalete+: server/observability/otel.mjs fija el propagador a
-# W3C (CompositePropagator W3CTraceContext + W3CBaggage) vía textMapPropagator EXPLÍCITO;
-# el NodeSDK no consulta OTEL_PROPAGATORS y el JaegerPropagator jamás se instancia
-# (verificado: fields()=[traceparent,tracestate,baggage] incluso con OTEL_PROPAGATORS=jaeger).
-# review-by: 2026-10-21
-# deuda: migración coordinada Sentry v10 + OTel v2 (fix propagator-jaeger 2.9.0+ exige OTel v2;
-#        @sentry/node v8 fija OTel 1.x). Ver CHP-SEC-SENTRY-OTEL-01.
-# resp:Release Security Reviewer  rev:2026-10-21
-CVE-2026-59892
+# V9R PRE-1 (2026-11-24): se retiraron CVE-2026-44902, CVE-2026-59892 y
+# GHSA-qwww-vcr4-c8h2. Trivy ya no las encuentra en las imágenes ni en el árbol de
+# la candidata sin esta lista; su justificación está en el historial del archivo.
 
 # ── AVD-DS-0002 — Dockerfile sin instrucción USER (HIGH misconfig) ───────────
 # Dockerfile.api y Dockerfile.front no declaran USER → los contenedores corren
@@ -40,24 +21,7 @@ CVE-2026-59892
 # Mitigación vigente: contenedores detrás del reverse-proxy chibalete_edge.
 # Migración a contenedores non-root = sprint de hardening dedicado.
 # Aceptado por el Release Security Reviewer.
-# resp:Release Security Reviewer  rev:2026-08-31
+# Revisado en V9R PRE-1 (2026-11-24): sigue siendo el único hallazgo HIGH/CRITICAL
+# de Trivy sin esta lista (imágenes, árbol y configuración de la candidata).
+# resp:Release Security Reviewer  rev:2027-02-28
 AVD-DS-0002
-
-# ── GHSA-qwww-vcr4-c8h2 — react-router: CSRF bypass en modo RSC (HIGH 7.1) ────
-# Paquete afectado: react-router 7.18.1 (rango >=7.12.0). Única versión corregida:
-# 8.3.0; no existe backport en la línea 7.x. El advisory es EXCLUSIVO del modo RSC.
-# NO ALCANZABLE en la arquitectura desplegada — verificado sobre contenido tracked
-# en CHP-SEC-DEPS-01B: SPA de cliente con ReactDOM.createRoot (cero hydrateRoot),
-# HashRouter y <Routes>/<Route element> declarativos; cero RouterProvider,
-# createBrowserRouter, useLoaderData, useActionData, useFetcher y errorElement;
-# cero RSC, SSR, server actions, Flight y turbo-stream. Dockerfile.front sirve
-# dist/ estático desde nginx:1.27-alpine, sin proceso Node en runtime: no hay
-# servidor capaz de ejecutar acciones RSC. NO se afirma que la vulnerabilidad no
-# exista: se afirma que hoy no tiene ruta de explotación aquí.
-# Deuda asociada: migrar a react-router 8.3.0 en unidad propia (react-router-dom
-# no tiene línea 8.x → 32 archivos deben importar react-router directamente,
-# más React >=19.2.7 y Node >=22.22.0 en ambos Dockerfiles).
-# ATENCIÓN: el formato plano de .trivyignore NO aplica vencimiento de forma
-# ejecutable; esta fecha es documental y exige revisión humana.
-# resp:Release Security Reviewer  rev:2026-09-30
-GHSA-qwww-vcr4-c8h2

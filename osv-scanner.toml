@@ -12,78 +12,11 @@
 #   - multer 1.4.5-lts.2 (7 HIGH, alcanzable vía /api/upload y /api/leo/ingest)
 #     → upgrade a multer 2.1.1 (docs/V4-SECURITY-AUDIT.md §10).
 
-# ── GHSA-q7rr-3cgh-j5r3 — OpenTelemetry Prometheus exporter crash (HIGH 7.5) ─
-# Afecta @opentelemetry/{auto-instrumentations-node,exporter-prometheus,sdk-node}.
-# NO ALCANZABLE: Chibalete+ sirve /metrics con prom-client (paquete distinto),
-# y server/observability/otel.mjs solo inicializa OTLPTraceExporter — el
-# PrometheusExporter de OpenTelemetry nunca se carga ni se instancia.
-# Fix requiere bump MAJOR del stack OTEL (0.57 → 0.21x) → sprint dedicado.
-# Evidencia completa: docs/V4-SECURITY-AUDIT.md §3.6.
-[[IgnoredVulns]]
-id = "GHSA-q7rr-3cgh-j5r3"
-reason = "No alcanzable: el PrometheusExporter de OpenTelemetry nunca se inicializa (otel.mjs solo usa OTLPTraceExporter; /metrics se sirve con prom-client, paquete distinto). Fix = bump major del stack OTEL, pendiente sprint dedicado. Evidencia: docs/V4-SECURITY-AUDIT.md §3.6."
-ignoreUntil = 2026-08-31
-
-# ── GHSA-w5hq-g745-h8pq — uuid: buffer bounds check en v3/v5/v6 (HIGH 7.5) ───
-# uuid NO es dependencia directa de Chibalete+ (cero imports en server/ y
-# services/). Llega transitiva: uuid@9.0.1 vía gaxios → @opentelemetry/
-# resource-detector-gcp, y uuid@8.3.2 solo en cadena dev. El sink vulnerable
-# es uuid.v3/v5/v6 invocado con argumento `buf` — Chibalete+ no llama uuid en
-# absoluto, así que ese path no se ejecuta. Override a uuid@11 rompería gaxios
-# (uuid 11 es ESM-only, major). Revisar cuando OTEL/gaxios actualicen uuid.
-[[IgnoredVulns]]
-id = "GHSA-w5hq-g745-h8pq"
-reason = "No alcanzable: uuid es dependencia transitiva (gaxios/OTEL-gcp en prod, cadena dev), con cero imports directos en Chibalete+; el path vulnerable (v3/v5/v6 con buf) no se invoca. Forzar uuid@11 por override rompería gaxios (ESM major). Revisar cuando OTEL/gaxios bumpen uuid."
-ignoreUntil = 2026-08-31
-
-# ── GHSA-45rx-2jwx-cxfr / CVE-2026-59892 — @opentelemetry/propagator-jaeger DoS (HIGH) ─
-# El JaegerPropagator lanza URIError no capturado ante un uber-trace-id / uberctx-*
-# con percent-encoding malformado, terminando el proceso Node. NO ALCANZABLE en
-# Chibalete+: server/observability/otel.mjs pasa un textMapPropagator EXPLÍCITO
-# (CompositePropagator W3CTraceContext + W3CBaggage) al NodeSDK, por lo que el SDK
-# NO consulta OTEL_PROPAGATORS y el JaegerPropagator jamás se instancia ni queda
-# activo — verificado: fields()=[traceparent,tracestate,baggage] incluso con
-# OTEL_PROPAGATORS=jaeger; uber-trace-id no es field ni crea contexto. propagator-jaeger
-# permanece solo como transitivo de sdk-node. El fix (2.9.0+) exige OTEL v2, acoplado
-# al major de @sentry/node (v8 fija OTEL 1.x) → migración coordinada Sentry v10 + OTel v2.
-[[IgnoredVulns]]
-id = "GHSA-45rx-2jwx-cxfr"
-reason = "Jaeger propagation is explicitly disabled; the application pins W3C Trace Context and Baggage, including when OTEL_PROPAGATORS requests jaeger. Removal requires the coordinated Sentry v10 and OpenTelemetry v2 migration."
-ignoreUntil = 2026-10-21
-
-# ── GHSA-8988-4f7v-96qf — @opentelemetry/core W3C Baggage parsing DoS (MODERATE) ─
-# El W3CBaggagePropagator de OTel 1.30.1 hace split del header `baggage` completo
-# sin acotar longitud total / número de miembros / tamaño por miembro (las
-# constantes W3C existen pero solo se usan al inyectar). server/observability/
-# otel.mjs envuelve la EXTRACCIÓN con esos límites (8192 bytes totales, 180
-# miembros, 4096 bytes/miembro, medidos en UTF-8) antes de delegar: un header
-# sobredimensionado o malformado devuelve contexto sin baggage, sin lanzar. El fix
-# oficial está en @opentelemetry/core 2.8.0+, inalcanzable mientras @sentry/node v8
-# fija OTel 1.x → migración coordinada Sentry v10 + OTel v2 (CHP-SEC-SENTRY-OTEL-01).
-[[IgnoredVulns]]
-id = "GHSA-8988-4f7v-96qf"
-reason = "W3C Baggage extraction is bounded in application code to 8192 bytes, 180 entries, and 4096 bytes per entry. Sentry v8 pins OpenTelemetry 1.x, which has no patched release for this advisory. Removal requires the coordinated Sentry v10 and OpenTelemetry v2 migration."
-ignoreUntil = 2026-10-21
-
-# ── GHSA-qwww-vcr4-c8h2 — react-router: CSRF bypass en modo RSC (HIGH 7.1) ────
-# Afecta react-router >=7.12.0; la única versión corregida es 8.3.0 (no hay
-# backport en la línea 7.x). El advisory es EXCLUSIVO del modo RSC: la acción se
-# ejecuta antes de devolver el 400.
-# NO ALCANZABLE con la arquitectura desplegada hoy — verificado sobre contenido
-# tracked en CHP-SEC-DEPS-01B: Chibalete+ es una SPA de cliente montada con
-# ReactDOM.createRoot (cero hydrateRoot), enruta con HashRouter y <Routes>/<Route
-# element> declarativos, y no usa data router (cero RouterProvider,
-# createBrowserRouter, useLoaderData, useActionData, useFetcher, errorElement).
-# No hay RSC, SSR, server actions, Flight ni turbo-stream, y Dockerfile.front
-# sirve dist/ estático desde nginx:1.30-alpine, sin proceso Node en runtime: no
-# existe servidor que pueda ejecutar acciones RSC. Esto NO afirma que la
-# vulnerabilidad no exista, sino que hoy no tiene ruta de explotación aquí.
-# La corrección real es migrar a react-router 8.3.0, lo que exige unidad propia:
-# sustituir los imports de react-router-dom (sin línea 8.x) por react-router en
-# 32 archivos, React/React-DOM >=19.2.7 y Node >=22.22.0 en ambos Dockerfiles.
-# REEVALUACIÓN OBLIGATORIA antes del vencimiento: si aparece RSC, SSR, data
-# router o server actions, esta excepción deja de ser válida de inmediato.
-[[IgnoredVulns]]
-id = "GHSA-qwww-vcr4-c8h2"
-reason = "Advisory limited to React Router RSC mode. Chibalete+ is a client-only SPA (ReactDOM.createRoot without hydration, HashRouter, declarative Routes/Route, no data router, loaders or actions) with no RSC, SSR or server actions, served as static assets by nginx, so the vulnerable path is not reachable in the deployed architecture. Not a claim that the flaw is absent. Fixing it requires migrating to react-router 8.3.0 in a dedicated unit: react-router-dom has no 8.x line, so 32 files must import react-router directly, plus React >=19.2.7 and Node >=22.22.0 in both Dockerfiles. Must be re-evaluated before the expiry date, and immediately if RSC, SSR or a data router is introduced."
-ignoreUntil = 2026-09-30
+# ── Sin excepciones en vigor (V9R PRE-1, 2026-11-24) ─────────────────────────
+# Las cinco excepciones que hubo aquí (GHSA-q7rr-3cgh-j5r3, GHSA-w5hq-g745-h8pq,
+# GHSA-45rx-2jwx-cxfr, GHSA-8988-4f7v-96qf, GHSA-qwww-vcr4-c8h2) vencieron entre
+# agosto y octubre de 2026 y ya no suprimían nada. Se comprobó que el escáner pasa
+# sin ninguna sobre el package-lock.json de la candidata (575 paquetes, sin
+# hallazgos) y se retiraron. Su justificación histórica está en el historial de
+# este archivo y en docs/V4-SECURITY-AUDIT.md. Una excepción nueva exige id, motivo
+# e ignoreUntil, como dice la cabecera.
