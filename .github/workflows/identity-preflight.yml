@@ -217,6 +217,23 @@ jobs:
       # HTTP con el motor OFF, roto y activo: respuestas MOOK idénticas.
       - name: Núcleo del ledger de gamificación (G3)
         run: npm run test:gamification-core
+      # V9R RC-1 — B2C como comprobación obligatoria de candidata: aprovisionamiento desde la tienda, activación
+      # efectiva, representación de menores, operaciones de representación y restablecimiento de contraseña, con sus
+      # pruebas de integración (servidor real). Sus cuatro suites unitarias salieron de test:v81 para no correr dos veces.
+      # Las de integración escriben el secreto de aprovisionamiento en su ruta fija (/app/secrets) y por eso solo
+      # corren con un permiso explícito en un entorno desechable; este ejecutor lo es. Sin ese permiso se omiten con
+      # código 0: aquí una omisión cuenta como fallo.
+      - name: B2C (aprovisionamiento, activación y representación)
+        env:
+          CHP_B2C_TEST_SECRET_SANDBOX: '1'
+        run: |
+          set +e
+          sudo mkdir -p /app/secrets && sudo chown -R "$(id -u):$(id -g)" /app
+          npm run test:b2c > b2c.log 2>&1; rc=$?
+          cat b2c.log
+          if grep -a -q "SKIP" b2c.log; then echo "::error title=test-b2c::una suite B2C se omitió"; rc=1; fi
+          rm -f b2c.log
+          exit $rc
 
       # CHP-V8.1-CLOSE-02 — A2 (registro y criterio único), resumen de Aula Viva
       # con A2 y el verificador O8 con anulaciones. O8 se ejecuta contra el

@@ -39,7 +39,10 @@ export function createEventsWriteAuth({ sessionEnabled, authenticate, onFailure 
         }
         if (!d?.ok) {
             try { onFailure(d?.reason || 'unknown'); } catch { /* noop */ }
-            return res.status(d?.status || 401).json({ error: 'No autorizado: se requiere sesión activa' });
+            // V9R RC-1: sesión vigente de una cuenta que ya no existe ⇒ se le dice a su cliente (ver sessionDenialBody).
+            return res.status(d?.status || 401).json(d?.reason === 'unknown_subject'
+                ? { error: 'No autorizado: se requiere sesión activa', code: 'account_removed' }
+                : { error: 'No autorizado: se requiere sesión activa' });
         }
         req.auth = d.req_auth;
         return next();

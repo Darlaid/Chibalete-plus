@@ -193,14 +193,17 @@ export function createMetricsRouterV2({ requireUserAuth, provider, now, log = ()
             });
 
             const full = summarize({ users, groups, schools, events, classifyGroup, period, idleMs });
+            // V9R RC-1: las poblaciones y lo no atribuido son cifras de TODA la plataforma. Solo la administración de
+            // plataforma las recibe; antes llegaban a cualquier cuenta con sesión, aunque no viera ninguna organización.
+            const platformWide = isAdminCaller(callerId);
             return res.json({
                 contractVersion: CONTRACT_VERSION,
                 generatedAt,
                 period,
                 sessionStrategy: full.sessionStrategy,
-                populations: full.populations,
+                populations: platformWide ? full.populations : null,
                 organizations,
-                unattributed: includeQuality ? full.unattributed : null,
+                unattributed: platformWide && includeQuality ? full.unattributed : null,
             });
         } catch (e) {
             return handleError(res, e, log);

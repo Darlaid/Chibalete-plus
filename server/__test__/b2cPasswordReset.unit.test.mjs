@@ -5,7 +5,7 @@
  * (`server/b2c/b2cPasswordReset.mjs`): a quién se resuelve, a quién se entrega, cuándo no se emite
  * y cómo se compara el token. No arranca el servidor ni toca almacenes.
  *
- * Corre en CI dentro de `npm run test:v81` (identity-preflight) y en `npm run test:b2c`; la parte HTTP
+ * Corre en CI dentro de `npm run test:b2c` (identity-preflight, V9R RC-1); la parte HTTP
  * vive en b2cPasswordReset.integration.test.mjs y solo se ejecuta en un contenedor desechable.
  *
  *   node server/__test__/b2cPasswordReset.unit.test.mjs

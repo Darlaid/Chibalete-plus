@@ -880,6 +880,13 @@ function ownSchoolConfigNames(scope, schools) {
  * Middleware to validate a regular reader session via userId.
  * Used for pedagogical AI endpoints (Leo).
  */
+// V9R RC-1 — señal de cuenta eliminada. Una sesión firmada, vigente y no revocada cuyo titular ya no existe en el
+// padrón solo puede presentarla quien inició sesión como ese titular: a ese cliente se le dice que la cuenta fue
+// eliminada, para que retire del dispositivo los datos locales de esa cuenta (Lector Único). Cualquier otro rechazo
+// conserva el cuerpo genérico de siempre.
+const sessionDenialBody = (decision, error = 'No autorizado') =>
+    (decision?.reason === 'unknown_subject' ? { error, code: 'account_removed' } : { error });
+
 const requireUserAuth = async (req, res, next) => {
     // CHP-IDDB-M1-A: en modo compat/enforce la identidad se resuelve por sesión
     // firmada (con x-user-id legacy según modo). En 'off' (default) el camino de
@@ -888,7 +895,7 @@ const requireUserAuth = async (req, res, next) => {
         const d = await sessionAuth.authenticate(req);
         if (!d.ok) {
             try { authSessionFailure.labels(d.reason || 'unknown').inc(); } catch { /* noop */ }
-            return res.status(d.status).json({ error: 'No autorizado' });
+            return res.status(d.status).json(sessionDenialBody(d));
         }
         const user = readJSON(USERS_DB).find(u => u.id === d.userId);
         if (!user || !isUserActive(user)) return res.status(401).json({ error: 'No autorizado' });
@@ -937,7 +944,7 @@ const requireProgressOwner = async (req, res, next) => {
         const d = await sessionAuth.authenticate(req);
         if (!d.ok) {
             try { authSessionFailure.labels(d.reason || 'unknown').inc(); } catch { /* noop */ }
-            return res.status(d.status).json({ error: 'No autorizado' });
+            return res.status(d.status).json(sessionDenialBody(d));
         }
         if (String(d.userId) !== String(userIdFromParam)) {
             return res.status(401).json({ error: 'No autorizado: la sesión no corresponde al usuario' });
@@ -1979,6 +1986,23 @@ const LU_CONFIG_DEFAULTS = {
     notes: 'Chibalete LU',
     minSupportedVersion: '0.1.0'
 };
+// V9R RC-1 — supresión remota en Lector Único. El dispositivo conserva, bajo su cuenta, la lectura aún no entregada
+// de cuentas que cerraron sesión. Con la sesión de la cuenta activa pregunta cuáles de ESAS cuentas ya no existen y
+// borra lo suyo. La respuesta solo dice qué identificadores de los enviados no están en el padrón; ante cualquier
+// duda (padrón ilegible) no afirma nada: nunca se borra por un error.
+const luRemovedAccountsLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: IS_PROD ? 30 : 1000, standardHeaders: true, legacyHeaders: false, message: { error: 'Demasiadas consultas.' } });
+app.post('/api/lu/accounts/removed', luRemovedAccountsLimiter, requireUserAuth, (req, res) => {
+    const ids = req.body?.ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 25 || ids.some((i) => typeof i !== 'string' || i.length === 0 || i.length > 120)) {
+        return res.status(400).json({ error: 'ids inválidos' });
+    }
+    let users;
+    try { users = readCanonicalStoreForMutation(USERS_DB); } catch { users = null; }
+    if (!Array.isArray(users) || users.length === 0) return res.status(503).json({ error: 'padrón no disponible' });
+    const present = new Set(users.map((u) => u?.id));
+    res.json({ removed: [...new Set(ids)].filter((i) => !present.has(i)) });
+});
+
 app.get('/api/lu/version', (req, res) => {
     try {
         let config = {};

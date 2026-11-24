@@ -61,5 +61,5 @@ El titular conserva 4 obras, 61 % y 7 lecturas iniciadas.
 
 - **Reconstruir el almacén derivado** tras el despliegue donde los motores estén encendidos (`rebuildInsights`): perfiles, señales y agregados de cohorte guardados antes de esta versión pueden incluir lectura personal. Las rutas individuales de la administración no dependen de ello; los agregados guardados, sí.
 - Los historiales que solo crecen (riesgo, resultados de intervención, series ya escritas) no se reescriben con la reconstrucción.
-- `/api/v2/metrics/*` aplica el mismo filtro y las reglas del clasificador están probadas, pero esas rutas no admiten sesión de navegador: su cableado no se pudo ejercitar por HTTP.
+- `/api/v2/metrics/*` aplica el mismo filtro. Su autoridad es la sesión más `x-user-id` igual al de la sesión; con ella quedó probado por HTTP real en V9R RC-1 (`derivedPrivacyHttp` [11], ver `CHP_V9R_RC1_CANDIDATE.md`).
 - Las métricas globales de plataforma (`/api/metrics/backbone`, embudos, insights) siguen midiendo toda la plataforma: no son indicadores institucionales ni identifican a nadie.

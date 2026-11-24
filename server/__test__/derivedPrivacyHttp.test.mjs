@@ -507,6 +507,89 @@ try {
         ok('los registros del servidor no contienen la lectura personal (ni centinelas ni posiciones)', !Object.values(SENT).some((v) => new RegExp(`(?<![0-9.])${v}(?![0-9])`).test(logs)) && !/sentenceIndex|globalPercentage/.test(logs));
         ok('ni el secreto de máquina ni contraseñas', !logs.includes(PW) && !logs.includes(MACHINE));
     }
+
+    // V9R RC-1 — /api/v2/metrics/* por HTTP real. Su autoridad válida es la sesión firmada MÁS la identidad declarada
+    // (`x-user-id`) igual a la de la sesión; el secreto de máquina no la sustituye.
+    section('[11] métricas v2: autoridad, alcance y separación de la lectura personal');
+    {
+        const V = (id) => ({ 'x-user-id': id });
+        const v2 = async (p, who) => [await get(S1, p, C[who], V(who)), await get(S2, p, C[who], V(who))];
+        const ORG = '/api/v2/metrics/organizations/org-a', LIST = '/api/v2/metrics/organizations';
+        const denied = [await get(S1, ORG, C.adm), await get(S2, ORG, C['mx-1'], V('adm')), await get(S1, ORG, null, V('adm')), await get(S2, '/api/v2/metrics/users/mx-1', null, V('mx-1')),
+            ...(machine ? [await get(S1, ORG, null, { 'x-admin-secret': MACHINE }), await get(S2, ORG, null, { 'x-admin-secret': MACHINE, 'x-user-id': 'adm' })] : [])];
+        ok('sin identidad declarada, con la de otra cuenta, sin sesión o solo con el secreto de máquina: 401 y sin datos', denied.every((r) => r.status === 401 && !r.json?.metrics && !leak(r.text)), st(denied));
+
+        const aOrg = await v2(ORG, 'adm'), aGrp = await v2('/api/v2/metrics/groups/g-a', 'adm'), aList = await v2(LIST, 'adm');
+        ok('administración: organización, grupo y lista responden 200 en las dos réplicas, sin lectura personal', [...aOrg, ...aGrp, ...aList].every((r) => r.status === 200 && !leak(r.text)), st([...aOrg, ...aGrp, ...aList]));
+        ok('…la lista de la administración trae las dos instituciones y las cifras de plataforma', aList.every((r) => r.json?.organizations?.length === 2 && r.json?.populations && r.json?.unattributed), aList[0].text.slice(0, 300));
+        // Cada métrica por su valor y su estado (el periodo lleva la hora de cada consulta).
+        const M = (r) => r.json?.metrics && Object.fromEntries(Object.entries(r.json.metrics).map(([k, v]) => [k, { value: v?.value ?? null, status: v?.status ?? null }]));
+        // El tiempo en plataforma sale de las horas de llegada de cada petición: entre gemelos difiere en milisegundos.
+        const X = (m) => ({ ...m, platformTimeMs: m?.platformTimeMs && { status: m.platformTimeMs.status } });
+        const near = (a, b) => Math.abs((a?.platformTimeMs?.value ?? 0) - (b?.platformTimeMs?.value ?? 0)) < 5000;
+        for (const who of ['adm', 'med-a']) {
+            const um = await v2('/api/v2/metrics/users/mx-1', who), ut = await v2('/api/v2/metrics/users/tw-1', who);
+            ok(`${who}: las métricas del lector con compras son las de su gemelo sin compras (sesiones, tiempo de lectura, obras distintas), en las dos réplicas`,
+                [...um, ...ut].every((r) => r.status === 200 && !leak(r.text)) && [0, 1].every((i) => M(um[i]) && same(X(M(um[i])), X(M(ut[i])), ['mx-1', 'tw-1']) && near(M(um[i]), M(ut[i]))), `${st([um[0], ut[0]])} ${diffOf(X(M(um[0])), X(M(ut[0])), ['mx-1', 'tw-1'])} ${M(um[0])?.platformTimeMs?.value}/${M(ut[0])?.platformTimeMs?.value}`);
+            if (who === 'adm') TABLA.v2 = { mx: { obras: M(um[0])?.distinctContents?.value ?? null, lectura_ms: M(um[0])?.readingTimeMs?.value ?? null, sesiones: M(um[0])?.sessions?.value ?? null },
+                tw: { obras: M(ut[0])?.distinctContents?.value ?? null, lectura_ms: M(ut[0])?.readingTimeMs?.value ?? null, sesiones: M(ut[0])?.sessions?.value ?? null } };
+        }
+        const pb = [...await v2('/api/v2/metrics/users/pb-1', 'adm'), ...await v2('/api/v2/metrics/users/pb-1', 'med-a')];
+        ok('una cuenta personal no entrega actividad a la administración ni a la mediación', pb.every((r) => !leak(r.text) && (r.status === 403 || (r.status === 200 && r.json?.organizationId === null && M(r)?.activeReaders?.value == null))), st(pb));
+
+        const mGrp = await v2('/api/v2/metrics/groups/g-a', 'med-a'), mList = await v2(LIST, 'med-a');
+        ok('mediación: su curso responde 200 sin lectura personal', mGrp.every((r) => r.status === 200 && !leak(r.text)), st(mGrp));
+        const foreign = []; for (const p of ['/api/v2/metrics/groups/g-b', '/api/v2/metrics/organizations/org-b', '/api/v2/metrics/users/mb-1']) foreign.push(...(await v2(p, 'med-a')).map((r) => ({ p, ...r })));
+        ok('mediación: el curso, la institución y el lector de otra institución quedan negados (403)', foreign.every((r) => r.status === 403 && !r.json?.metrics), foreign.map((r) => `${r.p} ${r.status}`).join(' | '));
+        ok('mediación: la lista no trae otra institución ni las cifras de plataforma', mList.every((r) => r.status === 200 && (r.json?.organizations || []).every((o) => o.organizationId === 'org-a') && r.json?.populations === null && r.json?.unattributed === null && !leak(r.text)), mList[0].text.slice(0, 300));
+
+        const rList = await v2(LIST, 'mx-1'), rOther = [...await v2(ORG, 'mx-1'), ...await v2('/api/v2/metrics/users/tw-1', 'mx-1'), ...await v2('/api/v2/metrics/groups/g-a', 'mx-1')];
+        ok('lector: ninguna organización visible y ninguna cifra de plataforma (antes recibía las poblaciones de toda la plataforma)', rList.every((r) => r.status === 200 && r.json?.organizations?.length === 0 && r.json?.populations === null && r.json?.unattributed === null), rList[0].text.slice(0, 300));
+        ok('lector: organización, curso y otro lector negados (403)', rOther.every((r) => r.status === 403 && !r.json?.metrics), st(rOther));
+        const rOwn = await v2('/api/v2/metrics/users/mx-1', 'mx-1'), bOwn = await v2('/api/v2/metrics/users/pb-1', 'pb-1');
+        ok('titular: esta API es institucional — su consulta propia nunca falla con error del servidor ni mezcla su lectura personal; sus datos completos siguen en sus rutas propias ([1])', [...rOwn, ...bOwn].every((r) => [200, 403].includes(r.status) && !leak(r.text)), st([...rOwn, ...bOwn]));
+        TABLA.v2_titular = { lector_colegio: rOwn[0].status, cuenta_personal: bOwn[0].status };
+    }
+
+    // V9R RC-1 — señal de cuenta eliminada para Lector Único. Va al final: elimina una cuenta del padrón de prueba.
+    section('[12] cuenta eliminada: señal para el dispositivo y consulta de cuentas ausentes');
+    {
+        const REM = '/api/lu/accounts/removed', gone = 'pz-1';
+        const before = await post(S1, REM, C['tw-1'], { ids: [gone, 'mx-1', 'no-existe-1'] });
+        ok('antes de la baja: la consulta solo nombra el identificador que no existe', before.status === 200 && JSON.stringify(before.json?.removed) === '["no-existe-1"]', st([before]));
+        const bad = [await post(S1, REM, C['tw-1'], {}), await post(S1, REM, C['tw-1'], { ids: [] }), await post(S2, REM, C['tw-1'], { ids: Array.from({ length: 26 }, (_, i) => `u-${i}`) }),
+            await post(S2, REM, C['tw-1'], { ids: [7] }), await post(S1, REM, C['tw-1'], { ids: ['x'.repeat(121)] })];
+        ok('consulta mal formada o con más de 25 identificadores: 400', bad.every((r) => r.status === 400), st(bad));
+        const anon = [await post(S1, REM, '', { ids: [gone] }), await post(S2, REM, 'chp_session=no-es-una-sesion', { ids: [gone] })];
+        ok('sin sesión válida la consulta no responde (401)', anon.every((r) => r.status === 401 && !r.json?.removed), st(anon));
+
+        const tDel = Date.now();
+        const alive = await get(S1, '/api/offline/assignment', C[gone]);
+        const del = await send(S1, 'DELETE', `/api/users/${gone}`, C.adm);
+        ok('la administración elimina la cuenta', alive.status === 200 && del.status === 200 && del.json?.success === true, st([alive, del]));
+
+        const sig = [];
+        for (const s of [S1, S2]) {
+            sig.push({ p: 'assignment', ...(await get(s, '/api/offline/assignment', C[gone])) }, { p: 'me', ...(await get(s, '/api/auth/me', C[gone])) },
+                { p: 'sync', ...(await post(s, `/api/progress/${gone}/c1/sync`, C[gone], pbody(`s-${gone}-x`, 300, 10, NOW - DAY, 5))) },
+                { p: 'analytics', ...(await post(s, '/api/analytics/events', C[gone], luSession(gone, 'c1', NOW - DAY, 2))) },
+                { p: 'removed', ...(await post(s, REM, C[gone], { ids: ['mx-1'] })) });
+        }
+        ok('la sesión todavía vigente de la cuenta eliminada recibe 401 con `code: account_removed` en las rutas que usa Lector Único (asignación, sesión, progreso, telemetría, consulta), en las dos réplicas',
+            sig.length === 10 && sig.every((r) => r.status === 401 && r.json?.code === 'account_removed'), sig.map((r) => `${r.p} ${r.status} ${r.json?.code}`).join(' | '));
+        ok('…y nada de lo que envió se guardó', sql(P.events, 'SELECT COUNT(*) n FROM events WHERE user_id = ? AND server_ts >= ?', gone, tDel)[0].n === 0);
+
+        const outCookie = await login(S1, 'tb-1'); const lo = await post(S1, '/api/auth/logout', outCookie, {});
+        const plain = [await get(S1, '/api/offline/assignment', ''), await get(S2, '/api/offline/assignment', 'chp_session=no-es-una-sesion'), await get(S2, '/api/offline/assignment', outCookie),
+            await post(S1, `/api/progress/tb-1/c1/sync`, outCookie, pbody('s-tb-x', 300, 10, NOW - DAY, 5)), await post(S1, '/api/analytics/events', outCookie, luSession('tb-1', 'c1', NOW - DAY, 2))];
+        ok('cualquier otro rechazo (sin sesión, sesión inválida, sesión cerrada) es el 401 de siempre, sin la señal: el dispositivo no borra nada', lo.status === 200 && plain.every((r) => r.status === 401 && r.json?.code === undefined), st(plain));
+        const relog = await parse(await fetch(`${S1.base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: S1.base }, body: JSON.stringify({ email: `${gone}@fixture.invalid`, password: PW }) }));
+        ok('el inicio de sesión de la cuenta eliminada responde lo mismo que una credencial incorrecta (no revela la baja a quien no tenía sesión)', relog.status === 401 && relog.json?.code === undefined, st([relog]));
+
+        const after = [await post(S1, REM, C['tw-1'], { ids: [gone, 'mx-1', 'tw-1'] }), await post(S2, REM, C['mx-1'], { ids: [gone, gone, 'tw-1'] })];
+        ok('otra cuenta del mismo dispositivo pregunta: la respuesta nombra la cuenta eliminada (una vez) y ninguna que exista, en las dos réplicas', after.every((r) => r.status === 200 && JSON.stringify(r.json?.removed) === `["${gone}"]`), st(after));
+        ok('la consulta no devuelve nada más que identificadores enviados', after.every((r) => Object.keys(r.json || {}).join() === 'removed'));
+    }
 } catch (e) {
     console.error('  ✗ excepción', e?.stack || e); fail++;
 } finally {
