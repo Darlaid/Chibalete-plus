@@ -42,9 +42,10 @@ const bundle = path.join(tmp, 'bundle.mjs');
 let M = null;
 // Referencia de la versión anterior (7402072), calculada al preparar esta unidad con el mismo render.
 // Fija en la prueba: la CI hace checkout superficial y no tiene ese commit.
+// V9R-DEP1: los controles incluyen además la casilla propia de la Política 001 (única adición desde 7402072).
 //  - controles del formulario (tipo:nombre:valor), ordenados;
 //  - SHA-256 del texto visible sin el bloque A5 (de «A5 ·» a «Si no respondes, queda pendiente.»).
-const BASE_CONTROLS = 'checkbox::|checkbox::|password::|password::|radio:A1:no|radio:A1:yes|radio:A2:no|radio:A2:not_applicable|radio:A2:yes|radio:A3:no|radio:A3:yes|radio:A5:no|radio:A5:yes|radio:actingAs:legal_representative|radio:actingAs:titular';
+const BASE_CONTROLS = 'checkbox::|checkbox::|checkbox::|password::|password::|radio:A1:no|radio:A1:yes|radio:A2:no|radio:A2:not_applicable|radio:A2:yes|radio:A3:no|radio:A3:yes|radio:A5:no|radio:A5:yes|radio:actingAs:legal_representative|radio:actingAs:titular';
 const BASE_REST_SHA = '3a3c208a4613ad575f467381883c06ac2c146f2b39f2a7a36a84c4f2a1415b0d';
 try {
     await esbuild.build({
@@ -77,12 +78,17 @@ if (M) {
     ok('A5 sigue siendo Sí / No, sin premarcar', count(html, /name="A5"/g) === 2 && /value="yes"[^>]*\/?>Sí, autorizo/.test(g) && /value="no"[^>]*\/?>No autorizo/.test(g) && !/name="A5"[^>]*checked/.test(html));
     // Misma lista de controles que la versión base (7402072): sin casillas ni decisiones nuevas.
     const controls = (h) => (h.match(/<input [^>]*>/g) ?? []).map((i) => `${(i.match(/type="([^"]+)"/) ?? [])[1]}:${(i.match(/name="([^"]+)"/) ?? [])[1] ?? ''}:${(i.match(/value="([^"]+)"/) ?? [])[1] ?? ''}`).sort().join('|');
-    ok('no aparecen casillas ni decisiones nuevas (mismos controles que en 7402072)', controls(html) === BASE_CONTROLS, controls(html));
-    ok('solo cambia el bloque A5 (el resto del texto visible es idéntico a 7402072)', (() => {
-        // Se quita el bloque A5 completo: ahora la explicación va antes de Sí/No y el bloque termina en «No autorizo».
-        const x = text(html); const a = x.indexOf('A5 ·'); const end = 'Sí, autorizo No autorizo'; const e = x.indexOf(end, a);
-        return a >= 0 && e >= 0 && createHash('sha256').update(x.slice(0, a) + x.slice(e + end.length)).digest('hex') === BASE_REST_SHA;
-    })());
+    ok('no aparecen casillas ni decisiones nuevas (controles de 7402072 más la casilla de la Política 001)', controls(html) === BASE_CONTROLS, controls(html));
+    // Se quita el bloque A5 completo: ahora la explicación va antes de Sí/No y el bloque termina en «No autorizo».
+    const POLICY_LINE = `He leído y acepto la ${DOCS.policy.title} (001, v1.0). Esta aceptación es independiente de las autorizaciones anteriores y no las sustituye.`;
+    const restSha = (() => {
+        // V9R-DEP1: la frase de la Política 001 es la única adición; sin ella, el texto es el de la referencia.
+        const x = text(html).replace(`${POLICY_LINE} `, ''); const a = x.indexOf('A5 ·'); const end = 'Sí, autorizo No autorizo'; const e = x.indexOf(end, a);
+        return a >= 0 && e >= 0 ? createHash('sha256').update(x.slice(0, a) + x.slice(e + end.length)).digest('hex') : 'sin bloque A5';
+    })();
+    ok('fuera del bloque A5, el texto visible es el de 7402072 más, únicamente, la frase de aceptación de la Política 001', restSha === BASE_REST_SHA, restSha);
+    ok('la Política 001 se acepta en su propia casilla, sin premarcar, aparte de términos y autorizaciones', count(html, /type="checkbox"/g) === 3 && !/type="checkbox"[^>]*checked/.test(html)
+        && text(html).split(POLICY_LINE).length === 2);
     ok('el enlace al 004 sigue en la lista de documentos', t.includes(DOCS.dataNotice.title));
 }
 
@@ -90,7 +96,7 @@ if (M) {
 console.log('\n[P] registro de A5 (sin cambios)');
 {
     const reader = { id: 'u-lector', roles: ['lector'] };
-    const base = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
+    const base = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
     const ctx = { today: '2026-11-11', ref: 'ACT-prueba' };
     const kinds = (p) => p.decisions.filter((d) => d.kind === 'A5' || d.kind === 'A3').map((d) => `${d.kind}:${d.status}:${d.version}`).sort().join(',');
     const yes = planActivationDecisions(reader, { ...base, A5: 'yes' }, ctx);

@@ -408,7 +408,7 @@ try {
         const minor = (orderId, reader = {}, email = C, extra = {}) => order(orderId, email, { reader: { type: 'minor', ...reader }, ...extra });
         const byId = (id) => J(P.users).find((u) => u.id === id);
         const gate = () => R.decisionGate({ CHP_A2_REGISTRY: process.env.CHP_A2_REGISTRY });
-        const REP = { terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'legal_representative', A1: 'yes' };
+        const REP = { terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'legal_representative', A1: 'yes' };
         const accept = async (activationUrl, acceptance) => { const r = await fetch(base + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: activationUrl.split('token=')[1], password: PW, acceptance }) }); let b = null; try { b = await r.json(); } catch { /* */ } return { status: r.status, body: b }; };
         const u0 = J(P.users).length, a0 = J(P.access).length;
 

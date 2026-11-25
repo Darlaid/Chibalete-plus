@@ -11,7 +11,7 @@
  *  - gamificación: `excludeUser` (desvincula y deja un tombstone sin id en el
  *    registro de exclusiones, que no se restaura con los respaldos); sin base de
  *    gamificación, solo el tombstone;
- *  - registro de decisiones: A1, A2 y C005 `revoked`, con la fecha del trámite.
+ *  - registro de decisiones: A1, A2, C005 y P (Política 001) `revoked`, con la fecha del trámite.
  *    Nada se borra: la historia queda append-only.
  *
  * Tras restaurar el padrón desde un respaldo, `accountsToRestrictAfterRestore`
@@ -59,8 +59,9 @@ export function suppressAccount(db, { userId, requestRef, requestDay, capacity, 
     // V8.1-CLOSE-09A: también T (002): termina la relación con la plataforma. T revocada junto
     // con el tombstone es la marca de SUPRESIÓN; un tombstone solo (retiro de XP, PRIV-C7) no
     // lo es y nunca dispara borrados tras una restauración. Solo este operador revoca T.
-    const kinds = mediator ? ['T', 'A1', 'A2', 'C005'] : ['T', 'A1', 'A2'];
-    const versionOf = { T: ACCEPTANCE_DOCUMENTS.terms.version, C005: '005@1.0' };
+    // V9R-DEP1: también la constancia de la Política 001 (P): termina con la relación, como T.
+    const kinds = mediator ? ['T', 'A1', 'A2', 'C005', 'P'] : ['T', 'A1', 'A2', 'P'];
+    const versionOf = { T: ACCEPTANCE_DOCUMENTS.terms.version, C005: '005@1.0', P: ACCEPTANCE_DOCUMENTS.policy.version };
     appendDecisions(kinds.map((kind) => ({
         subjectId: userId, kind, status: 'revoked', actDay: requestDay,
         version: versionOf[kind] ?? '004@1.0', medium: 'admin_record',

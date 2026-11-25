@@ -29,6 +29,10 @@ ok('términos (002) separados de las autorizaciones (004)', /DOCS\.terms\.title/
 ok('el representante decide A0 y se le advierte la verificación', /name="A0"/.test(src) && /Verificaremos la representación/.test(src));
 ok('el compromiso 005 aparece cuando el servidor lo pide', /required\.includes\('C005'\)/.test(src));
 ok('envía las versiones exigidas', /termsVersion: DOCS\.terms\.version/.test(src) && /dataNoticeVersion: DOCS\.dataNotice\.version/.test(src) && /mediatorVersion: DOCS\.mediator\.version/.test(src));
+// V9R-DEP1 — aceptación propia de la Política 001.
+ok('la Política 001 tiene su propia casilla, sin premarcar', /const \[policy, setPolicy\] = useState\(false\)/.test(src) && /checked=\{policy\} onChange=\{\(e\) => setPolicy\(e\.target\.checked\)\}/.test(src));
+ok('…y se envía con su versión, aparte de términos y autorizaciones', /policy, policyVersion: DOCS\.policy\.version/.test(src) && /flag\(required\.includes\('P'\)\)/.test(src));
+ok('el texto dice que no sustituye las autorizaciones', /independiente de las autorizaciones anteriores y no las sustituye/.test(src));
 ok('solo envía lo decidido (lo vacío no viaja)', /\.\.\.\(a1 \? \{ A1: a1 \} : \{\}\)/.test(src) && /\.\.\.\(a2 \? \{ A2: a2 \} : \{\}\)/.test(src));
 ok('las opciones de la pantalla son las admitidas', ['titular', 'legal_representative'].every((v) => DECISION_OPTIONS.actingAs.includes(v) && src.includes(`'${v}'`)));
 ok('versiones con formato documento@versión', Object.values(ACCEPTANCE_DOCUMENTS).every((d) => /^\d{3}@\d+(\.\d+)*$/.test(d.version)));

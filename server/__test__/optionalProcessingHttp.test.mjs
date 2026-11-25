@@ -60,7 +60,7 @@ R.appendDecisions([{ subjectId: 'r-rev', kind: 'A3', status: 'revoked', actDay: 
 section('[1] activación: A3/A5 opcionales e independientes');
 {
     const today = R.dayOf(Date.now());
-    const base = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
+    const base = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
     const reader = { id: 'nuevo', roles: ['lector'] };
     const kinds = (p) => (p.decisions ?? []).map((d) => `${d.kind}:${d.status}`).join(',');
     const none = A.planActivationDecisions(reader, base, { today, ref: 'REF-1' });
@@ -71,7 +71,7 @@ section('[1] activación: A3/A5 opcionales e independientes');
     const rep = A.planActivationDecisions(reader, { ...base, actingAs: 'legal_representative', A0: 'yes', adultDeclared: undefined, A3: 'yes' }, { today, ref: 'REF-3' });
     ok('representante en la app ⇒ A3 sin verificar (no surte efecto hasta VER)', rep.ok && rep.decisions.find((d) => d.kind === 'A3').verification === 'unverified', JSON.stringify(rep));
     ok('valor inválido ⇒ DECISIONS_REQUIRED [A3]', A.planActivationDecisions(reader, { ...base, A3: 'maybe' }, { today, ref: 'R' }).required?.join() === 'A3');
-    const med = A.planActivationDecisions({ id: 'm2', roles: ['mediador'] }, { terms: true, termsVersion: DOCS.terms.version, adultDeclared: true, mediatorCommitment: true, mediatorVersion: DOCS.mediator.version, A3: 'yes' }, { today, ref: 'R' });
+    const med = A.planActivationDecisions({ id: 'm2', roles: ['mediador'] }, { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', adultDeclared: true, mediatorCommitment: true, mediatorVersion: DOCS.mediator.version, A3: 'yes' }, { today, ref: 'R' });
     ok('mediador: A3/A5 no se registran (no es lector)', med.ok && !/A3|A5/.test(kinds(med)), kinds(med));
     ok('el registro admite A3 y A5 (mismo registro, sin otro sistema)', R.DECISION_KINDS.includes('A3') && R.DECISION_KINDS.includes('A5') && !R.DECISION_KINDS.includes('A4'));
 }

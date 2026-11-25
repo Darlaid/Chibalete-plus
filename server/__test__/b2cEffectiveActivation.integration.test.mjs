@@ -100,7 +100,7 @@ const order = (orderId, email, extra = {}) => ({ orderId, productId: 345, plan: 
     activationAt: Date.now(), idempotencyKey: `test:order:${orderId}`, ...extra });
 const minor = (orderId, email, reader = {}, extra = {}) => order(orderId, email, { reader: { type: 'minor', ...reader }, ...extra });
 const T_NOW = () => ({ version: DOCS.terms.version, acceptedAt: Date.now() - 5000 });
-const REP = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'legal_representative', A0: 'yes', A1: 'yes' };
+const REP = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'legal_representative', A0: 'yes', A1: 'yes' };
 const accept = async (activationUrl, acceptance, at = next()) => {
     const r = await fetch(at + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: String(activationUrl).split('token=')[1], password: PW, acceptance }) });
     let body = null; try { body = await r.json(); } catch { /* */ }
@@ -199,7 +199,7 @@ try {
         ok('pedido para un lector menor ⇒ cuenta representada (usuario lec-…), acceso pendiente', k1.status === 200 && /^lec-/.test(k1.body.loginId || '') && k1.body.accessState === 'pending_activation', JSON.stringify(k1.body));
         const before = stores();
         const tries = { 'sin decisiones': {}, 'sin declarar la representación': { ...REP, A0: undefined }, 'representante que NO autoriza el tratamiento (A1 = no)': { ...REP, A1: 'no' },
-            'quien activa declara no ser representante (A0 = no)': { ...REP, A0: 'no' }, 'como titular adulto, sin declarar mayoría de edad': { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', A1: 'yes' } };
+            'quien activa declara no ser representante (A0 = no)': { ...REP, A0: 'no' }, 'como titular adulto, sin declarar mayoría de edad': { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', A1: 'yes' } };
         const out = {};
         for (const [name, acc] of Object.entries(tries)) out[name] = (await accept(k1.body.activationUrl, acc)).status;
         ok('ningún intento sin autorización suficiente activa la cuenta (422 en todos)', Object.values(out).every((s) => s === 422), JSON.stringify(out));

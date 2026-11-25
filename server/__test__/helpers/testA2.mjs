@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { appendA2Decision, appendDecisions } from '../../privacy/a2Registry.mjs';
+import { appendA2Decision, appendDecisions, pilotSubject, PILOT_KIND, PILOT_MEDIUM, PILOT_SEAL_SUBJECT, PILOT_VERIFICATION, PILOT_VERSION } from '../../privacy/a2Registry.mjs';
 import { ACCEPTANCE_DOCUMENTS } from '../../../utils/acceptanceDocuments.mjs';
 
 export function a2RegistryPath() {
@@ -31,10 +31,10 @@ export function grantA2(ids, status = 'granted') {
 }
 
 /** V8.1-CLOSE-05: decisiones de un titular adulto sin institución (B2C), para activar cuentas en pruebas. */
-export const ADULT_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version,
+export const ADULT_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, policy: true, policyVersion: ACCEPTANCE_DOCUMENTS.policy.version,
     dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' });
 /** V8.1-CLOSE-05: decisiones de un mediador (titular adulto con el compromiso 005). */
-export const MEDIATOR_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, adultDeclared: true,
+export const MEDIATOR_ACTIVATION = Object.freeze({ terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, policy: true, policyVersion: ACCEPTANCE_DOCUMENTS.policy.version, adultDeclared: true,
     mediatorCommitment: true, mediatorVersion: ACCEPTANCE_DOCUMENTS.mediator.version });
 
 /**
@@ -79,5 +79,37 @@ export function grantOptional(kind, ids, { status = 'granted', actDay = '2000-01
     const decisions = [...new Set(ids)].map((userId) => ({ subjectId: userId, kind, status, actDay, version: '004@1.0', medium: 'admin_record',
         capacity: 'legal_representative', verification, requestRef: `AUT-SINT-${kind}-${String(userId).replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 90)}` }));
     if (decisions.length) appendDecisions(decisions, { env });
+    return env.CHP_A2_REGISTRY;
+}
+
+/**
+ * V9R-DEP1: constancia de la Política 001 verificada (ficha sintética) para cada id. Sin ella, una cuenta nueva no
+ * queda activa por la vía administrativa.
+ */
+export function grantPolicy(ids, { status = 'granted', verification = 'verified' } = {}) {
+    const env = { CHP_A2_REGISTRY: a2RegistryPath() };
+    const decisions = [...new Set(ids)].map((userId) => ({ subjectId: userId, kind: 'P', status, actDay: '2000-01-01', version: ACCEPTANCE_DOCUMENTS.policy.version,
+        medium: 'paper', capacity: 'titular', verification, requestRef: `POL-SINT-${String(userId).replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 90)}` }));
+    if (decisions.length) appendDecisions(decisions, { env });
+    return env.CHP_A2_REGISTRY;
+}
+
+/** V9R-DEP1: una línea PILOT_LEGACY (pertenencia del corte, o el sello con `seal: true`). */
+export const pilotLine = ({ groupId, userId, capacity, seal = false, status = 'granted', validUntil = null, ref = 'DIR-SINT-PILOT' }) => ({
+    subjectId: seal ? PILOT_SEAL_SUBJECT : pilotSubject(groupId, userId), kind: PILOT_KIND, status, actDay: '2000-01-01', version: PILOT_VERSION,
+    medium: PILOT_MEDIUM, capacity: seal ? 'pilot_seal' : capacity, verification: PILOT_VERIFICATION, validUntil, requestRef: ref });
+
+/**
+ * V9R-DEP1: carga sintética de un piloto y su sello, en un lote. `groups`: [{ id, mediators, readers, followup? }]
+ * (`followup`: lectores con seguimiento individual; por defecto, todos).
+ */
+export function sealPilot(groups, { seal = true } = {}) {
+    const env = { CHP_A2_REGISTRY: a2RegistryPath() };
+    const lines = groups.flatMap((g) => [
+        ...g.mediators.map((userId) => pilotLine({ groupId: g.id, userId, capacity: 'pilot_mediator' })),
+        ...g.readers.map((userId) => pilotLine({ groupId: g.id, userId, capacity: (g.followup ?? g.readers).includes(userId) ? 'pilot_reader_followup' : 'pilot_reader' })),
+    ]);
+    if (seal) lines.push(pilotLine({ seal: true }));
+    appendDecisions(lines, { env });
     return env.CHP_A2_REGISTRY;
 }

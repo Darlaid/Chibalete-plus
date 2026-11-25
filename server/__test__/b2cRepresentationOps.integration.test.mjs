@@ -104,7 +104,7 @@ const order = (orderId, email, extra = {}) => ({ orderId, productId: 345, plan: 
     activationAt: Date.now(), idempotencyKey: `test:order:${orderId}`, ...extra });
 const minor = (orderId, email, reader = {}, extra = {}) => order(orderId, email, { reader: { type: 'minor', ...reader }, ...extra });
 const T_NOW = () => ({ version: DOCS.terms.version, acceptedAt: Date.now() - 5000 });
-const REP = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'legal_representative', A0: 'yes', A1: 'yes' };
+const REP = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'legal_representative', A0: 'yes', A1: 'yes' };
 const accept = async (activationUrl, acceptance, at = next()) => {
     const r = await fetch(at + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: String(activationUrl).split('token=')[1], password: PW, acceptance }) });
     let body = null; try { body = await r.json(); } catch { /* */ }

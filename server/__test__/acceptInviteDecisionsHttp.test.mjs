@@ -116,7 +116,7 @@ const activate = async (c, id, acceptance, password = PW) => {
     return { status: r.status, body };
 };
 const status = async (c, subject, as) => (await fetch(`${c.base}/api/students/${subject}/status`, { headers: { 'x-user-id': as } })).status;
-const adult = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
+const adult = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
 const regRaw = () => fs.readFileSync(REG, 'utf8');
 const gate = () => R.decisionGate();
 
@@ -142,8 +142,9 @@ try {
     ok('decisiones completas ⇒ 200 y cuenta activa', okB2c.status === 200 && userOf('b2c-1').accountStatus === 'active', JSON.stringify(okB2c.body));
     ok('T y A1 efectivas; A2 no aplica (pendiente)', gate().effective('T', 'b2c-1') && gate().effective('A1', 'b2c-1') && gate().status('A2', 'b2c-1') === 'pending');
     const lines = regRaw().trim().split('\n').map((l) => JSON.parse(l));
-    ok('evidencia: versión, fecha, medio, calidad, verificación y referencia', lines.length === 2 && lines.every((e) => e.w === 'in_app' && e.q === 'titular'
-        && e.x === 'self_authenticated' && /^ACT-/.test(e.r) && e.e === e.d) && lines[0].v === '002@1.0' && lines[1].v === '004@1.0', JSON.stringify(lines[0]));
+    ok('evidencia: versión, fecha e instante, medio, calidad, verificación y referencia; la Política aparte', lines.length === 3 && lines.every((e) => e.w === 'in_app' && e.q === 'titular'
+        && e.x === 'self_authenticated' && /^ACT-/.test(e.r) && e.e === e.d) && lines[0].v === '002@1.0' && lines[1].v === '004@1.0'
+        && lines[2].k === 'P' && lines[2].v === '001@1.0' && lines.every((e) => !Number.isNaN(Date.parse(e.t)) && e.t.slice(0, 4) === e.d.slice(0, 4)) && gate().effective('P', 'b2c-1'), JSON.stringify(lines));
     ok('el registro no contiene el id ni el correo', !regRaw().includes('b2c-1') && !regRaw().includes('@fixture'));
     ok('el log del servidor enlaza la referencia sin nombres', new RegExp(`\\[ACCEPTANCE\\] user=b2c-1 ref=${lines[0].r} profile=titular kinds=T:granted,A1:granted`).test(r1.logs()) && !/Sint b2c-1/.test(r1.logs()));
     const before = regRaw();
@@ -172,9 +173,9 @@ try {
     ok('revocada ⇒ cerrada de inmediato', (await status(r2, 'menor-1', 'med-a')) === 403);
 
     section('[5] mediador');
-    const m1 = await activate(r1, 'med-new', { terms: true, termsVersion: DOCS.terms.version, adultDeclared: true });
+    const m1 = await activate(r1, 'med-new', { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', adultDeclared: true });
     ok('mediador sin 005 ⇒ 422 con C005', m1.status === 422 && m1.body.required.includes('C005'), JSON.stringify(m1.body));
-    const m2 = await activate(r1, 'med-new', { terms: true, termsVersion: DOCS.terms.version, adultDeclared: true, mediatorCommitment: true, mediatorVersion: DOCS.mediator.version });
+    const m2 = await activate(r1, 'med-new', { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', adultDeclared: true, mediatorCommitment: true, mediatorVersion: DOCS.mediator.version });
     ok('con el compromiso 005 ⇒ 200; C005 efectiva', m2.status === 200 && gate().effective('C005', 'med-new'));
 
     section('[6] cuenta existente sin decisiones');

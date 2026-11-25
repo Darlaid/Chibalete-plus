@@ -284,7 +284,7 @@ try {
     await SUP.suppressMookParticipant({ mookPath: LIVE.mook, userId: 'sup', requestRef: 'SOL-SINT-0901' });
     await SUP.suppressSubmissions({ submissionsPath: LIVE.subs, userId: 'sup', requestRef: 'SOL-SINT-0901' });
     const ack = await SUP.suppressResidualSources(paths(LIVE), 'sup');
-    ok('constancia, T/A1/A2 revocadas', acct.decisionsRevoked.join() === 'T,A1,A2' && SUP.suppressionGate().isSuppressed('sup'));
+    ok('constancia, T/A1/A2 y Política 001 revocadas', acct.decisionsRevoked.join() === 'T,A1,A2,P' && SUP.suppressionGate().isSuppressed('sup'));
     ok('el retiro de XP NO es supresión', SUP.suppressionGate().isSuppressed('xpo') === false && X.readRegistry().has(X.tombstoneOf('xpo')));
     ok('acuse sin ids ni contenido', !JSON.stringify(ack).includes('sup') && !JSON.stringify(ack).includes('RASTRO'), JSON.stringify(ack));
     ok('eventos propios eliminados (vivo y archivo)', ack.events.ownRemoved === 1 && ack.eventsArchive.ownRemoved === 1);

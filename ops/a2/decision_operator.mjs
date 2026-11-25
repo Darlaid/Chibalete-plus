@@ -4,6 +4,8 @@
 //    "actDay":"AAAA-MM-DD (fecha del acto según la evidencia)","version":"004@1.0","medium":"paper|electronic_signature|verifiable_message|admin_record",
 //    "capacity":"titular|legal_representative|institution|mediator","verification":"verified","requestRef":"AUT-…","validUntil":null}
 // Nada tiene valor por defecto: la fecha, el medio y la referencia salen de la evidencia. Todas las líneas o ninguna.
+// V9R-DEP1: también `P` (Política 001, ficha verificada) y las líneas PILOT_LEGACY que emite `pilot_legacy_pack.mjs`
+// (que no son una autorización: ver ese guion). Tras el sello de PILOT_LEGACY no se admite ninguna concesión más.
 // Salida: solo acuses (sin ids).
 const { loadA2Key, appendDecisions } = await import('/app/server/privacy/a2Registry.mjs');
 let input = '';

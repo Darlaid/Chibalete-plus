@@ -15,7 +15,15 @@
  *   v  documento y versión (`004@1.0`) · w  medio · q  calidad de quien decide
  *   x  verificación: self_authenticated | verified | unverified
  *   u  vigencia opcional · r  referencia opaca y verificable · m  MAC
+ *   t  instante de la anotación (servidor, ISO 8601 UTC); lo llevan las líneas escritas desde V9R-DEP1
  * Por sujeto y tipo vale la ÚLTIMA línea. Sin línea ⇒ pendiente.
+ *
+ * V9R-DEP1 — dos tipos más, ninguno es una autorización de tratamiento:
+ *   P             aceptación expresa de la Política de tratamiento de datos (001) al activar la cuenta. Es una
+ *                 constancia propia: no sustituye ni aporta T, A0–A5 ni C005.
+ *   PILOT_LEGACY  condición de continuidad de los pilotos anteriores a V9. NO es un consentimiento, ni una
+ *                 autorización parental, ni un compromiso 005: solo constata que una pertenencia (grupo + cuenta)
+ *                 existía en el corte del inventario. Ver el bloque PILOT_LEGACY más abajo.
  *
  * Una decisión es EFECTIVA solo si es `granted`, está vigente y su verificación
  * es `verified` (GVA/VER sobre la ficha C.1) o `self_authenticated` (titular
@@ -39,11 +47,37 @@ import { getSubjectKey, loadSubjectKey } from '../gamification/subjectKey.mjs';
 export const A2_STATUSES = Object.freeze(['granted', 'denied', 'revoked']);
 // V8.1-PROD-02B: A3 (Leo / IA) y A5 (transcripción de voz) del 004, independientes de A1/A2. A4 (LU) no tiene
 // tratamiento opcional propio en esta plataforma: queda comprendido en A1 (ver el documento de la unidad).
-export const DECISION_KINDS = Object.freeze(['T', 'A0', 'A1', 'A2', 'A3', 'A5', 'C003', 'C005']);
+export const DECISION_KINDS = Object.freeze(['T', 'A0', 'A1', 'A2', 'A3', 'A5', 'C003', 'C005', 'P', 'PILOT_LEGACY']);
 // `checkout`: aceptación en la compra, recibida por la integración autenticada de la tienda (HMAC servidor a servidor).
 export const MEDIA = Object.freeze(['in_app', 'paper', 'electronic_signature', 'verifiable_message', 'admin_record', 'checkout']);
 export const CAPACITIES = Object.freeze(['titular', 'legal_representative', 'institution', 'mediator']);
 export const VERIFICATIONS = Object.freeze(['self_authenticated', 'verified', 'unverified']);
+
+// ── V9R-DEP1 · PILOT_LEGACY ──────────────────────────────────────────────────
+// Régimen cerrado de continuidad. Una línea por PERTENENCIA existente en el corte (sujeto = grupo + cuenta) y una
+// línea de SELLO que cierra la carga:
+//   - nada rige hasta que existe el sello; desde el sello no se admite ni se lee ninguna concesión nueva (tampoco
+//     otro sello): ninguna cuenta, curso o institución posterior puede obtener la condición;
+//   - cada línea admite solo `granted` y `revoked`; revocar una pertenencia la cierra para siempre, y revocar el
+//     sello termina el régimen entero; `u` (vigencia) lo hace caducar solo;
+//   - su verificación es `inventory` (cotejo con el inventario del corte): nunca `verified` ni `self_authenticated`,
+//     así que `effective()` jamás la toma por una decisión de consentimiento, y ningún otro tipo puede declararla.
+// Qué conserva, y solo dentro de ESE grupo y mientras la pertenencia siga existiendo hoy:
+//   pilot_mediator         en lugar del C005 del mediador: nómina y resumen de ese grupo;
+//   pilot_reader           el lector figura en la nómina que ve ese mediador (sin detalle individual);
+//   pilot_reader_followup  además, en lugar de su A2: seguimiento individual por ese mediador.
+// Qué NO abre, nunca: Leo e IA (A3), transcripción de voz (A5), XP (A1), términos (T), candidatos y diagnóstico del grupo,
+// ni nada sobre un lector o un grupo sin su propia línea. Una negativa o revocación expresa de A2 (lector) o de
+// C005 (mediador) prevalece siempre sobre la condición de piloto.
+export const PILOT_KIND = 'PILOT_LEGACY';
+export const PILOT_VERSION = 'PILOT@1.0';
+export const PILOT_VERIFICATION = 'inventory';
+export const PILOT_MEDIUM = 'admin_record';
+export const PILOT_CAPACITIES = Object.freeze(['pilot_mediator', 'pilot_reader', 'pilot_reader_followup', 'pilot_seal']);
+const PILOT_PREFIX = 'pilot-legacy\u001f';
+export const PILOT_SEAL_SUBJECT = `${PILOT_PREFIX}seal`;
+/** Sujeto de una pertenencia del corte. Nunca coincide con el id de una cuenta ni de una organización. */
+export const pilotSubject = (groupId, userId) => `${PILOT_PREFIX}membership\u001f${groupId}\u001f${userId}`;
 /** Mínimo de lectores retenidos para publicar detalle del resto (mismo umbral k que los agregados). */
 export const A2_MIN_WITHHELD = 5;
 
@@ -56,7 +90,8 @@ const hmac = (key, msg) => crypto.createHmac('sha256', key).update(msg).digest()
 const registryKey = () => hmac(getSubjectKey(), 'chp-a2-registry-v2');
 const subjectKey = () => hmac(getSubjectKey(), 'chp-a2-reader-v1');
 const FIELDS = ['id', 's', 'k', 'a', 'd', 'e', 'v', 'w', 'q', 'x', 'u', 'r'];
-const entryMac = (e) => hmac(registryKey(), FIELDS.map((f) => String(e[f] ?? '')).join('\0')).toString('hex');
+// `t` entra en el MAC solo cuando la línea lo trae: las líneas anteriores siguen verificando y no se puede añadir ni quitar.
+const entryMac = (e) => hmac(registryKey(), [...FIELDS, ...(e.t != null ? ['t'] : [])].map((f) => String(e[f] ?? '')).join('\0')).toString('hex');
 
 class A2Error extends Error {
     constructor(code) { super(code); this.name = 'A2Error'; this.code = code; }
@@ -90,6 +125,7 @@ export function readDecisions(env = process.env) {
     const out = new Map();
     if (raw === '') return out;
     if (!raw.endsWith('\n')) throw unavailable();
+    const sealSlot = slot(subjectRef(PILOT_SEAL_SUBJECT), PILOT_KIND);
     for (const line of raw.slice(0, -1).split('\n')) {
         let e;
         try { e = JSON.parse(line); } catch { throw unavailable(); }
@@ -97,6 +133,8 @@ export function readDecisions(env = process.env) {
         const mac = Buffer.from(String(e.m ?? ''), 'hex');
         const expected = Buffer.from(entryMac(e), 'hex');
         if (mac.length !== expected.length || !crypto.timingSafeEqual(mac, expected)) throw unavailable();
+        // PILOT_LEGACY: desde el sello el régimen está cerrado. Una concesión posterior no se lee (ni otro sello).
+        if (e.k === PILOT_KIND && e.a === 'granted' && out.has(sealSlot)) continue;
         out.set(slot(e.s, e.k), { status: e.a, validUntil: e.u ?? null, verification: e.x, actDay: e.e, version: e.v, medium: e.w, capacity: e.q });
     }
     return out;
@@ -118,10 +156,22 @@ function validateDecision(d, today) {
     if (!DECISION_KINDS.includes(d.kind)) bad('INVALID_KIND');
     if (!A2_STATUSES.includes(d.status)) bad('INVALID_STATUS');
     if (typeof d.requestRef !== 'string' || !REF_RX.test(d.requestRef)) bad('INVALID_REQUEST_REF');
-    if (typeof d.version !== 'string' || !VERSION_RX.test(d.version)) bad('INVALID_VERSION');
-    if (!MEDIA.includes(d.medium)) bad('INVALID_MEDIUM');
-    if (!CAPACITIES.includes(d.capacity)) bad('INVALID_CAPACITY');
-    if (!VERIFICATIONS.includes(d.verification)) bad('INVALID_VERIFICATION');
+    if (d.kind === PILOT_KIND) {
+        // Forma única y cerrada: nunca con la calidad, el medio ni la verificación de un consentimiento.
+        if (d.status === 'denied') bad('INVALID_STATUS');
+        if (d.version !== PILOT_VERSION) bad('INVALID_VERSION');
+        if (d.medium !== PILOT_MEDIUM) bad('INVALID_MEDIUM');
+        if (!PILOT_CAPACITIES.includes(d.capacity)) bad('INVALID_CAPACITY');
+        if (d.verification !== PILOT_VERIFICATION) bad('INVALID_VERIFICATION');
+        if ((d.capacity === 'pilot_seal') !== (d.subjectId === PILOT_SEAL_SUBJECT)) bad('INVALID_USER');
+        if (d.capacity !== 'pilot_seal' && !d.subjectId.startsWith(`${PILOT_PREFIX}membership\u001f`)) bad('INVALID_USER');
+    } else {
+        if (typeof d.version !== 'string' || !VERSION_RX.test(d.version)) bad('INVALID_VERSION');
+        if (!MEDIA.includes(d.medium)) bad('INVALID_MEDIUM');
+        if (!CAPACITIES.includes(d.capacity)) bad('INVALID_CAPACITY');
+        if (!VERIFICATIONS.includes(d.verification)) bad('INVALID_VERIFICATION');
+        if (d.subjectId.startsWith(PILOT_PREFIX)) bad('INVALID_USER');
+    }
     // La fecha del acto la aporta la evidencia: nunca futura, nunca por defecto.
     if (typeof d.actDay !== 'string' || !DAY_RX.test(d.actDay) || Number.isNaN(Date.parse(d.actDay)) || d.actDay > today) bad('INVALID_ACT_DATE');
     if (d.validUntil != null && (d.status !== 'granted' || typeof d.validUntil !== 'string' || !DAY_RX.test(d.validUntil))) bad('INVALID_VALID_UNTIL');
@@ -131,6 +181,8 @@ function validateDecision(d, today) {
     if (d.kind === 'C003' && d.capacity !== 'institution') bad('INVALID_CAPACITY');
     if (d.kind === 'C005' && d.capacity !== 'mediator') bad('INVALID_CAPACITY');
     if (d.kind !== 'C003' && d.capacity === 'institution') bad('INVALID_CAPACITY');
+    // P (001): la acepta quien activa la cuenta, por sí o como representante; nunca una institución ni «mediator».
+    if (d.kind === 'P' && !['titular', 'legal_representative'].includes(d.capacity)) bad('INVALID_CAPACITY');
 }
 
 /**
@@ -142,11 +194,19 @@ export function appendDecisions(decisions, { env = process.env, now = Date.now()
     if (!Array.isArray(decisions) || decisions.length === 0) throw new A2Error('NO_DECISIONS');
     const today = dayOf(now);
     for (const d of decisions) validateDecision(d, today);
-    readDecisions(env); // nunca se añade a un registro que no se puede verificar
+    const current = readDecisions(env); // nunca se añade a un registro que no se puede verificar
+    // PILOT_LEGACY: con el sello puesto (aunque esté revocado) no se concede nada más; en el lote, el sello va al final.
+    const pilotGrants = decisions.map((d, i) => ({ d, i })).filter(({ d }) => d.kind === PILOT_KIND && d.status === 'granted');
+    if (pilotGrants.length) {
+        if (current.has(slot(subjectRef(PILOT_SEAL_SUBJECT), PILOT_KIND))) throw new A2Error('PILOT_LEGACY_SEALED');
+        const seal = pilotGrants.find(({ d }) => d.capacity === 'pilot_seal');
+        if (seal && pilotGrants.some(({ i }) => i > seal.i)) throw new A2Error('PILOT_LEGACY_SEALED');
+    }
     const p = registryPath(env);
+    const at = new Date(now).toISOString();
     const lines = decisions.map((d) => {
         const e = { id: crypto.randomUUID(), s: subjectRef(d.subjectId), k: d.kind, a: d.status, d: today, e: d.actDay, v: d.version,
-            w: d.medium, q: d.capacity, x: d.verification, u: d.validUntil ?? null, r: d.requestRef };
+            w: d.medium, q: d.capacity, x: d.verification, u: d.validUntil ?? null, r: d.requestRef, t: at };
         return { e, line: `${JSON.stringify({ ...e, m: entryMac(e) })}\n` };
     });
     const fd = fs.openSync(p, 'a');
@@ -180,7 +240,23 @@ export function decisionGate(env = process.env, now = Date.now()) {
     const registry = readDecisions(env);
     const today = dayOf(now);
     const stateOf = (kind, id) => (typeof id === 'string' && id ? registry.get(slot(subjectRef(id), kind)) ?? null : null);
+    const pilotLive = (st, capacities) => !!st && st.status === 'granted' && st.verification === PILOT_VERIFICATION && st.version === PILOT_VERSION
+        && capacities.includes(st.capacity) && (st.validUntil === null || today <= st.validUntil);
+    let sealed = null;
+    const pilotSealed = () => (sealed ??= pilotLive(stateOf(PILOT_KIND, PILOT_SEAL_SUBJECT), ['pilot_seal']));
     return {
+        /**
+         * V9R-DEP1 — ¿esa pertenencia (grupo + cuenta) tiene la condición PILOT_LEGACY vigente, con esa función?
+         * `role`: 'mediator' | 'reader' (figura en la nómina) | 'followup' (seguimiento individual).
+         * Solo con el régimen sellado y vigente. No comprueba que la pertenencia siga existiendo hoy: eso lo
+         * decide el llamador con los grupos actuales.
+         */
+        pilot: (role, groupId, userId) => {
+            if (typeof groupId !== 'string' || !groupId || typeof userId !== 'string' || !userId || !pilotSealed()) return false;
+            const capacities = role === 'mediator' ? ['pilot_mediator'] : role === 'reader' ? ['pilot_reader', 'pilot_reader_followup']
+                : role === 'followup' ? ['pilot_reader_followup'] : [];
+            return pilotLive(stateOf(PILOT_KIND, pilotSubject(groupId, userId)), capacities);
+        },
         effective: (kind, id) => isEffective(stateOf(kind, id), today),
         /** Última línea (versión, medio, calidad…) o null. Solo para decidir; nunca sale del servidor. */
         state: (kind, id) => stateOf(kind, id),
@@ -225,7 +301,62 @@ export function a2Gate(env = process.env, now = Date.now(), { mediatorId = null 
     // V8.1-CLOSE-07B (G-07): para un mediador, además su compromiso 005 (C005) efectivo y
     // vigente: la vigencia del 005 caduca sola y su retiro rige en la petición siguiente.
     const mediatorOk = mediatorId === null || gate.effective('C005', mediatorId);
-    return { allows: (userId) => mediatorOk && gate.effective('A2', userId) };
+    // V9R-DEP1: o bien la pareja mediador–lector es de un piloto anterior a V9 (mismo grupo, las dos pertenencias
+    // en el corte y vigentes hoy, el lector con seguimiento). Se calcula una vez por puerta, y solo si hace falta.
+    let followup = null;
+    const pilotAllows = (userId) => {
+        if (mediatorId === null || typeof userId !== 'string' || !userId) return false;
+        if (pilotRefused(gate, 'A2', userId)) return false;
+        followup ??= pilotFollowupReaders(gate, mediatorId);
+        return followup.has(userId);
+    };
+    return { allows: (userId) => (mediatorOk && gate.effective('A2', userId)) || pilotAllows(userId) };
+}
+
+// ── V9R-DEP1 · PILOT_LEGACY: lectura ─────────────────────────────────────────
+
+/** Una negativa o revocación expresa prevalece sobre la condición de piloto. */
+const pilotRefused = (gate, kind, id) => ['denied', 'revoked'].includes(gate.status(kind, id));
+
+/**
+ * Grupos que una cuenta media HOY, con su nómina de hoy: `(mediatorId) => [{ groupId, memberIds }]`. Lo aporta el
+ * servidor (la fuente de identidad es suya); sin él, o si falla, la condición de piloto no concede nada.
+ */
+let pilotScopeResolver = null;
+export function setPilotScopeResolver(fn) { pilotScopeResolver = typeof fn === 'function' ? fn : null; }
+const mediatedToday = (mediatorId) => {
+    if (!pilotScopeResolver) return [];
+    try { return (pilotScopeResolver(mediatorId) ?? []).filter((g) => g && typeof g.groupId === 'string'); } catch { return []; }
+};
+
+/**
+ * Nóminas de piloto de un mediador: por cada grupo que media hoy y cuya pertenencia es del corte, los miembros de
+ * hoy cuya pertenencia a ESE grupo también lo es. Un lector o un grupo sin su línea no aparece.
+ * @returns {Map<string, Set<string>>} groupId → lectores
+ */
+export function pilotRosters(gate, mediatorId) {
+    const out = new Map();
+    if (typeof mediatorId !== 'string' || !mediatorId || pilotRefused(gate, 'C005', mediatorId)) return out;
+    for (const g of mediatedToday(mediatorId)) {
+        if (!gate.pilot('mediator', g.groupId, mediatorId)) continue;
+        out.set(g.groupId, new Set((g.memberIds ?? []).filter((id) => gate.pilot('reader', g.groupId, id))));
+    }
+    return out;
+}
+
+/**
+ * ¿Ese mediador conserva, por PILOT_LEGACY, la nómina y el resumen de ESE grupo? Solo si lo media HOY, su
+ * pertenencia es del corte y su C005 no está negado ni revocado (las mismas condiciones que `pilotRosters`).
+ */
+export function pilotMediatorOf(gate, groupId, mediatorId) {
+    return pilotRosters(gate, mediatorId).has(groupId);
+}
+
+/** Lectores cuyo seguimiento individual conserva ese mediador por PILOT_LEGACY (sin mirar A2: lo hace `a2Gate`). */
+function pilotFollowupReaders(gate, mediatorId) {
+    const out = new Set();
+    for (const [groupId, readers] of pilotRosters(gate, mediatorId)) for (const id of readers) if (gate.pilot('followup', groupId, id)) out.add(id);
+    return out;
 }
 
 /**

@@ -92,6 +92,8 @@ const call = async (c, method, url, body, as = 'adm') => {
     return { status: r.status, body: b };
 };
 const activate = (c, token, acceptance) => call(c, 'POST', '/api/accept-invite', { token, password: 'Clave-Sintetica-2026!', acceptance });
+const verifiedPolicy = (id) => R.appendDecisions([{ subjectId: id, kind: 'P', status: 'granted', actDay: '2026-01-10', version: '001@1.0', medium: 'paper',
+    capacity: 'legal_representative', verification: 'verified', requestRef: `POL-SINT-${id}` }]);
 const verifiedA1 = (id) => R.appendDecisions([{ subjectId: id, kind: 'A1', status: 'granted', actDay: '2026-01-10', version: '004@1.0', medium: 'paper',
     capacity: 'legal_representative', verification: 'verified', requestRef: `AUT-SINT-${id}` }]);
 const PW = 'Clave-Admin-Sintetica-77!';
@@ -127,9 +129,13 @@ try {
     ok('mediador sin 005 ⇒ invitado', med.status === 200 && med.body.accountStatus === 'invited', JSON.stringify(med.body));
     const adm2 = await call(api, 'POST', '/api/users', { id: 'new-adm', email: 'newadm@fixture.invalid', nombre_completo: 'Admin Dos', password: PW, roles: ['administrador'] });
     ok('administración de plataforma ⇒ activa como antes', adm2.status === 200 && adm2.body.accountStatus === 'active' && !adm2.body.activationRequired);
-    verifiedA1('reg-lec');
+    // V9R-DEP1: la regularización exige además la constancia de la Política 001; con A1 sola la cuenta queda invitada.
+    verifiedA1('reg-sinpol');
+    const noPol = await call(api, 'POST', '/api/users', { id: 'reg-sinpol', email: 'regsinpol@fixture.invalid', nombre_completo: 'Sin política', password: PW, roles: ['lector'], colegio: 'Colegio Alfa', groupIds: ['g-a1'] });
+    ok('A1 verificada sin la Política 001 ⇒ invitada (se activa por su enlace)', noPol.status === 200 && noPol.body.accountStatus === 'invited' && noPol.body.activationRequired === true, JSON.stringify(noPol.body));
+    verifiedA1('reg-lec'); verifiedPolicy('reg-lec');
     const reg = await call(api, 'POST', '/api/users', { id: 'reg-lec', email: 'reglec@fixture.invalid', nombre_completo: 'Regularizado', password: PW, roles: ['lector'], colegio: 'Colegio Alfa', groupIds: ['g-a1'] });
-    ok('regularización con A1 verificada en el registro ⇒ activa', reg.status === 200 && reg.body.accountStatus === 'active' && !reg.body.activationRequired, JSON.stringify(reg.body));
+    ok('regularización con A1 y Política 001 verificadas en el registro ⇒ activa', reg.status === 200 && reg.body.accountStatus === 'active' && !reg.body.activationRequired, JSON.stringify(reg.body));
     ok('…la regularización no inventa A2', R.decisionGate().status('A2', 'reg-lec') === 'pending');
     const raw = fs.readFileSync(REG, 'utf8');
     fs.rmSync(REG);
@@ -143,8 +149,11 @@ try {
     const put1 = await call(api, 'PUT', '/api/users/new-lec', { accountStatus: 'active', password: PW });
     ok('invitada → activa sin decisión ⇒ 409 DECISIONS_REQUIRED y sigue invitada', put1.status === 409 && put1.body?.code === 'DECISIONS_REQUIRED' && userOf('new-lec').accountStatus === 'invited', JSON.stringify(put1.body));
     verifiedA1('inv-1');
+    const put2a = await call(api, 'PUT', '/api/users/inv-1', { accountStatus: 'active' });
+    ok('con A1 verificada pero sin la Política 001 ⇒ 409 y sigue invitada', put2a.status === 409 && put2a.body?.code === 'DECISIONS_REQUIRED' && userOf('inv-1').accountStatus === 'invited', JSON.stringify(put2a.body));
+    verifiedPolicy('inv-1');
     const put2 = await call(api, 'PUT', '/api/users/inv-1', { accountStatus: 'active' });
-    ok('con A1 verificada (regularización) ⇒ 200 y activa', put2.status === 200 && userOf('inv-1').accountStatus === 'active', JSON.stringify(put2.body));
+    ok('con A1 y Política 001 verificadas (regularización) ⇒ 200 y activa', put2.status === 200 && userOf('inv-1').accountStatus === 'active', JSON.stringify(put2.body));
     const put3 = await call(api, 'PUT', '/api/users/off-1', { accountStatus: 'active' });
     ok('reactivar una cuenta desactivada no cambia (compatibilidad)', put3.status === 200 && userOf('off-1').accountStatus === 'active', JSON.stringify(put3.body));
     const put4 = await call(api, 'PUT', '/api/users/old-1', { nombre_completo: 'Cuenta antigua editada' });

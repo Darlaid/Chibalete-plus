@@ -42,9 +42,9 @@ import {
 // GAMIFICATION_ENABLED off (default) y sin GAMIFICATION_MOOK_SINCE.
 import * as gamificationMook from './gamification/mookSource.mjs';
 // CHP-V8.1-CLOSE-01 (G-02) — A2: único criterio de divulgación individual a mediadores.
-import { a2Gate, appendDecisions, dayOf as a2DayOf, decisionGate, individualDisclosure, loadA2Key } from './privacy/a2Registry.mjs';
+import { a2Gate, appendDecisions, dayOf as a2DayOf, decisionGate, individualDisclosure, loadA2Key, pilotMediatorOf, pilotRosters, setPilotScopeResolver } from './privacy/a2Registry.mjs';
 import { setPersonalReadingResolver } from './privacy/personalReading.mjs';
-import { acceptanceDocumentsStatus, adminActivationAllowed, isRepresentedMinorAccount, optionalProcessingFor, planActivationDecisions, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
+import { acceptanceDocumentsStatus, adminActivationAllowed, isRepresentedMinorAccount, optionalProcessingFor, planActivationDecisions, policyOnFile, requiredDocumentIds, termsOnFile } from './privacy/acceptance.mjs';
 import { workBlock } from '../utils/workEligibility.mjs';
 import { isSyntheticUser } from './identity/organizationScope.mjs';
 // CHP-V6-READING-CANONICAL-PRODUCER-01 — la lectura persiste nombres del registry v2.
@@ -657,18 +657,31 @@ const a2Unavailable = (res) => { res.status(503).json({ error: 'individual_acces
  * diagnóstico (y replica el del resumen del grupo, 65C-S): sin C005 vigente, 403; registro no verificable, 503. La
  * administración (de máquina o de plataforma) no pasa por aquí: su acceso no depende de un compromiso de mediación.
  * Se decide en cada petición, así que una revocación rige de inmediato en todas las réplicas.
- * @returns {Promise<boolean>} false = ya respondió
+ *
+ * V9R-DEP1 — con `pilot: true` (solo la nómina del grupo), quien media un grupo de un piloto anterior a V9 conserva
+ * esa función sin C005, por la condición PILOT_LEGACY de SU pertenencia a ESE grupo. Entonces se devuelve
+ * `{ pilotReaders }`: los únicos miembros que puede recibir (los del corte que siguen en el grupo). Candidatos y
+ * diagnóstico no la admiten: nombran a personas de fuera de esa nómina.
+ * @returns {Promise<boolean|{pilotReaders:Set<string>}>} false = ya respondió
  */
-async function requireGroupMediatorCommitment(req, res, groupId) {
+async function requireGroupMediatorCommitment(req, res, groupId, { pilot = false } = {}) {
     if (await isAdminRequest(req)) return true;
     const viewerId = req.auth?.userId ?? req.user?.id ?? req.headers['x-user-id'];
     let viaMediation = true;
     try { viaMediation = evaluateScopeAccess(viewerId, 'group', groupId).via === 'mediator_of_group'; } catch { /* sin poder saberlo, se exige */ }
     if (!viaMediation) return true;
-    let committed;
-    try { committed = decisionGate().effective('C005', viewerId); } catch { return a2Unavailable(res); }
-    if (!committed) { res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: groupId }); return false; }
-    return true;
+    let gate;
+    try { gate = decisionGate(); } catch { return a2Unavailable(res); }
+    if (gate.effective('C005', viewerId)) return true;
+    if (pilot && pilotMediatorOf(gate, groupId, viewerId)) return { pilotReaders: pilotRosters(gate, viewerId).get(groupId) ?? new Set() };
+    res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: groupId });
+    return false;
+}
+// V9R-DEP1: la condición de piloto se decide con los grupos que la cuenta media HOY y su nómina de hoy (CIS).
+setPilotScopeResolver((mediatorId) => [...mediatedGroupRosters(mediatorId)].map(([groupId, members]) => ({ groupId, memberIds: [...members] })));
+/** V9R-DEP1 — nóminas que un mediador SIN C005 conserva por PILOT_LEGACY (grupo → lectores del corte). Vacío si ninguna. */
+function pilotRostersOfMediator(callerId) {
+    try { return pilotRosters(decisionGate(), callerId); } catch { return new Map(); }
 }
 /**
  * V9 65E-A — ¿quien lista es un mediador (no administración) SIN C005 vigente? Para las listas generales (usuarios y
@@ -6072,8 +6085,12 @@ app.get('/api/users', requireAuth, async (req, res) => {
             } else if (mediatorWithoutCommitment(scope)) {
                 // V9 65E-A: un mediador sin C005 vigente no consulta a los lectores de su institución, ni siquiera su
                 // perfil público: recibe su propia cuenta y el perfil público del resto del personal (no lectores).
-                normalizedUsers = normalizedUsers.filter(u => u?.id === scope.callerId || pedagogyRolesOf(u).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r)))
-                    .map(u => (u?.id === scope.callerId ? u : publicUserProfile(u)));
+                // V9R-DEP1: más los lectores de las nóminas que conserva por PILOT_LEGACY (sus cursos del piloto), con el
+                // mismo registro que recibiría con C005; del resto de la institución, nada.
+                const pilotOwn = new Set();
+                for (const roster of pilotRostersOfMediator(scope.callerId).values()) for (const id of roster) pilotOwn.add(id);
+                normalizedUsers = normalizedUsers.filter(u => u?.id === scope.callerId || pilotOwn.has(u?.id) || pedagogyRolesOf(u).some(r => PEDAGOGY_PRIVILEGED_ROLES.includes(r)))
+                    .map(u => (u?.id === scope.callerId ? u : (pilotOwn.has(u?.id) && !isPersonalB2cAccount(u) ? withoutAccessIdentity(u) : publicUserProfile(u))));
             } else {
                 // V9 F5-C3: el mediador recibe el registro (con correo) SOLO de los lectores de grupos que media (CIS);
                 // del resto de su institución, el mismo perfil público que recibe un lector. Una cuenta B2C personal, nunca.
@@ -6364,7 +6381,9 @@ app.post('/api/accept-invite', acceptInviteLimiter, async (req, res) => {
         const plan = planActivationDecisions(invited, req.body?.acceptance, { today: a2DayOf(Date.now()), ref: acceptanceRef,
             // V9 BII-CLOSE-1: en la transición a titular adulto (mayoría de edad) los términos que aceptó su
             // representante no se dan por suyos: los acepta él mismo.
-            termsAccepted: gateNow && !invited.titularTransition ? termsOnFile(gateNow, invited.id) : false });
+            termsAccepted: gateNow && !invited.titularTransition ? termsOnFile(gateNow, invited.id) : false,
+            // V9R-DEP1: la Política 001 se acepta de forma propia; solo se omite si esta cuenta ya la aceptó en esa versión.
+            policyAccepted: gateNow && !invited.titularTransition ? policyOnFile(gateNow, invited.id) : false });
         if (!plan.ok) {
             return res.status(422).json({ error: 'Faltan decisiones para activar la cuenta.', code: plan.code, ...(plan.required ? { required: plan.required } : {}) });
         }
@@ -7360,7 +7379,13 @@ app.get('/api/groups', requireAuth, async (req, res) => {
         // V9 65E-A: un mediador sin C005 vigente sigue sabiendo qué grupos media, pero no recibe ninguna nómina. La
         // retención va declarada (`rosterWithheld`) para que la interfaz la explique y no la lea como «grupo vacío».
         if (mediatorWithoutCommitment(scope)) {
-            return res.json(groups.map(normalizeGroup).map(g => ({ ...g, studentIds: [], memberIds: [], rosterWithheld: true })));
+            // V9R-DEP1: de los grupos de un piloto anterior a V9 conserva la nómina del corte (PILOT_LEGACY); del resto, nada.
+            const pilot = pilotRostersOfMediator(scope.callerId);
+            return res.json(groups.map(normalizeGroup).map(g => {
+                const kept = pilot.get(g.id);
+                if (!kept) return { ...g, studentIds: [], memberIds: [], rosterWithheld: true };
+                return { ...g, studentIds: (g.studentIds || []).filter(id => kept.has(id)), memberIds: (g.memberIds || []).filter(id => kept.has(id)), rosterPilotLegacy: true };
+            }));
         }
         // V9 BIII F5-DP: un lector recibe sus grupos completos y, de su institución, solo los clubes abiertos, con lo
         // mínimo para descubrirlos y unirse: sin participantes (solo cuántos son). Los demás cursos no se listan.
@@ -8217,7 +8242,9 @@ app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
         // tenant del grupo; `allowSelf:false` — un grupo no es un sujeto propio.
         if (!(await requireSubjectScope(req, res, 'group', groupId, { allowSelf: false }))) return;
         // V9 65E-A: y, para quien media, su C005 vigente.
-        if (!(await requireGroupMediatorCommitment(req, res, groupId))) return;
+        // V9R-DEP1: o la condición PILOT_LEGACY de su pertenencia a este grupo; entonces, solo los lectores del corte.
+        const commitment = await requireGroupMediatorCommitment(req, res, groupId, { pilot: true });
+        if (!commitment) return;
         const roster = await rosterDisclosure(req, res);
         if (!roster) return;
         const groups = readJSON(GROUPS_DB) || [];
@@ -8250,6 +8277,7 @@ app.get('/api/groups/:groupId/members', requireAuth, async (req, res) => {
         const members = [];
         for (const u of users) {
             if (!u?.id || !currentMemberIds.has(u.id)) continue;
+            if (commitment.pilotReaders && !commitment.pilotReaders.has(u.id)) continue;
 
             const inStudent      = studentSet.has(u.id);
             const inMember       = memberSet.has(u.id);
@@ -9911,10 +9939,16 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         // detalle por lector y los agregados de TODA la nómina seguían saliendo (con 5 o más lectores retenidos el
         // criterio de divulgación conserva el agregado de la cohorte). Se decide en cada petición, antes de mirar la
         // caché: una revocación rige de inmediato en todas las réplicas. Registro no verificable ⇒ 503, nunca cifras.
+        // V9R-DEP1: o la condición PILOT_LEGACY de su pertenencia a este grupo; entonces el resumen (filas y agregados) se
+        // limita a los lectores del corte que siguen en el grupo.
+        let pilotReaders = null;
         if (viewerMediatorId) {
-            let committed;
-            try { committed = decisionGate().effective('C005', viewerMediatorId); } catch { return a2Unavailable(res); }
-            if (!committed) return res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: id });
+            let gate;
+            try { gate = decisionGate(); } catch { return a2Unavailable(res); }
+            if (!gate.effective('C005', viewerMediatorId)) {
+                if (!pilotMediatorOf(gate, id, viewerMediatorId)) return res.status(403).json({ error: 'scope_access_denied', scope_type: 'group', scope_id: id });
+                pilotReaders = pilotRosters(gate, viewerMediatorId).get(id) ?? new Set();
+            }
         }
         // V9 F7-C2: para su mediador, el resumen cuenta solo la actividad de las obras asociadas a ESTE grupo. Se
         // cachea aparte del resumen completo (el de la administración), que no cambia.
@@ -9937,7 +9971,7 @@ app.get('/api/groups/:id/analytics-summary', libraryViewNoStore, requireAuth, as
         // V9 BIII F5-D: el resumen se conserva hasta 5 minutos, pero QUIÉN está en el grupo se decide en cada petición.
         // Un lector trasladado o dado de baja deja de aparecer (fila y agregados) de inmediato, en todas las réplicas;
         // antes seguía en el resumen conservado del curso anterior. Quien entra aparece al renovarse el resumen.
-        const currentCohort = new Set(resolveGroupLectorCohort(group, users, groups));
+        const currentCohort = new Set(resolveGroupLectorCohort(group, users, groups).filter(uid => !pilotReaders || pilotReaders.has(uid)));
         const currentOnly = (summary) => ((summary.readers || []).every(x => currentCohort.has(x.userId)) ? summary : restrictSummaryToReaders(summary, currentCohort));
         const r = { ...cached, data: currentOnly(cached.data) };
         const ms = Math.round(performance.now() - t0);

@@ -74,6 +74,8 @@ const ActivarCuenta: React.FC = () => {
     const [a3, setA3]                   = useState<'' | 'yes' | 'no'>('');
     const [a5, setA5]                   = useState<'' | 'yes' | 'no'>('');
     const [terms, setTerms]             = useState(false);
+    // V9R-DEP1: aceptación propia de la Política 001; nunca premarcada ni deducida de otra decisión.
+    const [policy, setPolicy] = useState(false);
     const [mediatorCommitment, setMediatorCommitment] = useState(false);
     const [required, setRequired]       = useState<string[]>([]);
     // V9 F3-D4: usuario de acceso que devuelve la activación de una cuenta representada (nunca se pide ni se busca).
@@ -151,6 +153,7 @@ const ActivarCuenta: React.FC = () => {
                     token, password,
                     acceptance: {
                         terms, termsVersion: DOCS.terms.version,
+                        policy, policyVersion: DOCS.policy.version,
                         dataNoticeVersion: DOCS.dataNotice.version,
                         ...(actingAs ? { actingAs } : {}),
                         adultDeclared,
@@ -430,6 +433,11 @@ const ActivarCuenta: React.FC = () => {
                                 <span>Acepto el {DOCS.mediator.title} ({DOCS.mediator.id}, v{versionOf(DOCS.mediator.version)}) para los grupos que me asigne la institución.</span>
                             </label>
                         )}
+
+                        <label className={'flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200 ' + flag(required.includes('P'))}>
+                            <input type="checkbox" checked={policy} onChange={(e) => setPolicy(e.target.checked)} className="mt-1" />
+                            <span>He leído y acepto la {DOCS.policy.title} ({DOCS.policy.id}, v{versionOf(DOCS.policy.version)}). Esta aceptación es independiente de las autorizaciones anteriores y no las sustituye.</span>
+                        </label>
 
                         <label className={'flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200 ' + flag(required.includes('T'))}>
                             <input type="checkbox" checked={terms} onChange={(e) => setTerms(e.target.checked)} className="mt-1" />

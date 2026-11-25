@@ -102,7 +102,7 @@ const order = (orderId, email, extra = {}) => ({ orderId, productId: 345, plan: 
     activationAt: Date.now(), idempotencyKey: `test:order:${orderId}`, ...extra });
 const minor = (orderId, email, reader = {}, extra = {}) => order(orderId, email, { reader: { type: 'minor', ...reader }, ...extra });
 const T_NOW = () => ({ version: DOCS.terms.version, acceptedAt: Date.now() - 5000 });
-const REP = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'legal_representative', A0: 'yes', A1: 'yes' };
+const REP = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'legal_representative', A0: 'yes', A1: 'yes' };
 const accept = async (activationUrl, acceptance, at = next()) => {
     const r = await fetch(at + '/api/accept-invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: String(activationUrl).split('token=')[1], password: PW, acceptance }) });
     let body = null; try { body = await r.json(); } catch { /* */ }
@@ -233,9 +233,9 @@ try {
         ok('ninguna queda como del «titular»: el menor no aceptó los términos ni autorizó nada por sí mismo', kinds.every((s) => s.capacity !== 'titular') && st('A5', K1) === 'pending');
         const lines = decl ? regLines().filter((l) => l.r === decl.ref) : [];
         ok('la cuenta guarda la constancia de la declaración (referencia y día) y esa referencia es la de sus decisiones en el registro', !!decl && /^ACT-[0-9a-f-]{36}$/.test(decl.ref) && decl.day === R.dayOf(Date.now())
-            && lines.length === 4 && JSON.stringify(lines.map((l) => l.k).sort()) === '["A0","A1","A3","T"]' && u.representedBy.email === F1, JSON.stringify([decl, lines.map((l) => l.k)]));
+            && lines.length === 5 && JSON.stringify(lines.map((l) => l.k).sort()) === '["A0","A1","A3","P","T"]' && u.representedBy.email === F1, JSON.stringify([decl, lines.map((l) => l.k)]));
         ok('el vínculo verificable: contacto del pedido → enlace de un solo uso → declaración → registro; nada de eso sale al navegador', act.body.user.representedBy === undefined && act.body.user.b2cOrigin === undefined && !JSON.stringify(act.body).includes(F1) && !JSON.stringify(act.body).includes(decl?.ref || 'ACT-'));
-        ok('el enlace ya usado no sirve para declarar otra vez', (await accept(k1.body.activationUrl, { ...REP })).status === 404 && regLines().filter((l) => l.r === decl?.ref).length === 4);
+        ok('el enlace ya usado no sirve para declarar otra vez', (await accept(k1.body.activationUrl, { ...REP })).status === 404 && regLines().filter((l) => l.r === decl?.ref).length === 5);
     }
     const sK1 = await login(userOf(K1).loginId);
     {

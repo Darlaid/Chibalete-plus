@@ -124,12 +124,12 @@ try {
     console.log('[3] activación de una cuenta representada');
     const reg0 = fs.readFileSync(REG, 'utf8').split('\n').filter(Boolean).length;
     const act = await fetch(`${base}/api/accept-invite`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: INVITE, password: pw('INV'),
-        acceptance: { terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'legal_representative', adultDeclared: true, A0: 'yes', A1: 'yes', A2: 'not_applicable' } }) });
+        acceptance: { terms: true, termsVersion: ACCEPTANCE_DOCUMENTS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: ACCEPTANCE_DOCUMENTS.dataNotice.version, actingAs: 'legal_representative', adultDeclared: true, A0: 'yes', A1: 'yes', A2: 'not_applicable' } }) });
     const actText = await act.text(); const actBody = JSON.parse(actText);
     ok('con las decisiones del representante → 200 y cuenta activa', act.status === 200 && actBody.user?.id === 'INV' && actBody.user.accountStatus === 'active', `${act.status} ${actText.slice(0, 160)}`);
     ok('la respuesta trae el usuario de acceso de ESA cuenta (pantalla de activación)', actBody.user?.loginId === L.INV);
     ok('…y no el contacto del adulto, ni tokens ni contraseña', !actText.includes(CONTACT) && !/representedBy|inviteToken|"password"/.test(actText));
-    ok('las decisiones quedaron registradas igual que antes (T, A0, A1 del representante)', fs.readFileSync(REG, 'utf8').split('\n').filter(Boolean).length === reg0 + 3, String(fs.readFileSync(REG, 'utf8').split('\n').filter(Boolean).length - reg0));
+    ok('las decisiones quedaron registradas (T, A0, A1 y la Política 001, del representante)', fs.readFileSync(REG, 'utf8').split('\n').filter(Boolean).length === reg0 + 4, String(fs.readFileSync(REG, 'utf8').split('\n').filter(Boolean).length - reg0));
     const inv = await login(L.INV, pw('INV'));
     ok('el lector recién activado entra con su usuario y lee', inv.status === 200 && (await access(inv.cookie, 'INV')) === true);
     ok('el contacto sigue guardado para los procesos internos (provisión, recuperación, GVA)', stored().find((u) => u.id === 'INV').representedBy?.email === CONTACT && stored().find((u) => u.id === 'INV').loginId === L.INV);

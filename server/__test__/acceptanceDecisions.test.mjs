@@ -33,14 +33,14 @@ const NOW = Date.parse('2026-11-09T15:00:00Z');
 const TODAY = R.dayOf(NOW);
 const ctx = { today: TODAY, ref: 'ACT-sintetico-1' };
 const lector = (id, extra = {}) => ({ id, roles: ['lector'], accountStatus: 'invited', ...extra });
-const adult = { terms: true, termsVersion: DOCS.terms.version, dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
+const adult = { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', dataNoticeVersion: DOCS.dataNotice.version, actingAs: 'titular', adultDeclared: true, A1: 'yes' };
 const write = (plan) => R.appendDecisions(plan.decisions, { env, now: NOW });
 const gate = () => R.decisionGate(env, NOW);
 
 try {
     section('[1] aceptación y autorización diferenciadas');
     const p1 = planActivationDecisions(lector('b2c-1'), adult, ctx);
-    ok('titular adulto B2C: T y A1, sin A2 (no aplica)', p1.ok && p1.decisions.map((d) => d.kind).join() === 'T,A1', JSON.stringify(p1));
+    ok('titular adulto B2C: T, A1 y la Política (P), sin A2 (no aplica)', p1.ok && p1.decisions.map((d) => d.kind).join() === 'T,A1,P', JSON.stringify(p1));
     ok('T con 002@1.0 y A1 con 004@1.0, mismo acto y referencia', p1.decisions[0].version === '002@1.0' && p1.decisions[1].version === '004@1.0'
         && p1.decisions.every((d) => d.actDay === TODAY && d.requestRef === 'ACT-sintetico-1' && d.medium === 'in_app'));
     ok('titular: autenticado por su enlace y contraseña', p1.decisions.every((d) => d.capacity === 'titular' && d.verification === 'self_authenticated'));
@@ -52,7 +52,7 @@ try {
     section('[2] representación del menor');
     const rep = { ...adult, actingAs: 'legal_representative', adultDeclared: undefined, A0: 'yes' };
     const p2 = planActivationDecisions(lector('menor-1', { organizationId: 'org-a' }), { ...rep, A2: 'yes' }, ctx);
-    ok('representante: T, A0, A1 y A2, todo como representante sin verificar', p2.ok && p2.decisions.map((d) => d.kind).join() === 'T,A0,A1,A2'
+    ok('representante: T, A0, A1, A2 y P, todo como representante sin verificar', p2.ok && p2.decisions.map((d) => d.kind).join() === 'T,A0,A1,A2,P'
         && p2.decisions.every((d) => d.capacity === 'legal_representative' && d.verification === 'unverified'), JSON.stringify(p2.decisions?.map((d) => d.verification)));
     write(p2);
     ok('lo declarado por el representante NO es efectivo hasta verificar (006 P03)', !gate().effective('A1', 'menor-1') && gate().status('A2', 'menor-1') === 'granted_unverified');
@@ -103,9 +103,9 @@ try {
 
     section('[6] mediador e institución');
     const med = { id: 'med-1', roles: ['mediador'], organizationId: 'org-a', accountStatus: 'invited' };
-    ok('mediador sin compromiso 005 ⇒ falta C005', planActivationDecisions(med, { terms: true, termsVersion: DOCS.terms.version, adultDeclared: true }, ctx).required?.includes('C005'));
-    const pm = planActivationDecisions(med, { terms: true, termsVersion: DOCS.terms.version, adultDeclared: true, mediatorCommitment: true, mediatorVersion: DOCS.mediator.version }, ctx);
-    ok('mediador: T y C005 (005@1.0), sin A1/A2 de lector', pm.ok && pm.decisions.map((d) => d.kind).join() === 'T,C005' && pm.decisions[1].version === '005@1.0' && pm.decisions[1].capacity === 'mediator');
+    ok('mediador sin compromiso 005 ⇒ falta C005', planActivationDecisions(med, { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', adultDeclared: true }, ctx).required?.includes('C005'));
+    const pm = planActivationDecisions(med, { terms: true, termsVersion: DOCS.terms.version, policy: true, policyVersion: '001@1.0', adultDeclared: true, mediatorCommitment: true, mediatorVersion: DOCS.mediator.version }, ctx);
+    ok('mediador: T, C005 (005@1.0) y P, sin A1/A2 de lector', pm.ok && pm.decisions.map((d) => d.kind).join() === 'T,C005,P' && pm.decisions[1].version === '005@1.0' && pm.decisions[1].capacity === 'mediator');
     write(pm);
     ok('C005 efectiva para el mediador', gate().effective('C005', 'med-1'));
     R.appendDecisions([{ subjectId: 'org-a', kind: 'C003', status: 'granted', actDay: '2026-10-01', version: '003@1.0', medium: 'electronic_signature', capacity: 'institution', verification: 'verified', requestRef: 'CONV-0001' }], { env, now: NOW });

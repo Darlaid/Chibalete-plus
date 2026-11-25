@@ -9,6 +9,9 @@
  * Reglas (002, 004, 005; 006 P03):
  *  - nada viene marcado: cada decisión llega explícita o falta;
  *  - términos (002) y su versión vigente, siempre;
+ *  - V9R-DEP1: la Política de tratamiento de datos (001) y su versión vigente, siempre y aparte. Su aceptación es
+ *    una constancia propia (`P`): no la aportan los términos, la compra ni ninguna autorización, y ella no aporta
+ *    ninguna. En una cuenta de menor la declara su representante, con la misma calidad que A0 y A1;
  *  - lector: quien activa declara su calidad (titular adulto o representante
  *    legal). Representante ⇒ A0. A1 Sí/No obligatoria; con A1 = No la cuenta no se
  *    activa (004 A1). A2 solo existe con acompañamiento institucional: cuenta con
@@ -40,7 +43,7 @@ export const isRepresentedMinorAccount = (user) => !!user && typeof user.loginId
  * @param {{ today: string, ref: string }} ctx
  * @returns {{ ok: true, decisions: object[], profile: string } | { ok: false, code: string, required?: string[] }}
  */
-export function planActivationDecisions(user, acceptance, { today, ref, termsAccepted = false }) {
+export function planActivationDecisions(user, acceptance, { today, ref, termsAccepted = false, policyAccepted = false }) {
     const a = acceptance && typeof acceptance === 'object' ? acceptance : {};
     const staff = isMediatorAccount(user) || isAdminAccount(user);
     const mediator = isMediatorAccount(user);
@@ -49,6 +52,7 @@ export function planActivationDecisions(user, acceptance, { today, ref, termsAcc
     if (!staff && isRepresentedMinorAccount(user) && a.actingAs === 'titular') return { ok: false, code: 'REPRESENTATIVE_REQUIRED', required: ['actingAs'] };
     const missing = [];
     if (a.terms !== true && !termsAccepted) missing.push('T');
+    if (a.policy !== true && !policyAccepted) missing.push('P');
     if (!staff && !OPT.actingAs.includes(a.actingAs)) missing.push('actingAs');
     if (!staff && !OPT.A1.includes(a.A1)) missing.push('A1');
     if (institutional && !['yes', 'no'].includes(a.A2)) missing.push('A2');
@@ -58,6 +62,7 @@ export function planActivationDecisions(user, acceptance, { today, ref, termsAcc
     if (missing.length) return { ok: false, code: 'DECISIONS_REQUIRED', required: missing };
 
     if (!termsAccepted && a.termsVersion !== DOCS.terms.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['T'] };
+    if (!policyAccepted && a.policyVersion !== DOCS.policy.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['P'] };
     if (!staff && a.dataNoticeVersion !== DOCS.dataNotice.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['A1'] };
     if (mediator && a.mediatorVersion !== DOCS.mediator.version) return { ok: false, code: 'VERSION_MISMATCH', required: ['C005'] };
     if (!staff && !institutional && a.A2 !== undefined && a.A2 !== 'not_applicable') return { ok: false, code: 'A2_NOT_APPLICABLE', required: ['A2'] };
@@ -78,6 +83,9 @@ export function planActivationDecisions(user, acceptance, { today, ref, termsAcc
     // V8.1-PROD-02B: A3/A5 del lector solo si las decide; sin respuesta quedan pendientes (no se presumen).
     if (!staff) for (const k of ['A3', 'A5']) if (a[k] !== undefined) decisions.push({ ...base, kind: k, status: a[k] === 'yes' ? 'granted' : 'denied', version: DOCS.dataNotice.version, capacity, verification });
     if (mediator) decisions.push({ ...base, kind: 'C005', status: 'granted', version: DOCS.mediator.version, capacity: 'mediator', verification: 'self_authenticated' });
+    // V9R-DEP1: aceptación expresa de la Política 001, con su versión, por quien activa (titular o representante). Va
+    // al final y aparte: no forma parte de T ni de ninguna autorización.
+    if (!policyAccepted) decisions.push({ ...base, kind: 'P', status: 'granted', version: DOCS.policy.version, capacity, verification });
     return { ok: true, decisions, profile: mediator ? 'mediator' : staff ? 'staff' : representative ? 'representative' : 'titular' };
 }
 
@@ -113,16 +121,24 @@ export const termsOnFile = (gate, userId) => {
     try { return gate.effective('T', userId) && gate.state('T', userId)?.version === DOCS.terms.version; } catch { return false; }
 };
 
+/** V9R-DEP1 — Política 001 ya aceptada por esta cuenta en la versión vigente: no se vuelve a pedir al activar. */
+export const policyOnFile = (gate, userId) => {
+    try { return gate.effective('P', userId) && gate.state('P', userId)?.version === DOCS.policy.version; } catch { return false; }
+};
+
 /**
  * Altas y cambios administrativos: una cuenta de lector o mediador solo queda ACTIVA
  * sin pasar por la activación si el registro ya tiene su decisión efectiva
  * (regularización con evidencia verificable: A1 del lector, C005 del mediador).
  * Administración de plataforma: sin cambio. Registro no verificable ⇒ no.
+ * V9R-DEP1: además, la aceptación de la Política 001 en su versión vigente (constancia `P` verificada). Una cuenta
+ * nueva no queda activa sin ella por ninguna vía; la condición PILOT_LEGACY no cuenta aquí.
  */
 export function adminActivationAllowed(user, gate) {
     const pureAdmin = isAdminAccount(user) && !isMediatorAccount(user) && !roleNames(user).some((r) => /lector/i.test(r));
     if (pureAdmin) return true;
     if (!gate) return false;
+    if (!policyOnFile(gate, user.id)) return false;
     return isMediatorAccount(user) ? gate.effective('C005', user.id) : gate.effective('A1', user.id);
 }
 
