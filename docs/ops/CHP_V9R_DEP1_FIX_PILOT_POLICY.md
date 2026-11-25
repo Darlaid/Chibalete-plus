@@ -1,6 +1,6 @@
 # CHP V9-R · DEP-1 — Corrección bloqueante: continuidad de pilotos y aceptación de la Política 001
 
-Estado: **corregido en código, NO desplegado.** Producción no se tocó. Candidata: `v9r-07126b5` (APP `07126b5`). Sustituye a `v9r-a3c16e6` y a la intermedia `v9r-f5b9281` para API y front; conector WEB (`6dc8aed`) y LU 0.10.0 (`41d17bf`) no cambian.
+Estado: **corregido en código, NO desplegado.** Producción no se tocó. Candidata: `v9r-acedba8` (APP `acedba8`). Sustituye a `v9r-a3c16e6` y a las intermedias `v9r-f5b9281` y `v9r-07126b5` para API y front; conector WEB (`6dc8aed`) y LU 0.10.0 (`41d17bf`) no cambian.
 
 DEP-1 se detuvo en el preflight (2026-11-25) por dos defectos de la candidata frente a la decisión de Dirección sobre los pilotos (21 mediadores y 224 lectores en tres espacios; sin regularización retrospectiva; sin autorizaciones fabricadas).
 
@@ -42,8 +42,8 @@ Cotejado contra el código de producción (`secsess-642820d`) y contra su estado
 | Resumen del grupo (`analytics-summary`) | Sí | **Se conserva**; filas individuales solo con seguimiento |
 | Progreso de lectura (`/api/progress/user`, `/item`, `/api/reading-progress`) | Sí | **Se conserva** (seguimiento) |
 | Estado del lector (`/api/students/:id/status`) | Sí | **Se conserva** (seguimiento) |
-| Tablero e informe del curso (`/api/metrics/course`, `/api/reports/course`) | Sí | **Se conserva**, solo con lectores con seguimiento |
-| Intervenciones del tablero (`/api/interventions…`) | Sí | **Se conserva** (seguimiento) |
+| Tablero e informe del curso (`/api/metrics/course`, `/api/reports/course`) | **No**: producción responde 403 `course_detail_restricted` a quien media (decisión de Dirección del 2026-11-15) | **No**: exigen A2 + C005. La intermedia `v9r-07126b5` los abría por error; corregido en `acedba8` antes de cualquier cambio productivo |
+| Intervenciones (`/api/interventions…`) | Sí | **Se conserva** (seguimiento) |
 | Revisión de entregas y exportación de entregas | Sí | **Se conserva** (seguimiento) |
 | Candidatos del grupo | Sí | **No**: nombra a personas ajenas a la nómina del corte. Exige C005 |
 | Diagnóstico del grupo | Sí | **No**: enumera canales y miembros sin distinguir el corte. Exige C005 |
@@ -67,7 +67,8 @@ Cotejado contra el código de producción (`secsess-642820d`) y contra su estado
 | Lector de piloto · Leo e IA | Sí | 403 `A3_REQUIRED` | 403 `A3_REQUIRED` |
 | Lector de piloto · transcripción de voz | — | Cerrada (A5) | Cerrada (A5) |
 | **Mediador de piloto** · nómina y resumen de su curso del corte | Sí | 403 / retenida | Sí, solo lectores del corte |
-| Mediador de piloto · seguimiento histórico (progreso, estado, tablero, intervenciones, entregas) | Sí | 403 | Solo de lectores con `pilot_reader_followup` en ese mismo curso |
+| Mediador de piloto · seguimiento histórico (progreso de lectura, estado, filas del resumen, intervenciones, entregas) | Sí | 403 | Solo de lectores con `pilot_reader_followup` en ese mismo curso |
+| Mediador de piloto · tablero e informe del curso | 403 (restringidos) | 403 | 403 |
 | Mediador de piloto · analítica derivada de Aula Viva, Leo del mediador, XP | Parcial (ver 2.1) | 403 | 403 |
 | Mediador de piloto · candidatos y diagnóstico | Sí | 403 | 403 |
 | Mediador de piloto · curso o lector posterior al corte | — | 403 | 403 |
@@ -90,6 +91,7 @@ Cotejado contra el código de producción (`secsess-642820d`) y contra su estado
 | Transcripción de la voz | A5 | Tratamiento opcional del 004, independiente de los demás. |
 | XP y reconocimiento | A1 | Apagado; exige A1 con fecha del acto anterior al hecho. |
 | Analítica derivada de Aula Viva por lector | A2 + C005 | En producción los motores están apagados: para un piloto es tratamiento nuevo. |
+| Tablero e informe del curso | A2 + C005 | Producción ya los niega a quien media por falta de base acreditable. |
 | Seguimiento histórico de un lector **sin** `pilot_reader_followup` | A2 + C005 | La carga decide, curso por curso, si los lectores lo conservan (`PILOT_FOLLOWUP`). |
 | Cualquier lector, mediador o curso posterior al corte | A2 + C005 | El régimen está cerrado. |
 | Candidatos y diagnóstico del grupo | C005 | Enumeran a personas ajenas a la nómina del corte. |
@@ -122,22 +124,22 @@ Las cuentas de piloto ya activas **no** tienen `P` y no se les anota: no pasan p
 | Comprobación | Resultado |
 |---|---|
 | `pilotLegacy.test.mjs` (registro, sin servidor) | 71 ✓ |
-| `pilotLegacyHttp.test.mjs` (server real, dos réplicas: alcance, funciones históricas frente a nuevas con control por la vía ordinaria, barrido de rutas, Leo aparte, cuentas nuevas, revocación, traslado, sustitución, desactivación, fin del régimen) | 66 ✓ |
+| `pilotLegacyHttp.test.mjs` (server real, dos réplicas: alcance, funciones históricas frente a nuevas con control por la vía ordinaria, tablero e informe cerrados, barrido de rutas, Leo aparte, cuentas nuevas, revocación, traslado, sustitución, desactivación, fin del régimen) | 67 ✓ |
 | `pilotLegacyPack.test.mjs` (herramienta de carga) | 12 ✓ |
-| Job `identity-preflight` completo en Linux (`node:20`, `npm ci`), incluido `test:b2c` sin omisiones | todos los pasos, `[job] completo` (clon limpio de `07126b5`) |
+| Job `identity-preflight` completo en Linux (`node:20`, `npm ci`), incluido `test:b2c` sin omisiones | todos los pasos, `[job] completo` (clon limpio de `acedba8`) |
 | 42 suites de página | 0 fallos |
-| E2E tienda → app (conector `6dc8aed`, APP `07126b5`) | 201 correctas, VERDE |
+| E2E tienda → app (conector `6dc8aed`, APP `acedba8`) | 201 correctas, VERDE |
 | Integridad de la imagen API; Trivy de las dos imágenes | 51 ok; 0 hallazgos |
 | Chrome real, laboratorio sintético: casilla propia y desmarcada, documento y versión enlazados, activación bloqueada sin aceptación, registro `P`; menor por su representante; ni A0/A1 ni términos la sustituyen | Correcto (capturas en la evidencia) |
 | Altas administrativas y reinvitación (laboratorio y `contractingLinkingHttp`) | Sin `P` verificada la cuenta queda invitada; con ella, activa |
 
-Las tres suites nuevas forman parte de `test:v81`, que la CI ejecuta. Evidencia: `D:/chp-artifacts/v9r-dep1-close/`.
+Las tres suites nuevas forman parte de `test:v81`, que la CI ejecuta. Evidencia: `D:/chp-artifacts/v9r-dep1-final/`. Validación en seco de la carga sobre una proyección de solo lectura de producción: 245 pertenencias (21 + 224), tres grupos, misma huella que un cálculo independiente.
 
 No se repitieron las pruebas de Android ni el ensayo de restauración: nada de esta corrección toca LU, los esquemas ni los respaldos. El registro de decisiones sigue fuera de los respaldos por diseño. En el laboratorio los enlaces de los documentos apuntan a un dominio de prueba: que el documento real se abra depende de su publicación.
 
 ## 7. Condiciones externas para retomar DEP-1
 
 1. **Aprobación documental**: acta firmada; 001, 002, 004 y 005 publicados en HTTPS en su versión `1.0`. Sin ella no se activa ninguna cuenta nueva, tampoco una cuenta de piloto reinvitada.
-2. **Decisión escrita de Dirección sobre el piloto**: referencia, fecha de corte, los tres grupos, en cuáles los lectores conservan el seguimiento histórico (`PILOT_FOLLOWUP`) y, si procede, fecha de caducidad del régimen.
+2. **Asiento `DIR-V9R-PILOT-01` aprobado por Dirección**: corte 2026-11-24, tres grupos, 245 pertenencias, seguimiento histórico en los tres, régimen revocable sin fecha, custodia en Dirección.
 3. **Decisión sobre las cinco funciones históricas que no se mantienen** (§2.1): aceptar que quedan cerradas para los pilotos hasta tener C005, A2 y A3, o aportar esas autorizaciones. No admiten otra vía en esta candidata.
 4. **Retención** (12 meses en servidor, 365 días en web y LU) sin ratificar; la poda sigue apagada. No bloquea por sí sola.
