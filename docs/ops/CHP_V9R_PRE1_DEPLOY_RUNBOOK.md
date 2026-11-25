@@ -48,14 +48,16 @@ No demostrado: arranque de la candidata sobre los **datos** reales (solo sobre s
 
 ### 3.1 Matriz única de despliegue (cierre de PRE-1, 2026-11-25)
 
+PRE-1 queda pendiente exclusivamente de **tres dependencias externas**. El paquete para Dirección (documentos exactos, acta, requerimiento, decisión de retención y procedimiento de carga) está fuera del repositorio.
+
 | Requisito | Evidencia | Estado | Responsable | Acción pendiente |
 |---|---|---|---|---|
 | APP de PRE-1 publicada con CI verde | Rama `chp/epub-mainfile-r1-release`; CI oficial con el paso `test:b2c` | Hecho | — | — |
 | #345 y #346 sin venta anticipada | Eran «Chibalete+ Digital» (`CHP-DIGITAL-ANUAL`) y «Chibalete+ Mi biblioteca» (`CHP-MIBIBLIOTECA-ANUAL`), publicados y ocultos del catálogo, 0 ventas, ningún pedido ni suscripción que los contenga. Pasados a **borrador** el 2026-11-25 00:44 UTC: páginas y Store API en 404, `is_purchasable=false`, `add-to-cart` deja el carrito vacío. Precios, SKU, IDs, visibilidad, clientes y pedidos sin tocar | Hecho | — | Reversión o activación comercial (paso 4.9): `wp post update 345 346 --post_status=publish` |
-| D1 · Documentos 001, 002, 004 y 005 aprobados y publicados en HTTPS, versión `@1.0` | Siguen como «PROPUESTA PARA APROBACIÓN», sin acta firmada y sin publicar. 002 y 005 son compatibles con V9 sin cambios; 001 (§9.8) y 004 (ficha 6.2) necesitan tres párrafos sobre Lector Único, ya preparados en el paquete de Dirección | **Pendiente externo** | Dirección | Firmar el acta única con las versiones ajustadas y publicarlas. Sin `CHP_ACCEPTANCE_DOCUMENTS` ninguna cuenta se activa (503). Otra versión que no sea `@1.0` obliga a reconstruir las imágenes |
-| D2 · Autorizaciones C005 (mediadores) y A1/A2 (lectores) verificadas y cargadas | Inventario de solo lectura: 3 cursos reales, **21 mediadores activos** (otros 4 identificadores de mediador no tienen cuenta y están en cursos de prueba) y **224 lectores activos**. En producción no existe ningún registro de decisiones ni evidencia de autorización en las cuentas: 0 verificables, 0 por aclarar, 245 titulares sin evidencia aportada. Nómina y validador: `ops/preflight/v9r/auth-pack.py` | **Pendiente externo** | Dirección (evidencias) · GVA (verificación) · AT (carga) | Entregar las fichas con su soporte; GVA diligencia la nómina; AT la carga en DEP-1 (paso 4.2). Alternativa: aceptación escrita de que el seguimiento individual queda cerrado hasta tenerlas |
-| D3 · Plazo de conservación ratificado | Contrato implementado en §5. Texto de la decisión en el paquete de Dirección. Poda del servidor apagada | **Pendiente externo** | Dirección y asesoría jurídica | Ratificar 12 meses en el servidor y 365 días en los dispositivos, o indicar otro plazo |
-| D5 · Constantes `CHIBALETE_B2C_TERMS_VERSION` y `CHIBALETE_B2C_TERMS_URL` en la tienda | Sin definir; sin ellas el conector nuevo no deja contratar | Preparado | AT | Se definen en el paso 4.8, con la versión y la URL que resulten de D1 |
+| **Dependencia 1 · Aprobación documental**: 001, 002, 004 y 005 aprobados y publicados en HTTPS, versión `@1.0` | Los cuatro siguen como propuesta, sin acta firmada y sin publicar. Acta única preparada, no firmada. 002 y 005 sin cambios; 001 §9.8 y 004 §6.2 con tres párrafos sobre Lector Único 0.10.0. El 004 arrastra condiciones materiales anteriores a V9 (proveedores de IA y alojamiento, plazos, voz) por las que Dirección difirió su aprobación y prohibió configurar la aceptación sin él | **Pendiente externo** | Dirección y asesoría jurídica | Aportar los soportes del 004, firmar el acta y publicar. Sin `CHP_ACCEPTANCE_DOCUMENTS` ninguna cuenta se activa (503). Otra versión que no sea `@1.0` obliga a reconstruir las imágenes |
+| **Dependencia 2 · Autorizaciones verificadas**: C005 de mediadores y A1/A2 de lectores | 3 instituciones, 3 cursos: 21 mediadores y 224 lectores con cuenta activa (10+80, 10+80 y 1+64). En producción no existe registro de decisiones ni evidencia en las cuentas: 0 verificables, 0 por aclarar, 245 titulares sin evidencia aportada. Requerimiento por institución y procedimiento de carga preparados; nómina y validador: `ops/preflight/v9r/auth-pack.py` | **Pendiente externo** | Dirección (requerimiento y soportes) · GVA (verificación) · AT (carga) | Enviar el requerimiento; con los soportes, GVA diligencia la nómina y AT la carga en DEP-1 (paso 4.2). Alternativa: decisión escrita de desplegar con el resumen y el seguimiento individual cerrados hasta tenerlas |
+| **Dependencia 3 · Decisión jurídica de retención** | Contrato implementado en §5. Decisión redactada con tres opciones. Poda del servidor apagada | **Pendiente externo** | Dirección y asesoría jurídica | Ratificar 12 meses de calendario en el servidor y 365 días en web y LU; otro plazo implica cambio de código y nueva candidata |
+| Constantes `CHIBALETE_B2C_TERMS_VERSION` y `CHIBALETE_B2C_TERMS_URL` en la tienda | Sin definir; sin ellas el conector nuevo no deja contratar | Preparado | AT | Se definen en el paso 4.8, con la versión y la URL que resulten de la dependencia 1 |
 | Restauración, compatibilidad de esquemas, Android, seguridad, datos derivados | §2, §6 y §7 (sin cambios desde PRE-1) | Hecho | — | Arranque sobre datos reales y actualización de LU con datos: pasos 4.3 y 4.10 |
 
 **Qué registros son imprescindibles para que los cursos actuales sigan funcionando** (medido con la candidata, §2):
@@ -63,7 +65,7 @@ No demostrado: arranque de la candidata sobre los **datos** reales (solo sobre s
 - **La lectura de los lectores no depende de ninguna autorización cargada**: catálogo, acceso, progreso y eventos responden igual con o sin registro.
 - **Tablero del curso**: exige la clave de sujeto, los dos archivos de registro (aunque estén vacíos) y `CHP_ACCEPTANCE_DOCUMENTS`. Sin los archivos, toda la mediación responde 503.
 - **Resumen del curso y seguimiento individual**: exigen además el C005 del mediador y las decisiones del lector. En la prueba se cargaron A1 y A2 juntas; no se midió A2 sin A1.
-- Sin D2, tras el despliegue los 21 mediadores conservarían el tablero agregado y perderían el resumen y el seguimiento individual de los 224 lectores.
+- Sin la dependencia 2, tras el despliegue los 21 mediadores conservarían el tablero agregado y perderían el resumen y el seguimiento individual de los 224 lectores.
 
 ### 3.2 Preparativos técnicos (se ejecutan en DEP-1, antes de la ventana)
 
@@ -83,7 +85,7 @@ No demostrado: arranque de la candidata sobre los **datos** reales (solo sobre s
      - { type: bind, source: /var/www/chibalete/registry/exclusions, target: /app/registry/exclusions, bind: { create_host_path: false } }
    ```
    `AULA_VIVA_CONTEXT_LEDGER_ENABLED` **no** se añade aquí (paso 4.7). XP, poda y retención no se tocan.
-6. Carga de decisiones (D2): `auth-pack.py roster` genera la nómina (salida con nombres: a un lugar custodiado, nunca al repositorio), GVA la diligencia desde los soportes y `auth-pack.py build` emite solo las filas completas y verificadas. Una línea JSON por decisión, por stdin, en un contenedor efímero sin red de la imagen nueva con `ops/a2/` montado en solo lectura; todas o ninguna. Después `a2_verify.mjs` e `inventory.mjs`; copia custodiada.
+6. Carga de decisiones (dependencia 2): `auth-pack.py roster` genera la nómina (salida con nombres: a un lugar custodiado, nunca al repositorio), GVA la diligencia desde los soportes y `auth-pack.py build` emite solo las filas completas y verificadas. Una línea JSON por decisión, por stdin, en un contenedor efímero sin red de la imagen nueva con `ops/a2/` montado en solo lectura; todas o ninguna. Después `a2_verify.mjs` e `inventory.mjs`; copia custodiada.
 
 ## 4. Secuencia de DEP-1
 
@@ -91,7 +93,7 @@ Cada paso tiene su comprobación. Si falla, **STOP** y rollback del paso; nunca 
 
 | Paso | Operación | Comprobación | Rollback |
 |---|---|---|---|
-| 4.0 | Confirmar D1–D5, respaldos (3.2-1) y sumas de los artefactos (`sha256sum -c SHA256SUMS`) | Sumas correctas; respaldo `ok` | — |
+| 4.0 | Confirmar las tres dependencias de §3.1 (acta firmada, autorizaciones verificadas, retención ratificada), respaldos (3.2-1) y sumas de los artefactos (`sha256sum -c SHA256SUMS`) | Sumas correctas; respaldo `ok` | — |
 | 4.1 | Transferir y cargar las dos imágenes; etiquetar `rollback-pre-v9r` las actuales | ID de imagen = `MANIFEST.md` | `docker rmi` de las nuevas |
 | 4.2 | Preparativos 3.2-2 a 3.2-6 | `a2_verify` con los recuentos de C.1; mismo SHA-256 del registro en los dos montajes | Retirar clave y directorios (no hay datos aún) |
 | 4.3 | Drenar `api_2` en el edge, recrearla con la imagen y el override nuevos | En un paso propio: `healthy`, `/api/health` con `version=v9r-a3c16e6`, 0 errores en el registro, `/api/health/analytics` correcto, `/api/acceptance/documents` sin pendientes | Línea `image:` y bloque nuevo fuera; recrear `api_2` con la imagen anterior |
@@ -99,7 +101,7 @@ Cada paso tiene su comprobación. Si falla, **STOP** y rollback del paso; nunca 
 | 4.5 | Lo mismo con `api_1`, en otro paso | Igual que 4.3 y 4.4, en `api_1` | Igual, para `api_1` |
 | 4.6 | Front, en su propia ventana: imagen `v9r-a3c16e6`, recrear `front`, recargar el edge | Carga de la aplicación, activación de una cuenta de prueba, panel institucional | Imagen `unifiedxp-13b8045` |
 | 4.7 | Registro de procedencia: `AULA_VIVA_CONTEXT_LEDGER_ENABLED: "1"` en las dos réplicas, una a una | `/api/health/analytics` → `checks.context_ledger.enabled: true`, intervalos de línea base; la poda sigue `enabled: false` | Quitar la variable (las tablas quedan; no estorban) |
-| 4.8 | Conector WEB: copia del archivo actual; instalar `inc/chplus-b2c.php` de `6dc8aed`; definir las constantes de D5 | md5 `aae19b14…`; `php -l`; `wp chplus-b2c pending`; WP-Cron con el evento `chplus_b2c_sync_pending` | Restaurar el archivo (md5 `43b64e45…`, `web-connector-rollback-1897e32.tar.gz`) |
+| 4.8 | Conector WEB: copia del archivo actual; instalar `inc/chplus-b2c.php` de `6dc8aed`; definir las constantes de términos (§3.1) | md5 `aae19b14…`; `php -l`; `wp chplus-b2c pending`; WP-Cron con el evento `chplus_b2c_sync_pending` | Restaurar el archivo (md5 `43b64e45…`, `web-connector-rollback-1897e32.tar.gz`) |
 | 4.9 | Compra real controlada (una, autorizada) y su activación; luego su reembolso | Cuenta invitada, activación con fechas, 12 meses desde la activación, calendario de Mi biblioteca; el reembolso cierra el acceso | Procedimientos de `CHP_V9_BII_B2C_OPERATING_PROCEDURES.md` |
 | 4.10 | LU 0.10.0: subir el APK con nombre versionado; copia de `lu_config.json`; apuntar `version` y `apkUrl` | SHA-256 del APK servido = `55d996cb…`; `/api/lu/version`; actualización en un dispositivo real desde 0.9.2 con una cuenta de prueba | Restaurar `lu_config.json` (0.9.2 sigue en `/uploads`) |
 
@@ -111,7 +113,7 @@ WP-Cron: `DISABLE_WP_CRON` no está definido y no hay cron del sistema; el segui
 
 ## 5. Privacidad y conservación
 
-- **Plazos: contrato implementado (propuesta técnica, pendiente de ratificación D3).**
+- **Plazos: contrato implementado (propuesta técnica, pendiente de ratificación, dependencia 3).**
 
   | Dónde | Qué caduca | Plazo | Desde cuándo | Estado |
   |---|---|---|---|---|
@@ -122,7 +124,7 @@ WP-Cron: `DISABLE_WP_CRON` no está definido y no hay cron del sistema; el segui
   Diferencias reales: (1) el servidor cuenta meses de calendario y los dispositivos 365 días, así que en un tramo con 29 de febrero el dispositivo vence un día antes; (2) en web y LU lo pendiente de la cuenta en uso no caduca; (3) la web no renueva el plazo de una lectura ya encolada, y LU sí lo hace por sesión cuando esa sesión se vuelve a guardar. Ningún documento jurídico recoge hoy estos plazos; el texto propuesto para 001 §9.8 y 004 §6.2 está en el paquete de Dirección.
 - **Supresión.** Eliminar la cuenta (`DELETE /api/users/:id`) y ejecutar `ops/a2/suppression_operator.mjs`. El dispositivo recibe la señal (`account_removed` o la consulta desde otra cuenta) y borra lo suyo. El 004 dice «no se promete borrado remoto de dispositivos sin capacidad verificada»: la capacidad existe desde LU 0.10.0, con el límite de que alguien debe iniciar sesión en el dispositivo.
 - **Menores, GVA/AT, representación, mayoría de edad y revocaciones:** `CHP_V9_BII_B2C_OPERATING_PROCEDURES.md` y `POST /api/users/:id/representation`; sin cambios en PRE-1.
-- **Cuenta personal existente.** Hay 1 cuenta B2C en producción. Con el registro activo, su acceso depende de sus decisiones (T/A1): anotarlas en D2 o confirmar que es de prueba.
+- **Cuenta personal existente.** Hay 1 cuenta B2C en producción. Con el registro activo, su acceso depende de sus decisiones (T/A1): anotarlas con la dependencia 2 o confirmar que es de prueba.
 
 ## 6. Datos derivados
 
