@@ -72,20 +72,24 @@ export function canAccessScope(callerId, scope_type, scope_id) {
  *
  * Devuelve una función reutilizable en listados: el registro se lee una sola vez
  * por petición. Nunca concede: solo puede restringir lo que el CIS ya permitió.
+ *
+ * V9R-DEP1: `pilot: true` lo pasan SOLO las funciones de seguimiento que ya existían antes de V9 (progreso, estado,
+ * tablero e intervenciones). Por defecto `false`: las rutas de `/api/aula-viva` (analítica derivada) y cualquier
+ * función nueva exigen A2 y C005; la condición PILOT_LEGACY no las abre.
  */
-export function individualAccessChecker(callerId) {
+export function individualAccessChecker(callerId, { pilot = false } = {}) {
     let gate = null, gateFailed = false;
     return (subjectId) => {
         const sid = String(subjectId ?? '');
         const d = evaluateScopeAccess(callerId, 'user', sid);
         if (d.decision !== 'allow' || d.via !== 'mediator_of_member_group') return d;
-        if (!gate && !gateFailed) { try { gate = a2Gate(undefined, undefined, { mediatorId: callerId }); } catch { gateFailed = true; } }
+        if (!gate && !gateFailed) { try { gate = a2Gate(undefined, undefined, { mediatorId: callerId, pilot }); } catch { gateFailed = true; } }
         if (gateFailed) return { decision: 'unavailable', cause: 'individual_access_unavailable' };
         return gate.allows(sid) ? d : { decision: 'forbidden', cause: 'individual_access_denied' };
     };
 }
 /** Decisión individual de una sola consulta. */
-export const individualAccess = (callerId, subjectId) => individualAccessChecker(callerId)(subjectId);
+export const individualAccess = (callerId, subjectId, opts) => individualAccessChecker(callerId, opts)(subjectId);
 /** Respuesta HTTP de una decisión (misma taxonomía que `requireScopeAccess`). */
 export function respondScopeDecision(d, res, scope_type, scope_id) {
     if (d.decision === 'allow') return true;

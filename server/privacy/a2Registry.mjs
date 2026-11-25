@@ -65,9 +65,15 @@ export const VERIFICATIONS = Object.freeze(['self_authenticated', 'verified', 'u
 // Qué conserva, y solo dentro de ESE grupo y mientras la pertenencia siga existiendo hoy:
 //   pilot_mediator         en lugar del C005 del mediador: nómina y resumen de ese grupo;
 //   pilot_reader           el lector figura en la nómina que ve ese mediador (sin detalle individual);
-//   pilot_reader_followup  además, en lugar de su A2: seguimiento individual por ese mediador.
-// Qué NO abre, nunca: Leo e IA (A3), transcripción de voz (A5), XP (A1), términos (T), candidatos y diagnóstico del grupo,
-// ni nada sobre un lector o un grupo sin su propia línea. Una negativa o revocación expresa de A2 (lector) o de
+//   pilot_reader_followup  además, en lugar de su A2: el seguimiento individual HISTÓRICO por ese mediador.
+// «Histórico» = lo que el mediador ya consultaba en la versión anterior a V9: progreso de lectura, estado del lector,
+// filas del resumen y del tablero del curso, intervenciones del tablero, revisión y exportación de entregas. Cada una
+// de esas funciones lo pide de forma expresa (`pilot: true`); `a2Gate` NO lo aplica por defecto, así que ninguna
+// función nueva lo hereda por reutilizar el criterio de A2.
+// Qué NO abre, nunca: Leo e IA (A3) ni las vistas de Leo del mediador, transcripción de voz (A5), XP (A1), términos
+// (T), candidatos y diagnóstico del grupo, la analítica derivada de Aula Viva (indicadores contextuales, riesgo,
+// recomendaciones, impacto, cohortes, trayectorias, patrones, perfil y línea de tiempo), ni nada sobre un lector o
+// un grupo sin su propia línea. Una negativa o revocación expresa de A2 (lector) o de
 // C005 (mediador) prevalece siempre sobre la condición de piloto.
 export const PILOT_KIND = 'PILOT_LEGACY';
 export const PILOT_VERSION = 'PILOT@1.0';
@@ -294,9 +300,11 @@ export function a1Gate(env = process.env, now = Date.now()) {
  * Puerta A2 vigente. `allows(userId)` solo es verdadero con A2 `granted`,
  * verificada y dentro de su vigencia (inclusive). Con `mediatorId`, exige además
  * C005 efectivo del mediador (consulta institucional por un mediador).
+ * V9R-DEP1: con `pilot: true` (solo funciones históricas, ver PILOT_LEGACY arriba) admite además la pareja
+ * mediador–lector de un piloto anterior a V9. Por defecto es `false`: una función nueva exige A2 y C005.
  * @throws A2_REGISTRY_UNAVAILABLE | A2_REGISTRY_NOT_INDEPENDENT
  */
-export function a2Gate(env = process.env, now = Date.now(), { mediatorId = null } = {}) {
+export function a2Gate(env = process.env, now = Date.now(), { mediatorId = null, pilot = false } = {}) {
     const gate = decisionGate(env, now);
     // V8.1-CLOSE-07B (G-07): para un mediador, además su compromiso 005 (C005) efectivo y
     // vigente: la vigencia del 005 caduca sola y su retiro rige en la petición siguiente.
@@ -305,7 +313,7 @@ export function a2Gate(env = process.env, now = Date.now(), { mediatorId = null 
     // en el corte y vigentes hoy, el lector con seguimiento). Se calcula una vez por puerta, y solo si hace falta.
     let followup = null;
     const pilotAllows = (userId) => {
-        if (mediatorId === null || typeof userId !== 'string' || !userId) return false;
+        if (pilot !== true || mediatorId === null || typeof userId !== 'string' || !userId) return false;
         if (pilotRefused(gate, 'A2', userId)) return false;
         followup ??= pilotFollowupReaders(gate, mediatorId);
         return followup.has(userId);
@@ -371,9 +379,9 @@ function pilotFollowupReaders(gate, mediatorId) {
  * @param {string[]} cohort
  * @returns {{ status: 'ok'|'partial'|'unavailable', allowed: Set<string>, aggregateOver: 'cohort'|'allowed' }}
  */
-export function individualDisclosure(cohort, { env = process.env, now = Date.now(), mediatorId = null } = {}) {
+export function individualDisclosure(cohort, { env = process.env, now = Date.now(), mediatorId = null, pilot = false } = {}) {
     let gate;
-    try { gate = a2Gate(env, now, { mediatorId }); } catch { return { status: 'unavailable', allowed: new Set(), aggregateOver: 'cohort' }; }
+    try { gate = a2Gate(env, now, { mediatorId, pilot }); } catch { return { status: 'unavailable', allowed: new Set(), aggregateOver: 'cohort' }; }
     const ids = [...new Set((cohort ?? []).filter((id) => typeof id === 'string' && id))];
     const allowed = new Set(ids.filter((id) => gate.allows(id)));
     const withheld = ids.length - allowed.size;

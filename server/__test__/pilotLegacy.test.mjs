@@ -5,7 +5,8 @@
  *  [1] la condición no rige sin sello; con sello rige por PERTENENCIA (grupo + cuenta) y por función
  *  [2] régimen cerrado: tras el sello no se concede ni se lee nada nuevo (ni otro sello)
  *  [3] nunca es un consentimiento: forma propia, y ninguna decisión de consentimiento se satisface con ella
- *  [4] pareja mediador–lector: mismo grupo, pertenencias vigentes HOY; negativa o revocación expresa prevalece
+ *  [4] pareja mediador–lector: solo donde la función lo pide (histórica); mismo grupo, pertenencias vigentes HOY;
+ *      negativa o revocación expresa prevalece
  *  [5] revocación de una pertenencia, vigencia y fin del régimen (sello revocado)
  *  [6] constancia P (Política 001): propia, con instante, sin efecto sobre otras decisiones
  *  [7] líneas anteriores (sin instante) siguen verificando; el instante no se puede añadir ni quitar
@@ -52,7 +53,7 @@ try {
     section('[1] sin sello no rige; con sello, por pertenencia y por función');
     const env = newEnv('main');
     add(env, PILOT);
-    ok('cargada pero sin sello ⇒ no rige para nadie', !gate(env).pilot('mediator', 'g-1', 'med-1') && !R.a2Gate(env, NOW, { mediatorId: 'med-1' }).allows('r-1'));
+    ok('cargada pero sin sello ⇒ no rige para nadie', !gate(env).pilot('mediator', 'g-1', 'med-1') && !R.a2Gate(env, NOW, { mediatorId: 'med-1', pilot: true }).allows('r-1'));
     add(env, [SEAL]);
     const g = gate(env);
     ok('mediador del corte en SU grupo', g.pilot('mediator', 'g-1', 'med-1') && R.pilotMediatorOf(g, 'g-1', 'med-1'));
@@ -103,16 +104,21 @@ try {
     ok('el registro no guarda grupos ni cuentas en claro', !/g-1|r-1|med-1/.test(fs.readFileSync(env.CHP_A2_REGISTRY, 'utf8')));
 
     section('[4] pareja mediador–lector');
-    const a2 = (mediatorId, e = env, now = NOW) => R.a2Gate(e, now, { mediatorId });
+    // `a2`: una función histórica (pide la condición de piloto). `a2New`: cualquier otra (no la pide).
+    const a2 = (mediatorId, e = env, now = NOW) => R.a2Gate(e, now, { mediatorId, pilot: true });
+    const a2New = (mediatorId, e = env, now = NOW) => R.a2Gate(e, now, { mediatorId });
+    ok('por defecto la puerta A2 NO admite la condición de piloto: una función nueva exige A2 y C005', !a2New('med-1').allows('r-1') && !a2New('med-1').allows('r-2') && !a2New('med-2').allows('r-7')
+        && !R.a2Gate(env, NOW, { mediatorId: 'med-1', pilot: 'true' }).allows('r-1') && !R.a2Gate(env, NOW, { mediatorId: 'med-1', pilot: 1 }).allows('r-1'));
+    ok('…ni el criterio único de divulgación', R.individualDisclosure(['r-1', 'r-2'], { env, now: NOW, mediatorId: 'med-1' }).allowed.size === 0);
     ok('mediador y lector del mismo grupo del corte, lector con seguimiento ⇒ sí', a2('med-1').allows('r-1') && a2('med-1').allows('r-2'));
     ok('lector solo de nómina ⇒ sin seguimiento individual', !a2('med-1').allows('r-3'));
     ok('lector nuevo del mismo curso ⇒ no', !a2('med-1').allows('r-new'));
     ok('lector de otro grupo que también media hoy (no es del corte) ⇒ no', !a2('med-1').allows('r-9'));
     ok('lector de piloto de OTRO mediador ⇒ no (cada cual en su ámbito)', !a2('med-1').allows('r-7') && !a2('med-2').allows('r-1') && a2('med-2').allows('r-7'));
     ok('mediador nuevo del mismo curso ⇒ no', !a2('med-new').allows('r-1'));
-    ok('sin mediador (otra vía de consulta) la condición de piloto no cuenta', !R.a2Gate(env, NOW).allows('r-1'));
+    ok('sin mediador (otra vía de consulta) la condición de piloto no cuenta', !R.a2Gate(env, NOW).allows('r-1') && !R.a2Gate(env, NOW, { pilot: true }).allows('r-1'));
     {
-        const d = R.individualDisclosure(['r-1', 'r-2', 'r-3', 'r-new'], { env, now: NOW, mediatorId: 'med-1' });
+        const d = R.individualDisclosure(['r-1', 'r-2', 'r-3', 'r-new'], { env, now: NOW, mediatorId: 'med-1', pilot: true });
         ok('criterio único de divulgación: solo los dos con seguimiento', d.status === 'partial' && [...d.allowed].sort().join() === 'r-1,r-2', JSON.stringify([...d.allowed]));
     }
     // Traslado: r-2 deja g-1 y pasa a g-2 (que med-1 también media). Su pertenencia del corte ya no existe hoy.
@@ -136,7 +142,8 @@ try {
         && !R.pilotMediatorOf(gate(env), 'g-3', 'med-2') && a2('med-1').allows('r-1'));
     // Regularización real: C005 + A2 abren lo que la condición de piloto no (lector nuevo).
     add(env, [decision('med-1', 'C005', 'granted'), decision('r-new', 'A2', 'granted')]);
-    ok('con C005 y A2 reales, el lector nuevo sí (vía ordinaria, no piloto)', a2('med-1').allows('r-new') && !gate(env).pilot('reader', 'g-1', 'r-new'));
+    ok('con C005 y A2 reales, el lector nuevo sí (vía ordinaria, no piloto), también en una función nueva', a2('med-1').allows('r-new') && a2New('med-1').allows('r-new') && !gate(env).pilot('reader', 'g-1', 'r-new'));
+    ok('…y un lector de piloto sin A2 propia sigue fuera de las funciones nuevas aunque su mediador ya tenga C005', !a2New('med-1').allows('r-1') && a2('med-1').allows('r-1'));
 
     section('[5] revocación, vigencia y fin del régimen');
     const e5 = newEnv('life');

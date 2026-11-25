@@ -4,7 +4,10 @@
  * Con server.js REAL, dos instituciones, cinco grupos y dos réplicas. Ninguna cuenta de piloto tiene A1, A2, A3, A5
  * ni C005 en el registro: no se anota ninguna autorización ficticia.
  *   [1] mediador de piloto: nómina, usuarios y resumen de SU curso del corte; nada de sus otros cursos ni de otros
- *   [2] seguimiento individual: solo de los lectores con esa función en su pertenencia del corte
+ *   [2] seguimiento individual HISTÓRICO (progreso, estado, tablero, intervenciones): solo de los lectores con esa
+ *       función en su pertenencia del corte
+ *   [2b] funciones que no existían o no tenían datos antes de V9 (analítica derivada de Aula Viva, indicadores
+ *       contextuales, Leo del mediador, XP): la condición de piloto NO las abre; con C005 + A2 siguen abiertas
  *   [3] barrido de rutas de consulta: ninguna entrega un lector ajeno al corte de ese mediador
  *   [4] lector de piloto: lee como antes; Leo se decide aparte (A3), y la condición de piloto no lo abre
  *   [5] cuentas y cursos nuevos: no heredan nada; la vía ordinaria (C005 + A2) no cambia
@@ -116,7 +119,14 @@ const readersIn = (text) => [...new Set([...text.matchAll(/"((?:ra|rn|rx|rc|rb)-
 const delivered = (r) => readersIn(r.status === 403 ? r.text.replace(/"scope_id":"[^"]*"/g, '') : r.text);
 const namesIn = (r) => (Array.isArray(r.json) ? r.json : []).filter((u) => /^Estudiante /.test(u?.nombre_completo || '')).map((u) => u.id).sort();
 const rosterOf = (r, g) => (Array.isArray(r.json) ? r.json : []).find((x) => x.id === g);
-const INDIVIDUAL = (R) => [`/api/students/${R}/status`, `/api/progress/user/${R}`, `/api/reading-progress/${R}`, `/api/aula-viva/students/${R}/timeline`];
+// Seguimiento que el mediador ya tenía antes de V9 (producción `secsess-642820d`).
+const INDIVIDUAL = (R) => [`/api/students/${R}/status`, `/api/progress/user/${R}`, `/api/progress/item/${R}/c1`, `/api/reading-progress/${R}`, `/api/reading-progress/${R}/c1`, `/api/interventions/student/${R}`];
+// Lo que V9 añade o recupera sobre un lector (en producción esos motores están apagados y sin filas), y lo que depende de Leo o de XP.
+const NEW_INDIVIDUAL = (G, R) => [`/api/aula-viva/students/${R}/timeline`, `/api/aula-viva/students/${R}/feature-vector`, `/api/aula-viva/students/${R}/risk-history`,
+    `/api/aula-viva/recommendations/scope/user/${R}`, `/api/aula-viva/institutional/profile/${R}`, `/api/aula-viva/institutional/outcomes/scope/user/${R}`,
+    `/api/aula-viva/context/students/${R}/indicators`, `/api/leo/mediator/student/${R}`, `/api/leo/mediator/student/${R}/content/c1`, `/api/leo/activation/${R}`, `/api/groups/${G}/students/${R}/progress`];
+const NEW_COLLECTIVE = ['/api/aula-viva/students-needing-attention', '/api/aula-viva/recommendations', '/api/aula-viva/institutional/outcomes/follow-up-queue', '/api/aula-viva/institutional/cohorts/definitions',
+    '/api/aula-viva/cohorts/group/g-a', '/api/aula-viva/cohorts/group/g-a/rollups', '/api/aula-viva/recommendations/scope/group/g-a', '/api/aula-viva/institutional/outcomes/scope/group/g-a', '/api/aula-viva/institutional/learnings/scope/group/g-a'];
 const SWEEP = (G, R) => ['/api/users', '/api/groups', `/api/groups/${G}/members`, `/api/groups/${G}/candidates`, `/api/groups/${G}/diagnosis`, `/api/groups/${G}/analytics-summary`,
     `/api/groups/${G}/students/${R}/progress`, `/api/students/${R}/export-submissions`, `/api/metrics/course/${G}`, `/api/reports/course/${G}`, '/api/metrics/schools', '/api/metrics/school/org-a',
     `/api/progress/item/${R}/c1`, `/api/reading-progress/${R}/c1`, `/api/interventions/course/${G}`, `/api/interventions/student/${R}`, `/api/leo/mediator/student/${R}`, `/api/leo/activation/${R}`,
@@ -163,6 +173,28 @@ try {
             ok(`${who} (${why}): sin seguimiento individual`, denied(rs), st(rs));
         }
         ok('el mediador del otro piloto: los suyos sí, los de este no', open(await both('/api/students/rb-1/status', C['med-b'])) && denied(await both('/api/students/ra-1/status', C['med-b'])));
+        const board = [...await both('/api/metrics/course/g-a', C['med-a']), ...await both('/api/reports/course/g-a', C['med-a'])];
+        ok('tablero e informe del curso del corte: 200, y solo con lectores con seguimiento', board.every((r) => r.status === 200 && delivered(r).every((id) => GA_FOLLOW.includes(id))) && board.some((r) => delivered(r).includes('ra-1')), st(board));
+        const iv = await send(S1, 'POST', '/api/interventions', C['med-a'], { studentId: 'ra-1', courseId: 'g-a', type: 'conversacion', note: 'seguimiento de lectura' });
+        const ivNew = await send(S2, 'POST', '/api/interventions', C['med-a'], { studentId: 'ra-7', courseId: 'g-a', type: 'conversacion', note: 'seguimiento de lectura' });
+        ok('intervención del tablero: sobre un lector con seguimiento no se niega; sobre el que llegó después del corte, 403', ![401, 403].includes(iv.status) && iv.status < 500 && ivNew.status === 403, st([iv, ivNew]));
+    }
+
+    section('[2b] funciones nuevas de V9, Leo del mediador y XP: la condición de piloto no las abre');
+    {
+        const rows = [];
+        for (const p of NEW_INDIVIDUAL('g-a', 'ra-1')) for (const r of await both(p, C['med-a'])) rows.push({ p, r });
+        const leaked = rows.filter(({ r }) => delivered(r).length > 0 || r.status === 200);
+        ok(`${NEW_INDIVIDUAL('g-a', 'ra-1').length} rutas sobre un lector con seguimiento histórico: ninguna responde 200 ni lo nombra`, leaked.length === 0, JSON.stringify(leaked.map(({ p, r }) => `${p} ${r.status}`)));
+        ok('…y ninguna falla con 5xx', rows.every(({ r }) => r.status < 500 || r.status === 503), JSON.stringify(rows.filter(({ r }) => r.status >= 500).map(({ p, r }) => `${p} ${r.status}`)));
+        const coll = [];
+        for (const p of NEW_COLLECTIVE) for (const r of await both(p, C['med-a'])) coll.push({ p, r });
+        ok(`${NEW_COLLECTIVE.length} rutas de analítica derivada del curso o del mediador: ningún lector de piloto en la respuesta`, coll.every(({ r }) => delivered(r).length === 0 && (r.status < 500 || r.status === 503)),
+            JSON.stringify(coll.filter(({ r }) => delivered(r).length > 0 || (r.status >= 500 && r.status !== 503)).map(({ p, r }) => `${p} ${r.status} ${delivered(r)}`)));
+        // Control: con C005 del mediador y A2 del lector, las mismas funciones no se niegan (la vía ordinaria no cambia).
+        const ctl = [];
+        for (const p of NEW_INDIVIDUAL('g-c', 'rc-1').filter((x) => !/context\/students|\/students\/rc-1\/progress/.test(x))) for (const r of await both(p, C['med-c'])) ctl.push({ p, r });
+        ok('control (C005 + A2): esas funciones no responden 403 a la vía ordinaria', ctl.every(({ r }) => r.status !== 403 && r.status !== 401 && (r.status < 500 || r.status === 503)), JSON.stringify(ctl.filter(({ r }) => [401, 403].includes(r.status) || (r.status >= 500 && r.status !== 503)).map(({ p, r }) => `${p} ${r.status}`)));
     }
 
     section('[3] barrido: nada de un lector ajeno al corte de ese mediador');
@@ -173,6 +205,8 @@ try {
         ok('ningún 5xx inesperado', rows.every((x) => x.status < 500 || x.status === 503), JSON.stringify(rows.filter((x) => x.status >= 500).map((x) => `${x.p} ${x.status}`)));
         const solo6 = rows.filter((x) => x.ids.includes('ra-6') && !['/api/users', '/api/groups', '/api/groups/g-a/members'].includes(x.p));
         ok('el lector de solo nómina aparece únicamente en nóminas', solo6.length === 0, JSON.stringify(solo6.map((x) => `${x.p} ${x.status}`)));
+        const derived = rows.filter((x) => /^\/api\/(aula-viva|leo)\//.test(x.p) && x.ids.length > 0);
+        ok('ninguna ruta de Aula Viva ni de Leo entrega un lector por la condición de piloto', derived.length === 0, JSON.stringify(derived.map((x) => `${x.p} ${x.status} ${x.ids}`)));
     }
 
     section('[4] lector de piloto: lectura conservada; Leo se decide aparte');
