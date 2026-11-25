@@ -73,8 +73,8 @@ export function canAccessScope(callerId, scope_type, scope_id) {
  * Devuelve una función reutilizable en listados: el registro se lee una sola vez
  * por petición. Nunca concede: solo puede restringir lo que el CIS ya permitió.
  *
- * V9R-DEP1: `pilot: true` lo pasan SOLO las funciones de seguimiento que ya existían antes de V9 (progreso, estado,
- * tablero e intervenciones). Por defecto `false`: las rutas de `/api/aula-viva` (analítica derivada) y cualquier
+ * V9R-DEP1: `pilot: true` lo pasan SOLO las funciones de seguimiento que el mediador ya tenía antes de V9 (progreso
+ * de lectura, estado e intervenciones). Por defecto `false`: las rutas de `/api/aula-viva` (analítica derivada) y cualquier
  * función nueva exigen A2 y C005; la condición PILOT_LEGACY no las abre.
  */
 export function individualAccessChecker(callerId, { pilot = false } = {}) {

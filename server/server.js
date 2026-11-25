@@ -12646,7 +12646,10 @@ function mediatorCourseReaders(requester, courseId) {
         return { decision: 'unavailable' };
     }
     if (!roster) return { decision: 'deny' };
-    const check = individualAccessChecker(requester.id, { pilot: true }); // V9R-DEP1: tablero e informe del curso, anteriores a V9
+    // V9R-DEP1: SIN la condición de piloto. En la versión anterior a V9 el tablero y el informe del curso estaban
+    // restringidos para quien media (403 `course_detail_restricted`, SEC-SESSION-IDENTITY-04U): no son una función
+    // que el piloto tuviera. Exigen A2 del lector y C005 del mediador.
+    const check = individualAccessChecker(requester.id);
     const users = readJSON(USERS_DB) || [];
     const eligible = new Set();
     for (const sid of roster) {

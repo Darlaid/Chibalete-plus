@@ -4,10 +4,11 @@
  * Con server.js REAL, dos instituciones, cinco grupos y dos réplicas. Ninguna cuenta de piloto tiene A1, A2, A3, A5
  * ni C005 en el registro: no se anota ninguna autorización ficticia.
  *   [1] mediador de piloto: nómina, usuarios y resumen de SU curso del corte; nada de sus otros cursos ni de otros
- *   [2] seguimiento individual HISTÓRICO (progreso, estado, tablero, intervenciones): solo de los lectores con esa
+ *   [2] seguimiento individual HISTÓRICO (progreso, estado, intervenciones): solo de los lectores con esa
  *       función en su pertenencia del corte
- *   [2b] funciones que no existían o no tenían datos antes de V9 (analítica derivada de Aula Viva, indicadores
- *       contextuales, Leo del mediador, XP): la condición de piloto NO las abre; con C005 + A2 siguen abiertas
+ *   [2b] funciones que el mediador no tenía antes de V9: tablero e informe del curso (restringidos en producción),
+ *       analítica derivada de Aula Viva, indicadores contextuales, Leo del mediador y XP. La condición de piloto NO
+ *       las abre; con C005 + A2 siguen abiertas
  *   [3] barrido de rutas de consulta: ninguna entrega un lector ajeno al corte de ese mediador
  *   [4] lector de piloto: lee como antes; Leo se decide aparte (A3), y la condición de piloto no lo abre
  *   [5] cuentas y cursos nuevos: no heredan nada; la vía ordinaria (C005 + A2) no cambia
@@ -173,8 +174,12 @@ try {
             ok(`${who} (${why}): sin seguimiento individual`, denied(rs), st(rs));
         }
         ok('el mediador del otro piloto: los suyos sí, los de este no', open(await both('/api/students/rb-1/status', C['med-b'])) && denied(await both('/api/students/ra-1/status', C['med-b'])));
+        // En producción (`secsess-642820d`) el tablero y el informe del curso están restringidos para quien media: no
+        // son una función histórica del piloto y la condición no los abre.
         const board = [...await both('/api/metrics/course/g-a', C['med-a']), ...await both('/api/reports/course/g-a', C['med-a'])];
-        ok('tablero e informe del curso del corte: 200, y solo con lectores con seguimiento', board.every((r) => r.status === 200 && delivered(r).every((id) => GA_FOLLOW.includes(id))) && board.some((r) => delivered(r).includes('ra-1')), st(board));
+        ok('tablero e informe del curso del corte: ningún lector por la condición de piloto', board.every((r) => delivered(r).length === 0 && (r.status < 500 || r.status === 503)), st(board));
+        const boardOrd = [...await both('/api/metrics/course/g-c', C['med-c']), ...await both('/api/reports/course/g-c', C['med-c'])];
+        ok('…y por la vía ordinaria (C005 + A2) siguen entregando al lector autorizado', boardOrd.every((r) => r.status === 200 && delivered(r).join() === 'rc-1'), st(boardOrd));
         const iv = await send(S1, 'POST', '/api/interventions', C['med-a'], { studentId: 'ra-1', courseId: 'g-a', type: 'conversacion', note: 'seguimiento de lectura' });
         const ivNew = await send(S2, 'POST', '/api/interventions', C['med-a'], { studentId: 'ra-7', courseId: 'g-a', type: 'conversacion', note: 'seguimiento de lectura' });
         ok('intervención del tablero: sobre un lector con seguimiento no se niega; sobre el que llegó después del corte, 403', ![401, 403].includes(iv.status) && iv.status < 500 && ivNew.status === 403, st([iv, ivNew]));

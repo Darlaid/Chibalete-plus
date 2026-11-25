@@ -67,11 +67,12 @@ export const VERIFICATIONS = Object.freeze(['self_authenticated', 'verified', 'u
 //   pilot_reader           el lector figura en la nómina que ve ese mediador (sin detalle individual);
 //   pilot_reader_followup  además, en lugar de su A2: el seguimiento individual HISTÓRICO por ese mediador.
 // «Histórico» = lo que el mediador ya consultaba en la versión anterior a V9: progreso de lectura, estado del lector,
-// filas del resumen y del tablero del curso, intervenciones del tablero, revisión y exportación de entregas. Cada una
+// filas del resumen del grupo, intervenciones, revisión y exportación de entregas. El tablero y el informe del curso
+// NO lo son: esa versión ya se los negaba a quien media. Cada una
 // de esas funciones lo pide de forma expresa (`pilot: true`); `a2Gate` NO lo aplica por defecto, así que ninguna
 // función nueva lo hereda por reutilizar el criterio de A2.
 // Qué NO abre, nunca: Leo e IA (A3) ni las vistas de Leo del mediador, transcripción de voz (A5), XP (A1), términos
-// (T), candidatos y diagnóstico del grupo, la analítica derivada de Aula Viva (indicadores contextuales, riesgo,
+// (T), candidatos y diagnóstico del grupo, el tablero y el informe del curso, la analítica derivada de Aula Viva (indicadores contextuales, riesgo,
 // recomendaciones, impacto, cohortes, trayectorias, patrones, perfil y línea de tiempo), ni nada sobre un lector o
 // un grupo sin su propia línea. Una negativa o revocación expresa de A2 (lector) o de
 // C005 (mediador) prevalece siempre sobre la condición de piloto.
