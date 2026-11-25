@@ -558,6 +558,7 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     // Single fire path: cooldown + mutual-exclusion with open companion or welcome toast.
     const fireIntervention = useCallback((msg: string, reason: LeoTriggerReason) => {
         if (!isMemoryLoadedRef.current) return; // skip until hydration settles
+        if (dataService.isLeoKnownDisabled()) return; // V9R ACC-1: sin A3, Leo no se abre solo (el botón dice su estado)
         const now = Date.now();
         if (now - lastTriggerTimeRef.current < TRIGGER_COOLDOWN_MS) return;
         if (showLeoCompanionRef.current) return;

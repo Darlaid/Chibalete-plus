@@ -13,6 +13,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Activity, RefreshCw } from 'lucide-react';
 import { describeInstitutionalError, describeNoEligibleReaders, describeAccessWithdrawn } from '../../utils/institutionalErrors';
 import { useAuthorizationRevalidation } from '../../hooks/useAuthorizationRevalidation';
+import { dataService } from '../../services/dataService';
 import { InstitutionalLearningCard } from './InstitutionalLearningCard';
 import type { InstitutionalLearning } from '../../services/aulaVivaInstitutionalService';
 import {
@@ -33,6 +34,12 @@ const BADGE: Record<string, string> = {
     calculated: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200',
 };
 const BADGE_TEXT: Record<string, string> = { pending: 'En seguimiento', insufficient: 'Evidencia insuficiente', calculated: 'Resultado calculado' };
+
+/** V9R ACC-1 — lectores en la nómina del grupo, si esta cuenta la tiene (sin mediadores); null si no se conoce. */
+function readerRosterOf(groupId: string): number | null {
+    const g = dataService.getAllGroups().find((x) => x.id === groupId);
+    return g && !(g as any).rosterWithheld ? dataService.getGroupStudents(groupId).length : null;
+}
 
 export const InterventionImpactPanel: React.FC<{
     scope: { type: 'user' | 'group'; id: string };
@@ -111,7 +118,9 @@ export const InterventionImpactPanel: React.FC<{
                 const insufficient = rows.filter(r => impactStateOf(r) === 'insufficient').length;
                 // Curso sin lectores con seguimiento habilitado para esta cuenta: no es «sin intervenciones».
                 if (isGroup && b.population && b.population.eligible === 0) {
-                    const none = describeNoEligibleReaders(b.population.roster);
+                    // V9R ACC-1: la nómina que se muestra es la de ESTUDIANTES (lectores). El recuento del servidor incluye a
+                    // los mediadores del grupo; si esta cuenta tiene la nómina, se usa la de lectores.
+                    const none = describeNoEligibleReaders(readerRosterOf(scope.id) ?? b.population.roster);
                     return (
                         <div role="status" data-testid="impact-no-eligible" className="mt-3 p-3 rounded-lg bg-gray-50 dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700">
                             <p className="text-sm font-semibold">{none.title}</p>
@@ -123,7 +132,7 @@ export const InterventionImpactPanel: React.FC<{
                     <div>
                         {isGroup && b.population && (
                             <p data-testid="impact-population" className="mt-3 text-sm text-gray-700 dark:text-gray-200">
-                                Población evaluada: {b.population.eligible} {b.population.eligible === 1 ? 'lector' : 'lectores'} con seguimiento habilitado, de {b.population.roster} en la nómina del curso.
+                                Población evaluada: {b.population.eligible} {b.population.eligible === 1 ? 'lector' : 'lectores'} con seguimiento habilitado, de {readerRosterOf(scope.id) ?? b.population.roster} en la nómina del curso.
                             </p>
                         )}
                         {rows.length === 0

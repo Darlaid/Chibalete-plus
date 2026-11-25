@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Send, Minimize2, Loader2, Volume2, Mic, StopCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import type { Content, ChatMessage, VisualContext, LeoReaderProfile } from '../types';
-import { chatConBibliotecario, generarMicroResumenRecordatorio } from '../services/geminiService';
+import { chatConBibliotecario, generarMicroResumenRecordatorio, LEO_NOT_ENABLED_MESSAGE } from '../services/geminiService';
 import type { LeoSessionMemory } from '../services/geminiService';
 import { useLocation } from 'react-router-dom';
 import { dataService } from '../services/dataService';
@@ -151,6 +151,15 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
   const leoMemoryRef = useRef<LeoSessionMemory | null>(null);
   const sessionStorageKeyRef = useRef<string | null>(null);
   const proactiveTriggeredRef = useRef<Set<string>>(new Set()); // keyed by contentId
+  // V9R ACC-1 — si ya consta que la cuenta no tiene A3, el chat lo dice antes de que se escriba nada y no envía preguntas
+  // que el servidor va a rechazar. El control sigue en el servidor (requireLeoAuthorization).
+  const [leoDisabled, setLeoDisabled] = useState<boolean>(() => dataService.isLeoKnownDisabled());
+  useEffect(() => {
+    if (!user) { setLeoDisabled(false); return; }
+    let alive = true;
+    dataService.leoAllowed().then((v) => { if (alive) setLeoDisabled(v === false); });
+    return () => { alive = false; };
+  }, [user?.id]);
 
   // Determine context based on URL
   const [currentContextContent, setCurrentContextContent] = useState<Content | undefined>(undefined);
@@ -401,7 +410,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
   }
 
   const handleSend = async () => {
-    if (!input.trim() || !user) return;
+    if (!input.trim() || !user || leoDisabled) return;
 
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
@@ -563,6 +572,9 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
                     </div>
                   </>
                 ) : (
+                  leoDisabled ? (
+                    <p role="status" data-testid="leo-not-enabled">{LEO_NOT_ENABLED_MESSAGE}</p>
+                  ) : (
                   <>
                     <p>¡Hola! Soy Leo.</p>
                     {visualContext ? (
@@ -571,6 +583,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
                       <p className="mt-2">Puedo recomendarte libros o hablar sobre lo que estás leyendo.</p>
                     )}
                   </>
+                  )
                 )}
               </div>
             )}
@@ -631,14 +644,14 @@ const Chatbot: React.FC<ChatbotProps> = ({ onVisibilityChange, visualContext, in
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={isListening ? "Escuchando..." : (visualContext ? "Pregunta sobre la imagen..." : "Pregunta sobre libros...")}
+                placeholder={leoDisabled ? "Leo no está habilitado para esta cuenta" : isListening ? "Escuchando..." : (visualContext ? "Pregunta sobre la imagen..." : "Pregunta sobre libros...")}
                 className="flex-1 pl-4 pr-10 py-3 rounded-full border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-sm"
-                disabled={isLoading}
+                disabled={isLoading || leoDisabled}
               />
 
               <button
                 onClick={handleSend}
-                disabled={isLoading || !input.trim()}
+                disabled={isLoading || leoDisabled || !input.trim()}
                 className="absolute right-0 p-2 bg-indigo-600 text-white rounded-full hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 <Send size={16} />

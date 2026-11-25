@@ -174,6 +174,8 @@ const AulaViva: React.FC = () => {
     const [diagnosis,        setDiagnosis]        = useState<GroupDiagnosis | null>(null);
     const [diagnosisLoading, setDiagnosisLoading] = useState(false);
     const [diagnosisError,   setDiagnosisError]   = useState<string | null>(null);
+    // V9R ACC-1: el diagnóstico se denegó por autorización (403 en la primera consulta), no falló.
+    const [diagnosisRestricted, setDiagnosisRestricted] = useState(false);
     // CHP-MAINT-AULA-VIVA-HISTORICAL-METRICS-01 (1B) — analítica REAL del grupo
     // (una petición por grupo). Sustituye a pedagogicalStats/localStorage.
     const [groupAnalytics, setGroupAnalytics] = useState<GroupAnalyticsState>({ status: 'loading' });
@@ -394,6 +396,7 @@ const AulaViva: React.FC = () => {
             const wasShown = diagnosisShown.current;
             diagnosisShown.current = false;
             setDiagnosis(null);
+            setDiagnosisRestricted(status === 403 && !(silent && wasShown));
             setDiagnosisError(silent && wasShown && (status === 401 || status === 403 || status >= 500)
                 ? describeAccessWithdrawn('group', status)
                 : e?.message || 'Error inesperado al obtener el diagnóstico.');
@@ -1645,6 +1648,7 @@ const AulaViva: React.FC = () => {
                                 diagnosis={diagnosis}
                                 loading={diagnosisLoading}
                                 error={diagnosisError}
+                                restricted={diagnosisRestricted}
                             />
                         </div>
                     )}

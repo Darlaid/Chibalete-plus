@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, UserCircle2 } from 'lucide-react';
 import { dataService } from '../services/dataService';
+import { LEO_NOT_ENABLED_MESSAGE } from '../services/geminiService';
 import { useAuth } from '../context/AuthContext';
 import * as analyticsService from '../services/analyticsService';
 import type { PedagogicalStage, LeoReaderProfile } from '../types';
@@ -60,6 +61,14 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
     const [mode, setMode] = useState<'menu' | 'vocab' | 'question' | 'loading' | 'result'>('menu');
     const [inputValue, setInputValue] = useState('');
     const [answer, setAnswer] = useState('');
+    // V9R ACC-1 — si ya consta que la cuenta no tiene A3, Leo lo dice al abrirse, antes de ofrecer preguntas. El servidor
+    // sigue decidiendo (requireLeoAuthorization); esto solo evita mostrar opciones que va a rechazar.
+    const [leoDisabled, setLeoDisabled] = useState<boolean>(() => dataService.isLeoKnownDisabled());
+    useEffect(() => {
+        let alive = true;
+        dataService.leoAllowed().then((v) => { if (alive) setLeoDisabled(v === false); });
+        return () => { alive = false; };
+    }, []);
     // CHP-WCAG-01B BIBLIOTECA-09: diálogo con nombre, foco inicial, contención de
     // Tab/Shift+Tab, cierre con Escape y restauración del foco al elemento activo
     // previo. Mínimo local, sin gestor global de modales.
@@ -218,8 +227,7 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
             const data = await res.json();
             // V8.1-PROD-02B — A3: sin autorización para Leo/IA, mensaje claro (no se llamó al proveedor).
             if (res.status === 403 && data?.code === 'A3_REQUIRED') {
-                setAnswer('Leo no está habilitado para esta cuenta: requiere la autorización A3 (Leo / inteligencia artificial). Tu lectura no cambia.');
-                setMode('result');
+                setLeoDisabled(true);
                 return;
             }
             if (data && data.success) {
@@ -297,7 +305,17 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                 </p>
                 {/* Body */}
                 <div className="p-6 relative min-h-[250px] flex flex-col justify-center">
-                    {mode === 'menu' && (
+                    {leoDisabled && (
+                        <div className="flex flex-col items-center w-full" role="status" data-testid="leo-not-enabled">
+                            <p className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-5 mb-6 text-gray-800 dark:text-gray-200 leading-relaxed font-medium">
+                                {LEO_NOT_ENABLED_MESSAGE}
+                            </p>
+                            <button onClick={onClose} className="w-full py-3 font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700 rounded-xl transition-colors">
+                                Entendido
+                            </button>
+                        </div>
+                    )}
+                    {!leoDisabled && mode === 'menu' && (
                         <div className="space-y-4 w-full">
                             <p className="text-gray-600 dark:text-gray-300 text-center mb-6 font-medium leading-relaxed px-2">
                                 {initialMessage ?? greetingMessage}
@@ -328,7 +346,7 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                         </div>
                     )}
 
-                    {(mode === 'vocab' || mode === 'question') && (
+                    {!leoDisabled && (mode === 'vocab' || mode === 'question') && (
                         <div className="flex flex-col gap-4 animate-in slide-in-from-right-4">
                             <button onClick={() => { setMode('menu'); setInputValue(''); }} className="text-xs uppercase font-bold text-gray-400 hover:text-indigo-600 self-start mb-2">
                                 ← Volver
@@ -357,14 +375,14 @@ export const LeoCompanion: React.FC<LeoCompanionProps> = ({ contentId, currentIn
                         </div>
                     )}
 
-                    {mode === 'loading' && (
+                    {!leoDisabled && mode === 'loading' && (
                         <div className="flex flex-col items-center justify-center space-y-4 animate-in fade-in">
                             <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
                             <p className="text-indigo-600 dark:text-indigo-400 font-bold animate-pulse">Leo está pensando...</p>
                         </div>
                     )}
 
-                    {mode === 'result' && (
+                    {!leoDisabled && mode === 'result' && (
                         <div className="flex flex-col items-center animate-in zoom-in-95 w-full">
                             <div className="bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-100 dark:border-indigo-800 rounded-2xl p-6 relative w-full mb-6">
                                 <UserCircle2 className="absolute -top-4 -left-2 text-indigo-500 bg-white dark:bg-gray-900 rounded-full" size={32} />

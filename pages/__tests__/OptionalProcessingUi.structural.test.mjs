@@ -55,6 +55,22 @@ ok('Tareas de audio: no pide autorización por uso (sin confirm/prompt)', !/wind
 
 const leo = src('components/LeoCompanion.tsx');
 ok('Leo: mensaje claro ante A3_REQUIRED, sin mostrar el código', /res\.status === 403 && data\?\.code === 'A3_REQUIRED'/.test(leo));
+// V9R ACC-1 — sin A3, Leo lo dice ANTES de que se pregunte y no lanza consultas que el servidor ya va a rechazar.
+{
+    const ds = src('services/dataService.ts'), gem = src('services/geminiService.ts'), texto = src('pages/VisorTexto.tsx'), inm = src('pages/VisorInmersivo.tsx');
+    ok('A3 de la sesión: se lee de /api/auth/me (optionalProcessing.leo), una vez por sesión, y se olvida al cerrarla', /fetch\('\/api\/auth\/me'/.test(ds) && /me\?\.optionalProcessing\?\.leo/.test(ds)
+        && /public clearSessionState\(\): void \{\s*this\.leoAuthorization = null;\s*this\.leoDisabledKnown = false;/.test(ds));
+    ok('sin respuesta clara no se supone nada (null): la interfaz y el servidor se comportan como antes', /if \(v === null\) this\.leoAuthorization = null;/.test(ds));
+    ok('memoria de Leo: sin A3 no se lee ni se guarda (sin 403 en segundo plano)', /if \(\(await this\.leoAllowed\(\)\) === false\) return null;/.test(ds) && /if \(\(await this\.leoAllowed\(\)\) === false\) return;/.test(ds));
+    ok('resumen y chat: sin A3 no se consultan; el chat dice la restricción (no «fallo de conexión»)', /if \(\(await dataService\.leoAllowed\(\)\) === false\) return '';/.test(gem)
+        && /if \(\(await dataService\.leoAllowed\(\)\) === false\) return LEO_NOT_ENABLED_MESSAGE;/.test(gem) && /body\?\.code === 'A3_REQUIRED'\) return LEO_NOT_ENABLED_MESSAGE/.test(gem));
+    ok('el texto es una restricción de autorización, no un fallo técnico', /LEO_NOT_ENABLED_MESSAGE = 'Leo no está habilitado para esta cuenta: requiere la autorización A3 \(Leo \/ inteligencia artificial\)\. Tu lectura no cambia\.'/.test(gem));
+    ok('panel de Leo: con A3 denegada muestra el estado al abrir y oculta las opciones de pregunta', /data-testid="leo-not-enabled"/.test(leo) && /\{!leoDisabled && mode === 'menu' && \(/.test(leo)
+        && /\{!leoDisabled && \(mode === 'vocab' \|\| mode === 'question'\) && \(/.test(leo) && /dataService\.leoAllowed\(\)\.then/.test(leo));
+    ok('chat de Leo: con A3 denegada lo dice en vez del saludo y desactiva la entrada', /leoDisabled \? \(\s*<p role="status" data-testid="leo-not-enabled">\{LEO_NOT_ENABLED_MESSAGE\}<\/p>/.test(bot)
+        && /disabled=\{isLoading \|\| leoDisabled\}/.test(bot) && /if \(!input\.trim\(\) \|\| !user \|\| leoDisabled\) return;/.test(bot));
+    ok('visores: sin A3, Leo no se abre solo (el botón sigue y explica el estado)', /if \(dataService\.isLeoKnownDisabled\(\)\) return;/.test(texto) && /if \(dataService\.isLeoKnownDisabled\(\)\) return;/.test(inm));
+}
 
 console.log(`\noptional processing UI (V8.1-PROD-02B): ${pass} ✓, ${fail} ✗`);
 process.exit(fail ? 1 : 0);

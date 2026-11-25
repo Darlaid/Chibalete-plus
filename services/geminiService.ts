@@ -162,6 +162,12 @@ export const adaptarNivelDificultad = async (textoPagina: string, nivelUsuario: 
 };
 
 /**
+ * V9R ACC-1 — texto único cuando la cuenta no tiene Leo habilitado (A3 del 004). Es una restricción de autorización,
+ * no un fallo técnico: el servidor la decide (requireLeoAuthorization) y no llama al proveedor de IA.
+ */
+export const LEO_NOT_ENABLED_MESSAGE = 'Leo no está habilitado para esta cuenta: requiere la autorización A3 (Leo / inteligencia artificial). Tu lectura no cambia.';
+
+/**
  * Generates a micro-summary for re-engagement notifications via Chatbot.
  * Routes through /api/leo/recap (backend) — no direct Gemini call from client.
  */
@@ -171,6 +177,8 @@ export const generarMicroResumenRecordatorio = async (
     userId?: string
 ): Promise<string> => {
     try {
+        // V9R ACC-1: sin A3 no hay resumen de Leo; no se consulta lo que el servidor ya va a rechazar.
+        if ((await dataService.leoAllowed()) === false) return '';
         const res = await fetch('/api/leo/recap', {
             method: 'POST',
             headers: {
@@ -591,6 +599,8 @@ export const chatConBibliotecario = async (
   userId?: string
 ): Promise<string> => {
     try {
+        // V9R ACC-1: sin A3, la restricción se dice tal cual (antes se respondía como si fallara la conexión).
+        if ((await dataService.leoAllowed()) === false) return LEO_NOT_ENABLED_MESSAGE;
         const res = await fetch('/api/leo/chat', {
             method: 'POST',
             headers: {
@@ -607,6 +617,10 @@ export const chatConBibliotecario = async (
             }),
         });
         if (!res.ok) {
+            if (res.status === 403) {
+                const body = await res.json().catch(() => null);
+                if (body?.code === 'A3_REQUIRED') return LEO_NOT_ENABLED_MESSAGE;
+            }
             return '¡Hola! Soy Leo 🦀. Mi conexión con la biblioteca central está fallando un poco. ¿Me repites eso?';
         }
         const data = await res.json();

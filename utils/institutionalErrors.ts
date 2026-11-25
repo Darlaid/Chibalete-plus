@@ -30,15 +30,25 @@ const FORBIDDEN: Record<InstitutionalSubject, string> = {
     group:  'No tienes acceso a este grupo como mediador asignado. Pide a la administración de tu institución que revise la asignación del grupo.',
 };
 const SIGNED_OUT = 'Tu sesión terminó. Vuelve a iniciar sesión para continuar.';
+/**
+ * V9R ACC-1 — función de grupo (diagnóstico, candidatos) denegada a quien SÍ figura como mediador del grupo. No es un
+ * problema de asignación: esas funciones exigen además el compromiso de acceso y confidencialidad del mediador (005),
+ * que no consta o fue retirado. Se dice lo que es; la asignación al grupo no cambia. (Si lo retirado es la cuenta o la
+ * asignación, el servidor responde 401 o la persona deja de figurar como mediadora: se aplican los otros textos.)
+ */
+const GROUP_COMMITMENT_REQUIRED = 'Figuras como mediador de este grupo, pero esta función requiere además tu compromiso de acceso y confidencialidad (documento 005) vigente, que no consta o fue retirado. Es una restricción de autorización, no un error ni un problema de tu asignación al grupo. Si crees que debería estar vigente, consulta con la coordinación de tu institución.';
 
 /**
  * Frase para mostrar ante un fallo HTTP de una consulta institucional.
  * @param status  código HTTP de la respuesta (0 o undefined si no hubo respuesta)
  * @param serverText  `error` del cuerpo, si lo hay; se muestra solo si ya es una frase
  */
-export function describeInstitutionalError(subject: InstitutionalSubject, status?: number, serverText?: unknown): string {
+export function describeInstitutionalError(subject: InstitutionalSubject, status?: number, serverText?: unknown,
+    context?: { assignedMediator?: boolean }): string {
     if (status === 503) return UNAVAILABLE[subject];
     if (status === 401) return SIGNED_OUT;
+    // V9R ACC-1: `assignedMediator` lo calcula quien llama con los grupos que el servidor le entregó a esta cuenta.
+    if (status === 403 && subject === 'group' && context?.assignedMediator === true) return GROUP_COMMITMENT_REQUIRED;
     if (status === 403) {
         // «Acceso denegado» y similares ya son frases; un código, no.
         return typeof serverText === 'string' && serverText.trim() && !isServerErrorCode(serverText) && serverText.trim() !== 'Acceso denegado'
@@ -78,12 +88,14 @@ export function describeNoEligibleReaders(rosterCount: number | null): { title: 
     const roster = rosterCount == null ? 'Nómina del curso: no disponible.'
         : rosterCount === 0 ? 'Nómina del curso: sin estudiantes registrados.'
         : `Nómina del curso: ${rosterCount} ${rosterCount === 1 ? 'estudiante' : 'estudiantes'}.`;
+    // V9R ACC-1: se dice de entrada que es una restricción de autorización (no un error ni un grupo sin lectura) y que por
+    // eso no se muestran cifras ni alertas.
     return {
-        title: 'Sin lectores con seguimiento habilitado',
+        title: rosterCount === 0 ? 'Sin lectores con seguimiento habilitado' : 'Indicadores no disponibles: ningún lector con seguimiento habilitado para tu cuenta',
         roster,
         body: rosterCount === 0
             ? 'Este curso todavía no tiene estudiantes en su nómina, así que no hay información que consultar.'
-            : 'Ningún lector de este curso tiene habilitado el seguimiento individual para tu cuenta, así que no hay información consultable. Esto no describe la actividad ni el nivel lector del grupo. Los datos generales del grupo siguen en Aula Viva.',
+            : 'Estos indicadores se calculan solo con los lectores cuyo seguimiento individual está autorizado para tu cuenta, y en este curso ninguno lo está. Es una restricción de autorización, no un error: por eso no hay información consultable ni se muestran cifras o alertas. Esto no describe la actividad ni el nivel lector del grupo. Los datos generales del grupo siguen en Aula Viva.',
     };
 }
 

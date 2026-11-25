@@ -945,6 +945,7 @@ const VisorInmersivo: React.FC<{ content: Content }> = ({ content }) => {
     useEffect(() => { if (pb.isPlaying) lastIndexChangeTimeRef.current = Date.now(); }, [pb.isPlaying]);
 
     const fireIntervention = useCallback((msg: string, reason: LeoTriggerReason) => {
+        if (dataService.isLeoKnownDisabled()) return; // V9R ACC-1: sin A3, Leo no se abre solo (el botón dice su estado)
         const now = Date.now();
         if (now - lastTriggerTimeRef.current < TRIGGER_COOLDOWN_MS) return;
         if (showLeoCompanionRef.current || activeLeoModalRef.current) return;

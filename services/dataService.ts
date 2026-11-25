@@ -835,7 +835,33 @@ class DataService {
     private sessionEpoch = 0;
     private usersReloadSeq = 0;
     private groupsReloadSeq = 0;
+    // V9R ACC-1 — A3 (Leo / IA) de la cuenta en sesión, tal como la decide el servidor en /api/auth/me. Solo presentación:
+    // sirve para decir de entrada que Leo no está habilitado y no lanzar consultas que el servidor ya va a rechazar. El
+    // control sigue en el servidor (requireLeoAuthorization). `null` = no se pudo saber: la interfaz se comporta como antes.
+    private leoAuthorization: Promise<boolean | null> | null = null;
+    private leoDisabledKnown = false;
+    public leoAllowed(): Promise<boolean | null> {
+        if (!this.leoAuthorization) {
+            const epoch = this.sessionEpoch;
+            this.leoAuthorization = fetch('/api/auth/me', { credentials: 'same-origin', cache: 'no-store' })
+                .then((r) => (r.ok ? r.json() : null))
+                .then((me) => {
+                    const v = typeof me?.optionalProcessing?.leo === 'boolean' ? me.optionalProcessing.leo : null;
+                    if (epoch !== this.sessionEpoch) return v;            // la sesión cambió mientras se consultaba
+                    this.leoDisabledKnown = v === false;
+                    if (v === null) this.leoAuthorization = null;       // sin respuesta clara: se vuelve a preguntar
+                    return v;
+                })
+                .catch(() => { if (epoch === this.sessionEpoch) this.leoAuthorization = null; return null; });
+        }
+        return this.leoAuthorization;
+    }
+    /** true solo si ya consta que la cuenta en sesión no tiene Leo habilitado (sin consultar). */
+    public isLeoKnownDisabled(): boolean { return this.leoDisabledKnown; }
+
     public clearSessionState(): void {
+        this.leoAuthorization = null;
+        this.leoDisabledKnown = false;
         this.sessionEpoch += 1;
         this.users = [];
         this.groups = [];
@@ -2787,6 +2813,7 @@ class DataService {
     async getLeoMemory(userId: string, contentId: string): Promise<any> {
         try {
             if (!userId || !contentId) return null;
+            if ((await this.leoAllowed()) === false) return null;   // V9R ACC-1: sin A3 no hay memoria de Leo que leer
             const res = await fetch(`/api/leo/memory/${userId}/${contentId}`, {
                 method: 'GET',
                 headers: {}
@@ -2802,6 +2829,7 @@ class DataService {
     async updateLeoMemory(userId: string, contentId: string, memory: any): Promise<void> {
         try {
             if (!userId || !contentId) return;
+            if ((await this.leoAllowed()) === false) return;        // V9R ACC-1: sin A3 no se guarda memoria de Leo
             await fetch(`/api/leo/memory/${userId}/${contentId}`, {
                 method: 'POST',
                 headers: {
@@ -3585,7 +3613,10 @@ class DataService {
             const body = await r.json().catch(() => ({}));
             // V9 F5-E2: sin grupo reconocido (403) o identidad no verificable (503) el cuerpo trae un
             // código (`scope_access_denied`…), no un diagnóstico: se explica, no se muestra crudo.
-            const err  = new Error(body?.summary?.headline || describeInstitutionalError('group', r.status, body?.error));
+            // V9R ACC-1: un 403 a quien figura como mediador del grupo no es falta de asignación (ver institutionalErrors).
+            const me = this.getSessionUserId();
+            const assignedMediator = !!me && this.groups.some(g => g?.id === groupId && Array.isArray((g as any).mediatorIds) && (g as any).mediatorIds.includes(me));
+            const err  = new Error(body?.summary?.headline || describeInstitutionalError('group', r.status, body?.error, { assignedMediator }));
             (err as any).status = r.status;
             (err as any).body   = body;
             throw err;

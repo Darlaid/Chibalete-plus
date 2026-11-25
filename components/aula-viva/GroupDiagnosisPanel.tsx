@@ -135,6 +135,24 @@ function LoadingState() {
     );
 }
 
+/**
+ * V9R ACC-1 — el servidor denegó el diagnóstico (403): es una restricción de autorización, no un fallo. Se dice así,
+ * sin el tono de error.
+ */
+function RestrictedState({ message }: { message: string }) {
+    return (
+        <section role="status" data-testid="diagnosis-restricted" className="bg-white border-l-4 border-gray-400 rounded-r-md p-6">
+            <header className="flex items-start gap-3">
+                <AlertCircle size={28} aria-hidden="true" className="flex-shrink-0 mt-0.5 text-gray-500" />
+                <div>
+                    <h2 className="text-lg font-bold text-gray-900 mb-1">Diagnóstico del grupo no disponible para tu cuenta</h2>
+                    <p className="text-base text-gray-900">{message}</p>
+                </div>
+            </header>
+        </section>
+    );
+}
+
 /** Estado de error: el diagnóstico mismo no se pudo leer. */
 function ErrorState({ message }: { message: string }) {
     return (
@@ -159,12 +177,14 @@ export interface GroupDiagnosisPanelProps {
     diagnosis: GroupDiagnosis | null;
     loading?:  boolean;
     error?:    string | null;
+    /** V9R ACC-1: el error es una denegación de autorización (403), no un fallo. */
+    restricted?: boolean;
 }
 
-export function GroupDiagnosisPanel({ diagnosis, loading, error }: GroupDiagnosisPanelProps) {
+export function GroupDiagnosisPanel({ diagnosis, loading, error, restricted }: GroupDiagnosisPanelProps) {
     const { activo } = useModoAccesible();
     if (loading)  return <LoadingState />;
-    if (error)    return <ErrorState message={error} />;
+    if (error)    return restricted ? <RestrictedState message={error} /> : <ErrorState message={error} />;
     if (!diagnosis) return null;
 
     const tone   = diagnosis.summary.tone;

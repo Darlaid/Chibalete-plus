@@ -53,6 +53,13 @@ try {
     const none3 = E.describeNoEligibleReaders(3), none0 = E.describeNoEligibleReaders(0), noneU = E.describeNoEligibleReaders(null);
     ok('distingue nómina (3), habilitados (ninguno) e información consultable (no hay)', /Nómina del curso: 3 estudiantes/.test(none3.roster) && /seguimiento habilitado/.test(none3.title) && /no hay información consultable/.test(none3.body));
     ok('dice expresamente que no describe actividad ni nivel', /no describe la actividad ni el nivel lector/.test(none3.body));
+    ok('V9R ACC-1: dice de entrada que es una restricción de autorización y que no se muestran cifras ni alertas', /Indicadores no disponibles/.test(none3.title)
+        && /restricción de autorización, no un error/.test(none3.body) && /ni se muestran cifras o alertas/.test(none3.body));
+    {
+        const imp = code('components/aula-viva/InterventionImpactPanel.tsx');
+        ok('V9R ACC-1: la nómina del impacto cuenta lectores (no mediadores) cuando la cuenta la tiene', /dataService\.getGroupStudents\(groupId\)\.length/.test(imp)
+            && /describeNoEligibleReaders\(readerRosterOf\(scope\.id\) \?\? b\.population\.roster\)/.test(imp) && /de \{readerRosterOf\(scope\.id\) \?\? b\.population\.roster\} en la nómina del curso/.test(imp));
+    }
     ok('sin diagnósticos ni cifras inventadas', ![none3, none0, noneU].some((n) => /inferencial|inactiv|bajo|0 estudiantes|0%|Inicial/i.test(`${n.title} ${n.roster} ${n.body}`)));
     ok('curso sin nómina ≠ curso sin habilitados', /sin estudiantes registrados/.test(none0.roster) && /no tiene estudiantes en su nómina/.test(none0.body) && none0.body !== none3.body);
     ok('nómina desconocida → se dice, no se supone cero', /no disponible/.test(noneU.roster));
@@ -97,7 +104,24 @@ try {
     ok('informe: un informe solo se pinta si es el de la ruta actual (curso ↔ colegio comparten pantalla)', /const viewKey = `\$\{type\}:\$\{id \?\? ''\}`;/.test(inf) && /if \(loading \|\| \(data !== null && dataKey !== viewKey\)\)/.test(inf) && /setDataKey\(viewKey\)/.test(inf) && /return \(\) => \{ cancelled = true; \};/.test(inf));
     ok('el panel administrativo no usa ningún campo por estudiante', !/studentBreakdown|topPerformers|needsAttention|nombre_completo/.test(code('pages/DashboardAdminLectura.tsx')));
     ok('la cabecera ya no llama «estudiantes» a los lectores habilitados', /describeReaderCoverage\(summary\.studentCount, rosterCount\)/.test(dash) && !/\{summary\.studentCount\} estudiantes/.test(dash));
-    ok('diagnóstico de grupo: 403/503 explicados (el `headline` del servidor se respeta)', /body\?\.summary\?\.headline \|\| describeInstitutionalError\('group', r\.status, body\?\.error\)/.test(ds));
+    ok('diagnóstico de grupo: 403/503 explicados (el `headline` del servidor se respeta)', /body\?\.summary\?\.headline \|\| describeInstitutionalError\('group', r\.status, body\?\.error, \{ assignedMediator \}\)/.test(ds));
+    // V9R ACC-1 — un 403 a quien figura como mediador del grupo no es «no estás asignado».
+    {
+        const assigned = E.describeInstitutionalError('group', 403, 'scope_access_denied', { assignedMediator: true });
+        const notAssigned = E.describeInstitutionalError('group', 403, 'scope_access_denied', { assignedMediator: false });
+        const noContext = E.describeInstitutionalError('group', 403, 'scope_access_denied');
+        ok('mediador asignado sin compromiso 005: lo dice, sin atribuirlo a la asignación', /Figuras como mediador de este grupo/.test(assigned) && /compromiso de acceso y confidencialidad/.test(assigned)
+            && /no consta o fue retirado/.test(assigned) && /no un error ni un problema de tu asignación/.test(assigned) && !/como mediador asignado\. Pide/.test(assigned), assigned);
+        ok('mediador no asignado (o sin saberlo): el texto de asignación de siempre', /No tienes acceso a este grupo como mediador asignado/.test(notAssigned) && notAssigned === noContext);
+        ok('cuenta o sesión retirada (401) y servicio caído (503): sus textos propios, también con el contexto', /Tu sesión terminó/.test(E.describeInstitutionalError('group', 401, '', { assignedMediator: true }))
+            && /interrupción temporal/.test(E.describeInstitutionalError('group', 503, '', { assignedMediator: true })));
+        ok('el contexto solo cambia el grupo: curso y lector no varían', E.describeInstitutionalError('course', 403, 'x', { assignedMediator: true }) === E.describeInstitutionalError('course', 403, 'x')
+            && E.describeInstitutionalError('reader', 403, 'x', { assignedMediator: true }) === E.describeInstitutionalError('reader', 403, 'x'));
+        ok('dataService: «asignado» = figura en mediatorIds del grupo que el servidor le entregó a esta cuenta', /const assignedMediator = !!me && this\.groups\.some\(g => g\?\.id === groupId && Array\.isArray\(\(g as any\)\.mediatorIds\) && \(g as any\)\.mediatorIds\.includes\(me\)\)/.test(ds));
+        const panel = code('components/aula-viva/GroupDiagnosisPanel.tsx'), aulaSrc = code('pages/AulaViva.tsx');
+        ok('Aula Viva: un 403 se pinta como «no disponible para tu cuenta» (estado, no alerta de fallo)', /Diagnóstico del grupo no disponible para tu cuenta/.test(panel) && /role="status" data-testid="diagnosis-restricted"/.test(panel)
+            && /restricted \? <RestrictedState message=\{error\} \/> : <ErrorState message=\{error\} \/>/.test(panel) && /setDiagnosisRestricted\(status === 403 && !\(silent && wasShown\)\)/.test(aulaSrc) && /restricted=\{diagnosisRestricted\}/.test(aulaSrc));
+    }
 
     section('[E] panel administrativo: lo que falta se dice');
     const adm = code('pages/DashboardAdminLectura.tsx');
