@@ -1,6 +1,6 @@
 # CHP V9-R · PRE-1 — Preparación productiva y runbook de DEP-1
 
-Estado: **preparado, NO ejecutado.** PRE-1 solo leyó producción; no desplegó, no activó ni modificó nada.
+Estado: **preparado, NO ejecutado.** PRE-1 solo leyó producción; no desplegó ni activó nada. Única modificación productiva, autorizada en el cierre de PRE-1: los productos #345 y #346 de la tienda pasaron a borrador (§3.1).
 Fecha de las mediciones: 2026-11-24. Evidencia: `D:\chp-artifacts\v9r-rc1\evidence\pre1-*` y `pre1\`.
 
 Candidata: imágenes `chibalete/api:v9r-a3c16e6` y `chibalete/front:v9r-a3c16e6` (construidas de APP `a3c16e6`), conector WEB `6dc8aed`, LU 0.10.0 (`41d17bf`). Los commits de APP posteriores a `a3c16e6` solo cambian documentación, excepciones de seguridad y guiones de `ops/`: no tocan `server/`, `utils/`, `engines/`, el front ni las dependencias, y **no requieren reconstruir las imágenes**.
@@ -46,15 +46,24 @@ No demostrado: arranque de la candidata sobre los **datos** reales (solo sobre s
 
 ## 3. Condiciones de entrada a DEP-1
 
-### 3.1 Decisiones que solo puede tomar Dirección
+### 3.1 Matriz única de despliegue (cierre de PRE-1, 2026-11-25)
 
-| # | Decisión | Por qué bloquea | Estado |
-|---|---|---|---|
-| D1 | Aprobar y publicar en HTTPS los documentos 001, 002, 004 y 005 en su versión `@1.0` | Sin `CHP_ACCEPTANCE_DOCUMENTS` ninguna cuenta se activa (503). 001 sigue «borrador», sin fecha de aprobación; 002 sin fecha de aprobación; 004 exige el 001 aprobado; ninguno está publicado. Si se aprueba otra versión hay que reconstruir las imágenes | Pendiente |
-| D2 | Fichas C.1 verificadas: C005 de los mediadores y A1/A2 de los lectores, o aceptación escrita del cierre | Hoy 25 mediadores ven el seguimiento de 3 cursos reales (80, 80 y 64 lectores). Con V9 y sin esas decisiones, **Aula Viva se cierra para todos ellos** (503 sin registro; 403 sin C005/A2) | Pendiente |
-| D3 | Ratificar el plazo de 12 meses / 365 días (§5) | Ningún documento lo recoge. Mientras tanto la poda queda apagada y los dispositivos aplican el plazo técnico | Pendiente |
-| D4 | Productos #345 y #346 | Están **publicados y son comprables** por enlace directo (ocultos del catálogo, 0 ventas), con el conector anterior y el aprovisionamiento activo. Decidir si pasan a borrador hasta la activación comercial | Pendiente |
-| D5 | Constantes `CHIBALETE_B2C_TERMS_VERSION` y `CHIBALETE_B2C_TERMS_URL` en la tienda | Sin ellas el conector nuevo no deja contratar la suscripción | Dependen de D1 |
+| Requisito | Evidencia | Estado | Responsable | Acción pendiente |
+|---|---|---|---|---|
+| APP de PRE-1 publicada con CI verde | Rama `chp/epub-mainfile-r1-release`; CI oficial con el paso `test:b2c` | Hecho | — | — |
+| #345 y #346 sin venta anticipada | Eran «Chibalete+ Digital» (`CHP-DIGITAL-ANUAL`) y «Chibalete+ Mi biblioteca» (`CHP-MIBIBLIOTECA-ANUAL`), publicados y ocultos del catálogo, 0 ventas, ningún pedido ni suscripción que los contenga. Pasados a **borrador** el 2026-11-25 00:44 UTC: páginas y Store API en 404, `is_purchasable=false`, `add-to-cart` deja el carrito vacío. Precios, SKU, IDs, visibilidad, clientes y pedidos sin tocar | Hecho | — | Reversión o activación comercial (paso 4.9): `wp post update 345 346 --post_status=publish` |
+| D1 · Documentos 001, 002, 004 y 005 aprobados y publicados en HTTPS, versión `@1.0` | Siguen como «PROPUESTA PARA APROBACIÓN», sin acta firmada y sin publicar. 002 y 005 son compatibles con V9 sin cambios; 001 (§9.8) y 004 (ficha 6.2) necesitan tres párrafos sobre Lector Único, ya preparados en el paquete de Dirección | **Pendiente externo** | Dirección | Firmar el acta única con las versiones ajustadas y publicarlas. Sin `CHP_ACCEPTANCE_DOCUMENTS` ninguna cuenta se activa (503). Otra versión que no sea `@1.0` obliga a reconstruir las imágenes |
+| D2 · Autorizaciones C005 (mediadores) y A1/A2 (lectores) verificadas y cargadas | Inventario de solo lectura: 3 cursos reales, **21 mediadores activos** (otros 4 identificadores de mediador no tienen cuenta y están en cursos de prueba) y **224 lectores activos**. En producción no existe ningún registro de decisiones ni evidencia de autorización en las cuentas: 0 verificables, 0 por aclarar, 245 titulares sin evidencia aportada. Nómina y validador: `ops/preflight/v9r/auth-pack.py` | **Pendiente externo** | Dirección (evidencias) · GVA (verificación) · AT (carga) | Entregar las fichas con su soporte; GVA diligencia la nómina; AT la carga en DEP-1 (paso 4.2). Alternativa: aceptación escrita de que el seguimiento individual queda cerrado hasta tenerlas |
+| D3 · Plazo de conservación ratificado | Contrato implementado en §5. Texto de la decisión en el paquete de Dirección. Poda del servidor apagada | **Pendiente externo** | Dirección y asesoría jurídica | Ratificar 12 meses en el servidor y 365 días en los dispositivos, o indicar otro plazo |
+| D5 · Constantes `CHIBALETE_B2C_TERMS_VERSION` y `CHIBALETE_B2C_TERMS_URL` en la tienda | Sin definir; sin ellas el conector nuevo no deja contratar | Preparado | AT | Se definen en el paso 4.8, con la versión y la URL que resulten de D1 |
+| Restauración, compatibilidad de esquemas, Android, seguridad, datos derivados | §2, §6 y §7 (sin cambios desde PRE-1) | Hecho | — | Arranque sobre datos reales y actualización de LU con datos: pasos 4.3 y 4.10 |
+
+**Qué registros son imprescindibles para que los cursos actuales sigan funcionando** (medido con la candidata, §2):
+
+- **La lectura de los lectores no depende de ninguna autorización cargada**: catálogo, acceso, progreso y eventos responden igual con o sin registro.
+- **Tablero del curso**: exige la clave de sujeto, los dos archivos de registro (aunque estén vacíos) y `CHP_ACCEPTANCE_DOCUMENTS`. Sin los archivos, toda la mediación responde 503.
+- **Resumen del curso y seguimiento individual**: exigen además el C005 del mediador y las decisiones del lector. En la prueba se cargaron A1 y A2 juntas; no se midió A2 sin A1.
+- Sin D2, tras el despliegue los 21 mediadores conservarían el tablero agregado y perderían el resumen y el seguimiento individual de los 224 lectores.
 
 ### 3.2 Preparativos técnicos (se ejecutan en DEP-1, antes de la ventana)
 
@@ -74,7 +83,7 @@ No demostrado: arranque de la candidata sobre los **datos** reales (solo sobre s
      - { type: bind, source: /var/www/chibalete/registry/exclusions, target: /app/registry/exclusions, bind: { create_host_path: false } }
    ```
    `AULA_VIVA_CONTEXT_LEDGER_ENABLED` **no** se añade aquí (paso 4.7). XP, poda y retención no se tocan.
-6. Carga de decisiones (D2): una línea JSON por decisión, por stdin, en un contenedor efímero sin red de la imagen nueva con `ops/a2/` montado en solo lectura; todas o ninguna. Después `a2_verify.mjs` e `inventory.mjs`; copia custodiada.
+6. Carga de decisiones (D2): `auth-pack.py roster` genera la nómina (salida con nombres: a un lugar custodiado, nunca al repositorio), GVA la diligencia desde los soportes y `auth-pack.py build` emite solo las filas completas y verificadas. Una línea JSON por decisión, por stdin, en un contenedor efímero sin red de la imagen nueva con `ops/a2/` montado en solo lectura; todas o ninguna. Después `a2_verify.mjs` e `inventory.mjs`; copia custodiada.
 
 ## 4. Secuencia de DEP-1
 
@@ -102,7 +111,15 @@ WP-Cron: `DISABLE_WP_CRON` no está definido y no hay cron del sistema; el segui
 
 ## 5. Privacidad y conservación
 
-- **Plazos.** Servidor: constancias de sesión y membresías cerradas, 12 meses de calendario (`contextLedger`, poda apagada con doble bandera). Web: lo pendiente de una cuenta ausente del navegador, 365 días. LU: lo pendiente de una cuenta que no es la activa, 365 días **desde el último guardado de cada sesión**; lo de la cuenta activa no caduca. Ningún documento jurídico recoge hoy estos plazos (D3).
+- **Plazos: contrato implementado (propuesta técnica, pendiente de ratificación D3).**
+
+  | Dónde | Qué caduca | Plazo | Desde cuándo | Estado |
+  |---|---|---|---|---|
+  | Servidor (`contextLedger.mjs`) | Constancias de sesión y membresías cerradas | 12 meses de calendario UTC (29 de febrero → 1 de marzo) | Última recepción de la constancia o cierre de la membresía | Poda **apagada** (doble bandera) |
+  | Web (`dataService.ts`) | Lecturas pendientes de envío de una cuenta que ya no usa el navegador | 365 días exactos | Momento en que cada lectura se guardó en la cola | Activo en la candidata |
+  | LU 0.10.0 (`AnalyticsSyncCoordinator`, `ReadingProgressRepository`) | Lo pendiente de una cuenta que no es la activa | 365 días exactos | Evento: su creación. Sesión de lectura: su último guardado. Posición sin sesiones: última actualización de la fila | Activo en la candidata |
+
+  Diferencias reales: (1) el servidor cuenta meses de calendario y los dispositivos 365 días, así que en un tramo con 29 de febrero el dispositivo vence un día antes; (2) en web y LU lo pendiente de la cuenta en uso no caduca; (3) la web no renueva el plazo de una lectura ya encolada, y LU sí lo hace por sesión cuando esa sesión se vuelve a guardar. Ningún documento jurídico recoge hoy estos plazos; el texto propuesto para 001 §9.8 y 004 §6.2 está en el paquete de Dirección.
 - **Supresión.** Eliminar la cuenta (`DELETE /api/users/:id`) y ejecutar `ops/a2/suppression_operator.mjs`. El dispositivo recibe la señal (`account_removed` o la consulta desde otra cuenta) y borra lo suyo. El 004 dice «no se promete borrado remoto de dispositivos sin capacidad verificada»: la capacidad existe desde LU 0.10.0, con el límite de que alguien debe iniciar sesión en el dispositivo.
 - **Menores, GVA/AT, representación, mayoría de edad y revocaciones:** `CHP_V9_BII_B2C_OPERATING_PROCEDURES.md` y `POST /api/users/:id/representation`; sin cambios en PRE-1.
 - **Cuenta personal existente.** Hay 1 cuenta B2C en producción. Con el registro activo, su acceso depende de sus decisiones (T/A1): anotarlas en D2 o confirmar que es de prueba.
@@ -111,7 +128,7 @@ WP-Cron: `DISABLE_WP_CRON` no está definido y no hay cron del sistema; el segui
 
 Medido sobre la copia restaurada (solo recuentos):
 
-- 672 cuentas (251 activas), 21 grupos, 25 mediadores, 627 lectores en grupos.
+- 672 cuentas (251 activas), 21 grupos, 25 identificadores de mediador (21 con cuenta activa, todos en los 3 cursos reales; 4 sin cuenta, en cursos de prueba), 627 lectores en grupos (224 activos en los cursos reales).
 - **1** cuenta personal B2C (29 eventos, 1 perfil y sus señales en `insights.db`). **Ningún** lector de colegio con obras propias.
 - `insights.db`: 52 perfiles, 1 248 señales, 33 agregados de cohorte. **0** filas en historial de riesgo, recomendaciones e impacto de intervenciones: no hay historiales acumulativos que conservar ni que purgar.
 - Telemetría: 2 620 eventos heredados (lejos del tope de 50 000); 165 de LU, ninguno con constancia de recepción (V9 no los acredita y lo declara).
@@ -135,4 +152,4 @@ Nada de esto impide desplegar; son datos que la institución puede corregir cuan
 
 ## 8. Guiones de PRE-1
 
-`ops/preflight/v9r/`: `restore-verify.py` (verifica un ensayo de restauración contra su manifiesto), `shape-export.py` (esquemas y recuentos, sin valores) y `prod-analysis.py` (recuentos de configuración institucional y de lectura personal). Solo lectura; se ejecutan sobre una copia en cuarentena, nunca sobre los almacenes vivos.
+`ops/preflight/v9r/`: `auth-pack.py` (nómina de fichas C005/A1/A2 y validador del paquete de carga; no escribe en producción), `restore-verify.py` (verifica un ensayo de restauración contra su manifiesto), `shape-export.py` (esquemas y recuentos, sin valores) y `prod-analysis.py` (recuentos de configuración institucional y de lectura personal). Solo lectura; se ejecutan sobre una copia en cuarentena, nunca sobre los almacenes vivos.
