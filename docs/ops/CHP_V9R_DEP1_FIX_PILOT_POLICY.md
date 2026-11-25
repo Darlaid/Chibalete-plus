@@ -1,6 +1,6 @@
 # CHP V9-R · DEP-1 — Corrección bloqueante: continuidad de pilotos y aceptación de la Política 001
 
-Estado: **corregido en código, NO desplegado.** Producción no se tocó. Candidata nueva: `v9r-f5b9281` (APP `f5b9281`). Sustituye a `v9r-a3c16e6` para API y front; conector WEB (`6dc8aed`) y LU 0.10.0 (`41d17bf`) no cambian.
+Estado: **corregido en código, NO desplegado.** Producción no se tocó. Candidata: `v9r-07126b5` (APP `07126b5`). Sustituye a `v9r-a3c16e6` y a la intermedia `v9r-f5b9281` para API y front; conector WEB (`6dc8aed`) y LU 0.10.0 (`41d17bf`) no cambian.
 
 DEP-1 se detuvo en el preflight (2026-11-25) por dos defectos de la candidata frente a la decisión de Dirección sobre los pilotos (21 mediadores y 224 lectores en tres espacios; sin regularización retrospectiva; sin autorizaciones fabricadas).
 
@@ -8,10 +8,10 @@ DEP-1 se detuvo en el preflight (2026-11-25) por dos defectos de la candidata fr
 
 | | Causa | Corrección |
 |---|---|---|
-| 1 | V9 exige C005 del mediador y A2 del lector para la nómina, el resumen y el seguimiento individual. Los pilotos no tienen ninguna en el registro, y no pueden inventarse: con el registro vacío los 21 mediadores perdían todo salvo el tablero agregado. | Tipo nuevo en el **mismo** registro de decisiones: `PILOT_LEGACY`. No es un consentimiento. Constata que una **pertenencia** (grupo + cuenta) existía en el corte, y conserva solo las funciones de la tabla del §2, dentro de ese grupo. |
+| 1 | V9 exige C005 del mediador y A2 del lector para la nómina, el resumen y el seguimiento individual. Los pilotos no tienen ninguna en el registro, y no pueden inventarse: con el registro vacío los 21 mediadores perdían todo salvo el tablero agregado. | Tipo nuevo en el **mismo** registro de decisiones: `PILOT_LEGACY`. No es un consentimiento. Constata que una **pertenencia** (grupo + cuenta) existía en el corte, y conserva solo las funciones históricas del §2, dentro de ese grupo. |
 | 2 | La activación registraba términos (T, 002), autorizaciones (A0–A5, 004) y compromiso (C005, 005). La Política 001 solo aparecía enlazada: su aceptación no dejaba constancia propia. | Tipo nuevo `P`: aceptación expresa de la Política 001, con su versión, en la activación. Casilla propia, sin premarcar. Ninguna cuenta nueva queda activa sin ella, tampoco por la vía administrativa. |
 
-Archivos: `server/privacy/a2Registry.mjs`, `server/privacy/acceptance.mjs`, `server/privacy/suppression.mjs`, `server/server.js`, `pages/ActivarCuenta.tsx`, `ops/a2/pilot_legacy_pack.mjs` (nuevo) y sus pruebas. No hay un segundo motor de permisos: las puertas existentes (`decisionGate`, `a2Gate`, `individualDisclosure`) consultan la condición en el mismo punto donde consultaban C005 y A2.
+Archivos: `server/privacy/a2Registry.mjs`, `server/privacy/acceptance.mjs`, `server/privacy/suppression.mjs`, `server/aulaViva/scopeAccess.mjs`, `server/server.js`, `pages/ActivarCuenta.tsx`, `ops/a2/pilot_legacy_pack.mjs` (nuevo) y sus pruebas. No hay un segundo motor de permisos: las puertas existentes (`decisionGate`, `a2Gate`, `individualDisclosure`) consultan la condición en el mismo punto donde consultaban C005 y A2.
 
 ## 2. `PILOT_LEGACY`: qué es y qué no
 
@@ -30,27 +30,50 @@ Archivos: `server/privacy/a2Registry.mjs`, `server/privacy/acceptance.mjs`, `ser
 
 Un lector trasladado no lleva la condición a su curso nuevo; una mediadora sustituida la pierde y su sustituta no la hereda.
 
-### Matriz de permisos
+**Solo funciones históricas.** La puerta de A2 (`a2Gate`) **no** admite la condición de piloto por defecto. Solo la admite la función que la pide de forma expresa (`pilot: true`), y solo la piden las que el mediador de un curso ya tenía en producción. Una función nueva que reutilice el criterio de A2 no hereda nada.
+
+### 2.1 Qué es «histórico»: cotejo con producción
+
+Cotejado contra el código de producción (`secsess-642820d`) y contra su estado medido el 2026-11-25 (`/api/health/analytics`): materializador encendido con 1 248 señales, 52 perfiles y 33 agregados de cohorte; motor de intervenciones, agregados periódicos y vectores **apagados, con 0 filas** (0 recomendaciones, 0 banderas de riesgo, 0 intervenciones registradas, 0 vectores).
+
+| Función | En producción para el mediador del curso | Con `PILOT_LEGACY` |
+|---|---|---|
+| Nómina del grupo; lista de grupos y de usuarios | Sí | **Se conserva**, limitada a los lectores del corte |
+| Resumen del grupo (`analytics-summary`) | Sí | **Se conserva**; filas individuales solo con seguimiento |
+| Progreso de lectura (`/api/progress/user`, `/item`, `/api/reading-progress`) | Sí | **Se conserva** (seguimiento) |
+| Estado del lector (`/api/students/:id/status`) | Sí | **Se conserva** (seguimiento) |
+| Tablero e informe del curso (`/api/metrics/course`, `/api/reports/course`) | Sí | **Se conserva**, solo con lectores con seguimiento |
+| Intervenciones del tablero (`/api/interventions…`) | Sí | **Se conserva** (seguimiento) |
+| Revisión de entregas y exportación de entregas | Sí | **Se conserva** (seguimiento) |
+| Candidatos del grupo | Sí | **No**: nombra a personas ajenas a la nómina del corte. Exige C005 |
+| Diagnóstico del grupo | Sí | **No**: enumera canales y miembros sin distinguir el corte. Exige C005 |
+| Leo del lector | Sí | **No**: exige A3 del lector |
+| Leo del mediador (resumen, historial por obra, activación) | Sí | **No**: son evidencias del tratamiento con IA. Exige A2 + C005 (y supone A3) |
+| Perfil lector y línea de tiempo de señales (`/api/aula-viva/…/profile`, `/timeline`) | Sí, con datos (perfiles y señales) | **No**: V9 las sirve desde el motor de contexto junto con los indicadores nuevos; no se pueden separar con un cambio mínimo. Exigen A2 + C005 |
+| Agregados de cohorte del grupo (`/api/aula-viva/cohorts/group/…`) | Sí, con datos (33 agregados) | **No** por lector; el agregado sigue las reglas de agregados, sin la condición de piloto |
+| Riesgo, recomendaciones, cola de atención, impacto, resultados, aprendizajes, cohortes tipadas, trayectorias, patrones, vector de rasgos | Rutas presentes, **sin datos** (motores apagados) | **No**: para un piloto serían tratamiento nuevo. Exigen A2 + C005 |
+| Indicadores contextuales por lector (`/api/aula-viva/context/…`) | No existe | **No**: función nueva de V9. Exige A2 + C005 |
+| Progreso de XP del lector | Inerte | **No**: exige A1 y A2 |
+
+**No hay continuidad completa.** Cinco funciones que el mediador tiene hoy no se mantienen bajo `PILOT_LEGACY` y quedan como decisión de Dirección (§7): candidatos, diagnóstico, Leo del lector, Leo del mediador, y perfil y línea de tiempo de señales.
+
+### 2.2 Matriz de permisos
 
 «Antes» = candidata `v9r-a3c16e6` con el registro vacío (lo único posible sin fabricar autorizaciones). «Después» = esta corrección con la carga del §4.
 
 | Quién · qué | Producción hoy | Antes | Después |
 |---|---|---|---|
 | **Lector de piloto** · leer, guardar progreso, ver lo suyo | Sí | Sí | Sí |
-| Lector de piloto · Leo e IA | Sí | 403 `A3_REQUIRED` | 403 `A3_REQUIRED` (§3) |
+| Lector de piloto · Leo e IA | Sí | 403 `A3_REQUIRED` | 403 `A3_REQUIRED` |
 | Lector de piloto · transcripción de voz | — | Cerrada (A5) | Cerrada (A5) |
-| Lector de piloto · XP | Apagado | Apagado (A1) | Apagado (A1) |
-| **Mediador de piloto** · lista de grupos | Con nóminas | Nóminas retenidas | Nómina del corte de sus cursos del corte; el resto, retenido |
-| Mediador de piloto · lista de usuarios | Institución | Solo personal | Además, los lectores del corte de sus cursos del corte |
-| Mediador de piloto · nómina de su curso del corte | Sí | 403 | Sí, solo lectores del corte |
-| Mediador de piloto · resumen del curso | Sí | 403 | Sí, limitado a lectores del corte; filas individuales solo con seguimiento |
-| Mediador de piloto · seguimiento individual (estado, progreso, línea de tiempo, intervenciones, revisión y exportación de entregas) | Sí | 403 | Solo de lectores con `pilot_reader_followup` en ese mismo curso |
-| Mediador de piloto · candidatos y diagnóstico del grupo | Sí | 403 | 403 (exigen C005: nombran a personas de fuera de la nómina) |
-| Mediador de piloto · un curso suyo posterior al corte | — | 403 | 403 |
-| Mediador de piloto · lector llegado después del corte | — | 403 | 403 (ni en la nómina) |
+| **Mediador de piloto** · nómina y resumen de su curso del corte | Sí | 403 / retenida | Sí, solo lectores del corte |
+| Mediador de piloto · seguimiento histórico (progreso, estado, tablero, intervenciones, entregas) | Sí | 403 | Solo de lectores con `pilot_reader_followup` en ese mismo curso |
+| Mediador de piloto · analítica derivada de Aula Viva, Leo del mediador, XP | Parcial (ver 2.1) | 403 | 403 |
+| Mediador de piloto · candidatos y diagnóstico | Sí | 403 | 403 |
+| Mediador de piloto · curso o lector posterior al corte | — | 403 | 403 |
 | Mediador de piloto · otros cursos, otra institución | 403 | 403 | 403 |
 | **Mediador nuevo** (sin C005) | — | 403 | 403 |
-| **Mediador con C005** · lector con A2 | — | Sí | Sí (sin cambios) |
+| **Mediador con C005** · lector con A2 | — | Todo lo de V9 | Todo lo de V9 (sin cambios) |
 | **Administración** | Sí | Sí | Sí (sin cambios) |
 | **Cuenta nueva** · activación | — | T + autorizaciones (+ C005) | Además `P`; sin `P` no se activa |
 | Cuenta nueva · alta activa por administración | — | Con A1 o C005 verificada | Además `P` verificada |
@@ -58,28 +81,28 @@ Un lector trasladado no lleva la condición a su curso nuevo; una mediadora sust
 
 ## 3. Tratamientos que siguen exigiendo base jurídica verificable
 
-`PILOT_LEGACY` **no** abre ninguno de estos. Cada uno requiere su decisión propia en el registro, por lector:
+`PILOT_LEGACY` **no** abre ninguno de estos. Cada uno requiere su decisión propia en el registro:
 
 | Tratamiento | Decisión | Por qué no entra en la continuidad |
 |---|---|---|
 | Leo y cualquier procesamiento con IA de un lector | A3 | Interviene un proveedor externo de IA; las condiciones materiales del 004 sobre proveedores siguen abiertas. Para un menor decide su representante. |
+| Vistas de Leo del mediador | A2 + C005 | Muestran evidencias del tratamiento con IA. |
 | Transcripción de la voz | A5 | Tratamiento opcional del 004, independiente de los demás. |
 | XP y reconocimiento | A1 | Apagado; exige A1 con fecha del acto anterior al hecho. |
-| Seguimiento individual de un lector **sin** `pilot_reader_followup` | A2 + C005 | La carga decide, curso por curso, si los lectores conservan el seguimiento (`PILOT_FOLLOWUP`). Donde Dirección no lo decida, el mediador ve la nómina y los agregados, no el detalle. |
+| Analítica derivada de Aula Viva por lector | A2 + C005 | En producción los motores están apagados: para un piloto es tratamiento nuevo. |
+| Seguimiento histórico de un lector **sin** `pilot_reader_followup` | A2 + C005 | La carga decide, curso por curso, si los lectores lo conservan (`PILOT_FOLLOWUP`). |
 | Cualquier lector, mediador o curso posterior al corte | A2 + C005 | El régimen está cerrado. |
-| Candidatos y diagnóstico del grupo | C005 | Enumeran a personas de la institución ajenas a la nómina del corte. |
-
-**Decisión que queda en Dirección:** en qué cursos del piloto los lectores (menores incluidos) conservan el seguimiento individual. El seguimiento es el mismo tratamiento que el piloto ya hacía (004 A2: acompañamiento por los mediadores asignados), con las vistas de V9; no llega a nadie distinto del mediador que ya lo tenía. La herramienta no tiene valor por defecto: `none`, `all` o la lista de cursos.
+| Candidatos y diagnóstico del grupo | C005 | Enumeran a personas ajenas a la nómina del corte. |
 
 ## 4. Carga (se ejecuta en DEP-1, paso 4.2; sustituye al preparativo 3.2-6)
 
 En un contenedor efímero sin red de la imagen nueva, con `ops/a2/` montado en solo lectura:
 
-1. `PILOT_MODE=emit` con `PILOT_GROUPS` (los tres grupos), `PILOT_FOLLOWUP` (decisión de Dirección), `PILOT_CUTOFF_DAY=2026-11-24` (inventario de PRE-1), `PILOT_REF` (referencia de la decisión) y, si se fija, `PILOT_VALID_UNTIL`. Los recuentos salen por stderr, sin identificadores: se cotejan con el inventario (21 mediadores, 224 lectores) **antes** de cargar.
+1. `PILOT_MODE=emit` con `PILOT_GROUPS` (los tres grupos), `PILOT_FOLLOWUP` (decisión de Dirección: `none`, `all` o la lista de cursos), `PILOT_CUTOFF_DAY=2026-11-24` (inventario de PRE-1), `PILOT_REF` (referencia de la decisión) y, si se fija, `PILOT_VALID_UNTIL`. Los recuentos salen por stderr, sin identificadores: se cotejan con el inventario (21 mediadores, 224 lectores) **antes** de cargar.
 2. La salida se entuba al operador de decisiones en el mismo paso: `node pilot_legacy_pack.mjs | node decision_operator.mjs`. Todas las líneas o ninguna; la última es el sello. La salida lleva identificadores de cuenta: no se guarda.
 3. `PILOT_MODE=verify`: recuentos por grupo de pertenencias vigentes. Copia custodiada del registro, como tras cualquier lote.
 
-Reversión: revocar el sello (una línea). No hay reapertura: una carga corregida exige un registro nuevo antes de arrancar.
+Reversión: revocar el sello (una línea). No hay reapertura ni enmienda: una carga corregida exige un registro nuevo antes de arrancar.
 
 ## 5. Constancia `P` (Política 001)
 
@@ -88,6 +111,7 @@ Línea del registro, autenticada como las demás: sujeto (HMAC de la cuenta), ti
 - Identidad del declarante: el titular activa con su enlace personal de un solo uso y su contraseña (`self_authenticated`). En una cuenta de menor declara su representante, con la misma calidad y el mismo estado «sin verificar» que A0 y A1, y la cuenta guarda la referencia de esa declaración junto al contacto del adulto del pedido.
 - Separación: `P` no aporta T, A0–A5 ni C005, y ninguna de ellas aporta `P`. Mediadores y administración también la aceptan.
 - Exige el 001 aprobado y publicado (`CHP_ACCEPTANCE_DOCUMENTS`), como antes: sin él no hay activación (503).
+- Reinvitación: una cuenta que ya la aceptó por sí misma en esa versión no la repite; la de un menor (declarada por su representante y aún sin verificar) sí.
 - Revocación: línea `revoked` por el operador; la supresión de una cuenta la revoca junto con T. No se añadió ningún efecto automático nuevo sobre el acceso: lo que procede tras revocarla lo fija el 001 y se tramita por los procedimientos de supresión existentes.
 - Las líneas anteriores (sin `t`) siguen verificando; el instante no se puede añadir, quitar ni alterar sin invalidar el registro.
 
@@ -97,21 +121,23 @@ Las cuentas de piloto ya activas **no** tienen `P` y no se les anota: no pasan p
 
 | Comprobación | Resultado |
 |---|---|
-| `pilotLegacy.test.mjs` (registro, sin servidor) | 68 ✓ |
-| `pilotLegacyHttp.test.mjs` (server real, dos réplicas: alcance, barrido de rutas, Leo aparte, cuentas nuevas, revocación, traslado, sustitución, desactivación, fin del régimen) | 57 ✓ |
+| `pilotLegacy.test.mjs` (registro, sin servidor) | 71 ✓ |
+| `pilotLegacyHttp.test.mjs` (server real, dos réplicas: alcance, funciones históricas frente a nuevas con control por la vía ordinaria, barrido de rutas, Leo aparte, cuentas nuevas, revocación, traslado, sustitución, desactivación, fin del régimen) | 66 ✓ |
 | `pilotLegacyPack.test.mjs` (herramienta de carga) | 12 ✓ |
-| Job `identity-preflight` completo en Linux (`node:20`, `npm ci`), incluido `test:b2c` sin omisiones | `todos los pasos, `[job] completo` (clon limpio de `f5b9281`)` |
+| Job `identity-preflight` completo en Linux (`node:20`, `npm ci`), incluido `test:b2c` sin omisiones | todos los pasos, `[job] completo` (clon limpio de `07126b5`) |
 | 42 suites de página | 0 fallos |
-| E2E tienda → app (conector `6dc8aed`, APP `f5b9281`) | `201 correctas, VERDE` |
-| Integridad de la imagen API | `51 ok` |
+| E2E tienda → app (conector `6dc8aed`, APP `07126b5`) | 201 correctas, VERDE |
+| Integridad de la imagen API; Trivy de las dos imágenes | 51 ok; 0 hallazgos |
+| Chrome real, laboratorio sintético: casilla propia y desmarcada, documento y versión enlazados, activación bloqueada sin aceptación, registro `P`; menor por su representante; ni A0/A1 ni términos la sustituyen | Correcto (capturas en la evidencia) |
+| Altas administrativas y reinvitación (laboratorio y `contractingLinkingHttp`) | Sin `P` verificada la cuenta queda invitada; con ella, activa |
 
-Las tres suites nuevas forman parte de `test:v81`, que la CI ejecuta. Evidencia: `D:\chp-artifacts\v9r-dep1-fix\`.
+Las tres suites nuevas forman parte de `test:v81`, que la CI ejecuta. Evidencia: `D:/chp-artifacts/v9r-dep1-close/`.
 
-No se repitieron las pruebas de Android ni el ensayo de restauración: nada de esta corrección toca LU, los esquemas ni los respaldos. El registro de decisiones sigue fuera de los respaldos por diseño.
+No se repitieron las pruebas de Android ni el ensayo de restauración: nada de esta corrección toca LU, los esquemas ni los respaldos. El registro de decisiones sigue fuera de los respaldos por diseño. En el laboratorio los enlaces de los documentos apuntan a un dominio de prueba: que el documento real se abra depende de su publicación.
 
-## 7. Bloqueos que siguen abiertos (todos externos)
+## 7. Condiciones externas para retomar DEP-1
 
-1. **Aprobación documental**: acta sin firmar; 001, 002, 004 y 005 sin publicar. Sin ella no se activa ninguna cuenta nueva, tampoco una cuenta de piloto reinvitada.
-2. **Decisión escrita de Dirección sobre el piloto**: referencia, fecha de corte, cursos con seguimiento individual y, si procede, fecha de caducidad del régimen.
-3. **Retención** (12 meses en servidor, 365 días en web y LU) sin ratificar; la poda sigue apagada.
-4. **Publicación de este commit y CI oficial**: pendientes de autorización; aquí solo consta la reproducción local del job.
+1. **Aprobación documental**: acta firmada; 001, 002, 004 y 005 publicados en HTTPS en su versión `1.0`. Sin ella no se activa ninguna cuenta nueva, tampoco una cuenta de piloto reinvitada.
+2. **Decisión escrita de Dirección sobre el piloto**: referencia, fecha de corte, los tres grupos, en cuáles los lectores conservan el seguimiento histórico (`PILOT_FOLLOWUP`) y, si procede, fecha de caducidad del régimen.
+3. **Decisión sobre las cinco funciones históricas que no se mantienen** (§2.1): aceptar que quedan cerradas para los pilotos hasta tener C005, A2 y A3, o aportar esas autorizaciones. No admiten otra vía en esta candidata.
+4. **Retención** (12 meses en servidor, 365 días en web y LU) sin ratificar; la poda sigue apagada. No bloquea por sí sola.

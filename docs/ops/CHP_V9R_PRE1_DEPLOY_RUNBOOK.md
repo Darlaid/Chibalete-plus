@@ -9,12 +9,12 @@ Candidata: imágenes `chibalete/api:v9r-a3c16e6` y `chibalete/front:v9r-a3c16e6`
 
 DEP-1 se detuvo en el preflight sin tocar producción. La corrección está en `CHP_V9R_DEP1_FIX_PILOT_POLICY.md`; este runbook sigue vigente con estos cambios, que prevalecen sobre el texto de abajo:
 
-- **Candidata de API y front: `v9r-f5b9281`** (APP `f5b9281`), en `D:/chp-artifacts/v9r-dep1-fix/`. Sustituye a `v9r-a3c16e6` en los pasos 3.2-5, 4.1, 4.3 y 4.6. Conector WEB y LU: los mismos.
+- **Candidata de API y front: `v9r-07126b5`** (APP `07126b5`), en `D:/chp-artifacts/v9r-dep1-close/`. Sustituye a `v9r-a3c16e6` en los pasos 3.2-5, 4.1, 4.3 y 4.6. Conector WEB y LU: los mismos.
 - **Dependencia 2 (§3.1) sustituida por decisión de Dirección:** los 21 mediadores y 224 lectores son pilotos y no se exige regularización retrospectiva de C005, A1 ni A2. No se anota ninguna autorización que no exista. Su continuidad se carga como condición `PILOT_LEGACY`, que no es una autorización.
 - **Preparativo 3.2-6 sustituido** por la carga de `PILOT_LEGACY` (§4 del documento de corrección): `pilot_legacy_pack.mjs` entubado a `decision_operator.mjs`, con la referencia de la decisión de Dirección, el corte `2026-11-24` y la decisión expresa sobre el seguimiento individual. Comprobación del paso 4.2: recuentos de `PILOT_MODE=verify` iguales al inventario.
-- **Paso 4.4:** donde dice «tablero de un mediador con C005», comprobar con una mediadora de piloto: nómina y resumen de su curso, y seguimiento solo donde se haya decidido. Leo responde `A3_REQUIRED` a los lectores sin A3: es el comportamiento previsto, no un fallo.
+- **Paso 4.4:** donde dice «tablero de un mediador con C005», comprobar con una mediadora de piloto: nómina y resumen de su curso, y progreso, estado y tablero solo donde se haya decidido el seguimiento. Leo responde `A3_REQUIRED` a los lectores sin A3, y la analítica derivada de Aula Viva, Leo del mediador, candidatos y diagnóstico responden 403 a quien solo tiene la condición de piloto: es el comportamiento previsto, no un fallo.
 - **Paso 4.6:** la activación de la cuenta de prueba incluye la casilla de la Política 001; en el registro debe quedar una línea `P` con `001@1.0`.
-- **Siguen bloqueando:** dependencia 1 (acta y documentos publicados) y la decisión escrita sobre el piloto. La dependencia 3 (retención) no bloquea mientras la poda siga apagada.
+- **Siguen bloqueando:** dependencia 1 (acta y documentos publicados), la decisión escrita sobre el piloto y la decisión sobre las cinco funciones históricas que no se mantienen (§7 del documento de corrección). La dependencia 3 (retención) no bloquea mientras la poda siga apagada.
 
 ## 1. Producción hoy (inventario de solo lectura)
 
