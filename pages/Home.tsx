@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { dataService } from '../services/dataService';
+import { dataService, PROGRESS_SYNCED_EVENT } from '../services/dataService';
 import { useUserClubs } from '../hooks/useUserClubs';
 import ContentCarousel from '../components/ContentCarousel';
 import ProgressUpdater from '../components/ProgressUpdater';
@@ -130,6 +130,20 @@ const Home: React.FC = () => {
     useEffect(() => {
         fetchData();
     }, [fetchData]);
+
+    // V9R BLOCKER-READING-PERSISTENCE-01: el progreso del servidor puede llegar después del acceso (al cerrar sesión
+    // se borra la copia local). Cuando llega el de ESTA cuenta, se recalcula solo «Estoy leyendo».
+    useEffect(() => {
+        if (!user?.id || !accessReady) return;
+        const userId = user.id;
+        const roles = user.roles;
+        const onSynced = (e: Event) => {
+            if ((e as CustomEvent<{ userId?: string }>).detail?.userId !== userId) return;
+            setEnProgreso(dataService.getContenidosEnProgreso(userId, roles).map(item => ({ content: item.content, progress: item.progress })));
+        };
+        window.addEventListener(PROGRESS_SYNCED_EVENT, onSynced);
+        return () => window.removeEventListener(PROGRESS_SYNCED_EVENT, onSynced);
+    }, [user?.id, user?.roles, accessReady]);
 
     // Filter assignments when date is selected
     useEffect(() => {

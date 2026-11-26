@@ -137,6 +137,9 @@ export interface LandingBannerSlide {
     active: boolean;
 }
 
+/** V9R BLOCKER-READING-PERSISTENCE-01 — el progreso de `detail.userId` ya llegó del servidor (sin más datos). */
+export const PROGRESS_SYNCED_EVENT = 'chibalete:progress-synced';
+
 class DataService {
     private users: User[] = [];
     private content: Content[] = [];
@@ -1078,6 +1081,13 @@ class DataService {
     }
 
     // --- SYNC METHODS ---
+    private notifyProgressSynced(userId: string): void {
+        try {
+            if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
+            window.dispatchEvent(new CustomEvent(PROGRESS_SYNCED_EVENT, { detail: { userId } }));
+        } catch { /* sin entorno de eventos: la lista se recalcula al volver a montarse */ }
+    }
+
     async syncUserProgress(userId: string) {
         const epoch = this.sessionEpoch;
         try {
@@ -1122,6 +1132,10 @@ class DataService {
                     this.progress = merged;
                     this.saveState('progress', this.progress);
                     console.log(`[Sync] Synced ${apiProgress.length} progress entries from canonical server.`);
+                    // V9R BLOCKER-READING-PERSISTENCE-01: la lista «Estoy leyendo» se calcula al tener el acceso; si este
+                    // progreso llega después, se avisa para recalcularla. Solo lleva la cuenta, y solo sale con la sesión
+                    // que lo pidió (la comprobación de arriba descarta la respuesta de una sesión que cambió o terminó).
+                    this.notifyProgressSynced(userId);
                 }
             }
         } catch (e) {

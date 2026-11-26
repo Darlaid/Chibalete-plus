@@ -326,7 +326,11 @@ const VisorTexto: React.FC<{ content: Content }> = ({ content }) => {
     useEffect(() => {
         if (!loading && text && user && !initialScrollSet) {
             const progress = dataService.getProgresoUsuarioLibro(user.id, content.id);
-            if (progress && progress.porcentaje > 0) {
+            // V9R BLOCKER-READING-PERSISTENCE-01: una posición guardada por debajo del 0,5 % redondea a 0 %, pero su
+            // `viewportHint` es válido: también se reanuda.
+            const hint = progress?.canonicalProgress?.viewportHint;
+            const hasPreciseHint = typeof hint === 'number' && isFinite(hint) && hint > 0;
+            if (progress && (progress.porcentaje > 0 || hasPreciseHint)) {
                 // F: Priority order for scroll precision:
                 // 1. viewportHint — full-precision float (e.g. 42.73%) saved by this visor
                 // 2. anchor.value — rounded integer (e.g. 42%) — same-mode, from any device

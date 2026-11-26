@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { dataService } from '../services/dataService';
+import { dataService, PROGRESS_SYNCED_EVENT } from '../services/dataService';
 import { useAuth } from '../context/AuthContext';
 import ContentCard from '../components/ContentCard';
 import CommunityPostCard from '../components/CommunityPostCard';
@@ -90,6 +90,8 @@ const Biblioteca: React.FC = () => {
     const { user, accessReady } = useAuth();
     const [activeTab, setActiveTab] = useState('biblioteca');
     const [enProgreso, setEnProgreso] = useState<{ content: Content, progress: ProgresoLectura }[]>([]);
+    // Último catálogo autorizado por el servidor (para recalcular «en progreso» cuando llega el progreso).
+    const authorizedCatalogRef = useRef<Content[] | null>(null);
     const [miBiblioteca, setMiBiblioteca] = useState<Content[]>([]);
     const [librosAlbum, setLibrosAlbum] = useState<Content[]>([]);
     const [communityPosts, setCommunityPosts] = useState<CommunityPost[]>([]);
@@ -190,10 +192,13 @@ const Biblioteca: React.FC = () => {
                 // respuesta ilegible) no se muestra catálogo. Nunca se degrada al
                 // filtro de cliente.
                 const authorized = visible ?? [];
+                authorizedCatalogRef.current = authorized;
                 // Las pestañas derivadas del catálogo se calculan sobre el
                 // MISMO conjunto autorizado. Son filtros de PRESENTACIÓN (tipo,
                 // orden, tope): no deciden acceso.
-                setEnProgreso(gateProgressByVisible(prog, authorized) as typeof prog);
+                // V9R BLOCKER-READING-PERSISTENCE-01: el progreso se vuelve a leer aquí (no la copia tomada al empezar),
+                // por si llegó del servidor mientras se pedía el catálogo.
+                setEnProgreso(gateProgressByVisible(dataService.getContenidosEnProgreso(user.id, user.roles), authorized) as typeof prog);
                 setMiBiblioteca(authorized);
                 setVisiblePublishers(dataService.getVisiblePublishers());
                 setLibrosAlbum(deriveAlbumFromVisible(authorized) as Content[]);
@@ -203,6 +208,24 @@ const Biblioteca: React.FC = () => {
             });
         }
     }, [user, accessReady]);
+
+    // V9R BLOCKER-READING-PERSISTENCE-01: el progreso del servidor puede llegar después del acceso y del catálogo (al
+    // cerrar sesión se borra la copia local). Cuando llega el de ESTA cuenta, se recalcula solo la lista en progreso,
+    // sobre el mismo catálogo autorizado. Sin catálogo todavía, no se hace nada: lo hará la carga de arriba.
+    useEffect(() => {
+        authorizedCatalogRef.current = null;
+        if (!user?.id || !accessReady) return;
+        const userId = user.id;
+        const roles = user.roles;
+        const onSynced = (e: Event) => {
+            if ((e as CustomEvent<{ userId?: string }>).detail?.userId !== userId) return;
+            const authorized = authorizedCatalogRef.current;
+            if (!authorized) return;
+            setEnProgreso(gateProgressByVisible(dataService.getContenidosEnProgreso(userId, roles), authorized) as typeof enProgreso);
+        };
+        window.addEventListener(PROGRESS_SYNCED_EVENT, onSynced);
+        return () => window.removeEventListener(PROGRESS_SYNCED_EVENT, onSynced);
+    }, [user?.id, user?.roles, accessReady]);
 
     const handleTabChange = (tab: string) => {
         setActiveTab(tab);
